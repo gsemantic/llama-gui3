@@ -1,0 +1,101 @@
+{
+  "name": "__last_session__",
+  "windows": [
+    {
+      "height": 245.0,
+      "name": "profile_manager",
+      "visible": false,
+      "width": 305.0,
+      "x": 60.0,
+      "y": 60.0
+    },
+    {
+      "height": 600.0,
+      "name": "settings_viewer",
+      "visible": false,
+      "width": 400.0,
+      "x": 200.0,
+      "y": 100.0
+    },
+    {
+      "height": 720.0,
+      "name": "rag_settings",
+      "visible": false,
+      "width": 305.0,
+      "x": 60.0,
+      "y": 60.0
+    },
+    {
+      "height": 600.0,
+      "name": "cloud_services",
+      "visible": false,
+      "width": 400.0,
+      "x": 200.0,
+      "y": 100.0
+    },
+    {
+      "height": 600.0,
+      "name": "backup_manager",
+      "visible": false,
+      "width": 400.0,
+      "x": 200.0,
+      "y": 100.0
+    },
+    {
+      "height": 360.0,
+      "name": "settings",
+      "visible": false,
+      "width": 565.0,
+      "x": 480.0,
+      "y": 215.0
+    },
+    {
+      "height": 500.0,
+      "name": "agents",
+      "visible": false,
+      "width": 200.0,
+      "x": 690.0,
+      "y": 100.0
+    },
+    {
+      "height": 250.0,
+      "name": "rag",
+      "visible": true,
+      "width": 480.0,
+      "x": 885.0,
+      "y": 465.0
+    },
+    {
+      "height": 740.0,
+      "name": "files",
+      "visible": false,
+      "width": 460.0,
+      "x": 60.0,
+      "y": 60.0
+    },
+    {
+      "height": 370.0,
+      "name": "grid_snapping",
+      "visible": false,
+      "width": 435.0,
+      "x": 60.0,
+      "y": 60.0
+    },
+    {
+      "height": 435.0,
+      "name": "conversations",
+      "visible": true,
+      "width": 475.0,
+      "x": 885.0,
+      "y": 25.0
+    },
+    {
+      "height": 695.0,
+      "name": "chat",
+      "visible": true,
+      "width": 870.0,
+      "x": 10.0,
+      "y": 25.0
+    }
+  ]
+}

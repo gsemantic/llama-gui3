@@ -1,0 +1,230 @@
+#include "../../include/core/openrouter_client.h"
+#include "../../include/core/logger.h"
+#include <thread>
+#include <iostream>
+
+using namespace llama_gui::core;
+
+namespace llama_gui {
+namespace core {
+
+// ============================================================================
+// Конструктор/деструктор
+// ============================================================================
+
+OpenRouterClient::OpenRouterClient(const std::string& api_key)
+    : rate_limiter_(http_client_) {
+    http_client_.set_api_key(api_key);
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    std::cout << "[CloudClient] Initialized with key: "
+              << (api_key.empty() ? "NONE" : api_key.substr(0, 8) + "...") << std::endl;
+}
+
+OpenRouterClient::~OpenRouterClient() {
+    curl_global_cleanup();
+}
+
+// ============================================================================
+// Настройки
+// ============================================================================
+
+void OpenRouterClient::set_api_key(const std::string& api_key) {
+    http_client_.set_api_key(api_key);
+}
+
+void OpenRouterClient::set_base_url(const std::string& url) {
+    http_client_.set_base_url(url);
+}
+
+void OpenRouterClient::set_timeout(int timeout_ms) {
+    http_client_.set_timeout(timeout_ms);
+}
+
+// ============================================================================
+// Получение моделей
+// ============================================================================
+
+OpenRouterModelsResponse OpenRouterClient::get_models() {
+    std::string response = http_client_.make_request("models");
+    return model_parser_.parse_models_response(response);
+}
+
+bool OpenRouterClient::get_models_async(ModelsCallback callback) {
+    if (!callback) return false;
+
+    std::thread([this, callback]() {
+        auto response = get_models();
+        callback(response);
+    }).detach();
+
+    return true;
+}
+
+OpenRouterModelsResponse OpenRouterClient::get_free_models() {
+    auto response = get_models();
+
+    if (response.success) {
+        std::vector<OpenRouterModel> free_models;
+        for (const auto& model : response.models) {
+            if (model.is_free) {
+                free_models.push_back(model);
+            }
+        }
+        response.models = free_models;
+    }
+
+    return response;
+}
+
+bool OpenRouterClient::get_free_models_async(ModelsCallback callback) {
+    if (!callback) return false;
+
+    std::thread([this, callback]() {
+        auto response = get_free_models();
+        callback(response);
+    }).detach();
+
+    return true;
+}
+
+// ============================================================================
+// Поиск моделей
+// ============================================================================
+
+OpenRouterModelsResponse OpenRouterClient::search_models(const std::string& query, bool free_only) {
+    auto response = get_models();
+
+    if (response.success) {
+        response.models = model_parser_.filter_models(response.models, query, free_only);
+    }
+
+    return response;
+}
+
+bool OpenRouterClient::search_models_async(const std::string& query, bool free_only, ModelsCallback callback) {
+    if (!callback) return false;
+
+    std::thread([this, query, free_only, callback]() {
+        auto response = search_models(query, free_only);
+        callback(response);
+    }).detach();
+
+    return true;
+}
+
+// ============================================================================
+// Детали модели
+// ============================================================================
+
+OpenRouterModelDetails OpenRouterClient::get_model_details(const std::string& model_id) {
+    OpenRouterModelDetails details;
+    details.id = model_id;
+
+    auto response = get_models();
+
+    if (!response.success) {
+        details.error = response.error;
+        details.success = false;
+        return details;
+    }
+
+    for (const auto& model : response.models) {
+        if (model.id == model_id) {
+            details.name = model.name;
+            details.description = model.description;
+            details.provider_name = model.provider;
+            details.context_length = model.context_length;
+            details.prompt_price_usd_per_million = model.prompt_price_usd_per_million;
+            details.completion_price_usd_per_million = model.completion_price_usd_per_million;
+            details.is_free = model.is_free;
+            details.modality = model.modality;
+            details.success = true;
+            return details;
+        }
+    }
+
+    details.error = "Модель не найдена";
+    details.success = false;
+    return details;
+}
+
+// ============================================================================
+// Генерация текста
+// ============================================================================
+
+OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestParams& params) {
+    nlohmann::json request_body;
+
+    request_body["model"] = params.model;
+    request_body["messages"] = nlohmann::json::array();
+
+    if (!params.messages.empty()) {
+        for (const auto& msg : params.messages) {
+            nlohmann::json message;
+            message["role"] = msg.role;
+            message["content"] = msg.content;
+            request_body["messages"].push_back(message);
+        }
+    } else if (!params.prompt.empty()) {
+        if (!params.system_prompt.empty()) {
+            nlohmann::json system_msg;
+            system_msg["role"] = "system";
+            system_msg["content"] = params.system_prompt;
+            request_body["messages"].push_back(system_msg);
+        }
+        nlohmann::json user_msg;
+        user_msg["role"] = "user";
+        user_msg["content"] = params.prompt;
+        request_body["messages"].push_back(user_msg);
+    }
+
+    if (params.max_tokens != 1024) {
+        request_body["max_tokens"] = params.max_tokens;
+    }
+    if (params.temperature != 0.7f) {
+        request_body["temperature"] = params.temperature;
+    }
+    if (params.top_p != 0.9f) {
+        request_body["top_p"] = params.top_p;
+    }
+    if (params.presence_penalty != 0.0f) {
+        request_body["presence_penalty"] = params.presence_penalty;
+    }
+    if (params.frequency_penalty != 0.0f) {
+        request_body["frequency_penalty"] = params.frequency_penalty;
+    }
+
+    request_body["stream"] = params.stream;
+
+    std::string response_str = http_client_.make_request("chat/completions", request_body.dump());
+    return model_parser_.parse_completion_response(response_str);
+}
+
+bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback) {
+    if (!callback) return false;
+
+    std::thread([this, params, callback]() {
+        auto response = complete(params);
+        if (response.success) {
+            callback(response.content, true);
+        }
+    }).detach();
+
+    return true;
+}
+
+// ============================================================================
+// API
+// ============================================================================
+
+bool OpenRouterClient::is_api_available() {
+    return rate_limiter_.is_api_available();
+}
+
+OpenRouterRateLimit OpenRouterClient::get_rate_limit() {
+    return rate_limiter_.get_rate_limit();
+}
+
+} // namespace core
+} // namespace llama_gui

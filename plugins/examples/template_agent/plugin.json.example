@@ -1,0 +1,19 @@
+{
+    "name": "template_agent",
+    "version": "1.0.0",
+    "description": "Шаблон для создания нового агента. Скопируйте и модифицируйте.",
+    "author": "Ваше имя <email@example.com>",
+    "api_version": "1.0.0",
+    "library": "libtemplate_agent_plugin.so",
+    "entry_point": "plugin_create_agent",
+    "dependencies": ["core:1.0"],
+    "permissions": [],
+    "capabilities": [],
+    "config": {
+        "timeout_ms": 30000
+    },
+    "homepage": "https://github.com/username/my-agent",
+    "license": "MIT",
+    "tags": ["template", "example"],
+    "platforms": ["linux", "windows", "macos"]
+}

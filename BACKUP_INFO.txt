@@ -1,0 +1,14 @@
+============================================================================
+BACKUP INFORMATION
+============================================================================
+Project:     llama-gui
+Version:     0.1.57-alpha.2
+Timestamp:   2026-07-26 16:30:46
+Hostname:    mx
+Comment:     mimo_final
+Build ID:    mx1630
+============================================================================
+
+SYSTEM INFORMATION:
+OS: Linux mx 6.1.0-43-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.162-1 (2026-02-08) x86_64 GNU/Linux
+Date: Вс 26 июл 2026 16:30:46 MSK

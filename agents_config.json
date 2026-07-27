@@ -1,0 +1,102 @@
+{
+    "plugins_directory": "plugins",
+    "user_plugins_directory": "plugins/user_plugins",
+    "official_plugins_directory": "plugins/official",
+    
+    "auto_load_plugins": true,
+    "enable_hot_reload": false,
+    
+    "security_level": "STANDARD",
+    
+    "enabled_agents": [
+        "rag_agent"
+    ],
+    
+    "disabled_agents": [
+        "terminal_agent"
+    ],
+    
+    "agent_settings": {
+        "rag_agent": {
+            "enabled": true,
+            "timeout_ms": 60000,
+            "max_memory_mb": 1024,
+            "settings": {
+                "max_chunks": 10,
+                "similarity_threshold": 0.7,
+                "cache_enabled": true
+            }
+        },
+        
+        "file_agent": {
+            "enabled": true,
+            "timeout_ms": 30000,
+            "max_memory_mb": 256,
+            "settings": {
+                "allowed_extensions": [".txt", ".md", ".json", ".csv", ".cpp", ".h"],
+                "max_file_size_mb": 10
+            }
+        },
+        
+        "web_search_agent": {
+            "enabled": false,
+            "timeout_ms": 30000,
+            "max_memory_mb": 256,
+            "settings": {
+                "default_timeout_ms": 5000,
+                "max_redirects": 5,
+                "user_agent": "llama-gui-agent/1.0"
+            }
+        },
+        
+        "code_agent": {
+            "enabled": false,
+            "timeout_ms": 60000,
+            "max_memory_mb": 512,
+            "settings": {
+                "default_language": "cpp",
+                "max_code_length": 10000
+            }
+        },
+        
+        "terminal_agent": {
+            "enabled": false,
+            "timeout_ms": 10000,
+            "max_memory_mb": 128,
+            "settings": {
+                "shell": "/bin/bash",
+                "allowed_commands": ["ls", "pwd", "cat", "echo", "head", "tail"]
+            }
+        },
+        
+        "summarization_agent": {
+            "enabled": false,
+            "timeout_ms": 60000,
+            "max_memory_mb": 512,
+            "settings": {
+                "max_summary_ratio": 0.3,
+                "min_summary_length": 100
+            }
+        },
+        
+        "hello_agent": {
+            "enabled": true,
+            "timeout_ms": 5000,
+            "max_memory_mb": 64,
+            "settings": {}
+        }
+    },
+    
+    "enable_logging": true,
+    "log_level": "INFO",
+    "log_file": "logs/agents.log",
+    
+    "enable_sandbox": true,
+    "sandbox": {
+        "timeout_ms": 30000,
+        "max_memory_mb": 512,
+        "max_output_size_kb": 1024,
+        "allow_network": false,
+        "allow_filesystem": false
+    }
+}

@@ -1,0 +1,156 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://llama-gui/schemas/plugin.schema.json",
+    "title": "Llama GUI Agent Plugin Manifest",
+    "description": "Schema for plugin.json files in llama-gui agent system",
+    
+    "type": "object",
+    "required": ["name", "version", "description", "api_version"],
+    
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Unique identifier for the plugin",
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "minLength": 2,
+            "maxLength": 64,
+            "examples": ["rag_agent", "file_agent", "web_search_agent"]
+        },
+        
+        "version": {
+            "type": "string",
+            "description": "Plugin version in semver format",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9]+)?$",
+            "examples": ["1.0.0", "2.1.3-beta"]
+        },
+        
+        "description": {
+            "type": "string",
+            "description": "Human-readable description of the plugin",
+            "minLength": 10,
+            "maxLength": 500,
+            "examples": ["RAG-based document search agent"]
+        },
+        
+        "author": {
+            "type": "string",
+            "description": "Plugin author name",
+            "maxLength": 256,
+            "examples": ["llama-gui team", "John Doe <john@example.com>"]
+        },
+        
+        "api_version": {
+            "type": "string",
+            "description": "Compatible agent API version",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "examples": ["1.0.0"]
+        },
+        
+        "library": {
+            "type": "string",
+            "description": "Filename of the plugin library",
+            "pattern": "^lib?[a-zA-Z0-9_-]+\\.(so|dll|dylib)$",
+            "examples": ["librag_agent.so", "file_agent.dll"]
+        },
+        
+        "entry_point": {
+            "type": "string",
+            "description": "Name of the plugin entry point function",
+            "default": "plugin_create_agent",
+            "examples": ["plugin_create_agent", "create_my_agent"]
+        },
+        
+        "dependencies": {
+            "type": "array",
+            "description": "List of plugin dependencies",
+            "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]*(:[0-9]+\\.[0-9]+)?$",
+                "examples": ["core:1.0", "rag_agent"]
+            }
+        },
+        
+        "permissions": {
+            "type": "array",
+            "description": "List of permissions required by the plugin",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "read_files",
+                    "write_files",
+                    "delete_files",
+                    "list_directories",
+                    "http_get",
+                    "http_post",
+                    "http_put",
+                    "http_delete",
+                    "execute_commands",
+                    "spawn_processes",
+                    "rag_access",
+                    "embedding",
+                    "web_search",
+                    "call_other_agents"
+                ]
+            }
+        },
+        
+        "capabilities": {
+            "type": "array",
+            "description": "List of capabilities provided by the plugin",
+            "items": {
+                "type": "string",
+                "examples": ["document_search", "code_generation", "file_reading"]
+            }
+        },
+        
+        "config": {
+            "type": "object",
+            "description": "Default configuration for the plugin",
+            "additionalProperties": true,
+            "examples": [
+                {"max_chunks": 10, "similarity_threshold": 0.7},
+                {"allowed_extensions": [".txt", ".md", ".json"]}
+            ]
+        },
+        
+        "homepage": {
+            "type": "string",
+            "description": "URL to plugin homepage or repository",
+            "format": "uri",
+            "examples": ["https://github.com/user/my-agent"]
+        },
+        
+        "license": {
+            "type": "string",
+            "description": "SPDX license identifier",
+            "examples": ["MIT", "Apache-2.0", "GPL-3.0"]
+        },
+        
+        "tags": {
+            "type": "array",
+            "description": "List of tags for categorization",
+            "items": {
+                "type": "string"
+            },
+            "examples": [["search", "rag", "documents"], ["utility", "files"]]
+        },
+        
+        "min_llama_gui_version": {
+            "type": "string",
+            "description": "Minimum required llama-gui version",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "examples": ["1.0.0"]
+        },
+        
+        "platforms": {
+            "type": "array",
+            "description": "Supported platforms",
+            "items": {
+                "type": "string",
+                "enum": ["linux", "windows", "macos"]
+            }
+        }
+    },
+    
+    "additionalProperties": false
+}

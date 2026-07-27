@@ -1,0 +1,132 @@
+#include "../../include/core/env_manager.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <filesystem>
+#include <vector>
+#include <algorithm>
+
+namespace llama_gui {
+namespace core {
+
+std::string EnvManager::get_env_path(const std::string& profiles_dir) {
+    return profiles_dir + "/.env";
+}
+
+std::string EnvManager::read_key(const std::string& key_name,
+                                 const std::string& profiles_dir) {
+    std::string path = get_env_path(profiles_dir);
+    std::ifstream file(path);
+    if (!file.is_open()) return "";
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#') continue;
+
+        // Find '=' separator
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+
+        // Trim whitespace from key
+        key.erase(0, key.find_first_not_of(" \t\r\n"));
+        key.erase(key.find_last_not_of(" \t\r\n") + 1);
+
+        if (key == key_name) {
+            // Trim surrounding quotes from value
+            if (value.size() >= 2 &&
+                ((value.front() == '"' && value.back() == '"') ||
+                 (value.front() == '\'' && value.back() == '\''))) {
+                value = value.substr(1, value.size() - 2);
+            }
+            // Trim whitespace
+            value.erase(0, value.find_first_not_of(" \t\r\n"));
+            value.erase(value.find_last_not_of(" \t\r\n") + 1);
+            return value;
+        }
+    }
+    return "";
+}
+
+void EnvManager::write_key(const std::string& key_name,
+                           const std::string& value,
+                           const std::string& profiles_dir) {
+    std::string path = get_env_path(profiles_dir);
+
+    // Read existing lines
+    std::vector<std::string> lines;
+    bool found = false;
+
+    {
+        std::ifstream file(path);
+        if (file.is_open()) {
+            std::string line;
+            while (std::getline(file, line)) {
+                auto eq = line.find('=');
+                if (eq != std::string::npos) {
+                    std::string key = line.substr(0, eq);
+                    key.erase(0, key.find_first_not_of(" \t\r\n"));
+                    key.erase(key.find_last_not_of(" \t\r\n") + 1);
+                    if (key == key_name) {
+                        lines.push_back(key_name + "=" + value);
+                        found = true;
+                        continue;
+                    }
+                }
+                lines.push_back(line);
+            }
+        }
+    }
+
+    if (!found) {
+        lines.push_back(key_name + "=" + value);
+    }
+
+    // Ensure parent directory exists
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "EnvManager: Failed to open " << path << " for writing" << std::endl;
+        return;
+    }
+
+    for (const auto& line : lines) {
+        file << line << "\n";
+    }
+
+    std::cout << "EnvManager: Wrote key '" << key_name << "' to " << path << std::endl;
+}
+
+void EnvManager::remove_key(const std::string& key_name,
+                            const std::string& profiles_dir) {
+    std::string path = get_env_path(profiles_dir);
+    std::ifstream file(path);
+    if (!file.is_open()) return;
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(file, line)) {
+        auto eq = line.find('=');
+        if (eq != std::string::npos) {
+            std::string key = line.substr(0, eq);
+            key.erase(0, key.find_first_not_of(" \t\r\n"));
+            key.erase(key.find_last_not_of(" \t\r\n") + 1);
+            if (key == key_name) continue; // skip this line
+        }
+        lines.push_back(line);
+    }
+    file.close();
+
+    std::ofstream out(path);
+    if (!out.is_open()) return;
+    for (const auto& l : lines) {
+        out << l << "\n";
+    }
+}
+
+} // namespace core
+} // namespace llama_gui

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "active_conversation_id": "conversation_1785009747",
+  "conversations": [
+    {
+      "id": "conversation_1785009747",
+      "title": "New Chat",
+      "created_at": "1785009747",
+      "updated_at": "1785009767",
+      "is_active": true,
+      "messages": [
+        {
+          "id": "",
+          "role": "user",
+          "content": "В каком гду состоялась битва под Ватерлоу?",
+          "timestamp": "",
+          "is_error": false
+        },
+        {
+          "id": "",
+          "role": "assistant",
+          "content": "Скорее всего, вы имели в виду вопрос «В **где** состоялась битва...».\n\nБитва под Ватерлоо произошла в **1815 году** в **Бельгии** (тогда это была Голландия), недалеко от деревни Ватерлоо.",
+          "timestamp": "1785009767",
+          "is_error": false
+        }
+      ]
+    }
+  ]
+}
