@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <functional>
 #include <curl/curl.h>
 
 namespace llama_gui {
@@ -14,6 +15,8 @@ namespace core {
  */
 class OpenRouterHttpClient {
 public:
+    using StreamCallback = std::function<void(const std::string& chunk)>;
+
     OpenRouterHttpClient() = default;
     ~OpenRouterHttpClient();
 
@@ -28,6 +31,15 @@ public:
     std::string get_api_key() const { return api_key_; }
 
     std::string make_request(const std::string& endpoint, const std::string& body = "");
+    
+    /**
+     * @brief Выполняет streaming запрос с обработкой чанков в реальном времени
+     * @param endpoint Эндпоинт API
+     * @param body Тело запроса JSON
+     * @param callback Функция обратного вызова для каждого чанка
+     * @return Пустая строка при успехе, сообщение об ошибке при неудаче
+     */
+    std::string make_streaming_request(const std::string& endpoint, const std::string& body, StreamCallback callback);
 
 private:
     std::string base_url_ = "https://openrouter.ai/api/v1";
@@ -38,6 +50,7 @@ private:
     std::vector<std::string> get_request_headers() const;
 
     static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp);
+    static size_t stream_write_callback(void* contents, size_t size, size_t nmemb, void* userp);
 };
 
 } // namespace core

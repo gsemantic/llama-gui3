@@ -2,6 +2,8 @@
 #include "../../include/core/logger.h"
 #include <thread>
 #include <iostream>
+#include <mutex>
+#include <nlohmann/json.hpp>
 
 using namespace llama_gui::core;
 
@@ -212,6 +214,161 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
     }).detach();
 
     return true;
+}
+
+bool OpenRouterClient::complete_streaming_with_retry_async(const OpenRouterRequestParams& params, 
+                                                            StreamCallback callback,
+                                                            int max_retries) {
+    if (!callback) return false;
+
+    std::thread([this, params, callback, max_retries]() {
+        int attempt = 0;
+        bool success = false;
+        
+        while (attempt < max_retries && !success) {
+            try {
+                // Создаем параметры запроса с включенным стримингом
+                OpenRouterRequestParams stream_params = params;
+                stream_params.stream = true;
+                
+                std::cout << "[CloudClient] Streaming attempt " << (attempt + 1) << "/" << max_retries << std::endl;
+                
+                std::string accumulated_content;
+                std::mutex content_mutex;
+                
+                // Выполняем streaming запрос
+                std::string error = http_client_.make_streaming_request(
+                    "chat/completions",
+                    build_request_body(stream_params),
+                    [&accumulated_content, &content_mutex, callback](const std::string& chunk) {
+                        // Парсим JSON чанк и извлекаем контент
+                        try {
+                            auto json_chunk = nlohmann::json::parse(chunk);
+                            
+                            if (json_chunk.contains("choices") && !json_chunk["choices"].empty()) {
+                                auto& choice = json_chunk["choices"][0];
+                                std::string token;
+                                
+                                // Пробуем получить токен из delta (для streaming)
+                                if (choice.contains("delta") && choice["delta"].contains("content")) {
+                                    auto content = choice["delta"]["content"];
+                                    if (!content.is_null()) {
+                                        token = content.get<std::string>();
+                                    }
+                                }
+                                // Или из message (для некоторых провайдеров)
+                                else if (choice.contains("message") && choice["message"].contains("content")) {
+                                    auto content = choice["message"]["content"];
+                                    if (!content.is_null()) {
+                                        token = content.get<std::string>();
+                                    }
+                                }
+                                
+                                if (!token.empty()) {
+                                    std::lock_guard<std::mutex> lock(content_mutex);
+                                    accumulated_content += token;
+                                    // Вызываем callback с токеном (не финальный)
+                                    callback(token, false);
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "[CloudClient] Error parsing chunk: " << e.what() << std::endl;
+                        }
+                    }
+                );
+                
+                if (error.empty()) {
+                    // Успешно завершено
+                    success = true;
+                    // Сигнализируем о завершении
+                    callback("", true);
+                    std::cout << "[CloudClient] Streaming completed successfully" << std::endl;
+                } else {
+                    // Ошибка - увеличиваем счетчик попыток
+                    attempt++;
+                    std::cerr << "[CloudClient] Streaming error: " << error << std::endl;
+                    
+                    if (attempt < max_retries) {
+                        // Экспоненциальная задержка перед повторной попыткой
+                        int delay_ms = 1000 * attempt;  // 1s, 2s, 3s...
+                        std::cout << "[CloudClient] Retrying in " << delay_ms << "ms..." << std::endl;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                        
+                        // Сообщаем пользователю о повторной попытке
+                        std::string retry_msg = "\n[Попытка " + std::to_string(attempt + 1) + "/" + std::to_string(max_retries) + "]... ";
+                        callback(retry_msg, false);
+                    }
+                }
+            } catch (const std::exception& e) {
+                attempt++;
+                std::cerr << "[CloudClient] Exception: " << e.what() << std::endl;
+                
+                if (attempt >= max_retries) {
+                    callback("\n[Ошибка: " + std::string(e.what()) + "]", true);
+                }
+            }
+        }
+        
+        if (!success && attempt >= max_retries) {
+            callback("\n[Не удалось выполнить запрос после " + std::to_string(max_retries) + " попыток]", true);
+        }
+    }).detach();
+
+    return true;
+}
+
+// Вспомогательный метод для построения тела запроса
+std::string OpenRouterClient::build_request_body(const OpenRouterRequestParams& params) {
+    nlohmann::json request_body;
+
+    request_body["model"] = params.model;
+    request_body["messages"] = nlohmann::json::array();
+
+    if (!params.messages.empty()) {
+        for (const auto& msg : params.messages) {
+            nlohmann::json message;
+            message["role"] = msg.role;
+            message["content"] = msg.content;
+            request_body["messages"].push_back(message);
+        }
+    } else if (!params.prompt.empty()) {
+        if (!params.system_prompt.empty()) {
+            nlohmann::json system_msg;
+            system_msg["role"] = "system";
+            system_msg["content"] = params.system_prompt;
+            request_body["messages"].push_back(system_msg);
+        }
+        nlohmann::json user_msg;
+        user_msg["role"] = "user";
+        user_msg["content"] = params.prompt;
+        request_body["messages"].push_back(user_msg);
+    }
+
+    if (params.max_tokens != 1024) {
+        request_body["max_tokens"] = params.max_tokens;
+    }
+    if (params.temperature != 0.7f) {
+        request_body["temperature"] = params.temperature;
+    }
+    if (params.top_p != 0.9f) {
+        request_body["top_p"] = params.top_p;
+    }
+    if (params.presence_penalty != 0.0f) {
+        request_body["presence_penalty"] = params.presence_penalty;
+    }
+    if (params.frequency_penalty != 0.0f) {
+        request_body["frequency_penalty"] = params.frequency_penalty;
+    }
+
+    // Включаем стриминг
+    request_body["stream"] = true;
+    
+    // Добавляем stream_options для получения статистики токенов
+    request_body["stream_options"] = {
+        {"include_usage", true}
+    };
+
+    return request_body.dump();
 }
 
 // ============================================================================
