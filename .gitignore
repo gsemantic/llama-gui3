@@ -1,42 +1,19 @@
-# Build artifacts
-build/
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-compile_commands.json
+# Scripts and temporary files
+*.tmp
+*.swp
+*.log
 
-# Compiled objects
-*.o
-*.a
-*.so
-*.so.*
-*.dll
-*.dylib
-*.lib
+# Environment files
+.env
+.env.local
+*.env.*
 
-# Executables
-llama-gui-core
-test_*
-
-# IDE
+# Editor/IDE files
 .vscode/
 .idea/
-*.swp
 *.swo
+
+# Backup and swap files
 *~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Temporary files
-*.tmp
 *.bak
-
-# Environment variables
-.env
+*.backup
