@@ -54,6 +54,17 @@ public:
     // Генерация текста
     OpenRouterCompletionResponse complete(const OpenRouterRequestParams& params);
     bool complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback);
+    
+    /**
+     * @brief Streaming генерация с retry-логикой
+     * @param params Параметры запроса
+     * @param callback Функция обратного вызова для каждого токена
+     * @param max_retries Максимальное количество попыток при ошибках сети
+     * @return true если запрос запущен, false если ошибка
+     */
+    bool complete_streaming_with_retry_async(const OpenRouterRequestParams& params, 
+                                              StreamCallback callback,
+                                              int max_retries = 3);
 
     // API
     bool is_api_available();
@@ -63,6 +74,9 @@ private:
     OpenRouterHttpClient http_client_;
     OpenRouterModelParser model_parser_;
     OpenRouterRateLimiter rate_limiter_;
+    
+    // Вспомогательный метод для построения тела запроса
+    std::string build_request_body(const OpenRouterRequestParams& params);
 };
 
 } // namespace core
