@@ -570,7 +570,7 @@ void ChatInterface::send_message_via_openrouter() {
     params.max_tokens = 8192;
     params.temperature = settings_.chat().temperature;
     params.top_p = settings_.chat().top_p;
-    params.stream = false;
+    params.stream = true;  // Включаем стриминг
     
     // Дополнительные параметры (поддерживаются не всеми моделями)
     if (settings_.chat().presence_penalty != 0.0f) {
@@ -640,65 +640,95 @@ void ChatInterface::send_message_via_openrouter() {
             std::cout << "[CloudProvider] Ответ получен (модель " << model_id_copy << "): " << response.content.size() << " символов" << std::endl;
 
             // Добавляем ответ ассистента
-            PendingResponse pr;
-            pr.content = response.content;
-            pr.conversation_id = conv_id;
-            pending_responses_.push_back(pr);
-        } else {
-            std::cerr << "[CloudProvider] Ошибка: " << response.error << std::endl;
-            
-            // Диагностика ошибки
-            std::string error_msg = response.error;
-            std::string diagnostic = "[CloudProvider] Диагностика ошибки:\n";
-            
-            // Проверка типа ошибки
-            if (error_msg.find("408") != std::string::npos || 
-                error_msg.find("timeout") != std::string::npos ||
-                error_msg.find("timed out") != std::string::npos) {
-                diagnostic += "  - Тип: Таймаут соединения\n";
-                diagnostic += "  - Причина: Сервер не ответил за " + std::to_string(timeout_copy / 1000) + "с\n";
-                diagnostic += "  - Решение: Проверьте подключение к интернету или увеличьте таймаут\n";
-            } else if (error_msg.find("401") != std::string::npos) {
-                diagnostic += "  - Тип: Ошибка авторизации (401)\n";
-                diagnostic += "  - Причина: Неверный или отсутствующий API ключ\n";
-                diagnostic += "  - Решение: Проверьте API ключ в настройках облачного провайдера\n";
-            } else if (error_msg.find("403") != std::string::npos) {
-                diagnostic += "  - Тип: Доступ запрещён (403)\n";
-                diagnostic += "  - Причина: API ключ не имеет доступа к этой модели\n";
-                diagnostic += "  - Решение: Проверьте подписку или выберите другую модель\n";
-            } else if (error_msg.find("429") != std::string::npos) {
-                diagnostic += "  - Тип: Превышен лимит (429)\n";
-                diagnostic += "  - Причина: Превышен дневной лимит запросов\n";
-                diagnostic += "  - Решение: Дождитесь сброса лимита или обновите подписку\n";
-            } else if (error_msg.find("500") != std::string::npos || 
-                       error_msg.find("502") != std::string::npos ||
-                       error_msg.find("503") != std::string::npos) {
-                diagnostic += "  - Тип: Ошибка сервера провайдера\n";
-                diagnostic += "  - Причина: Временные проблемы на стороне сервиса\n";
-                diagnostic += "  - Решение: Попробуйте позже или используйте локальную модель\n";
-            } else {
-                diagnostic += "  - Тип: Неизвестная ошибка\n";
-                diagnostic += "  - Детали: " + error_msg + "\n";
-            }
-            
-            diagnostic += "\n[!] Ответ будет получен от локальной модели вместо облачной.\n";
-            diagnostic += "    Для переключения настройте облачный провайдер.\n";
-            
-            std::cerr << diagnostic << std::endl;
-            
-            // Показываем ошибку в чате
-            PendingResponse pr;
-            pr.content = diagnostic;
-            pr.conversation_id = conv_id;
-            pending_responses_.push_back(pr);
-            
-            // Автоматическое переключение на локальную модель (опционально)
-            // settings_.openrouter().enabled = false;  // Можно включить при необходимости
+    std::cout << "[CloudProvider] Параметры: model=" << model_id 
+              << ", max_tokens=" << params.max_tokens 
+              << ", temp=" << params.temperature 
+              << ", top_p=" << params.top_p
+              << ", stream=true";
+    if (params.presence_penalty != 0.0f) {
+        std::cout << ", presence=" << params.presence_penalty;
+    }
+    if (params.frequency_penalty != 0.0f) {
+        std::cout << ", frequency=" << params.frequency_penalty;
+    }
+    std::cout << std::endl;
+
+    // Добавляем системный промпт
+    if (!settings_.chat().default_system_prompt.empty()) {
+        llama_gui::core::OpenRouterRequestParams::Message sys_msg;
+        sys_msg.role = "system";
+        sys_msg.content = settings_.chat().default_system_prompt;
+        params.messages.push_back(sys_msg);
+    }
+
+    // Получаем историю диалога из active_conv (объявлена выше)
+    if (active_conv) {
+        for (const auto& msg : active_conv->messages) {
+            llama_gui::core::OpenRouterRequestParams::Message orch_msg;
+            orch_msg.role = msg.role;
+            orch_msg.content = msg.content;
+            params.messages.push_back(orch_msg);
+        }
+    }
+
+    // Показываем индикатор загрузки
+    streaming_active_ = true;
+
+    // Отправляем запрос с стримингом и retry-логикой
+    std::string api_key_copy = api_key;
+    std::string model_id_copy = model_id;
+    std::string endpoint_copy = cp.endpoint_url;
+    int timeout_copy = cp.timeout_ms;
+    std::string conv_id = active_conv->id;
+
+    std::thread([this, api_key_copy, model_id_copy, endpoint_copy, timeout_copy, params, conv_id]() mutable {
+        llama_gui::core::OpenRouterClient client(api_key_copy);
+        client.set_timeout(timeout_copy);
+        if (!endpoint_copy.empty()) {
+            client.set_base_url(endpoint_copy);
         }
 
-        streaming_active_ = false;
+        std::string accumulated_content;
+        std::mutex content_mutex;
+
+        // Используем streaming с retry-логикой
+        bool started = client.complete_streaming_with_retry_async(
+            params,
+            [this, conv_id, &accumulated_content, &content_mutex](const std::string& token, bool is_done) {
+                if (!token.empty()) {
+                    // Накапливаем контент
+                    std::lock_guard<std::mutex> lock(content_mutex);
+                    accumulated_content += token;
+
+                    // Обновляем последнее сообщение в чате
+                    PendingResponse pr;
+                    pr.content = token;  // Отправляем только новый токен для UI
+                    pr.conversation_id = conv_id;
+                    pr.is_streaming = true;
+                    pending_responses_.push_back(pr);
+                }
+
+                if (is_done) {
+                    // Стриминг завершен
+                    std::cout << "[CloudProvider] Streaming completed. Total: " << accumulated_content.size() << " chars" << std::endl;
+                    streaming_active_ = false;
+                }
+            },
+            3  // max_retries
+        );
+
+        if (!started) {
+            std::cerr << "[CloudProvider] Failed to start streaming request" << std::endl;
+            streaming_active_ = false;
+
+            PendingResponse pr;
+            pr.content = "[Ошибка: Не удалось запустить запрос к облачной модели]";
+            pr.conversation_id = conv_id;
+            pending_responses_.push_back(pr);
+        }
     }).detach();
-}
+
+} // namespace llama_gui
 
 } // namespace ui
 } // namespace llama_gui
