@@ -1,59 +1,88 @@
 ```
-# Compiled and build artifacts
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.a
-*.out
+# CMake build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
 
-# Dependencies
-venv/
-.venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-node_modules/
+# Dependencies downloaded by CMake
+_deps/
 
-# Logs and temp files
-*.log
+# Temporary files
 *.tmp
 *.swp
 
-# Editors
-.vscode/
-.idea/
+# Logs
+*.log
 
-# System files
-.DS_Store
-Thumbs.db
+# Environment files
 .env
 .env.local
 *.env.*
 
-# Coverage
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Coverage reports
 coverage/
 htmlcov/
 .coverage
 
-# Common compressed files
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Compiled files
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.exe
+*.out
+
+# Package managers
+node_modules/
+.npm/
+.yarn/
+bower_components/
+
+# Virtual environments
+venv/
+.venv/
+.env/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.tox/
+
+# Java/Maven
+target/
+.gradle/
+*.class
+
+# Go
+bin/
+pkg/
+
+# Rust
+target/
+
+# Zig
+zig-cache/
+zig-out/
+
+# Julia
+julia-*/
+
 ```

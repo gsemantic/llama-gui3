@@ -613,67 +613,6 @@ void ChatInterface::send_message_via_openrouter() {
     // Показываем индикатор загрузки
     streaming_active_ = true;
     
-    // Отправляем запрос (синхронно, в отдельном потоке)
-    std::string api_key_copy = api_key;
-    std::string model_id_copy = model_id;
-    std::string endpoint_copy = cp.endpoint_url;
-    int timeout_copy = cp.timeout_ms;
-    std::thread([this, api_key_copy, model_id_copy, endpoint_copy, timeout_copy, params]() mutable {
-        llama_gui::core::OpenRouterClient client(api_key_copy);
-        client.set_timeout(timeout_copy);
-        if (!endpoint_copy.empty()) {
-            client.set_base_url(endpoint_copy);
-        }
-        auto response = client.complete(params);
-        
-        // Получаем активную конверсацию внутри потока
-        std::vector<llama_gui::core::Conversation*> all_convs = state_manager_.get_all_conversations();
-        std::string conv_id;
-        for (auto* conv : all_convs) {
-            if (conv->is_active) {
-                conv_id = conv->id;
-                break;
-            }
-        }
-        
-        if (response.success) {
-            std::cout << "[CloudProvider] Ответ получен (модель " << model_id_copy << "): " << response.content.size() << " символов" << std::endl;
-
-            // Добавляем ответ ассистента
-    std::cout << "[CloudProvider] Параметры: model=" << model_id 
-              << ", max_tokens=" << params.max_tokens 
-              << ", temp=" << params.temperature 
-              << ", top_p=" << params.top_p
-              << ", stream=true";
-    if (params.presence_penalty != 0.0f) {
-        std::cout << ", presence=" << params.presence_penalty;
-    }
-    if (params.frequency_penalty != 0.0f) {
-        std::cout << ", frequency=" << params.frequency_penalty;
-    }
-    std::cout << std::endl;
-
-    // Добавляем системный промпт
-    if (!settings_.chat().default_system_prompt.empty()) {
-        llama_gui::core::OpenRouterRequestParams::Message sys_msg;
-        sys_msg.role = "system";
-        sys_msg.content = settings_.chat().default_system_prompt;
-        params.messages.push_back(sys_msg);
-    }
-
-    // Получаем историю диалога из active_conv (объявлена выше)
-    if (active_conv) {
-        for (const auto& msg : active_conv->messages) {
-            llama_gui::core::OpenRouterRequestParams::Message orch_msg;
-            orch_msg.role = msg.role;
-            orch_msg.content = msg.content;
-            params.messages.push_back(orch_msg);
-        }
-    }
-
-    // Показываем индикатор загрузки
-    streaming_active_ = true;
-
     // Отправляем запрос с стримингом и retry-логикой
     std::string api_key_copy = api_key;
     std::string model_id_copy = model_id;
@@ -704,7 +643,6 @@ void ChatInterface::send_message_via_openrouter() {
                     PendingResponse pr;
                     pr.content = token;  // Отправляем только новый токен для UI
                     pr.conversation_id = conv_id;
-                    pr.is_streaming = true;
                     pending_responses_.push_back(pr);
                 }
 
@@ -727,8 +665,7 @@ void ChatInterface::send_message_via_openrouter() {
             pending_responses_.push_back(pr);
         }
     }).detach();
-
-} // namespace llama_gui
+}
 
 } // namespace ui
 } // namespace llama_gui

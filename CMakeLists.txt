@@ -73,6 +73,7 @@ if(NOT CURL_FOUND)
         GIT_REPOSITORY https://github.com/curl/curl.git
         GIT_TAG curl-8_11_0
     )
+    set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(CURL)
     set(CURL_FOUND TRUE)
 endif()
@@ -139,10 +140,16 @@ else()
 endif()
 
 # Find OpenGL
-find_package(OpenGL REQUIRED)
+find_package(OpenGL QUIET)
+if(NOT OPENGL_FOUND)
+    message(WARNING "OpenGL not found - rendering will be disabled")
+endif()
 
 # Find GLEW
-find_package(GLEW REQUIRED)
+find_package(GLEW QUIET)
+if(NOT GLEW_FOUND)
+    message(WARNING "GLEW not found - rendering will be disabled")
+endif()
 
 # Find SDL2 (system package)
 find_package(PkgConfig QUIET)
