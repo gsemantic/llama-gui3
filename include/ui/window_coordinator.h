@@ -26,6 +26,13 @@ public:
                         bool render_always = false, const std::string& imgui_name = "",
                         bool* p_open = nullptr);
 
+    /**
+     * @brief Запросить фокус (bring-to-front) для окна при следующем рендере.
+     *        Одноразовый запрос: применяется в ближайшем renderAll().
+     * @param name Имя окна в WindowManager
+     */
+    void bringToFront(const std::string& name);
+
     void renderAll();
 
     /**
@@ -58,8 +65,15 @@ private:
 
     std::vector<std::pair<std::string, WindowEntry>> windows_;
 
-    // Для отслеживания: позиция окна на предыдущем кадре
-    std::unordered_map<std::string, ImVec2> prev_positions_;
+    // Одноразовые запросы bring-to-front (применяются в ближайшем renderAll())
+    std::vector<std::string> focus_requests_;
+
+    // Для отслеживания: позиция и размер окна на предыдущем кадре
+    struct PrevWindowState {
+        ImVec2 pos{0, 0};
+        ImVec2 size{0, 0};
+    };
+    std::unordered_map<std::string, PrevWindowState> prev_states_;
 };
 
 } // namespace ui

@@ -135,8 +135,8 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     g_api->command_register(g_host, "hello_plugin_confirm", cmd_confirm, nullptr,
                             "Show confirmation dialog", nullptr);
 
-    // Добавляем меню плагина
-    g_menu = g_api->menu_add(g_host, "Hello Plugin");
+    // Добавляем меню плагина (в существующее меню "Agents" по стабильному ключу)
+    g_menu = g_api->menu_add(g_host, "Agents");
     if (g_menu) {
         g_api->menu_add_item(g_host, g_menu, "Open Window", "hello_plugin_open_window",
                              "Ctrl+Shift+H");

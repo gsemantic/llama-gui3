@@ -1,5 +1,6 @@
 #include "../include/ui/advanced_menu_system.h"
 #include "../include/ui/localization_manager.h"
+#include <algorithm>
 #include <iostream>
 
 namespace llama_gui {
@@ -256,6 +257,59 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createViewMenu() {
         "show_grid_snapping_dialog", "", "Configure window grid snapping"));
 
     return menu;
+}
+
+std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createWindowMenu() {
+    auto menu = std::make_unique<AdvancedMenu>();
+    menu->menu_key = "Window";
+    menu->name = TRF("menu.window", "Window");
+
+    // Список окон заполняется динамически из WindowManager,
+    // чтобы не зависеть от порядка инициализации меню/окон.
+    populateWindowMenu(*menu);
+
+    return menu;
+}
+
+void AdvancedMenuSystem::populateWindowMenu(AdvancedMenu& menu) {
+    menu.items.clear();
+    if (!window_manager_) return;
+
+    const auto windows = window_manager_->getAllWindowStates();
+
+    // Сортируем по имени для стабильного порядка (WindowManager хранит окна в unordered_map)
+    std::vector<WindowState> sorted = windows;
+    std::sort(sorted.begin(), sorted.end(), [this](const WindowState& a, const WindowState& b) {
+        std::string na = window_manager_->getImGuiName(a.name);
+        std::string nb = window_manager_->getImGuiName(b.name);
+        if (na.empty()) na = a.name;
+        if (nb.empty()) nb = b.name;
+        return na < nb;
+    });
+
+    for (const auto& ws : sorted) {
+        // Пропускаем служебные окна (начинаются с "_")
+        if (ws.name.empty() || ws.name[0] == '_') continue;
+
+        std::string display = window_manager_->getImGuiName(ws.name);
+        if (display.empty()) display = ws.name;
+
+        menu.items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
+            display, ws.name, "",
+            "Show/hide window '" + display + "'"));
+    }
+}
+
+void AdvancedMenuSystem::refreshWindowMenu() {
+    // Окна могут регистрироваться после построения меню — обновляем список каждый кадр.
+    // Ищем по menu_key (стабильному), а не по локализованному имени: menus_map_
+    // хранит ключ "Окно"/"Window", поэтому поиск по строке "Window" дал бы nullptr.
+    for (auto& menu : menus_ordered_) {
+        if (menu && menu->menu_key == "Window") {
+            populateWindowMenu(*menu);
+            return;
+        }
+    }
 }
 
 std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createHelpMenu() {

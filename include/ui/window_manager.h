@@ -65,6 +65,8 @@ public:
     bool isWindowVisible(const std::string& name) const;
     void updateWindowPosition(const std::string& name, const ImVec2& position, bool snap_to_grid = false);
     void updateWindowSize(const std::string& name, const ImVec2& size, bool snap_to_grid = false);
+    void setWindowPositionRaw(const std::string& name, const ImVec2& position);
+    void setWindowSizeRaw(const std::string& name, const ImVec2& size);
     ImVec2 getWindowPosition(const std::string& name) const;
     ImVec2 getWindowSize(const std::string& name) const;
     WindowState getWindowState(const std::string& name) const;

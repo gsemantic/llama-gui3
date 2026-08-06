@@ -210,6 +210,11 @@ void GridSnappingSystem::setShowGridOverlay(bool show) {
     std::cout << "GridSnappingSystem: Grid overlay " << (show ? "enabled" : "disabled") << std::endl;
 }
 
+void GridSnappingSystem::setSnapThreshold(float threshold) {
+    settings_.snap_threshold = std::max(0.5f, threshold);
+    std::cout << "GridSnappingSystem: Snap threshold set to " << settings_.snap_threshold << "px" << std::endl;
+}
+
 // =========================================================================
 // Визуализация
 // =========================================================================

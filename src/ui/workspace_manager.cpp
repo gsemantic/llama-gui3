@@ -68,8 +68,14 @@ WorkspaceConfiguration WorkspaceManager::createDefaultUserWorkspace() const {
         "open_file", "save_file", "save_file_as",
         "toggle_window_chat", "toggle_window_files", "toggle_window_rag",
         "toggle_window_status_bar",
+        // Переключение окон через меню Window (все окна)
+        "toggle_window_conversations", "toggle_window_agents",
+        "toggle_window_settings", "toggle_window_cloud_services",
+        "toggle_window_rag_settings", "toggle_window_settings_viewer",
+        "toggle_window_grid_snapping", "toggle_window_profile_manager",
+        "toggle_window_backup_manager",
         "select_model", "model_directory",
-        "toggle_window_agents", "rag", "search", "code", "summarize",
+        "rag", "search", "code", "summarize",
         "show_documentation", "show_shortcuts", "show_about",
         // Только быстрые настройки (Quick Settings)
         "open_settings_server", "open_settings_chat", "open_settings_models", "open_settings_ui", "open_settings_cloud",

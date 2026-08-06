@@ -13,6 +13,13 @@ void WindowCoordinator::registerWindow(const std::string& name, RenderCallback c
     windows_.emplace_back(name, WindowEntry{std::move(callback), render_always, imgui_name, p_open});
 }
 
+void WindowCoordinator::bringToFront(const std::string& name) {
+    for (const auto& n : focus_requests_) {
+        if (n == name) return;
+    }
+    focus_requests_.push_back(name);
+}
+
 void WindowCoordinator::renderAll() {
     bool want_apply = workspace_applier_ && workspace_applier_->hasPendingPositions();
     bool any_applied = false;
@@ -69,6 +76,21 @@ void WindowCoordinator::renderAll() {
                 }
             }
 
+            // Одноразовый bring-to-front: вызываем SetNextWindowFocus ПЕРЕД Begin(),
+            // чтобы окно перерисовалось поверх остальных (порядок отрисовки ImGui
+            // определяется фокусом, а не порядком Begin()).
+            bool should_focus = false;
+            for (auto it = focus_requests_.begin(); it != focus_requests_.end(); ++it) {
+                if (*it == name) {
+                    should_focus = true;
+                    focus_requests_.erase(it);
+                    break;
+                }
+            }
+            if (should_focus) {
+                ImGui::SetNextWindowFocus();
+            }
+
             if (entry.callback) {
                 entry.callback();
             }
@@ -100,31 +122,60 @@ void WindowCoordinator::renderAll() {
                     }
                 }
 
-                // Примагничивание
+                // Примагничивание во время движения/ресайза.
+                // Для перемещения — прилипание позиции к сетке с порогом.
+                // Для ресайза — примагничиваем размер, сохраняя противоположный
+                // край неподвижным. Иначе при перетаскивании левого/верхнего края
+                // окно "расползается" в обе стороны (правый/нижний край дрейфует).
                 auto& gs = window_manager_->getGridSnappingSystem();
                 if (gs.isEnabled()) {
-                    auto it = prev_positions_.find(name);
-                    bool is_dragging = (it != prev_positions_.end() &&
-                                        (w->Pos.x != it->second.x || w->Pos.y != it->second.y));
+                    const auto& gs_settings = gs.getSettings();
+                    auto it = prev_states_.find(name);
+                    if (it != prev_states_.end()) {
+                        const PrevWindowState& prev = it->second;
+                        bool pos_changed_x = (w->Pos.x != prev.pos.x);
+                        bool pos_changed_y = (w->Pos.y != prev.pos.y);
+                        bool size_changed_x = (w->Size.x != prev.size.x);
+                        bool size_changed_y = (w->Size.y != prev.size.y);
+                        bool size_changed = size_changed_x || size_changed_y;
 
-                    if (!is_dragging) {
-                        if (gs.getSettings().snap_position) {
-                            ImVec2 snapped = gs.snapPosition(w->Pos);
+                        if (size_changed && gs_settings.snap_size) {
+                            // Ресайз: примагничиваем размер, фиксируя неподвижный край.
+                            // Если позиция по оси изменилась — край был "притянут" к мыши
+                            // (левый/верхний), значит фиксируем противоположный (правый/нижний).
+                            ImVec2 snapped = gs.snapSize(w->Size);
+                            if (snapped.x != w->Size.x) {
+                                if (pos_changed_x) {
+                                    float right_edge = w->Pos.x + w->Size.x;
+                                    w->Size.x = snapped.x;
+                                    w->Pos.x = right_edge - snapped.x;
+                                } else {
+                                    w->Size.x = snapped.x;
+                                }
+                            }
+                            if (snapped.y != w->Size.y) {
+                                if (pos_changed_y) {
+                                    float bottom_edge = w->Pos.y + w->Size.y;
+                                    w->Size.y = snapped.y;
+                                    w->Pos.y = bottom_edge - snapped.y;
+                                } else {
+                                    w->Size.y = snapped.y;
+                                }
+                            }
+                            window_manager_->setWindowSizeRaw(name, w->Size);
+                            window_manager_->setWindowPositionRaw(name, w->Pos);
+                        } else if (!size_changed && (pos_changed_x || pos_changed_y) && gs_settings.snap_position) {
+                            // Перемещение окна
+                            ImVec2 snapped = gs.snapPositionWithThreshold(w->Pos, gs_settings.snap_threshold);
                             if (snapped.x != w->Pos.x || snapped.y != w->Pos.y) {
                                 w->Pos = snapped;
-                                window_manager_->updateWindowPosition(name, snapped);
                             }
-                        }
-                        if (gs.getSettings().snap_size) {
-                            ImVec2 snapped = gs.snapSize(w->Size);
-                            if (snapped.x != w->Size.x || snapped.y != w->Size.y) {
-                                w->Size = snapped;
-                                window_manager_->updateWindowSize(name, snapped);
-                            }
+                            window_manager_->setWindowPositionRaw(name, w->Pos);
                         }
                     }
-
-                    prev_positions_[name] = w->Pos;
+                    prev_states_[name] = { w->Pos, w->Size };
+                } else {
+                    prev_states_.erase(name);
                 }
                 break;
             }

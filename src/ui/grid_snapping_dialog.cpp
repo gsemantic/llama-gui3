@@ -113,7 +113,7 @@ void GridSnappingDialog::render(bool* open) {
     // Порог примагничивания
     ImGui::Text(TR("grid_snapping.snap_threshold"));
     if (ImGui::SliderFloat("##snap_threshold_slider", &temp_snap_threshold_, 1.0f, 32.0f, "%.1f px")) {
-        // Можно добавить динамическое обновление порога
+        grid_system_->setSnapThreshold(temp_snap_threshold_);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();

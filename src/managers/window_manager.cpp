@@ -84,6 +84,24 @@ void WindowManager::updateWindowSize(const std::string& name, const ImVec2& size
     }
 }
 
+void WindowManager::setWindowPositionRaw(const std::string& name, const ImVec2& position) {
+    auto it = windows_.find(name);
+    if (it != windows_.end()) {
+        it->second.position = position;
+        it->second.snapped_to_grid = false;
+        notifyWindowChanged(name);
+    }
+}
+
+void WindowManager::setWindowSizeRaw(const std::string& name, const ImVec2& size) {
+    auto it = windows_.find(name);
+    if (it != windows_.end()) {
+        it->second.size = size;
+        it->second.snapped_to_grid = false;
+        notifyWindowChanged(name);
+    }
+}
+
 ImVec2 WindowManager::getWindowPosition(const std::string& name) const {
     auto it = windows_.find(name);
     return (it != windows_.end()) ? it->second.position : ImVec2(0, 0);

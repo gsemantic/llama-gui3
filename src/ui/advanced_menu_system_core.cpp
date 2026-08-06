@@ -21,6 +21,17 @@ const AdvancedMenu* AdvancedMenuSystem::getMenu(const std::string& menu_name) co
     return const_cast<AdvancedMenuSystem*>(this)->findMenuInternal(menu_name);
 }
 
+AdvancedMenu* AdvancedMenuSystem::getMenuByKey(const std::string& menu_key) {
+    for (auto& menu : menus_ordered_) {
+        if (menu && menu->menu_key == menu_key) return menu.get();
+    }
+    return nullptr;
+}
+
+const AdvancedMenu* AdvancedMenuSystem::getMenuByKey(const std::string& menu_key) const {
+    return const_cast<AdvancedMenuSystem*>(this)->getMenuByKey(menu_key);
+}
+
 void AdvancedMenuSystem::initialize(CommandManager* command_manager, WindowManager* window_manager, WorkspaceManager* workspace_manager) {
     command_manager_ = command_manager;
     window_manager_ = window_manager;
@@ -32,6 +43,7 @@ void AdvancedMenuSystem::buildModernMenu() {
     auto file_menu = createFileMenu();
     auto settings_menu = createSettingsMenu();
     auto view_menu = createViewMenu();
+    auto window_menu = createWindowMenu();
     auto agents_menu = createAgentsMenu();
 
     // Создаем меню для Developer workspace
@@ -53,6 +65,8 @@ void AdvancedMenuSystem::buildModernMenu() {
     else std::cerr << "Warning: settings_menu is null" << std::endl;
     if (view_menu) addMenu(std::move(view_menu));
     else std::cerr << "Warning: view_menu is null" << std::endl;
+    if (window_menu) addMenu(std::move(window_menu));
+    else std::cerr << "Warning: window_menu is null" << std::endl;
     if (agents_menu) addMenu(std::move(agents_menu));
     else std::cerr << "Warning: agents_menu is null" << std::endl;
 
@@ -128,13 +142,19 @@ bool AdvancedMenuSystem::addMenu(const std::string& name, std::vector<AdvancedMe
 }
 
 bool AdvancedMenuSystem::addMenuItem(const std::string& menu_name, const AdvancedMenuItem& item) {
-    auto it = menus_map_.find(menu_name);
-    if (it == menus_map_.end()) {
-        std::cerr << "Menu not found: " << menu_name << std::endl;
-        return false;
+    // Сначала ищем по стабильному ключу (устойчив к локализации имени),
+    // затем по локализованному имени.
+    AdvancedMenu* menu = getMenuByKey(menu_name);
+    if (!menu) {
+        auto it = menus_map_.find(menu_name);
+        if (it == menus_map_.end()) {
+            std::cerr << "Menu not found: " << menu_name << std::endl;
+            return false;
+        }
+        menu = it->second;
     }
 
-    it->second->items.push_back(item);
+    menu->items.push_back(item);
     std::cout << "✓ Added menu item: " << item.name << " to menu: " << menu_name << std::endl;
     return true;
 }
@@ -191,6 +211,9 @@ bool AdvancedMenuSystem::removeMenuItem(const std::string& menu_name, const std:
 
 void AdvancedMenuSystem::updateMenuStates() {
     // Update menu states based on current application state
+    // Список окон обновляется динамически (окна могут регистрироваться после построения меню)
+    refreshWindowMenu();
+
     for (auto& menu : menus_ordered_) {
         for (auto& item : menu->items) {
             updateMenuItemState(item);

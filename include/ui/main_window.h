@@ -121,6 +121,11 @@ public:
     void setupCommandCallbacks();
     void syncWindowFlagsFromManager();
     
+    // Открыть диалоговое окно по имени (для Window menu / toggle-команд)
+    void showWindowByName(const std::string& window_name);
+    // Скрыть диалоговое окно по имени
+    void hideWindowByName(const std::string& window_name);
+    
     // Window management
     void set_title(const std::string& title);
     void set_size(int width, int height);

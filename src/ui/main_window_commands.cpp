@@ -80,7 +80,12 @@ void MainWindow::connectAdditionalWindowCommands() {
 
         registerCommand("show_backup_manager", CommandFactory::createFunctionalCommand(
             "show_backup_manager",
-            [this]() { if (backup_manager_dialog_) backup_manager_dialog_->setOpen(true); },
+            [this]() {
+                if (backup_manager_dialog_) {
+                    backup_manager_dialog_->setOpen(true);
+                    window_coordinator_.bringToFront("backup_manager");
+                }
+            },
             "Open Backup Manager", "Ctrl+Shift+B", nullptr
         ));
 
@@ -128,9 +133,23 @@ void MainWindow::connectAdditionalWindowCommands() {
                 window_manager_.setWindowVisible("grid_snapping", show_grid_snapping_);
                 if (show_grid_snapping_) {
                     grid_snapping_dialog_->show();
+                    window_coordinator_.bringToFront("grid_snapping");
                 }
             },
             "Grid Snapping", "", nullptr));
+
+        // toggle_window_grid_snapping — используется меню Window (createWindowToggleItem)
+        registerCommand("toggle_window_grid_snapping", CommandFactory::createFunctionalCommand(
+            "toggle_window_grid_snapping",
+            [this]() {
+                window_manager_.toggleWindow("grid_snapping");
+                if (window_manager_.isWindowVisible("grid_snapping")) {
+                    grid_snapping_dialog_->show();
+                    window_coordinator_.bringToFront("grid_snapping");
+                }
+                syncWindowFlagsFromManager();
+            },
+            "Toggle Grid Snapping Window", "", nullptr));
 
         // Console (реальная команда — открывает диалог консоли)
         registerCommand("toggle_console", CommandFactory::createFunctionalCommand(
@@ -197,6 +216,7 @@ void MainWindow::connectSettingsMenuCommands() {
         "open_settings_cloud",
         [this]() {
             cloud_services_dialog_->open();
+            window_coordinator_.bringToFront("cloud_services");
         },
         "Open Cloud Services Settings",
         "",
@@ -337,7 +357,10 @@ void MainWindow::connectSettingsMenuCommands() {
 
     registerCommand("open_settings_ini_viewer", CommandFactory::createFunctionalCommand(
         "open_settings_ini_viewer",
-        [this]() { settings_viewer_dialog_->show(); },
+        [this]() {
+            settings_viewer_dialog_->show();
+            window_coordinator_.bringToFront("settings_viewer");
+        },
         "Open INI Settings Viewer",
         "",
         nullptr

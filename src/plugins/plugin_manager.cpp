@@ -129,12 +129,22 @@ LlamaPluginMenu* host_menu_add(LlamaPluginHost* host, const char* menu_name) {
     if (!ms) return nullptr;
 
     const std::string name = menu_name;
-    if (!ms->getMenu(name)) {
-        ms->addMenu(name, {});
-    }
 
     auto handle = std::make_unique<PluginHandle>();
-    handle->name = name;
+    // Пытаемся найти существующее меню: сначала по стабильному ключу
+    // (например "Agents"), затем по локализованному имени.
+    ui::AdvancedMenu* existing = ms->getMenuByKey(name);
+    if (!existing) existing = ms->getMenu(name);
+    if (existing) {
+        // Плагин добавляет пункты в существующее меню — новое верхнеуровневое
+        // меню не создаём. В хендле храним ключ меню для дальнейших вызовов.
+        handle->name = existing->menu_key.empty() ? existing->name : existing->menu_key;
+    } else {
+        // Новое верхнеуровневое меню плагина
+        ms->addMenu(name, {});
+        handle->name = name;
+    }
+
     LlamaPluginMenu* result = reinterpret_cast<LlamaPluginMenu*>(handle.get());
     if (pd->plugin) {
         pd->plugin->menu_names.push_back(name);
@@ -865,10 +875,12 @@ void PluginManager::render_plugins() {
         if (!p || !p->render_fn) continue;
 
         // Перерегистрация меню — идемпотентна, устойчива к перестройке меню
-        // приложением (например, при смене языка).
+        // приложением (например, при смене языка). Ищем и по ключу, и по имени,
+        // чтобы не создавать дубликат существующего меню (например "Agents").
         if (impl_->subsystems.menu_system) {
             for (const auto& menu_name : p->menu_names) {
-                if (!impl_->subsystems.menu_system->getMenu(menu_name)) {
+                if (!impl_->subsystems.menu_system->getMenuByKey(menu_name) &&
+                    !impl_->subsystems.menu_system->getMenu(menu_name)) {
                     impl_->subsystems.menu_system->addMenu(menu_name, {});
                 }
             }

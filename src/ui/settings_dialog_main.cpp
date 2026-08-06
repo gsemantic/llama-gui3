@@ -99,6 +99,11 @@ void SettingsDialog::render() {
 
     ImGui::OpenPopup("Settings");
 
+    // Стартовый размер при первом открытии и минимальные границы — иначе в
+    // расширенном режиме попап открывается маленьким, и элементы обрезаются.
+    ImGui::SetNextWindowSize(ImVec2(700, 480), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(540, 380), ImVec2(FLT_MAX, FLT_MAX));
+
     if (ImGui::BeginPopupModal("Settings", &show_dialog_, show_quick_ ? ImGuiWindowFlags_AlwaysAutoResize : ImGuiWindowFlags_None)) {
 
         // Переключатель между быстрыми и расширенными настройками

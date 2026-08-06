@@ -98,6 +98,10 @@ public:
     AdvancedMenu* getMenu(const std::string& menu_name);
     const AdvancedMenu* getMenu(const std::string& menu_name) const;
     
+    // Получение меню по стабильному ключу (не зависит от локали имени)
+    AdvancedMenu* getMenuByKey(const std::string& menu_key);
+    const AdvancedMenu* getMenuByKey(const std::string& menu_key) const;
+    
     // Получение всех меню
     std::vector<std::string> getAllMenuNames() const;
     
@@ -185,6 +189,11 @@ private:
     void updateMenuItemState(AdvancedMenuItem& item);
     bool executeMenuItem(const AdvancedMenuItem& item);
     
+    // Обновление списка окон в меню "Window" (динамически из WindowManager)
+    void refreshWindowMenu();
+    // Заполнить пункты меню из текущего списка окон
+    void populateWindowMenu(AdvancedMenu& menu);
+    
     // Обновление видимости меню для workspace
     void updateMenuVisibilityForWorkspace(WorkspaceType type);
     
@@ -192,6 +201,7 @@ private:
     std::unique_ptr<AdvancedMenu> createFileMenu();
     std::unique_ptr<AdvancedMenu> createSettingsMenu();
     std::unique_ptr<AdvancedMenu> createViewMenu();
+    std::unique_ptr<AdvancedMenu> createWindowMenu();
     std::unique_ptr<AdvancedMenu> createHelpMenu();
     std::unique_ptr<AdvancedMenu> createDeveloperMenu();
     std::unique_ptr<AdvancedMenu> createAgentsMenu();

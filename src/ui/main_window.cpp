@@ -329,6 +329,15 @@ bool MainWindow::initialize(int width, int height) {
     try {
         command_manager_->setToggleWindowCallback([this](const std::string& window_name) {
             window_manager_.toggleWindow(window_name);
+            if (window_manager_.isWindowVisible(window_name)) {
+                // Открываем диалоговое окно через его собственный метод (если нужно),
+                // затем поднимаем окно наверх (порядок отрисовки ImGui зависит от
+                // фокуса, а не от порядка Begin()).
+                showWindowByName(window_name);
+                window_coordinator_.bringToFront(window_name);
+            } else {
+                hideWindowByName(window_name);
+            }
             syncWindowFlagsFromManager();
         });
         command_manager_->initializeDefaultCommands(
@@ -681,8 +690,14 @@ void MainWindow::initializeNewUISystem() {
 
     // Настройка сетки для позиционирования
     window_manager_.getGridSnappingSystem().setEnabled(true);
-    window_manager_.getGridSnappingSystem().setGridSize(20.0f);
+    window_manager_.getGridSnappingSystem().setGridSize(20);
     grid_snapping_dialog_->setGridSnappingSystem(&window_manager_.getGridSnappingSystem());
+
+    // Кнопка "Snap all windows": примагничиваем все видимые окна к сетке
+    grid_snapping_dialog_->setSnapAllCallback([this]() {
+        window_manager_.snapAllWindowsToGrid();
+        workspace_applier_.requestApply();
+    });
 
     // Инициализация WindowCoordinator
     window_coordinator_.setWindowManager(&window_manager_);
@@ -794,6 +809,42 @@ void MainWindow::syncWindowFlagsFromManager() {
     show_backup_manager_ = window_manager_.isWindowVisible("backup_manager");
     show_grid_snapping_ = window_manager_.isWindowVisible("grid_snapping");
     show_status_bar_ = window_manager_.isWindowVisible("status_bar");
+}
+
+void MainWindow::showWindowByName(const std::string& window_name) {
+    // Диалоговые окна управляются собственными флагами видимости —
+    // при переключении через Window menu нужно открыть диалог явно.
+    if (window_name == "settings") {
+        if (settings_dialog_) settings_dialog_->show();
+    } else if (window_name == "cloud_services") {
+        if (cloud_services_dialog_) cloud_services_dialog_->open();
+    } else if (window_name == "rag_settings") {
+        if (rag_settings_dialog_) rag_settings_dialog_->set_visible(true);
+    } else if (window_name == "settings_viewer") {
+        if (settings_viewer_dialog_) settings_viewer_dialog_->show();
+    } else if (window_name == "grid_snapping") {
+        if (grid_snapping_dialog_) grid_snapping_dialog_->show();
+    } else if (window_name == "profile_manager") {
+        if (profile_manager_dialog_) profile_manager_dialog_->setOpen(true);
+    } else if (window_name == "backup_manager") {
+        if (backup_manager_dialog_) backup_manager_dialog_->setOpen(true);
+    }
+}
+
+void MainWindow::hideWindowByName(const std::string& window_name) {
+    if (window_name == "settings") {
+        if (settings_dialog_) settings_dialog_->hide();
+    } else if (window_name == "cloud_services") {
+        if (cloud_services_dialog_) cloud_services_dialog_->close();
+    } else if (window_name == "rag_settings") {
+        if (rag_settings_dialog_) rag_settings_dialog_->set_visible(false);
+    } else if (window_name == "settings_viewer") {
+        if (settings_viewer_dialog_) settings_viewer_dialog_->hide();
+    } else if (window_name == "profile_manager") {
+        if (profile_manager_dialog_) profile_manager_dialog_->setOpen(false);
+    } else if (window_name == "backup_manager") {
+        if (backup_manager_dialog_) backup_manager_dialog_->setOpen(false);
+    }
 }
 
 void MainWindow::show_settings_viewer() {
@@ -936,6 +987,7 @@ void MainWindow::show_info(const std::string& title, const std::string& message)
 void MainWindow::show_profile_manager() {
     if (profile_manager_dialog_) {
         profile_manager_dialog_->setOpen(true);
+        window_coordinator_.bringToFront("profile_manager");
     }
 }
 
@@ -1092,6 +1144,15 @@ void MainWindow::setup_imgui_style() {
     } else {
         ImGui::StyleColorsLight();
     }
+
+    // Смягчаем геометрию: скруглённые углы окон и элементов
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 6.0f;
+    style.ChildRounding = 4.0f;
+    style.PopupRounding = 4.0f;
+    style.FrameRounding = 3.0f;
+    style.GrabRounding = 3.0f;
+    style.TabRounding = 3.0f;
 }
 
 void MainWindow::create_ui_components() {

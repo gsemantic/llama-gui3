@@ -91,6 +91,8 @@ void DialogManager::render() {
         if (dialog.size.x != 0 || dialog.size.y != 0) {
             ImGui::SetNextWindowSize(dialog.size);
         }
+        // Минимальный размер — чтобы контент не обрезался в маленьких попапах
+        ImGui::SetNextWindowSizeConstraints(ImVec2(320, 200), ImVec2(FLT_MAX, FLT_MAX));
 
         // Определяем модальность диалога
         ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize;

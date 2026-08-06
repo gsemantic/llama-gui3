@@ -187,7 +187,7 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     g_api->command_register(g_host, "calculator_about", cmd_about, nullptr,
                             "About Calculator", nullptr);
 
-    LlamaPluginMenu* menu = g_api->menu_add(g_host, "Calculator");
+    LlamaPluginMenu* menu = g_api->menu_add(g_host, "Agents");
     if (menu) {
         g_api->menu_add_item(g_host, menu, "Open Calculator", "calculator_open", "Ctrl+Shift+C");
         g_api->menu_add_item(g_host, menu, "About", "calculator_about", nullptr);

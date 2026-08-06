@@ -149,6 +149,12 @@ public:
     void setShowGridOverlay(bool show);
 
     /**
+     * @brief Установить порог примагничивания
+     * @param threshold Порог в пикселях (минимум 0.5)
+     */
+    void setSnapThreshold(float threshold);
+
+    /**
      * @brief Проверить, включена ли визуализация сетки
      */
     bool isGridOverlayVisible() const { return settings_.show_grid_overlay; }
