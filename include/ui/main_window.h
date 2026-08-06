@@ -196,6 +196,7 @@ public:
     void connectWorkspaceCommands();
     void connectAdditionalWindowCommands();
     void connectSettingsMenuCommands();
+    void connectDeveloperCommands();
     void connectStubCommands();
     void create_backup();
     void restore_from_backup(const std::string& backup_path);

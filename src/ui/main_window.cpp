@@ -36,6 +36,9 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     , profile_manager_dialog_(std::make_unique<ProfileManagerDialog>(config_manager_))
     , backup_manager_dialog_(std::make_unique<BackupManagerDialog>(config_manager_))
     , quick_settings_dialog_(std::make_unique<QuickSettingsDialog>(settings_))
+#ifdef ENABLE_LLAMA_BENCH
+    , llama_bench_dialog_(std::make_unique<LlamaBenchDialog>())
+#endif
     , command_manager_(std::make_unique<CommandManager>())
     , conversation_file_manager_(std::make_unique<ConversationFileManager>(state_manager_))
     , file_dialog_manager_(std::make_unique<FileDialogManager>())
@@ -47,6 +50,13 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     // Initialize advanced menu system
     advanced_menu_system_.initialize(command_manager_.get(), &window_manager_, &workspace_manager_);
     advanced_menu_system_.buildModernMenu();
+
+#ifdef ENABLE_LLAMA_BENCH
+    // Передаём server manager в диалог Llama Bench (для остановки/запуска сервера)
+    if (llama_bench_dialog_) {
+        llama_bench_dialog_->setServerManager(server_manager_);
+    }
+#endif
 
     // Привязываем WorkspaceManager к ProfileManagerDialog для редактирования видимости меню
     if (profile_manager_dialog_) {
@@ -325,7 +335,12 @@ bool MainWindow::initialize(int width, int height) {
             [this]() { open_conversation_file(); },
             [this]() { shutdown(); },
             [this]() { open_settings(); },
-            [this]() { open_model_directory_dialog(); },
+            [this]() {
+                std::string model_path;
+                if (file_dialog_manager_->tryOpenModelFileDialog(model_path)) {
+                    load_model_from_path(model_path);
+                }
+            },
             [this](ServerControlCommand::Action action) { on_server_control_command(action); },
             [this](const std::string& help_type) { show_help(help_type); }
         );
@@ -398,6 +413,13 @@ bool MainWindow::initialize(int width, int height) {
         connectStubCommands();
     } catch (const std::exception& e) {
         std::cerr << "ERROR in connectStubCommands(): " << e.what() << std::endl;
+    }
+
+    // Register developer commands (Dear ImGui tools)
+    try {
+        connectDeveloperCommands();
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR in connectDeveloperCommands(): " << e.what() << std::endl;
     }
 
     // Sync all window flags after initialization
@@ -1121,6 +1143,14 @@ void MainWindow::render_ui() {
     render_model_selection_dialog();
     render_model_load_dialog();
 
+#ifdef ENABLE_LLAMA_BENCH
+    // Llama Bench dialog (standalone)
+    render_llama_bench_dialog();
+#endif
+
+    // Developer tools (Dear ImGui окна: Metrics, Style Editor, Font Selector, Debug Log)
+    renderDeveloperTools();
+
     // Render main layout and status bar
     render_main_layout();
     if (window_manager_.isWindowVisible("status_bar")) {
@@ -1201,6 +1231,44 @@ void MainWindow::toggle_fullscreen() {
     }
 #endif
 }
+
+void MainWindow::renderDeveloperTools() {
+    // Dear ImGui встроенные отладочные окна
+    if (show_metrics_window_) {
+        ImGui::ShowMetricsWindow(&show_metrics_window_);
+    }
+
+    if (show_debug_log_window_) {
+        ImGui::ShowDebugLogWindow(&show_debug_log_window_);
+    }
+
+    if (show_style_editor_window_) {
+        ImGui::Begin("Style Editor", &show_style_editor_window_);
+        ImGui::ShowStyleEditor();
+        ImGui::End();
+    }
+
+    if (show_font_selector_window_) {
+        ImGui::Begin("Font Selector", &show_font_selector_window_);
+        ImGui::ShowFontSelector("Font");
+        ImGui::End();
+    }
+}
+
+#ifdef ENABLE_LLAMA_BENCH
+void MainWindow::openLlamaBenchDialog() {
+    std::cout << "MainWindow: Opening Llama Bench dialog" << std::endl;
+    if (llama_bench_dialog_) {
+        llama_bench_dialog_->setVisible(true);
+    }
+}
+
+void MainWindow::render_llama_bench_dialog() {
+    if (llama_bench_dialog_) {
+        llama_bench_dialog_->render();
+    }
+}
+#endif
 
 } // namespace ui
 } // namespace llama_gui

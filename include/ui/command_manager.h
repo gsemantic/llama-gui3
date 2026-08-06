@@ -2,6 +2,7 @@
 
 #include "command.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <stack>
@@ -29,6 +30,9 @@ private:
     
     // Словарь горячих клавиш -> имя команды
     std::unordered_map<std::string, std::string> shortcuts_;
+    
+    // Команды-заглушки (показывают "не реализовано", отображаются серым)
+    std::unordered_set<std::string> stub_commands_;
     
     // История выполненных команд для отмены
     std::stack<std::string> command_history_;
@@ -81,6 +85,19 @@ public:
     // Проверка доступности
     bool isCommandRegistered(const std::string& name) const;
     bool isShortcutRegistered(const std::string& shortcut) const;
+
+    // =========================================================================
+    // Заглушки (stubs)
+    // =========================================================================
+
+    // Пометить команду как заглушку (не реализована)
+    void markCommandAsStub(const std::string& name);
+
+    // Проверить, является ли команда заглушкой
+    bool isCommandStub(const std::string& name) const;
+
+    // Проверить, доступна ли команда (зарегистрирована и не является заглушкой)
+    bool isCommandAvailable(const std::string& name) const;
     
     // Установка обработчиков событий
     void setCommandExecutedCallback(std::function<void(const std::string&)> callback);

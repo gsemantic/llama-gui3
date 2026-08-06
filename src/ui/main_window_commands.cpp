@@ -120,6 +120,34 @@ void MainWindow::connectAdditionalWindowCommands() {
             "Toggle Fullscreen", "F11", nullptr
         ));
 
+        // Grid Snapping (реальное переключение диалога примагничивания)
+        registerCommand("show_grid_snapping_dialog", CommandFactory::createFunctionalCommand(
+            "show_grid_snapping_dialog",
+            [this]() {
+                show_grid_snapping_ = !show_grid_snapping_;
+                window_manager_.setWindowVisible("grid_snapping", show_grid_snapping_);
+                if (show_grid_snapping_) {
+                    grid_snapping_dialog_->show();
+                }
+            },
+            "Grid Snapping", "", nullptr));
+
+        // Console (реальная команда — открывает диалог консоли)
+        registerCommand("toggle_console", CommandFactory::createFunctionalCommand(
+            "toggle_console",
+            [this]() { dialog_manager_.showConsoleDialog(); },
+            "Toggle Console", "", nullptr
+        ));
+
+#ifdef ENABLE_LLAMA_BENCH
+        // Llama Bench (реальный диалог сравнения моделей)
+        registerCommand("open_llama_bench", CommandFactory::createFunctionalCommand(
+            "open_llama_bench",
+            [this]() { openLlamaBenchDialog(); },
+            "Open Llama Bench", "", nullptr
+        ));
+#endif
+
         std::cout << "✓ Connected additional window commands" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "ERROR in connectAdditionalWindowCommands(): " << e.what() << std::endl;
@@ -263,9 +291,115 @@ void MainWindow::connectSettingsMenuCommands() {
         nullptr
     ));
 
-    commands_count = 17;
+    // =========================================================================
+    // Системные настройки (System) — реальные вкладки AdvancedSettingsDialog
+    // =========================================================================
+
+    registerCommand("open_settings_logging", CommandFactory::createFunctionalCommand(
+        "open_settings_logging",
+        [this]() { settings_dialog_->show_logging_settings(); },
+        "Open Logging Settings",
+        "",
+        nullptr
+    ));
+
+    registerCommand("open_settings_performance", CommandFactory::createFunctionalCommand(
+        "open_settings_performance",
+        [this]() { settings_dialog_->show_performance_settings(); },
+        "Open Performance Settings",
+        "",
+        nullptr
+    ));
+
+    registerCommand("open_settings_advanced", CommandFactory::createFunctionalCommand(
+        "open_settings_advanced",
+        [this]() { settings_dialog_->show_advanced_settings_tab(); },
+        "Open Advanced Settings",
+        "",
+        nullptr
+    ));
+
+    registerCommand("open_settings_output", CommandFactory::createFunctionalCommand(
+        "open_settings_output",
+        [this]() { settings_dialog_->show_output_settings(); },
+        "Open Output Settings",
+        "",
+        nullptr
+    ));
+
+    registerCommand("open_settings_tensor_override", CommandFactory::createFunctionalCommand(
+        "open_settings_tensor_override",
+        [this]() { settings_dialog_->show_tensor_override_settings(); },
+        "Open Tensor Override Settings",
+        "",
+        nullptr
+    ));
+
+    registerCommand("open_settings_ini_viewer", CommandFactory::createFunctionalCommand(
+        "open_settings_ini_viewer",
+        [this]() { settings_viewer_dialog_->show(); },
+        "Open INI Settings Viewer",
+        "",
+        nullptr
+    ));
+
+    // Команды меню Performance и Logging (Admin workspace) — реальные вкладки настроек
+    registerCommand("open_performance_settings", CommandFactory::createFunctionalCommand(
+        "open_performance_settings",
+        [this]() { settings_dialog_->show_performance_settings(); },
+        "Open Performance Settings",
+        "",
+        nullptr
+    ));
+
+    registerCommand("open_logging_settings", CommandFactory::createFunctionalCommand(
+        "open_logging_settings",
+        [this]() { settings_dialog_->show_logging_settings(); },
+        "Open Logging Settings",
+        "",
+        nullptr
+    ));
+
+    commands_count = 24;
 
     std::cout << "✓ Connected settings menu commands (" << commands_count << " commands)" << std::endl;
+}
+
+void MainWindow::connectDeveloperCommands() {
+    std::cout << "Connecting developer commands..." << std::endl;
+
+    // Реальные инструменты Dear ImGui (окна создаются в renderDeveloperTools())
+    registerCommand("show_metrics", CommandFactory::createFunctionalCommand(
+        "show_metrics",
+        [this]() { show_metrics_window_ = true; },
+        "Show Metrics/Debugger", "", nullptr
+    ));
+
+    registerCommand("show_style_editor", CommandFactory::createFunctionalCommand(
+        "show_style_editor",
+        [this]() { show_style_editor_window_ = true; },
+        "Show Style Editor", "", nullptr
+    ));
+
+    registerCommand("show_font_selector", CommandFactory::createFunctionalCommand(
+        "show_font_selector",
+        [this]() { show_font_selector_window_ = true; },
+        "Show Font Selector", "", nullptr
+    ));
+
+    registerCommand("show_debug_log", CommandFactory::createFunctionalCommand(
+        "show_debug_log",
+        [this]() { show_debug_log_window_ = true; },
+        "Show Debug Log", "", nullptr
+    ));
+
+    registerCommand("start_item_picker", CommandFactory::createFunctionalCommand(
+        "start_item_picker",
+        []() { ImGui::DebugStartItemPicker(); },
+        "Start Item Picker", "", nullptr
+    ));
+
+    std::cout << "✓ Connected developer commands" << std::endl;
 }
 
 void MainWindow::connectStubCommands() {
@@ -278,121 +412,59 @@ void MainWindow::connectStubCommands() {
         };
     };
 
-    // Settings stubs
-    registerCommand("open_settings_tensor_override", CommandFactory::createFunctionalCommand(
-        "open_settings_tensor_override", stub("Tensor Override Settings"), "Stub", "", nullptr));
-    registerCommand("open_settings_ini_viewer", CommandFactory::createFunctionalCommand(
-        "open_settings_ini_viewer", stub("INI File Viewer"), "Stub", "", nullptr));
-    registerCommand("open_settings_logging", CommandFactory::createFunctionalCommand(
-        "open_settings_logging", stub("Logging Settings"), "Stub", "", nullptr));
-    registerCommand("open_settings_performance", CommandFactory::createFunctionalCommand(
-        "open_settings_performance", stub("Performance Settings"), "Stub", "", nullptr));
-    registerCommand("open_settings_advanced", CommandFactory::createFunctionalCommand(
-        "open_settings_advanced", stub("Advanced Settings"), "Stub", "", nullptr));
-    registerCommand("open_settings_output", CommandFactory::createFunctionalCommand(
-        "open_settings_output", stub("Output Settings"), "Stub", "", nullptr));
-    registerCommand("open_auth_settings", CommandFactory::createFunctionalCommand(
-        "open_auth_settings", stub("Auth Settings"), "Stub", "", nullptr));
-    registerCommand("open_ssl_settings", CommandFactory::createFunctionalCommand(
-        "open_ssl_settings", stub("SSL Settings"), "Stub", "", nullptr));
-    registerCommand("open_extensions", CommandFactory::createFunctionalCommand(
-        "open_extensions", stub("Extensions"), "Stub", "", nullptr));
-    registerCommand("open_plugins", CommandFactory::createFunctionalCommand(
-        "open_plugins", stub("Plugins"), "Stub", "", nullptr));
-    registerCommand("open_llama_bench", CommandFactory::createFunctionalCommand(
-        "open_llama_bench", stub("LLaMA Benchmark"), "Stub", "", nullptr));
+    // Регистрирует команду-заглушку и помечает её как неактивную (отображается серым)
+    auto registerStub = [this, &stub](const std::string& name, const std::string& feature_name) {
+        registerCommand(name, CommandFactory::createFunctionalCommand(
+            name, stub(feature_name), "Stub", "", nullptr));
+        if (command_manager_) {
+            command_manager_->markCommandAsStub(name);
+        }
+    };
 
-    // Settings viewer (real, not stub)
-    registerCommand("toggle_window_settings_viewer", CommandFactory::createFunctionalCommand(
-        "toggle_window_settings_viewer",
-        [this]() { settings_viewer_dialog_->show(); },
-        "Toggle Settings Viewer", "Ctrl+Alt+I", nullptr));
+    // Settings stubs
+    registerStub("open_auth_settings", "Auth Settings");
+    registerStub("open_ssl_settings", "SSL Settings");
+    registerStub("open_extensions", "Extensions");
+    registerStub("open_plugins", "Plugins");
 
     // View stubs
-    registerCommand("show_grid_snapping_dialog", CommandFactory::createFunctionalCommand(
-        "show_grid_snapping_dialog",
-        [this]() {
-            show_grid_snapping_ = !show_grid_snapping_;
-            window_manager_.setWindowVisible("grid_snapping", show_grid_snapping_);
-            if (show_grid_snapping_) {
-                grid_snapping_dialog_->show();
-            }
-        },
-        "Grid Snapping", "", nullptr));
-    registerCommand("reload_ui", CommandFactory::createFunctionalCommand(
-        "reload_ui", stub("Reload UI"), "Stub", "", nullptr));
-    registerCommand("toggle_performance", CommandFactory::createFunctionalCommand(
-        "toggle_performance", stub("Performance Overlay"), "Stub", "", nullptr));
-    registerCommand("toggle_smart_redraw", CommandFactory::createFunctionalCommand(
-        "toggle_smart_redraw", stub("Smart Redraw"), "Stub", "", nullptr));
-    registerCommand("toggle_vsync", CommandFactory::createFunctionalCommand(
-        "toggle_vsync", stub("VSync"), "Stub", "", nullptr));
-    registerCommand("toggle_fps_limit", CommandFactory::createFunctionalCommand(
-        "toggle_fps_limit", stub("FPS Limit"), "Stub", "", nullptr));
+    registerStub("reload_ui", "Reload UI");
+    registerStub("toggle_performance", "Performance Overlay");
+    registerStub("toggle_smart_redraw", "Smart Redraw");
+    registerStub("toggle_vsync", "VSync");
+    registerStub("toggle_fps_limit", "FPS Limit");
 
     // Help stubs
-    registerCommand("check_updates", CommandFactory::createFunctionalCommand(
-        "check_updates", stub("Check for Updates"), "Stub", "", nullptr));
+    registerStub("check_updates", "Check for Updates");
 
     // Agents stubs
-    registerCommand("agents_status", CommandFactory::createFunctionalCommand(
-        "agents_status", stub("Agent Status"), "Stub", "", nullptr));
-    registerCommand("agents_list", CommandFactory::createFunctionalCommand(
-        "agents_list", stub("List Agents"), "Stub", "", nullptr));
-    registerCommand("rag", CommandFactory::createFunctionalCommand(
-        "rag", stub("RAG Search"), "Stub", "", nullptr));
-    registerCommand("search", CommandFactory::createFunctionalCommand(
-        "search", stub("Web Search"), "Stub", "", nullptr));
-    registerCommand("code", CommandFactory::createFunctionalCommand(
-        "code", stub("Generate Code"), "Stub", "", nullptr));
-    registerCommand("summarize", CommandFactory::createFunctionalCommand(
-        "summarize", stub("Summarize"), "Stub", "", nullptr));
+    registerStub("agents_status", "Agent Status");
+    registerStub("agents_list", "List Agents");
+    registerStub("rag", "RAG Search");
+    registerStub("search", "Web Search");
+    registerStub("code", "Generate Code");
+    registerStub("summarize", "Summarize");
 
     // Developer stubs
-    registerCommand("show_style_editor", CommandFactory::createFunctionalCommand(
-        "show_style_editor", stub("Style Editor"), "Stub", "", nullptr));
-    registerCommand("show_font_selector", CommandFactory::createFunctionalCommand(
-        "show_font_selector", stub("Font Selector"), "Stub", "", nullptr));
-    registerCommand("show_debug_log", CommandFactory::createFunctionalCommand(
-        "show_debug_log", stub("Debug Log"), "Stub", "", nullptr));
-    registerCommand("start_item_picker", CommandFactory::createFunctionalCommand(
-        "start_item_picker", stub("Item Picker"), "Stub", "", nullptr));
-    registerCommand("toggle_debug_mode", CommandFactory::createFunctionalCommand(
-        "toggle_debug_mode", stub("Debug Mode"), "Stub", "", nullptr));
-    registerCommand("show_command_manager_state", CommandFactory::createFunctionalCommand(
-        "show_command_manager_state", stub("Command Manager State"), "Stub", "", nullptr));
-    registerCommand("show_window_manager_state", CommandFactory::createFunctionalCommand(
-        "show_window_manager_state", stub("Window Manager State"), "Stub", "", nullptr));
-    registerCommand("export_debug_info", CommandFactory::createFunctionalCommand(
-        "export_debug_info", stub("Export Debug Info"), "Stub", "", nullptr));
-    registerCommand("clear_cache", CommandFactory::createFunctionalCommand(
-        "clear_cache", stub("Clear Cache"), "Stub", "", nullptr));
-    registerCommand("show_logger_info", CommandFactory::createFunctionalCommand(
-        "show_logger_info", stub("Logger Info"), "Stub", "", nullptr));
-    registerCommand("validate_files", CommandFactory::createFunctionalCommand(
-        "validate_files", stub("Validate Files"), "Stub", "", nullptr));
+    registerStub("toggle_debug_mode", "Debug Mode");
+    registerStub("show_command_manager_state", "Command Manager State");
+    registerStub("show_window_manager_state", "Window Manager State");
+    registerStub("export_debug_info", "Export Debug Info");
+    registerStub("clear_cache", "Clear Cache");
+    registerStub("show_logger_info", "Logger Info");
+    registerStub("validate_files", "Validate Files");
 
     // Logging stubs
-    registerCommand("flush_logs", CommandFactory::createFunctionalCommand(
-        "flush_logs", stub("Flush Logs"), "Stub", "", nullptr));
-    registerCommand("export_logs", CommandFactory::createFunctionalCommand(
-        "export_logs", stub("Export Logs"), "Stub", "", nullptr));
-    registerCommand("view_logs", CommandFactory::createFunctionalCommand(
-        "view_logs", stub("View Logs"), "Stub", "", nullptr));
-    registerCommand("toggle_log_level", CommandFactory::createFunctionalCommand(
-        "toggle_log_level", stub("Toggle Log Level"), "Stub", "", nullptr));
-    registerCommand("toggle_log_to_file", CommandFactory::createFunctionalCommand(
-        "toggle_log_to_file", stub("Toggle Log to File"), "Stub", "", nullptr));
-    registerCommand("toggle_console", CommandFactory::createFunctionalCommand(
-        "toggle_console", stub("Toggle Console"), "Stub", "", nullptr));
+    registerStub("flush_logs", "Flush Logs");
+    registerStub("export_logs", "Export Logs");
+    registerStub("view_logs", "View Logs");
+    registerStub("toggle_log_level", "Toggle Log Level");
+    registerStub("toggle_log_to_file", "Toggle Log to File");
 
     // Misc stubs
-    registerCommand("toggle_flash_style_colors", CommandFactory::createFunctionalCommand(
-        "toggle_flash_style_colors", stub("Flash Style Colors"), "Stub", "", nullptr));
-    registerCommand("toggle_verify_ssl", CommandFactory::createFunctionalCommand(
-        "toggle_verify_ssl", stub("Verify SSL"), "Stub", "", nullptr));
-    registerCommand("toggle_group_rects", CommandFactory::createFunctionalCommand(
-        "toggle_group_rects", stub("Show Group Rects"), "Stub", "", nullptr));
+    registerStub("toggle_flash_style_colors", "Flash Style Colors");
+    registerStub("toggle_verify_ssl", "Verify SSL");
+    registerStub("toggle_group_rects", "Show Group Rects");
 
     std::cout << "✓ Connected stub commands" << std::endl;
 }

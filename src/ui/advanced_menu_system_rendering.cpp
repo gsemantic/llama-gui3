@@ -31,11 +31,8 @@ void AdvancedMenuSystem::renderMainMenu() {
 
 void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& items) {
     for (const auto& item : items) {
-        if (!item.enabled) {
-            continue;
-        }
-
-        // Проверяем доступность команды для текущего workspace
+        // Проверяем доступность команды для текущего workspace.
+        // Отключенные workspace команды скрываем, а заглушки (stubs) показываем серым.
         if (workspace_manager_ && !item.command.empty()) {
             if (!workspace_manager_->isCommandEnabled(item.command)) {
                 continue; // Скрываем элементы с отключенными командами
@@ -60,23 +57,30 @@ void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& it
                 }
                 break;
 
-            case AdvancedMenuItemType::Submenu:
-                // Проверяем, есть ли в подменю хотя бы один доступный элемент
+            case AdvancedMenuItemType::Submenu: {
+                // Проверяем, есть ли в подменю хотя бы один видимый элемент
                 bool has_visible_items = false;
                 for (const auto& sub_item : item.submenu_items) {
-                    if (sub_item.enabled && (sub_item.command.empty() || workspace_manager_->isCommandEnabled(sub_item.command))) {
-                        has_visible_items = true;
-                        break;
+                    if (sub_item.type == AdvancedMenuItemType::Separator) {
+                        continue;
                     }
+                    // Скрытые workspace команды не считаются видимыми
+                    if (workspace_manager_ && !sub_item.command.empty() &&
+                        !workspace_manager_->isCommandEnabled(sub_item.command)) {
+                        continue;
+                    }
+                    has_visible_items = true;
+                    break;
                 }
                 
                 if (has_visible_items) {
-                    if (ImGui::BeginMenu(item.name.c_str())) {
+                    if (ImGui::BeginMenu(item.name.c_str(), item.enabled)) {
                         renderMenuItems(item.submenu_items);
                         ImGui::EndMenu();
                     }
                 }
                 break;
+            }
         }
 
         // Show tooltip if available

@@ -142,6 +142,18 @@ bool CommandManager::isCommandRegistered(const std::string& name) const {
     return commands_.find(name) != commands_.end();
 }
 
+void CommandManager::markCommandAsStub(const std::string& name) {
+    stub_commands_.insert(name);
+}
+
+bool CommandManager::isCommandStub(const std::string& name) const {
+    return stub_commands_.find(name) != stub_commands_.end();
+}
+
+bool CommandManager::isCommandAvailable(const std::string& name) const {
+    return isCommandRegistered(name) && !isCommandStub(name);
+}
+
 bool CommandManager::isShortcutRegistered(const std::string& shortcut) const {
     return shortcuts_.find(shortcut) != shortcuts_.end();
 }
@@ -230,16 +242,6 @@ void CommandManager::initializeDefaultCommands(
         "",
         nullptr));
 
-    registerCommand("show_metrics", CommandFactory::createFunctionalCommand(
-        "show_metrics",
-        []() { 
-            std::cout << "Showing Dear ImGui Metrics/Debugger" << std::endl;
-            // Show ImGui Metrics Debugger
-            std::cout << "ImGui Metrics Debugger: Please check ImGui::ShowMetricsWindow() implementation" << std::endl;
-        },
-        "Show Dear ImGui Metrics/Debugger",
-        "",
-        nullptr));
     registerCommand("open_file", CommandFactory::createFunctionalCommand(
         "open_file",
         [this]() {

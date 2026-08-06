@@ -10,6 +10,11 @@ target_sources(ui PRIVATE ${UI_SOURCES})
 # Определить USE_IMGUI для компиляции
 target_compile_definitions(ui PRIVATE USE_IMGUI)
 
+# Llama Bench интеграция (меню и диалог в UI)
+if(ENABLE_LLAMA_BENCH)
+    target_compile_definitions(ui PRIVATE ENABLE_LLAMA_BENCH)
+endif()
+
 # Определить USE_SDL2 и USE_OPENGL для компиляции
 target_compile_definitions(ui PRIVATE USE_SDL2)
 target_compile_definitions(ui PRIVATE USE_OPENGL)

@@ -193,13 +193,29 @@ void AdvancedMenuSystem::updateMenuStates() {
     // Update menu states based on current application state
     for (auto& menu : menus_ordered_) {
         for (auto& item : menu->items) {
-            // Skip if no window manager
-            if (!window_manager_) continue;
+            updateMenuItemState(item);
 
-            // Update window toggle items
-            if (item.is_window_toggle && !item.window_name.empty()) {
-                item.checked = window_manager_->isWindowVisible(item.window_name);
+            // Обновляем и элементы подменю
+            if (item.type == AdvancedMenuItemType::Submenu) {
+                for (auto& sub_item : item.submenu_items) {
+                    updateMenuItemState(sub_item);
+                }
             }
+        }
+    }
+}
+
+void AdvancedMenuSystem::updateMenuItemState(AdvancedMenuItem& item) {
+    // Update window toggle items
+    if (item.is_window_toggle && !item.window_name.empty() && window_manager_) {
+        item.checked = window_manager_->isWindowVisible(item.window_name);
+    }
+
+    // Отключаем элементы, чьи команды являются заглушками или не зарегистрированы.
+    // Заглушки отображаются серым (неактивными), но остаются видимыми.
+    if (!item.command.empty()) {
+        if (!command_manager_ || !command_manager_->isCommandAvailable(item.command)) {
+            item.enabled = false;
         }
     }
 }
