@@ -1,0 +1,42 @@
+{
+  "application": {
+    "name": "Llama.cpp C++ GUI",
+    "short_name": "llama-gui",
+    "description": "Graphical user interface for llama.cpp"
+  },
+  "version": {
+    "major": @VERSION_MAJOR@,
+    "minor": @VERSION_MINOR@,
+    "patch": @VERSION_PATCH@,
+    "suffix": "@VERSION_SUFFIX@",
+    "codename": "@VERSION_CODENAME@",
+    "full": "@VERSION_FULL@",
+    "string": "@VERSION_STRING@",
+    "is_prerelease": true
+  },
+  "build": {
+    "date": "@BUILD_DATE@",
+    "time": "@BUILD_TIME@",
+    "year": "@BUILD_YEAR@",
+    "type": "@BUILD_TYPE@",
+    "compiler": "@COMPILER_VERSION@"
+  },
+  "git": {
+    "commit_hash": "@GIT_COMMIT_HASH@",
+    "describe": "@GIT_DESCRIBE@"
+  },
+  "system": {
+    "cmake_version": "@CMAKE_VERSION@",
+    "cxx_standard": 17,
+    "platform": "@CMAKE_SYSTEM_NAME@"
+  },
+  "links": {
+    "homepage": "https://github.com/llama-b7472-bin-ubuntu-x64/llama-gui",
+    "documentation": "https://github.com/llama-b7472-bin-ubuntu-x64/llama-gui/docs",
+    "issues": "https://github.com/llama-b7472-bin-ubuntu-x64/llama-gui/issues"
+  },
+  "license": {
+    "type": "MIT",
+    "copyright": "© 2024-2026 Llama GUI Contributors"
+  }
+}

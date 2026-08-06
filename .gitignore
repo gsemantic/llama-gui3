@@ -1,0 +1,50 @@
+# Build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Runtime data and backups (never commit)
+_backups/
+backups/
+.cache/
+.config/
+kv_cache/
+profiles/.env
+settings.ini
+conversation.json
+*.tar.gz
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.lib
+
+# Executables
+llama-gui-core
+test_*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak

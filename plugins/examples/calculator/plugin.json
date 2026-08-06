@@ -1,0 +1,19 @@
+{
+    "$schema": "../plugin.schema.json",
+    "name": "calculator",
+    "version": "1.0.0",
+    "description": "Калькулятор выражений: локальный расчёт и расчёт через LLM",
+    "author": "llama-gui",
+    "api_version": "1.0.0",
+    "library": "libcalculator.so",
+    "permissions": [
+        "llm_access",
+        "chat_access"
+    ],
+    "capabilities": [
+        "calculator",
+        "ui"
+    ],
+    "tags": ["calculator", "utility", "ui"],
+    "platforms": ["linux", "windows", "macos"]
+}

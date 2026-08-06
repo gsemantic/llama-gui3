@@ -1,0 +1,40 @@
+{
+    "name": "rag_agent",
+    "version": "1.0.0",
+    "description": "RAG-based document search and retrieval agent for llama-gui",
+    "author": "llama-gui team",
+    "api_version": "1.0.0",
+    "library": "librag_agent.so",
+    "entry_point": "plugin_create_agent",
+    
+    "dependencies": [
+        "core:1.0"
+    ],
+    
+    "permissions": [
+        "read_files",
+        "rag_access",
+        "embedding"
+    ],
+    
+    "capabilities": [
+        "document_search",
+        "semantic_search",
+        "embedding_generation",
+        "context_retrieval"
+    ],
+    
+    "config": {
+        "max_chunks": 10,
+        "similarity_threshold": 0.7,
+        "cache_enabled": true,
+        "cache_size": 1000,
+        "embedding_model": "all-MiniLM-L6-v2"
+    },
+    
+    "homepage": "https://github.com/llama-gui/rag-agent",
+    "license": "MIT",
+    "tags": ["rag", "search", "documents", "embedding", "official"],
+    
+    "platforms": ["linux", "windows", "macos"]
+}

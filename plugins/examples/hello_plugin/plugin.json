@@ -1,0 +1,21 @@
+{
+    "$schema": "../plugin.schema.json",
+    "name": "hello_plugin",
+    "version": "1.0.0",
+    "description": "Демонстрационный плагин llama-gui: меню, окно, команды, диалоги, чат, RAG",
+    "author": "llama-gui",
+    "api_version": "1.0.0",
+    "library": "libhello_plugin.so",
+    "permissions": [
+        "rag_access",
+        "chat_access"
+    ],
+    "capabilities": [
+        "demo",
+        "ui",
+        "menu",
+        "commands"
+    ],
+    "tags": ["example", "demo", "ui"],
+    "platforms": ["linux", "windows", "macos"]
+}
