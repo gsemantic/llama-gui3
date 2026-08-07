@@ -3,6 +3,11 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 #include "core/llama_interface.h"
 #include "core/settings.h"
 #include "core/version.h"
@@ -15,6 +20,57 @@
 using namespace llama_gui::core;
 using namespace llama_gui::ui;
 // using namespace agents;  // ОТКЛЮЧЕНО: агенты временно отключены
+
+// =========================================================================
+// Single-instance guard
+// =========================================================================
+
+// Путь к lock-файлу в пользовательской директории данных (~/.llama-gui/)
+static std::string get_lock_file_path() {
+    const char* home = getenv("HOME");
+    if (!home) {
+        home = ".";
+    }
+    return std::string(home) + "/.llama-gui/llama-gui.lock";
+}
+
+// Дескриптор lock-файла. Держим открытым весь цикл работы приложения:
+// ядро ОС автоматически снимает flock при завершении процесса (в т.ч. при
+// падении), поэтому устаревших блокировок не возникает.
+static int g_lock_fd = -1;
+
+// Пытаемся захватить эксклюзивную блокировку. Возвращает false, если другой
+// экземпляр приложения уже запущен.
+static bool acquire_single_instance_lock() {
+    std::string lock_path = get_lock_file_path();
+
+    try {
+        std::filesystem::create_directories(std::filesystem::path(lock_path).parent_path());
+    } catch (const std::exception&) {
+        // Не блокируем запуск, если директорию создать не удалось
+    }
+
+    g_lock_fd = open(lock_path.c_str(), O_CREAT | O_RDWR, 0666);
+    if (g_lock_fd == -1) {
+        std::cerr << "Llama GUI: не удалось открыть lock-файл: " << lock_path << std::endl;
+        return true;
+    }
+
+    if (flock(g_lock_fd, LOCK_EX | LOCK_NB) != 0) {
+        std::cerr << "Llama GUI: приложение уже запущено (допускается только один экземпляр)." << std::endl;
+        std::cerr << "Lock-файл: " << lock_path << std::endl;
+        close(g_lock_fd);
+        g_lock_fd = -1;
+        return false;
+    }
+
+    // Записываем PID запущенного экземпляра для диагностики
+    ftruncate(g_lock_fd, 0);
+    std::string pid_str = std::to_string(getpid());
+    write(g_lock_fd, pid_str.c_str(), pid_str.size());
+
+    return true;
+}
 
 int main(int argc, char* argv[]) {
     // Parse command line arguments
@@ -48,6 +104,11 @@ int main(int argc, char* argv[]) {
         std::cout << "======================================================" << std::endl;
     }
     std::cout << "" << std::endl;
+
+    // Проверка single-instance: если другой экземпляр уже запущен — завершаемся
+    if (!acquire_single_instance_lock()) {
+        return 1;
+    }
 
     try {
         // Инициализация core компонентов
