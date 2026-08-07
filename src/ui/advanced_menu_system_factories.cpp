@@ -177,11 +177,6 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createSettingsMenu() {
         TRF("menu.settings.backups", "Backups"),
         "show_backup_manager", "Ctrl+Shift+B", "Open backup manager"));
 
-    // Quick Settings
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.settings.quick_settings", "Quick Settings"),
-        "toggle_quick_settings", "Ctrl+Alt+Q", "Quick settings dialog"));
-
     // Settings Viewer
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.settings.ini_viewer", "INI File Viewer"),
