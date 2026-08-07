@@ -361,6 +361,16 @@ void AdvancedMenuSystem::updateMenuVisibilityForWorkspace(WorkspaceType type) {
     const auto& config = workspace_manager_->getCurrentWorkspace();
     std::cout << "[MENU] updateMenuVisibilityForWorkspace: " << config.name << std::endl;
 
+    // Если workspace не инициализирован (нет ни одной конфигурации меню) —
+    // показываем все меню. Иначе при пересборке меню (смена языка) все пункты
+    // кроме Window/Workspace были бы скрыты, т.к. isMenuVisible() возвращает false.
+    if (config.menu_configs.empty()) {
+        for (auto& menu : menus_ordered_) {
+            menu->enabled = true;
+        }
+        return;
+    }
+
     // Скрываем/показываем меню в зависимости от workspace
     for (auto& menu : menus_ordered_) {
         // Меню Workspace и Window всегда видимы для переключения

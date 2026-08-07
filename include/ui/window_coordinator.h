@@ -33,6 +33,15 @@ public:
      */
     void bringToFront(const std::string& name);
 
+    /**
+     * @brief Обновить ImGui-имя зарегистрированного окна (например, при смене языка,
+     *        когда локализованный заголовок изменился). Иначе ImGui считает окно
+     *        новым и сбрасывает его позицию/размер.
+     * @param name Имя окна в WindowManager
+     * @param new_imgui_name Новое ImGui-имя (локализованный заголовок)
+     */
+    void updateWindowImguiName(const std::string& name, const std::string& new_imgui_name);
+
     void renderAll();
 
     /**

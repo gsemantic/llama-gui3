@@ -251,6 +251,9 @@ private:
     void setup_window_layout();
     void save_window_layout();
     void load_window_layout();
+
+    // Обновление локализованных ImGui-имён окон (смена языка) с сохранением позиций/размеров
+    void refreshLocalizedWindowNames();
     
     // Theme and styling
     void apply_theme();

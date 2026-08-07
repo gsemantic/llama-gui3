@@ -20,6 +20,15 @@ void WindowCoordinator::bringToFront(const std::string& name) {
     focus_requests_.push_back(name);
 }
 
+void WindowCoordinator::updateWindowImguiName(const std::string& name, const std::string& new_imgui_name) {
+    for (auto& [entry_name, entry] : windows_) {
+        if (entry_name == name) {
+            entry.imgui_name = new_imgui_name;
+            return;
+        }
+    }
+}
+
 void WindowCoordinator::renderAll() {
     bool want_apply = workspace_applier_ && workspace_applier_->hasPendingPositions();
     bool any_applied = false;

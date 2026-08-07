@@ -15,6 +15,7 @@
 
 #include "../external/imgui/backends/imgui_impl_sdl2.h"
 #include "../external/imgui/backends/imgui_impl_opengl3.h"
+#include "../external/imgui/imgui_internal.h"
 
 namespace llama_gui {
 namespace ui {
@@ -193,6 +194,11 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
         settings_.save_profile(profile.empty() ? "default" : profile);
         pending_language_change_ = true;
     });
+
+    // Меню уже построено ДО применения сохранённого языка (buildModernMenu() выше),
+    // поэтому оно могло остаться на языке по умолчанию. Принудительно пересобираем
+    // меню на первом кадре, чтобы текст соответствовал выбранному языку.
+    pending_language_change_ = true;
 
     // Initialize UI dirty flags
     force_ui_update_ = false;
@@ -539,6 +545,10 @@ void MainWindow::run() {
         if (pending_language_change_) {
             advanced_menu_system_.rebuildModernMenu();
             ui_dirty_menu_ = true;
+            // Локализованные заголовки окон изменились (TR(...) в ImGui::Begin),
+            // иначе ImGui создал бы окна заново и сбросил их позиции/размеры.
+            refreshLocalizedWindowNames();
+            workspace_applier_.requestApply();
             pending_language_change_ = false;
         }
 
@@ -826,6 +836,48 @@ void MainWindow::syncWindowFlagsFromManager() {
     show_backup_manager_ = window_manager_.isWindowVisible("backup_manager");
     show_grid_snapping_ = window_manager_.isWindowVisible("grid_snapping");
     show_status_bar_ = window_manager_.isWindowVisible("status_bar");
+}
+
+void MainWindow::refreshLocalizedWindowNames() {
+    // Сначала сохраняем текущие позиции/размеры локализованных окон — они ещё
+    // зарегистрированы в WindowManager/WindowCoordinator под СТАРЫМИ ImGui-именами.
+    // Затем обновляем ImGui-имена на актуальные переводы и пере-применяем макет,
+    // чтобы окно не "прыгало" в позицию по умолчанию (ImGui считает окно с новым
+    // именем новым окном и сбрасывает его геометрию).
+    auto capture = [this](const std::string& wm_name) {
+        ImGuiContext* g = ImGui::GetCurrentContext();
+        if (!g) return;
+        std::string old_name = window_manager_.getImGuiName(wm_name);
+        for (int i = 0; i < g->Windows.Size; i++) {
+            ImGuiWindow* w = g->Windows[i];
+            if (!w || w->Hidden) continue;
+            std::string wname = w->Name;
+            auto hash_pos = wname.find("##");
+            if (hash_pos != std::string::npos) wname = wname.substr(0, hash_pos);
+            if (wname != old_name) continue;
+            window_manager_.setWindowPositionRaw(wm_name, w->Pos);
+            window_manager_.setWindowSizeRaw(wm_name, w->Size);
+            break;
+        }
+    };
+
+    // Окна, чьи ImGui-имена локализованы через TR() (см. initializeNewUISystem)
+    const char* localized_windows[] = {
+        "conversations", "files", "agents", "grid_snapping", "rag_settings"
+    };
+    for (const char* wm_name : localized_windows) {
+        capture(wm_name);
+    }
+
+    window_manager_.setImGuiName("conversations", TR("conversations.title"));
+    window_manager_.setImGuiName("files", TR("files.title"));
+    window_manager_.setImGuiName("agents", TR("agents.title"));
+    window_manager_.setImGuiName("grid_snapping", TR("grid_snapping.title"));
+    window_manager_.setImGuiName("rag_settings", TR("rag_settings.title"));
+
+    window_coordinator_.updateWindowImguiName("conversations", TR("conversations.title"));
+    window_coordinator_.updateWindowImguiName("files", TR("files.title"));
+    window_coordinator_.updateWindowImguiName("grid_snapping", TR("grid_snapping.title"));
 }
 
 void MainWindow::showWindowByName(const std::string& window_name) {
