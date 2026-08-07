@@ -12,9 +12,12 @@ backups/
 .cache/
 .config/
 kv_cache/
+.mimocode/
+bench_results/
 profiles/.env
 settings.ini
 conversation.json
+BACKUP_INFO.txt
 *.tar.gz
 
 # Compiled objects

@@ -154,35 +154,32 @@ increment_version() {
     log_success "Версия обновлена: PATCH ${current_patch:-0} → $new_patch"
 }
 
-# Проверить, не является ли текущая версией из старого бэкапа
+# Проверить, не является ли текущая версия кода откатом относительно последнего бэкапа
 check_version_mismatch() {
-    local version_file="$PROJECT_ROOT/CMakeLists.txt"
-    local backup_info_file="$PROJECT_ROOT/BACKUP_INFO.txt"
-    
-    # Проверяем, есть ли файл BACKUP_INFO.txt (признак распаковки бэкапа)
-    if [ ! -f "$backup_info_file" ]; then
+    # Источник истины — самый свежий бэкап в $BACKUP_DIR (версия из имени файла).
+    # BACKUP_INFO.txt в корне проекта НЕ используется: это побочный артефакт
+    # распаковки архива, который быстро устаревает и вызывал ложные срабатывания.
+    local latest_backup=$(ls -1t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | head -1)
+    if [ -z "$latest_backup" ]; then
         return 0
     fi
-    
-    # Получаем версию из BACKUP_INFO.txt
-    local backup_version=$(grep "^Version:" "$backup_info_file" | awk '{print $2}')
-    
+
+    local backup_version=$(basename "$latest_backup" | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -z "$backup_version" ]; then
         return 0
     fi
-    
-    # Получаем текущую версию из CMakeLists.txt
+
+    local version_file="$PROJECT_ROOT/CMakeLists.txt"
     local current_version=$(get_version)
-    
-    # Сравниваем версии по компонентам (MAJOR.MINOR.PATCH)
-    local backup_major=$(echo "$backup_version" | grep -oP '^\d+' | head -1)
-    local backup_minor=$(echo "$backup_version" | grep -oP '^\d+\.\K\d+' | head -1)
-    local backup_patch=$(echo "$backup_version" | grep -oP '^\d+\.\d+\.\K\d+' | head -1)
-    
+
+    # Разбираем версии на компоненты
+    local backup_major=$(echo "$backup_version" | cut -d. -f1)
+    local backup_minor=$(echo "$backup_version" | cut -d. -f2)
+    local backup_patch=$(echo "$backup_version" | cut -d. -f3)
     local current_major=$(grep "set(VERSION_MAJOR" "$version_file" | grep -oP '\d+' | head -1)
     local current_minor=$(grep "set(VERSION_MINOR" "$version_file" | grep -oP '\d+' | head -1)
     local current_patch=$(grep "set(VERSION_PATCH" "$version_file" | grep -oP '\d+' | head -1)
-    
+
     # Преобразуем в числа для сравнения
     backup_major=${backup_major:-0}
     backup_minor=${backup_minor:-0}
@@ -190,32 +187,33 @@ check_version_mismatch() {
     current_major=${current_major:-0}
     current_minor=${current_minor:-0}
     current_patch=${current_patch:-0}
-    
-    # Сравниваем: если версия бэкапа меньше текущей — это откат
+
+    # Откат: текущая версия кода НИЖЕ версии последнего бэкапа
     local is_rollback=false
-    
-    if [ "$backup_major" -lt "$current_major" ]; then
+
+    if [ "$current_major" -lt "$backup_major" ]; then
         is_rollback=true
-    elif [ "$backup_major" -eq "$current_major" ]; then
-        if [ "$backup_minor" -lt "$current_minor" ]; then
+    elif [ "$current_major" -eq "$backup_major" ]; then
+        if [ "$current_minor" -lt "$backup_minor" ]; then
             is_rollback=true
-        elif [ "$backup_minor" -eq "$current_minor" ]; then
-            if [ "$backup_patch" -lt "$current_patch" ]; then
+        elif [ "$current_minor" -eq "$backup_minor" ]; then
+            if [ "$current_patch" -lt "$backup_patch" ]; then
                 is_rollback=true
             fi
         fi
     fi
-    
+
     if [ "$is_rollback" = true ]; then
         log_warning "=============================================="
         log_warning "ОБНАРУЖЕН ОТКАТ К СТАРОЙ ВЕРСИИ!"
         log_warning "=============================================="
-        log_warning "Версия бэкапа:   $backup_version"
-        log_warning "Текущая версия:  $current_version"
+        log_warning "Текущая версия кода:  $current_version"
+        log_warning "Последний бэкап:      $backup_version"
         log_warning "=============================================="
         log_warning ""
-        log_warning "ВНИМАНИЕ: При следующем бэкапе версия будет"
-        log_warning "увеличена от СТАРОЙ версии (${backup_version})."
+        log_warning "ВНИМАНИЕ: Код старее последнего бэкапа. При"
+        log_warning "следующем бэкапе версия будет увеличена от"
+        log_warning "СТАРОЙ версии (${current_version})."
         log_warning ""
         log_warning "Если это нежелательно, используйте:"
         log_warning "  --skip-version-incr"
@@ -277,12 +275,26 @@ create_backup() {
     
     log_info "Копирование файлов..."
 
-    # Копируем файлы проекта (исключая ненужное)
+    # Копируем файлы проекта (исключая ненужное/пересоздаваемое)
+    # ВАЖНО: сначала исключаем каталоги, затем --include='*/' разрешает обход
+    # оставшихся каталогов, а --include='*.cpp'/'*.h' защищают исходники тестов
+    # от исключения test_* (которое должно ловить только скомпилированные бинарники).
     rsync -a \
         --exclude=".git" \
         --exclude="_backups" \
         --exclude="build" \
         --exclude="llama-gui-core" \
+        --exclude=".mimocode" \
+        --exclude=".cache" \
+        --exclude=".config" \
+        --exclude="kv_cache" \
+        --exclude="backups" \
+        --exclude="bench_results" \
+        --include="*/" \
+        --include="*.cpp" \
+        --include="*.h" \
+        --exclude="test_*" \
+        --exclude=".env" \
         --exclude="*.log" \
         --exclude="*.swp" \
         --exclude=".DS_Store" \
