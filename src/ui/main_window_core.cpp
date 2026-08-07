@@ -1,5 +1,6 @@
 #include "main_window.h"
 #include "advanced_menu_system.h"
+#include "localization_manager.h"
 #include <iostream>
 
 namespace llama_gui {
@@ -43,20 +44,46 @@ void MainWindow::render_status_bar() {
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus |
                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNavFocus);
 
-    // Server status
-    if (server_manager_) {
-        bool running = server_manager_->is_server_running();
-        if (running) {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Server: Running");
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Server: Stopped");
+    // Cloud mode: показываем облачного провайдера/модель
+    const auto& cloud = settings_.cloud_provider();
+    if (cloud.enabled) {
+        ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), TRF("status.cloud", "Cloud: %s"), cloud.model_id.c_str());
+    } else {
+        // Server status
+        if (server_manager_) {
+            bool running = server_manager_->is_server_running();
+            if (running) {
+                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), TRF("status.server_running", "Server: Running"));
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), TRF("status.server_stopped", "Server: Stopped"));
+            }
+            ImGui::SameLine();
         }
-        ImGui::SameLine();
+
+        // Model info (короткое имя файла модели)
+        std::string model_path = settings_.get_model_path();
+        size_t last_slash = model_path.find_last_of("/\\");
+        std::string model_name = (last_slash == std::string::npos) ? model_path : model_path.substr(last_slash + 1);
+        ImGui::Text(TRF("status.model", "Model: %s"), model_name.c_str());
     }
 
-    // Model info
-    std::string model_info = "Model: " + settings_.get_model_path();
-    ImGui::Text("%s", model_info.c_str());
+    // Performance metrics (скорость, токены, время, контекст)
+    if (chat_interface_) {
+        const auto& m = chat_interface_->get_performance_metrics();
+        if (m.is_measuring) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.0f, 1.0f),
+                TRF("performance.generating_short", "Generating: %d tok | %.1f tok/s | %ds | Context: %d/%d"),
+                m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
+                m.context_used + m.tokens_generated, m.total_context);
+        } else if (m.response_time_seconds > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
+                TRF("performance.completed_short", "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d"),
+                m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
+                m.context_used, m.total_context);
+        }
+    }
 
     ImGui::End();
     ImGui::PopStyleVar();

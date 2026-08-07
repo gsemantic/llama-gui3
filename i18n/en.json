@@ -281,6 +281,13 @@
     "performance.tokens": "Tokens",
     "performance.speed": "Speed",
     "performance.tokens_per_second": "tok/s",
+    "performance.generating_short": "Generating: %d tok | %.1f tok/s | %ds | Context: %d/%d",
+    "performance.completed_short": "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d",
+
+    "status.server_running": "Server: Running",
+    "status.server_stopped": "Server: Stopped",
+    "status.cloud": "Cloud: %s",
+    "status.model": "Model: %s",
 
     "chat.title": "Conversation: %s",
     "chat.no_active_conversation": "No active conversation. Start a new chat to begin.",

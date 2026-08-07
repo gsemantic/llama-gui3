@@ -142,6 +142,20 @@ public:
     void start_streaming();
     void stop_streaming();
 
+    // Performance metrics (скорость, токены и т.д.) для отображения в статусной строке
+    struct PerformanceMetrics {
+        double response_time_seconds = 0.0;
+        int tokens_generated = 0;
+        double tokens_per_second = 0.0;
+        int remaining_context = 0;
+        int total_context = 0;
+        int context_used = 0;  // Tokens used by conversation history + generated tokens
+        std::chrono::steady_clock::time_point start_time;
+        std::chrono::steady_clock::time_point end_time;
+        bool is_measuring = false;
+    };
+    const PerformanceMetrics& get_performance_metrics() const { return current_metrics_; }
+
     // Settings access
     const Settings& get_settings() const { return settings_; }
 
@@ -220,19 +234,6 @@ private:
     // Scroll position tracking
     bool auto_scroll_ = true;
     float scroll_to_message_id_ = -1.0f;
-
-    // Performance metrics
-    struct PerformanceMetrics {
-        double response_time_seconds = 0.0;
-        int tokens_generated = 0;
-        double tokens_per_second = 0.0;
-        int remaining_context = 0;
-        int total_context = 0;
-        int context_used = 0;  // Tokens used by conversation history + generated tokens
-        std::chrono::steady_clock::time_point start_time;
-        std::chrono::steady_clock::time_point end_time;
-        bool is_measuring = false;
-    };
 
     PerformanceMetrics current_metrics_;
     void update_performance_metrics(const std::string& content, bool is_final);
