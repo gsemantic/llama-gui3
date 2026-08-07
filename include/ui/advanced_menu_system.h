@@ -182,6 +182,7 @@ private:
     std::unordered_map<std::string, AdvancedMenu*> menus_map_;  // Быстрый поиск по имени
     WorkspaceConfig current_workspace_;
     std::unordered_map<std::string, WorkspaceConfig> workspaces_;
+    bool workspace_callback_registered_ = false;
 
     // Вспомогательные методы
     AdvancedMenu* findMenuInternal(const std::string& menu_name);

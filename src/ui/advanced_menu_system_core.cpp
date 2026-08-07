@@ -89,7 +89,9 @@ void AdvancedMenuSystem::buildModernMenu() {
     else std::cerr << "Warning: help_menu is null" << std::endl;
 
     // Добавляем callback для обновления меню при смене workspace
-    if (workspace_manager_) {
+    // (только один раз, даже если меню перестраиваются при смене языка)
+    if (workspace_manager_ && !workspace_callback_registered_) {
+        workspace_callback_registered_ = true;
         workspace_manager_->addWorkspaceChangedCallback([this](WorkspaceType type) {
             updateMenuVisibilityForWorkspace(type);
         });

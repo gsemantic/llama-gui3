@@ -2,7 +2,9 @@
 #include "../include/ui/language_selector.h"
 #include "../external/imgui/imgui.h"
 #include "../include/ui/localization_manager.h"
+#include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace llama_gui {
@@ -25,8 +27,34 @@ void AdvancedMenuSystem::renderMainMenu() {
             }
         }
 
+        // Language selector at the right side of the menu bar
+        renderLanguageSelector();
+
         ImGui::EndMainMenuBar();
     }
+}
+
+void AdvancedMenuSystem::renderLanguageSelector() {
+#ifdef USE_IMGUI
+    auto& loc = getLocalizationManager();
+    std::vector<LanguageInfo> languages = loc.getLanguageInfos();
+    if (languages.size() < 2) return;
+
+    std::string current_code = loc.getCurrentLanguageCode();
+    std::string current_name = loc.getLanguageDisplayName(current_code);
+
+    // Render as a regular submenu item, exactly like the other menu bar entries.
+    ImGui::Separator();
+    if (ImGui::BeginMenu(current_name.c_str())) {
+        for (const auto& lang : languages) {
+            const bool is_selected = (lang.code == current_code);
+            if (ImGui::MenuItem(lang.display_name.c_str(), nullptr, is_selected)) {
+                loc.setCurrentLanguage(lang.code);
+            }
+        }
+        ImGui::EndMenu();
+    }
+#endif
 }
 
 void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& items) {
@@ -108,11 +136,12 @@ void AdvancedMenuSystem::handleKeyboardShortcuts() {
     // Горячая клавиша Ctrl+L для переключения языка
     if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L)) {
         auto& lang_mgr = getLocalizationManager();
-        Language current = lang_mgr.getCurrentLanguage();
-        if (current == Language::Russian) {
-            lang_mgr.setCurrentLanguage(Language::English);
-        } else {
-            lang_mgr.setCurrentLanguage(Language::Russian);
+        std::vector<std::string> codes = lang_mgr.getAvailableLanguageCodes();
+        if (codes.size() > 1) {
+            std::string current = lang_mgr.getCurrentLanguageCode();
+            auto it = std::find(codes.begin(), codes.end(), current);
+            size_t idx = (it == codes.end()) ? 0 : (static_cast<size_t>(std::distance(codes.begin(), it)) + 1) % codes.size();
+            lang_mgr.setCurrentLanguage(codes[idx]);
         }
     }
 }

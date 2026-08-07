@@ -126,11 +126,17 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
         }
     });
 
-    // Initialize localization system
+    // Initialize localization system (Russian is the default language)
     auto& loc_manager = getLocalizationManager();
     loc_manager.loadTranslationsFromDirectory("translations");
     loc_manager.loadTranslationsFromDirectory("i18n");
-    loc_manager.setCurrentLanguage(Language::Russian);
+    {
+        std::string saved_language = settings_.display().language;
+        if (saved_language.empty() || !loc_manager.isLanguageAvailable(saved_language)) {
+            saved_language = "ru";
+        }
+        loc_manager.setCurrentLanguage(saved_language);
+    }
 
     // Set up model selection callback
     chat_interface_->set_model_selection_callback([this]() {
@@ -174,8 +180,17 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     // Adapt UI components
     settings_.adapt_ui_components();
 
-    // Set up language change callback AFTER all components are initialized
+    // Set up language change callback AFTER all components are initialized.
+    // IMPORTANT: we must NOT rebuild the menu synchronously here — this callback
+    // fires while the menu bar is being rendered (from the language submenu click),
+    // and clearing the menu structures mid-frame corrupts the menu and window layout.
+    // The rebuild is deferred to the pending_language_change_ block in run(),
+    // which executes BEFORE ImGui::NewFrame().
     loc_manager.setLanguageChangeCallback([this](Language new_lang, Language old_lang) {
+        // Persist the chosen language so it survives restarts
+        settings_.display().language = getLocalizationManager().getCurrentLanguageCode();
+        std::string profile = settings_.get_current_profile_name();
+        settings_.save_profile(profile.empty() ? "default" : profile);
         pending_language_change_ = true;
     });
 
@@ -518,9 +533,11 @@ void MainWindow::run() {
         }
 #endif
 
-        // Process pending language change BEFORE ImGui NewFrame
+        // Process pending language change BEFORE ImGui NewFrame.
+        // Rebuilding the menu here is safe: it happens outside of any ImGui
+        // rendering pass, so the menu structures and window layout stay intact.
         if (pending_language_change_) {
-            reload_fonts();
+            advanced_menu_system_.rebuildModernMenu();
             ui_dirty_menu_ = true;
             pending_language_change_ = false;
         }

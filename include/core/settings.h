@@ -48,6 +48,7 @@ struct DisplaySettings {
     std::string font_family = "default";
     bool enable_animation = true;
     int frame_rate_limit = 60;
+    std::string language = "ru";   // UI language code (e.g. "ru", "en"); default is Russian
     
     // Новые поля для адаптации к разрешению монитора
     int screen_width = 1920;

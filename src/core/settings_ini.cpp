@@ -124,6 +124,7 @@ void Settings::load_display_settings(const IniParser::Document& doc) {
     set_from_ini(doc, "display", "min_window_height", display_settings_.min_window_height);
     set_from_ini(doc, "display", "center_window", display_settings_.center_window);
     set_from_ini(doc, "display", "margin", display_settings_.margin);
+    set_from_ini(doc, "display", "language", display_settings_.language);
 }
 
 void Settings::load_performance_settings(const IniParser::Document& doc) {

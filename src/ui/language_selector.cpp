@@ -6,17 +6,14 @@ namespace ui {
 
 bool LanguageSelector::renderComboBox(const std::string& label, float width) {
 #ifdef USE_IMGUI
-    // Callback устанавливается в main_window_init_constructor.cpp
-    // Не перезаписываем его здесь
-
-    Language current_lang = getCurrentLanguage();
-    std::vector<std::string> language_names = getLocalizationManager().getAvailableLanguageNames();
-    std::vector<Language> languages = getLocalizationManager().getAvailableLanguages();
+    auto& loc = getLocalizationManager();
+    std::vector<LanguageInfo> languages = loc.getLanguageInfos();
+    std::string current_code = loc.getCurrentLanguageCode();
 
     // Find current language index
     int current_index = 0;
     for (size_t i = 0; i < languages.size(); ++i) {
-        if (languages[i] == current_lang) {
+        if (languages[i].code == current_code) {
             current_index = static_cast<int>(i);
             break;
         }
@@ -30,14 +27,14 @@ bool LanguageSelector::renderComboBox(const std::string& label, float width) {
     bool changed = false;
     // Convert vector<string> to vector<const char*> for ImGui::Combo
     std::vector<const char*> language_name_ptrs;
-    language_name_ptrs.reserve(language_names.size());
-    for (const auto& name : language_names) {
-        language_name_ptrs.push_back(name.c_str());
+    language_name_ptrs.reserve(languages.size());
+    for (const auto& lang : languages) {
+        language_name_ptrs.push_back(lang.display_name.c_str());
     }
-    
+
     if (ImGui::Combo(label.c_str(), &current_index, language_name_ptrs.data(), static_cast<int>(language_name_ptrs.size()))) {
         if (current_index >= 0 && current_index < static_cast<int>(languages.size())) {
-            getLocalizationManager().setCurrentLanguage(languages[current_index]);
+            loc.setCurrentLanguage(languages[current_index].code);
             language_changed_ = true;
             changed = true;
         }
@@ -56,12 +53,9 @@ bool LanguageSelector::renderComboBox(const std::string& label, float width) {
 
 bool LanguageSelector::renderButtons(const std::string& label) {
 #ifdef USE_IMGUI
-    // Callback устанавливается в main_window_init_constructor.cpp
-    // Не перезаписываем его здесь
-
-    Language current_lang = getCurrentLanguage();
-    std::vector<std::string> language_names = getLocalizationManager().getAvailableLanguageNames();
-    std::vector<Language> languages = getLocalizationManager().getAvailableLanguages();
+    auto& loc = getLocalizationManager();
+    std::vector<LanguageInfo> languages = loc.getLanguageInfos();
+    std::string current_code = loc.getCurrentLanguageCode();
 
     bool changed = false;
 
@@ -73,16 +67,16 @@ bool LanguageSelector::renderButtons(const std::string& label) {
 
     // Render buttons for each language
     for (size_t i = 0; i < languages.size(); ++i) {
-        bool is_current = (languages[i] == current_lang);
-        
+        bool is_current = (languages[i].code == current_code);
+
         if (is_current) {
             // Current language button (disabled style)
             ImGui::BeginDisabled();
         }
 
-        if (ImGui::Button(language_names[i].c_str())) {
+        if (ImGui::Button(languages[i].display_name.c_str())) {
             if (!is_current) {
-                getLocalizationManager().setCurrentLanguage(languages[i]);
+                loc.setCurrentLanguage(languages[i].code);
                 language_changed_ = true;
                 changed = true;
             }
@@ -109,17 +103,14 @@ bool LanguageSelector::renderButtons(const std::string& label) {
 
 bool LanguageSelector::renderCompact(const std::string& label) {
 #ifdef USE_IMGUI
-    // Callback устанавливается в main_window_init_constructor.cpp
-    // Не перезаписываем его здесь
-
-    Language current_lang = getCurrentLanguage();
-    std::vector<std::string> language_names = getLocalizationManager().getAvailableLanguageNames();
-    std::vector<Language> languages = getLocalizationManager().getAvailableLanguages();
+    auto& loc = getLocalizationManager();
+    std::vector<LanguageInfo> languages = loc.getLanguageInfos();
+    std::string current_code = loc.getCurrentLanguageCode();
 
     // Find current language index
     int current_index = 0;
     for (size_t i = 0; i < languages.size(); ++i) {
-        if (languages[i] == current_lang) {
+        if (languages[i].code == current_code) {
             current_index = static_cast<int>(i);
             break;
         }
@@ -134,11 +125,11 @@ bool LanguageSelector::renderCompact(const std::string& label) {
     }
 
     // Render compact combo
-    if (ImGui::BeginCombo("##language_selector", language_names[current_index].c_str())) {
-        for (int i = 0; i < static_cast<int>(language_names.size()); ++i) {
+    if (ImGui::BeginCombo("##language_selector", languages[current_index].display_name.c_str())) {
+        for (int i = 0; i < static_cast<int>(languages.size()); ++i) {
             const bool is_selected = (i == current_index);
-            if (ImGui::Selectable(language_names[i].c_str(), is_selected)) {
-                getLocalizationManager().setCurrentLanguage(languages[i]);
+            if (ImGui::Selectable(languages[i].display_name.c_str(), is_selected)) {
+                loc.setCurrentLanguage(languages[i].code);
                 language_changed_ = true;
                 changed = true;
                 current_index = i;

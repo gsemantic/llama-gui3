@@ -45,14 +45,14 @@ void SettingsViewerDialog::revert_all_changes() {
         }
     }
     settings_changed_ = false;
-    status_message_ = "All changes reverted";
+    status_message_ = TR("settings.viewer.status.reverted");
 }
 
 bool SettingsViewerDialog::load_from_file(const std::string& file_path) {
     std::string path = file_path.empty() ? settings_.get_ini_file_path() : file_path;
     
     if (!IniParser::load(path, ini_document_)) {
-        status_message_ = "Failed to load INI file: " + path;
+        status_message_ = std::string(TR("settings.viewer.status.load_failed")) + path;
         std::cerr << status_message_ << std::endl;
         return false;
     }
@@ -61,7 +61,7 @@ bool SettingsViewerDialog::load_from_file(const std::string& file_path) {
     build_sections_list();
     
     settings_changed_ = false;
-    status_message_ = "Loaded: " + path;
+    status_message_ = std::string(TR("settings.viewer.status.loaded")) + path;
     std::cout << "Settings viewer loaded: " << path << std::endl;
     
     return true;
@@ -87,7 +87,7 @@ bool SettingsViewerDialog::save_to_file(const std::string& file_path) {
         "; ============================================================\n\n";
 
     if (!IniParser::save(path, ini_document_, header)) {
-        status_message_ = "Failed to save INI file: " + path;
+        status_message_ = std::string(TR("settings.viewer.status.save_failed")) + path;
         std::cerr << status_message_ << std::endl;
         return false;
     }
@@ -111,7 +111,7 @@ bool SettingsViewerDialog::save_to_file(const std::string& file_path) {
         settings_changed_ = false;
     }
 
-    status_message_ = "Saved: " + path;
+    status_message_ = std::string(TR("settings.viewer.status.saved")) + path;
     std::cout << "Settings viewer saved: " + path << std::endl;
 
     return true;
@@ -188,7 +188,7 @@ void SettingsViewerDialog::render() {
     if (!show_dialog_) return;
 
     // ImGuiWindowFlags_NoCollapse - предотвращает закрытие по Esc
-    if (ImGui::Begin("Settings INI Viewer", &show_dialog_, ImGuiWindowFlags_NoCollapse)) {
+    if (ImGui::Begin(TR("settings.viewer.title"), &show_dialog_, ImGuiWindowFlags_NoCollapse)) {
 
         // Панель фильтров
         render_filter_panel();
@@ -211,23 +211,24 @@ void SettingsViewerDialog::render() {
 }
 
 void SettingsViewerDialog::render_filter_panel() {
-    // Локализованные строки
-    bool is_ru = (getLocalizationManager().getCurrentLanguage() == Language::Russian);
-    const char* filter_label = is_ru ? "Фильтр:" : "Filter:";
-    const char* search_label = is_ru ? "Поиск" : "Search";
-    const char* clear_label = is_ru ? "Сброс" : "Clear";
-    const char* modified_only_label = is_ru ? "Только изменённые" : "Modified only";
-    const char* showing_label = is_ru ? "Показано: %zu / %zu (Изменено: %zu)" : "Showing: %zu / %zu (Modified: %zu)";
+    const char* filter_label = TR("settings.viewer.filter");
+    const char* search_label = TR("settings.viewer.search");
+    const char* clear_label = TR("settings.viewer.clear");
+    const char* modified_only_label = TR("settings.viewer.modified_only");
+    const char* showing_label = TR("settings.viewer.showing");
 
     ImGui::Text("%s", filter_label);
     ImGui::SameLine();
 
     // Dropdown для секций
-    const char* current_section = section_filter_.c_str();
+    const char* current_section = (section_filter_ == "all")
+        ? TR("settings.viewer.all_sections") : section_filter_.c_str();
     if (ImGui::BeginCombo("##SectionFilter", current_section)) {
         for (const auto& section : sections_list_) {
             bool is_selected = (section_filter_ == section);
-            if (ImGui::Selectable(section.c_str(), is_selected)) {
+            const char* display_name = (section == "all")
+                ? TR("settings.viewer.all_sections") : section.c_str();
+            if (ImGui::Selectable(display_name, is_selected)) {
                 section_filter_ = section;
             }
             if (is_selected) {
@@ -289,7 +290,7 @@ void SettingsViewerDialog::render_settings_table() {
     auto filtered_rows = get_filtered_rows();
 
     if (filtered_rows.empty()) {
-        ImGui::TextDisabled("No settings match the current filters");
+        ImGui::TextDisabled("%s", TR("settings.viewer.no_match"));
         return;
     }
 
@@ -300,10 +301,10 @@ void SettingsViewerDialog::render_settings_table() {
                           ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV,
                           ImVec2(0, 400))) {
 
-        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 120);
-        ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 250);
-        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 300);
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 80);
+        ImGui::TableSetupColumn(TR("settings.viewer.col.section"), ImGuiTableColumnFlags_WidthFixed, 120);
+        ImGui::TableSetupColumn(TR("settings.viewer.col.key"), ImGuiTableColumnFlags_WidthFixed, 250);
+        ImGui::TableSetupColumn(TR("settings.viewer.col.value"), ImGuiTableColumnFlags_WidthStretch, 300);
+        ImGui::TableSetupColumn(TR("settings.viewer.col.status"), ImGuiTableColumnFlags_WidthFixed, 80);
         ImGui::TableSetupScrollFreeze(0, 1); // Закрепить заголовок
         ImGui::TableHeadersRow();
 
@@ -352,7 +353,7 @@ void SettingsViewerDialog::render_table_row(int original_index, int display_inde
         snprintf(selectable_id, sizeof(selectable_id), "##empty_%d", original_index);
         ImGui::Selectable(selectable_id, false, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 0));
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Double-click to edit (двойной клик для редактирования)");
+            ImGui::SetTooltip("%s", TR("settings.viewer.edit_tooltip"));
         }
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             strncpy(current_edit_buffer_, "", sizeof(current_edit_buffer_) - 1);
@@ -363,7 +364,7 @@ void SettingsViewerDialog::render_table_row(int original_index, int display_inde
         }
         // Рисуем текст [empty] поверх
         ImGui::SameLine();
-        ImGui::Text("[empty]");
+        ImGui::Text("%s", TR("settings.viewer.empty"));
         ImGui::PopStyleColor();
     } else {
         ImGui::Text("%s", row.value.c_str());
@@ -371,7 +372,7 @@ void SettingsViewerDialog::render_table_row(int original_index, int display_inde
 
     // Кнопка редактирования при наведении (для непустых значений)
     if (!row.value.empty() && ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Double-click to edit (двойной клик для редактирования)");
+        ImGui::SetTooltip("%s", TR("settings.viewer.edit_tooltip"));
     }
 
     // Обработка двойного клика - открываем модальное окно (для непустых значений)
@@ -387,7 +388,7 @@ void SettingsViewerDialog::render_table_row(int original_index, int display_inde
     // Status
     ImGui::TableNextColumn();
     if (row.is_modified) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Modified");
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "%s", TR("settings.viewer.modified"));
     } else {
         ImGui::TextDisabled("-");
     }
@@ -395,20 +396,12 @@ void SettingsViewerDialog::render_table_row(int original_index, int display_inde
 
 void SettingsViewerDialog::render_action_panel() {
     // Локализованные строки
-    const char* actions_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Действия:" : "Actions:";
-    const char* save_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Сохранить" : "Save";
-    const char* revert_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Отменить" : "Revert";
-    const char* reload_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Откатить" : "Reload";  // Переименовано для ясности
-    const char* apply_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Применить" : "Apply";
-    const char* close_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Закрыть" : "Close";
-    const char* modified_only_label = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-        ? "Только изменённые" : "Modified only";
+    const char* actions_label = TR("settings.viewer.actions");
+    const char* save_label = TR("settings.viewer.save");
+    const char* revert_label = TR("settings.viewer.revert");
+    const char* reload_label = TR("settings.viewer.reload");
+    const char* apply_label = TR("settings.viewer.apply");
+    const char* close_label = TR("settings.viewer.close");
 
     ImGui::Text("%s", actions_label);
     ImGui::SameLine();
@@ -421,8 +414,7 @@ void SettingsViewerDialog::render_action_panel() {
         save_to_file();
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip((getLocalizationManager().getCurrentLanguage() == Language::Russian)
-            ? "Сохранить изменения в INI файл" : "Save changes to INI file");
+        ImGui::SetTooltip("%s", TR("settings.viewer.tooltip.save"));
     }
 
     ImGui::SameLine();
@@ -434,8 +426,7 @@ void SettingsViewerDialog::render_action_panel() {
             revert_all_changes();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip((getLocalizationManager().getCurrentLanguage() == Language::Russian)
-                ? "Отменить все несохранённые изменения" : "Discard all unsaved changes");
+            ImGui::SetTooltip("%s", TR("settings.viewer.tooltip.revert"));
         }
     } else {
         ImGui::BeginDisabled();
@@ -451,8 +442,7 @@ void SettingsViewerDialog::render_action_panel() {
         load_from_file();
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip((getLocalizationManager().getCurrentLanguage() == Language::Russian)
-            ? "Откатить к последнему сохранённому состоянию (перезагрузить из файла)" : "Reload settings from INI file (discard unsaved changes)");
+        ImGui::SetTooltip("%s", TR("settings.viewer.tooltip.reload"));
     }
 
     ImGui::SameLine();
@@ -461,12 +451,10 @@ void SettingsViewerDialog::render_action_panel() {
     if (ImGui::Button(apply_label, ImVec2(100, 0))) {
         std::cout << "[INI Viewer] Apply button clicked!" << std::endl;
         apply_settings_to_core();
-        status_message_ = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-            ? "Настройки применены" : "Settings applied";
+        status_message_ = TR("settings.viewer.status.applied");
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip((getLocalizationManager().getCurrentLanguage() == Language::Russian)
-            ? "Применить текущие значения INI к настройкам приложения" : "Apply current INI values to application settings");
+        ImGui::SetTooltip("%s", TR("settings.viewer.tooltip.apply"));
     }
 
     ImGui::SameLine();
@@ -509,7 +497,6 @@ void SettingsViewerDialog::render_edit_modal() {
     bool modal_open = true;
     // ImGuiWindowFlags_Modal - автоматически затемняет фон корректно
     if (ImGui::Begin(window_id, &modal_open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_Modal)) {
-        bool is_ru = (getLocalizationManager().getCurrentLanguage() == Language::Russian);
 
         // Заголовок
         char title_buffer[512];
@@ -521,8 +508,7 @@ void SettingsViewerDialog::render_edit_modal() {
         ImGui::Spacing();
 
         // Поле ввода
-        const char* value_label = is_ru ? "Значение:" : "Value:";
-        ImGui::Text("%s", value_label);
+        ImGui::Text("%s", TR("settings.viewer.value"));
         ImGui::Spacing();
         ImGui::SetNextItemWidth(400);
 
@@ -540,14 +526,14 @@ void SettingsViewerDialog::render_edit_modal() {
         }
         // Правый клик для контекстного меню (копировать/вставить/вырезать)
         if (ImGui::BeginPopupContextItem("EditValueContext")) {
-            if (ImGui::MenuItem("Cut", "Ctrl+X")) {
+            if (ImGui::MenuItem(TR("settings.viewer.cut"), "Ctrl+X")) {
                 ImGui::SetClipboardText(current_edit_buffer_);
                 current_edit_buffer_[0] = '\0';
             }
-            if (ImGui::MenuItem("Copy", "Ctrl+C")) {
+            if (ImGui::MenuItem(TR("settings.viewer.copy"), "Ctrl+C")) {
                 ImGui::SetClipboardText(current_edit_buffer_);
             }
-            if (ImGui::MenuItem("Paste", "Ctrl+V")) {
+            if (ImGui::MenuItem(TR("settings.viewer.paste"), "Ctrl+V")) {
                 const char* clipboard = ImGui::GetClipboardText();
                 if (clipboard && strlen(clipboard) > 0) {
                     strncpy(current_edit_buffer_, clipboard, sizeof(current_edit_buffer_) - 1);
@@ -674,8 +660,7 @@ void SettingsViewerDialog::apply_settings_to_core() {
             std::cout << "[INI Viewer] Profile saved: " << current_profile << std::endl;
         }
 
-        status_message_ = (getLocalizationManager().getCurrentLanguage() == Language::Russian)
-            ? "Настройки применены и синхронизированы" : "Settings applied and synchronized";
+        status_message_ = TR("settings.viewer.status.applied_sync");
 
         // Удаляем временный файл
         std::remove(temp_file.c_str());

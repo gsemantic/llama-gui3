@@ -77,6 +77,52 @@ void LocalizationManager::initializeSettingsTranslations() {
     addTranslation("settings.button.browse", "Обзор...", "Browse...");
     addTranslation("settings.button.set_directory", "Указать папку", "Set Directory");
 
+    // Language
+    addTranslation("settings.language", "Язык", "Language");
+    addTranslation("settings.language.interface", "Язык интерфейса", "Interface Language");
+
+    // UI settings
+    addTranslation("settings.ui.theme", "Тема", "Theme");
+    addTranslation("settings.ui.theme.dark", "Тёмная", "Dark");
+    addTranslation("settings.ui.theme.light", "Светлая", "Light");
+    addTranslation("settings.ui.theme.auto", "Авто", "Auto");
+    addTranslation("settings.ui.theme.appearance", "Тема оформления", "Appearance Theme");
+    addTranslation("settings.ui.font", "Шрифт", "Font");
+    addTranslation("settings.ui.window", "Окно", "Window");
+    addTranslation("settings.ui.window.width", "Ширина", "Width");
+    addTranslation("settings.ui.window.height", "Высота", "Height");
+    addTranslation("settings.ui.window.maximized", "Развернуто", "Maximized");
+    addTranslation("settings.ui.window.auto_resize", "Автоматический размер", "Auto Resize");
+    addTranslation("settings.ui.window.auto_resize.help", "Автоматически подстраивать размер окна под разрешение монитора", "Automatically adjust the window size to the monitor resolution");
+    addTranslation("settings.ui.window.center", "Центрировать окно", "Center Window");
+    addTranslation("settings.ui.window.min_width", "Мин. ширина", "Min Width");
+    addTranslation("settings.ui.window.min_height", "Мин. высота", "Min Height");
+    addTranslation("settings.ui.performance", "Производительность интерфейса", "Interface Performance");
+    addTranslation("settings.ui.animations", "Анимации", "Animations");
+    addTranslation("settings.ui.vsync.help", "Вертикальная синхронизация — убирает разрывы кадров", "Vertical sync — eliminates screen tearing");
+    addTranslation("settings.ui.idle_fps", "FPS в простое", "Idle FPS");
+    addTranslation("settings.ui.idle_fps.help", "Частота кадров, когда окно не активно", "Frame rate when the window is not active");
+    addTranslation("settings.ui.idle_timeout", "Таймаут простоя (мс)", "Idle Timeout (ms)");
+    addTranslation("settings.ui.idle_timeout.help", "Время бездействия до переключения в режим пониженного FPS", "Idle time before switching to reduced FPS mode");
+    addTranslation("settings.ui.smart_redraw", "Умная перерисовка", "Smart Redraw");
+    addTranslation("settings.ui.smart_redraw.help", "Перерисовывать только при изменениях (экономит CPU)", "Redraw only on changes (saves CPU)");
+    addTranslation("settings.ui.performance_overlay", "Показать оверлей производительности", "Show Performance Overlay");
+
+    // File settings
+    addTranslation("settings.files.default_paths", "Пути по умолчанию", "Default Paths");
+    addTranslation("settings.files.save_path", "Путь сохранения", "Save Path");
+    addTranslation("settings.files.auto_save_path", "Путь автосохранения", "Auto-save Path");
+    addTranslation("settings.files.auto_save", "Автосохранение", "Auto-save");
+    addTranslation("settings.files.auto_save_enabled", "Включить автосохранение", "Enable Auto-save");
+    addTranslation("settings.files.auto_save_interval", "Интервал (сек)", "Interval (sec)");
+
+    // Security settings
+    addTranslation("settings.security.ssl", "SSL / TLS", "SSL / TLS");
+    addTranslation("settings.security.verify_ssl", "Проверять SSL-сертификаты", "Verify SSL Certificates");
+    addTranslation("settings.security.verify_ssl.help", "Отключите только если используете самоподписанные сертификаты", "Disable only if you use self-signed certificates");
+    addTranslation("settings.security.token", "Токен доступа", "Access Token");
+    addTranslation("settings.security.token.help", "Токен для аутентификации на сервере (если включена)", "Token for server authentication (if enabled)");
+
     // Profiles
     addTranslation("settings.profiles.title", "Профили настроек", "Settings Profiles");
     addTranslation("settings.profiles.select", "Выберите профиль", "Select profile");
@@ -85,6 +131,46 @@ void LocalizationManager::initializeSettingsTranslations() {
     addTranslation("settings.profiles.save_as", "Сохранить как", "Save As");
     addTranslation("settings.profiles.delete", "Удалить", "Delete");
     addTranslation("settings.profiles.new_name", "Имя нового профиля", "New profile name");
+
+    // Settings viewer (INI viewer dialog)
+    addTranslation("settings.viewer.title", "Просмотр настроек INI", "Settings INI Viewer");
+    addTranslation("settings.viewer.filter", "Фильтр:", "Filter:");
+    addTranslation("settings.viewer.search", "Поиск", "Search");
+    addTranslation("settings.viewer.clear", "Сброс", "Clear");
+    addTranslation("settings.viewer.modified_only", "Только изменённые", "Modified only");
+    addTranslation("settings.viewer.showing", "Показано: %zu / %zu (Изменено: %zu)", "Showing: %zu / %zu (Modified: %zu)");
+    addTranslation("settings.viewer.all_sections", "Все секции", "All sections");
+    addTranslation("settings.viewer.no_match", "Нет настроек, соответствующих фильтрам", "No settings match the current filters");
+    addTranslation("settings.viewer.col.section", "Секция", "Section");
+    addTranslation("settings.viewer.col.key", "Ключ", "Key");
+    addTranslation("settings.viewer.col.value", "Значение", "Value");
+    addTranslation("settings.viewer.col.status", "Статус", "Status");
+    addTranslation("settings.viewer.edit_tooltip", "Двойной клик для редактирования", "Double-click to edit");
+    addTranslation("settings.viewer.empty", "[пусто]", "[empty]");
+    addTranslation("settings.viewer.modified", "Изменено", "Modified");
+    addTranslation("settings.viewer.actions", "Действия:", "Actions:");
+    addTranslation("settings.viewer.save", "Сохранить", "Save");
+    addTranslation("settings.viewer.revert", "Отменить", "Revert");
+    addTranslation("settings.viewer.reload", "Откатить", "Reload");
+    addTranslation("settings.viewer.apply", "Применить", "Apply");
+    addTranslation("settings.viewer.close", "Закрыть", "Close");
+    addTranslation("settings.viewer.tooltip.save", "Сохранить изменения в INI файл", "Save changes to INI file");
+    addTranslation("settings.viewer.tooltip.revert", "Отменить все несохранённые изменения", "Discard all unsaved changes");
+    addTranslation("settings.viewer.tooltip.reload", "Откатить к последнему сохранённому состоянию (перезагрузить из файла)", "Reload settings from INI file (discard unsaved changes)");
+    addTranslation("settings.viewer.tooltip.apply", "Применить текущие значения INI к настройкам приложения", "Apply current INI values to application settings");
+    addTranslation("settings.viewer.value", "Значение:", "Value:");
+    addTranslation("settings.viewer.cut", "Вырезать", "Cut");
+    addTranslation("settings.viewer.copy", "Копировать", "Copy");
+    addTranslation("settings.viewer.paste", "Вставить", "Paste");
+    addTranslation("settings.viewer.ok", "OK", "OK");
+    addTranslation("settings.viewer.cancel", "Отмена", "Cancel");
+    addTranslation("settings.viewer.status.reverted", "Все изменения отменены", "All changes reverted");
+    addTranslation("settings.viewer.status.load_failed", "Не удалось загрузить INI файл: ", "Failed to load INI file: ");
+    addTranslation("settings.viewer.status.loaded", "Загружено: ", "Loaded: ");
+    addTranslation("settings.viewer.status.save_failed", "Не удалось сохранить INI файл: ", "Failed to save INI file: ");
+    addTranslation("settings.viewer.status.saved", "Сохранено: ", "Saved: ");
+    addTranslation("settings.viewer.status.applied", "Настройки применены", "Settings applied");
+    addTranslation("settings.viewer.status.applied_sync", "Настройки применены и синхронизированы", "Settings applied and synchronized");
 }
 
 } // namespace ui

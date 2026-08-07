@@ -30,6 +30,7 @@ void Settings::serializeDisplaySettings(json& j) const {
         {"min_window_height", display_settings_.min_window_height},
         {"dpi_scale", display_settings_.dpi_scale},
         {"margin", display_settings_.margin},
+        {"language", display_settings_.language},
         {"theme", static_cast<int>(current_theme_)}
     };
 }
@@ -165,6 +166,7 @@ void Settings::deserializeDisplaySettings(const json& j) {
         display_settings_.min_window_height = d.value("min_window_height", 600);
         display_settings_.dpi_scale = d.value("dpi_scale", 1.0f);
         display_settings_.margin = d.value("margin", 10);
+        display_settings_.language = d.value("language", std::string("ru"));
 
         // Загружаем тему: приоритет у ключа "theme" (int), fallback на use_dark_theme (bool)
         if (d.contains("theme")) {
