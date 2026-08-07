@@ -415,7 +415,7 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
 
     core::OpenRouterRequestParams params;
     params.model = cp.model_id;
-    params.max_tokens = 8192;
+    params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (см. build_completion_body)
     params.temperature = settings->chat().temperature;
     params.top_p = settings->chat().top_p;
     params.stream = false;

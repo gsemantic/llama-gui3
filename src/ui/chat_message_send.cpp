@@ -630,9 +630,10 @@ void ChatInterface::send_message_via_openrouter() {
     // Формируем параметры запроса
     llama_gui::core::OpenRouterRequestParams params;
     params.model = model_id;
-    // Cloud models (especially thinking models like GLM) use tokens for reasoning,
-    // so we need a higher max_tokens to get complete responses
-    params.max_tokens = 8192;
+    // Лимит токенов вывода берём из настроек облачного соединения.
+    // 0 = не ограничено: поле max_tokens не отправляется, и провайдер/модель
+    // использует свой максимум (важно для thinking-моделей вроде GLM).
+    params.max_tokens = cp.max_output_tokens;
     params.temperature = settings_.chat().temperature;
     params.top_p = settings_.chat().top_p;
     params.stream = false;

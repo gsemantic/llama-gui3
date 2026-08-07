@@ -17,12 +17,10 @@ void Settings::serializeOpenRouterSettings(json& j) const {
         {"endpoint_url", openrouter_settings_.endpoint_url},
         {"model_id", openrouter_settings_.model_id},
         {"timeout_ms", openrouter_settings_.timeout_ms},
+        {"max_output_tokens", openrouter_settings_.max_output_tokens},
         {"free_models_only", openrouter_settings_.free_models_only},
         {"last_search_query", openrouter_settings_.last_search_query},
-        {"recent_models", openrouter_settings_.recent_models},
-        {"usage_total_requests", openrouter_settings_.usage_total_requests},
-        {"usage_remaining", openrouter_settings_.usage_remaining},
-        {"usage_limit", openrouter_settings_.usage_limit}
+        {"recent_models", openrouter_settings_.recent_models}
     };
 }
 
@@ -35,14 +33,12 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.endpoint_url = o.value("endpoint_url", "");
         openrouter_settings_.model_id = o.value("model_id", "");
         openrouter_settings_.timeout_ms = o.value("timeout_ms", 30000);
+        openrouter_settings_.max_output_tokens = o.value("max_output_tokens", 0);
         openrouter_settings_.free_models_only = o.value("free_models_only", false);
         openrouter_settings_.last_search_query = o.value("last_search_query", "");
         if (o.contains("recent_models") && o["recent_models"].is_array()) {
             openrouter_settings_.recent_models = o["recent_models"].get<std::vector<std::string>>();
         }
-        openrouter_settings_.usage_total_requests = o.value("usage_total_requests", 0);
-        openrouter_settings_.usage_remaining = o.value("usage_remaining", 50);
-        openrouter_settings_.usage_limit = o.value("usage_limit", 50);
         return;
     }
 
@@ -54,14 +50,12 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.endpoint_url = o.value("custom_base_url", "");
         openrouter_settings_.provider_name = "OpenRouter";
         openrouter_settings_.timeout_ms = o.value("timeout_ms", 30000);
+        openrouter_settings_.max_output_tokens = o.value("max_output_tokens", 0);
         openrouter_settings_.free_models_only = o.value("free_models_only", false);
         openrouter_settings_.last_search_query = o.value("last_search_query", "");
         if (o.contains("recent_models") && o["recent_models"].is_array()) {
             openrouter_settings_.recent_models = o["recent_models"].get<std::vector<std::string>>();
         }
-        openrouter_settings_.usage_total_requests = o.value("usage_total_requests", 0);
-        openrouter_settings_.usage_remaining = o.value("usage_remaining", 50);
-        openrouter_settings_.usage_limit = o.value("usage_limit", 50);
 
         // Migrate: move legacy api_key to .env
         std::string legacy_key = o.value("api_key", "");

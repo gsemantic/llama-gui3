@@ -183,7 +183,7 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
         request_body["messages"].push_back(user_msg);
     }
 
-    if (params.max_tokens != 1024) {
+    if (params.max_tokens > 0) {
         request_body["max_tokens"] = params.max_tokens;
     }
     if (params.temperature != 0.7f) {

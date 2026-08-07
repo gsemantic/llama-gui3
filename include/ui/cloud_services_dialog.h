@@ -43,6 +43,7 @@ private:
     char api_key_buf_[512] = "";
     char model_id_buf_[256] = "";
     int timeout_ms_ = 60000;
+    int max_output_tokens_ = 0;   // 0 = не ограничено
     bool show_api_key_ = false;
 
     // Saved state for change detection

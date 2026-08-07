@@ -94,6 +94,7 @@ void CloudServicesDialog::load_from_settings() {
     api_key_buf_[sizeof(api_key_buf_) - 1] = '\0';
 
     timeout_ms_ = cp.timeout_ms > 0 ? cp.timeout_ms : 60000;
+    max_output_tokens_ = cp.max_output_tokens;
     saved_model_id_ = cp.model_id;
     settings_modified_ = false;
     show_api_key_ = false;
@@ -105,6 +106,7 @@ void CloudServicesDialog::save_to_settings() {
     cp.endpoint_url = endpoint_url_buf_;
     cp.model_id = model_id_buf_;
     cp.timeout_ms = timeout_ms_;
+    cp.max_output_tokens = max_output_tokens_ < 0 ? 0 : max_output_tokens_;
 
     // Write API key to .env (never to profile JSON).
     // Key is stored per-provider so switching providers never touches other keys.
@@ -408,6 +410,19 @@ void CloudServicesDialog::render() {
         if (ImGui::InputInt("##timeout", &timeout_ms_, 1000, 5000)) {
             if (timeout_ms_ < 1000) timeout_ms_ = 1000;
             settings_modified_ = true;
+        }
+
+        // Max output tokens (0 = unlimited)
+        ImGui::Text("Max output tokens:");
+        ImGui::SameLine(120);
+        if (ImGui::InputInt("##max_output_tokens", &max_output_tokens_, 256, 2048)) {
+            if (max_output_tokens_ < 0) max_output_tokens_ = 0;
+            settings_modified_ = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled(max_output_tokens_ == 0 ? "(unlimited)" : "");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("0 = no limit (the model/provider decides its own maximum)");
         }
 
         // Model list (if loaded)
