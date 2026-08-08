@@ -185,6 +185,15 @@ const ImVec4 status_color_task(TaskStatus s) {
 void render_news_rewriter_window(UiDeps& deps) {
     if (!deps.worker) return;
 
+    // Крестик в заголовке (p_open): при закрытии скрываем окно в хосте и
+    // сбрасываем флаг, чтобы повторное открытие через меню снова показало окно.
+    static bool s_window_open = true;
+    static bool s_reset_open = false;
+    if (s_reset_open) {
+        s_window_open = true;
+        s_reset_open = false;
+    }
+
     const WorkerState state = deps.worker->snapshot();
     const Config cfg = deps.worker->get_config();
 
@@ -198,7 +207,19 @@ void render_news_rewriter_window(UiDeps& deps) {
     }
 
     ImGui::SetNextWindowSize(ImVec2(560, 520), ImGuiCond_FirstUseEver);
-    ImGui::Begin("News Rewriter");
+    const bool visible = ImGui::Begin("News Rewriter", &s_window_open);
+    if (!s_window_open) {
+        // Крестик нажат — скрываем окно в хосте.
+        ImGui::End();
+        if (deps.on_close) deps.on_close();
+        s_reset_open = true;
+        return;
+    }
+    if (!visible) {
+        // Окно свёрнуто в заголовок — содержимое не рисуем, но не закрываем.
+        ImGui::End();
+        return;
+    }
 
     ImGui::TextUnformatted("Агент: обход адресов, рерайт новостей через LLM, сохранение локально");
     ImGui::Separator();

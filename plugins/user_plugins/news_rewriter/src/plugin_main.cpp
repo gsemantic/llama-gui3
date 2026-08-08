@@ -173,6 +173,11 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
             g_worker->post(Command{CmdType::ReloadConfig, config_to_json(cfg).dump()});
         }
     };
+    g_ui_deps.on_close = []() {
+        if (g_api && g_host && g_window) {
+            g_api->window_set_visible(g_host, g_window, 0);
+        }
+    };
 
     // Команды
     g_api->command_register(g_host, "news_rewriter_run", cmd_run, nullptr,
@@ -219,6 +224,8 @@ LLAMA_PLUGIN_EXPORT void ll_plugin_shutdown(void) {
     g_window = nullptr;
     g_menu = nullptr;
     g_ui_deps.worker = nullptr;
+    g_ui_deps.on_save = nullptr;
+    g_ui_deps.on_close = nullptr;
 }
 
 } // extern "C"
