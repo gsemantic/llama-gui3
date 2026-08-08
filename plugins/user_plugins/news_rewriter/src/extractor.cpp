@@ -198,6 +198,50 @@ std::string normalize_lines(const std::string& in) {
     return out;
 }
 
+// Контейнеры, содержимое которых — не текст статьи (меню, шапка, подвал, сайдбар).
+bool is_noise_container(const std::string& name) {
+    static const char* kNoise[] = {"nav", "header", "footer", "aside", "form"};
+    for (const char* s : kNoise) {
+        if (name == s) return true;
+    }
+    return false;
+}
+
+// Заголовочные теги h1..h6: заголовок статьи извлекается отдельно.
+bool is_heading_tag(const std::string& name) {
+    return name.size() == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6';
+}
+
+// Число «символов» без пробелов (UTF-8-aware: многобайтовая последовательность
+// считается одним символом — иначе для кириллицы density занижалась бы вдвое).
+std::size_t nonspace_count(const std::string& s) {
+    std::size_t c = 0;
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char ch = static_cast<unsigned char>(s[i]);
+        if (std::isspace(ch)) {
+            ++i;
+            continue;
+        }
+        ++c;
+        if (ch >= 0xC0) {
+            ++i;
+            while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) ++i;
+        } else {
+            ++i;
+        }
+    }
+    return c;
+}
+
+// Плотность текста: доля «букв» среди всех непустых символов (0..1).
+// Низкая плотность — характерный признак мусора (счётчики, даты, символьные строки).
+double text_density(const std::string& text) {
+    const std::size_t ch = nonspace_count(text);
+    if (ch == 0) return 0.0;
+    return static_cast<double>(letter_count(text)) / static_cast<double>(ch);
+}
+
 } // namespace
 
 std::string html_to_text(const std::string& html) {
@@ -296,22 +340,31 @@ std::string extract_title(const std::string& html) {
     return "";
 }
 
-// Тело страницы: самый длинный блок текста (эвристика «читаемости»).
-// Разбиваем на абзацы по блочным тегам и выбираем самый длинный связный кусок.
+// Тело страницы: эвристика по плотности текста. HTML разбивается на блоки по
+// блочным тегам; блоки внутри nav/header/footer/aside/form и заголовки h1..h6
+// исключаются как заведомо не-статья. Среди оставшихся блоков «прозой»
+// считаются те, что содержат достаточно слов/букв и высокую плотность текста;
+// берётся самый длинный связный набор таких блоков — это и есть текст статьи.
 std::string extract_body(const std::string& html) {
-    std::string best;
+    enum class BlockKind { kEmpty, kCandidate, kOther };
+
+    struct Block {
+        std::string html;
+        bool noise;    // внутри nav/header/footer/aside/form
+        bool heading;  // внутри h1..h6
+    };
+
+    // -- разбор HTML на блоки по блочным тегам --------------------------------
+    std::vector<Block> blocks;
     const std::size_t n = html.size();
     std::size_t i = 0;
-    std::string block;
-    std::string best_block;
+    Block cur;
+    std::size_t noise_depth = 0;
+    bool heading_flag = false;
 
-    auto consider = [&]() {
-        const std::string text = html_to_text(block);
-        if (text.size() > best.size()) {
-            best = text;
-            best_block = block;
-        }
-        block.clear();
+    auto flush = [&]() {
+        blocks.push_back(cur);
+        cur = Block{};
     };
 
     while (i < n) {
@@ -322,9 +375,12 @@ std::string extract_body(const std::string& html) {
                 continue;
             }
             if (i + 1 < n && html[i + 1] == '/') {
+                std::size_t name_end = 0;
+                const std::string name = tag_name(html, i, &name_end);
+                if (is_noise_container(name) && noise_depth > 0) --noise_depth;
                 const std::size_t gt = html.find('>', i);
                 if (gt == std::string::npos) break;
-                block += " ";
+                cur.html += " ";
                 i = gt + 1;
                 continue;
             }
@@ -339,17 +395,96 @@ std::string extract_body(const std::string& html) {
                 continue;
             }
             if (is_block_tag(name)) {
-                consider();
+                flush();
+                if (is_noise_container(name)) ++noise_depth;
+                if (is_heading_tag(name)) heading_flag = true;
+                // флаги фиксируются при создании блока, чтобы закрывающий
+                // тег (например, </nav>) не «снял» их с уже идущего текста.
+                cur.noise = (noise_depth > 0);
+                cur.heading = heading_flag;
+                heading_flag = false;
             }
             i = gt + 1;
             (void)name_end;
             continue;
         }
-        block += html[i];
+        cur.html += html[i];
         ++i;
     }
-    consider();
-    return best;
+    flush();
+
+    // -- оценка каждого блока --------------------------------------------------
+    struct Scored {
+        std::string text;
+        std::size_t letters = 0;
+        std::size_t words = 0;
+        double density = 0.0;
+        BlockKind kind = BlockKind::kOther;
+    };
+    std::vector<Scored> scored(blocks.size());
+    for (std::size_t b = 0; b < blocks.size(); ++b) {
+        const Block& blk = blocks[b];
+        Scored& s = scored[b];
+        s.text = html_to_text(blk.html);
+        s.letters = letter_count(s.text);
+        s.words = word_count(s.text);
+        s.density = text_density(s.text);
+        if (blk.noise || blk.heading) {
+            s.kind = BlockKind::kOther;      // заведомо не-статья
+        } else if (s.text.empty()) {
+            s.kind = BlockKind::kEmpty;      // пустышка не рвёт связку абзацев
+        } else if (s.words >= 2 && s.letters >= 15 && s.density >= 0.5) {
+            s.kind = BlockKind::kCandidate;  // «проза» — кандидат в статью
+        } else {
+            s.kind = BlockKind::kOther;      // навигация/мусор — рвёт связку
+        }
+    }
+
+    // -- выбор самого длинного связного набора «прозы» -------------------------
+    std::size_t best_start = 0, best_end = 0, best_len = 0, best_letters = 0;
+    std::size_t k = 0;
+    while (k < scored.size()) {
+        if (scored[k].kind == BlockKind::kOther) {
+            ++k;
+            continue;
+        }
+        const std::size_t start = k;
+        std::size_t letters_sum = 0, len = 0;
+        while (k < scored.size() && scored[k].kind != BlockKind::kOther) {
+            if (scored[k].kind == BlockKind::kCandidate) {
+                letters_sum += scored[k].letters;
+                ++len;
+            }
+            ++k;
+        }
+        if (len > best_len || (len == best_len && letters_sum > best_letters)) {
+            best_start = start;
+            best_end = k;
+            best_len = len;
+            best_letters = letters_sum;
+        }
+    }
+
+    // -- сборка результата ------------------------------------------------------
+    std::string out;
+    if (best_len > 0) {
+        for (std::size_t b = best_start; b < best_end; ++b) {
+            if (scored[b].kind != BlockKind::kCandidate) continue;
+            if (!out.empty()) out += '\n';
+            out += scored[b].text;
+        }
+        return out;
+    }
+
+    // нет ни одного подходящего блока — fallback: самый длинный блок текста.
+    std::size_t best_i = 0, best_l = 0;
+    for (std::size_t b = 0; b < scored.size(); ++b) {
+        if (scored[b].letters > best_l) {
+            best_l = scored[b].letters;
+            best_i = b;
+        }
+    }
+    return best_l > 0 ? scored[best_i].text : std::string();
 }
 
 } // namespace

@@ -21,7 +21,8 @@ ExtractedArticle extract_from_description(const std::string& desc);
 
 // HTML-страница → заголовок + основной текст.
 // Если в cfg заданы маркеры — берётся текст между ними; иначе эвристика:
-// заголовок из <h1>/<title>, тело — самый длинный блок текста.
+// заголовок из <h1>/<title>, тело — самый длинный связный набор «прозы» по
+// плотности текста (исключая nav/header/footer/aside/form и заголовки h1..h6).
 ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg);
 
 } // namespace news_rewriter
