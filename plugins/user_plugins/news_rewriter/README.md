@@ -22,13 +22,27 @@
 
 ## Сборка
 
+Плагин собирается автономно, без полной сборки GUI — его `CMakeLists.txt` сам
+находит `include/` и `external/imgui` репозитория. Для быстрой итерации есть
+скрипт `build.sh` (в каталоге плагина):
+
 ```bash
-# Из корня проекта llama-gui:
-cmake -S . -B build        # уже есть build/
-cmake --build build
+./build.sh                # конфигурация (тесты включены) + сборка .so и тестов
+./build.sh --tests        # то же + прогон юнит-тестов
+./build.sh --deploy DIR   # сборка + копирование .so и news_rewriter.json в DIR
+./build.sh --clean        # удалить каталог сборки (build/)
+./build.sh --help         # справка
 ```
 
-Результат: `build/plugins/libnews_rewriter.so` + `build/plugins/news_rewriter.json`.
+Результат (автономно): `build/plugins/libnews_rewriter.so` +
+`build/plugins/news_rewriter.json`. Вручную это делается так:
+
+```bash
+cmake -S plugins/user_plugins/news_rewriter -B build-nr -DBUILD_NEWS_REWRITER_TESTS=ON
+cmake --build build-nr --target news_rewriter news_rewriter_tests
+```
+
+Плагин также собирается в составе основного проекта (`cmake --build build`).
 
 ## Запуск
 

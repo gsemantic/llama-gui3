@@ -15,6 +15,7 @@
 ```
 plugins/user_plugins/news_rewriter/
 ├── CMakeLists.txt              # цель news_rewriter (SHARED) + опция тестов
+├── build.sh                    # быстрая автономная сборка (сборка/тесты/deploy)
 ├── plugin.json                 # манифест (см. ARCHITECTURE.md)
 ├── README.md                   # краткое описание, сборка, использование
 ├── docs/
