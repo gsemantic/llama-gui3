@@ -6,24 +6,10 @@
 namespace llama_gui {
 namespace ui {
 
-void MainWindow::render_frame() {
-    // render_ui() is now in main_window.cpp
-}
-
 void MainWindow::render_main_layout() {
     // Layout is managed by WindowManager/WindowCoordinator
     // This method is kept for compatibility but does not render components
     // to avoid double-rendering and input conflicts
-}
-
-void MainWindow::render_menu_bar_once() {
-    // Render menu bar only once after initialization
-    static bool menu_built = false;
-    if (!menu_built) {
-        std::cout << "MainWindow: Building menu structure" << std::endl;
-        advanced_menu_system_.buildModernMenu();
-        menu_built = true;
-    }
 }
 
 void MainWindow::render_status_bar() {

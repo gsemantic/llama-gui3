@@ -40,10 +40,25 @@ show_help() {
     echo "  -k, --kill              Остановить все llama-server процессы"
     echo "  -r, --rebuild           Пересобрать проект перед запуском"
     echo ""
+    echo "  -b, --headless          Безголовый режим: запуск llama-server без GUI"
+    echo "                          (OpenAI-совместимый endpoint для внешних клиентов)"
+    echo "  -C, --cloud             Облачный прокси: endpoint пересылает запросы в облачного"
+    echo "                          провайдера (OpenRouter и пр.) с настройками профиля + RAG"
+    echo "      --proxy             GUI-режим: поднять облачный прокси в фоне на порту из"
+    echo "                          настроек (для внешних клиентов, напр. qwen cli)"
+    echo "  -H, --host HOST         Адрес привязки в headless/cloud режиме (напр. 0.0.0.0 для LAN)"
+    echo "  -p, --port PORT         Порт в headless/cloud режиме (по умолчанию 8081)"
+    echo "  -m, --model PATH        Путь к модели в headless режиме"
+    echo "  -P, --profile NAME      Профиль настроек для headless/cloud режима"
+    echo "      --auto-port         Автоматически выбрать свободный порт, если занят"
+    echo ""
     echo "ПРИМЕРЫ:"
     echo "  $0 -l                   # Запуск с локальным сервером"
     echo "  $0 -c http://192.168.1.100:8081  # Запуск с удаленным сервером"
     echo "  $0 -r -l                # Пересборка + запуск с локальным сервером"
+    echo "  $0 -b -m /path/to/model.gguf      # Headless endpoint (localhost:8081)"
+    echo "  $0 -C -P MiMo1 -p 8082  # Облачный прокси с профилем MiMo1 на порту 8082"
+    echo "  $0 -b -H 0.0.0.0 -p 8082 --auto-port  # Headless для LAN на свободном порту"
     echo ""
     echo "СЕРВЕР:"
     echo "  По умолчанию используется: localhost:8081"
@@ -144,6 +159,10 @@ main() {
     local server_url=""
     local need_rebuild=false
     local run_mode="local"
+    local headless=false
+    local cloud=false
+    local gui_proxy=false
+    local extra_args=()
     
     # Парсинг аргументов
     while [[ $# -gt 0 ]]; do
@@ -179,6 +198,38 @@ main() {
                 need_rebuild=true
                 shift
                 ;;
+            -b|--headless)
+                headless=true
+                shift
+                ;;
+            -C|--cloud)
+                cloud=true
+                shift
+                ;;
+            --proxy)
+                gui_proxy=true
+                shift
+                ;;
+            -H|--host)
+                extra_args+=("--host=$2")
+                shift 2
+                ;;
+            -p|--port)
+                extra_args+=("--port=$2")
+                shift 2
+                ;;
+            -m|--model)
+                extra_args+=("--model=$2")
+                shift 2
+                ;;
+            -P|--profile)
+                extra_args+=("--profile=$2")
+                shift 2
+                ;;
+            --auto-port)
+                extra_args+=("--auto-port")
+                shift
+                ;;
             *)
                 print_colored $RED "❌ Неизвестная опция: $1"
                 echo "Используйте $0 --help для справки"
@@ -204,8 +255,19 @@ main() {
     
     case $run_mode in
         "local")
-            print_colored $GREEN "🚀 Запуск с локальным сервером (localhost:8081)"
-            run_command="$GUI_BINARY"
+            if [ "$cloud" = true ]; then
+                print_colored $GREEN "🚀 Запуск в облачном прокси-режиме (endpoint -> облачный провайдер)"
+                run_command="$GUI_BINARY --cloud"
+            elif [ "$headless" = true ]; then
+                print_colored $GREEN "🚀 Запуск в безголовом режиме (endpoint без GUI)"
+                run_command="$GUI_BINARY --headless"
+            elif [ "$gui_proxy" = true ]; then
+                print_colored $GREEN "🚀 Запуск GUI с фоновым облачным прокси (endpoint для внешних клиентов)"
+                run_command="$GUI_BINARY --proxy"
+            else
+                print_colored $GREEN "🚀 Запуск с локальным сервером (localhost:8081)"
+                run_command="$GUI_BINARY"
+            fi
             ;;
         "custom")
             if [ -z "$server_url" ]; then
@@ -218,10 +280,21 @@ main() {
             ;;
     esac
     
+    # Добавляем дополнительные аргументы headless-режима
+    if [ ${#extra_args[@]} -gt 0 ]; then
+        run_command="$run_command ${extra_args[*]}"
+    fi
+    
     echo ""
     print_colored $BLUE "Команда запуска: $run_command"
     echo ""
-    print_colored $YELLOW "💡 Для остановки серверов используйте: $0 --kill"
+    if [ "$cloud" = true ]; then
+        print_colored $YELLOW "💡 Endpoint проксирует запросы в облачного провайдера из профиля. Остановка: Ctrl+C"
+    elif [ "$headless" = true ]; then
+        print_colored $YELLOW "💡 Endpoint API будет показан после запуска. Остановка: Ctrl+C"
+    else
+        print_colored $YELLOW "💡 Для остановки серверов используйте: $0 --kill"
+    fi
     echo ""
     
     # Запуск

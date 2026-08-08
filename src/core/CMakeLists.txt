@@ -46,6 +46,7 @@ endif()
 set(CORE_SOURCES
     llama_interface.cpp
     llama_interface_impl.cpp
+    cloud_proxy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bench/profile_adapter.cpp
     server_manager.cpp
     model_manager.cpp

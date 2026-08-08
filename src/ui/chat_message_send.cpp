@@ -469,10 +469,10 @@ void ChatInterface::send_message() {
                                             auto& choice = json_chunk["choices"][0];
                                             if (choice.contains("delta") && choice["delta"].contains("content")) {
                                                 auto content = choice["delta"]["content"];
-                                                if (!content.is_null()) clean_chunk = content.get<std::string>();
+                                                if (content.is_string()) clean_chunk = content.get<std::string>();
                                             } else if (choice.contains("message") && choice["message"].contains("content")) {
                                                 auto content = choice["message"]["content"];
-                                                if (!content.is_null()) clean_chunk = content.get<std::string>();
+                                                if (content.is_string()) clean_chunk = content.get<std::string>();
                                             }
                                         }
                                     } catch (...) {}

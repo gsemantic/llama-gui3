@@ -272,7 +272,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                     if (json_chunk.contains("choices") && !json_chunk["choices"].empty()) {
                         const auto& choice = json_chunk["choices"][0];
                         if (choice.contains("delta") && choice["delta"].contains("content") &&
-                            !choice["delta"]["content"].is_null()) {
+                            choice["delta"]["content"].is_string()) {
                             std::string token = choice["delta"]["content"].get<std::string>();
                             if (!token.empty()) {
                                 delivered_content = true;

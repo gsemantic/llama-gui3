@@ -41,14 +41,12 @@ struct AdvancedMenuItem {
     std::string shortcut;                // Горячая клавиша
     bool enabled = true;                 // Доступность элемента
     bool checked = false;                // Состояние checkbox/radio
-    bool separator = false;              // Является ли разделителем
     std::string tooltip;                 // Подсказка
     std::function<bool()> check_func;    // Функция для checkbox/radio
     std::function<void(bool)> toggle_func; // Функция переключения
     std::string window_name;             // Имя окна для управления (если применимо)
     bool is_window_toggle = false;       // Является ли элемент переключателем окна
     AdvancedMenuItemType type = AdvancedMenuItemType::Item; // Тип элемента
-    int command_id = 0;                  // ID команды
     std::function<void()> callback;      // Callback функция
     std::vector<AdvancedMenuItem> submenu_items; // Подменю
 };

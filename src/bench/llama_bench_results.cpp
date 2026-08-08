@@ -106,7 +106,7 @@ bool LlamaBenchResults::saveToFile(const std::string& file_path) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     
     try {
-        nlohmann::json json = toJson();
+        nlohmann::json json = toJsonUnlocked();
         
         // Создать директорию при необходимости
         BenchCommon::createDirectory(BenchCommon::extractFileName(file_path.substr(0, file_path.find_last_of('/'))));
@@ -315,7 +315,7 @@ BenchComparisonResult LlamaBenchResults::compareAllProfiles() const {
 std::string LlamaBenchResults::exportToJson() const {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     
-    nlohmann::json json = toJson();
+    nlohmann::json json = toJsonUnlocked();
     return json.dump(2);
 }
 
@@ -534,7 +534,10 @@ bool LlamaBenchResults::removeById(const std::string& test_id) {
 
 nlohmann::json LlamaBenchResults::toJson() const {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    
+    return toJsonUnlocked();
+}
+
+nlohmann::json LlamaBenchResults::toJsonUnlocked() const {
     nlohmann::json json = nlohmann::json::object();
     
     // Результаты

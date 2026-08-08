@@ -153,9 +153,6 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createSettingsMenu() {
     system_submenu.submenu_items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.settings.tensor_override", "Tensor Override"),
         "open_settings_tensor_override", "", "Open tensor override settings"));
-    system_submenu.submenu_items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.settings.ini_viewer", "INI File Viewer"),
-        "open_settings_ini_viewer", "", "View and edit all settings in INI format (like php.ini)"));
     menu->items.push_back(system_submenu);
 
     menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
@@ -190,24 +187,8 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createViewMenu() {
     menu->menu_key = "View";
     menu->name = TRF("menu.view", "View");
 
-    // Элементы управления окнами (перенесено из меню "Окно")
-    menu->items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
-        TRF("menu.window.conversations", "Conversations"),
-        "conversations", "Ctrl+1", "Toggle conversations panel"));
-    menu->items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
-        TRF("menu.window.files", "Files"),
-        "files", "Ctrl+2", "Toggle files panel"));
-    menu->items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
-        TRF("menu.window.chat", "Chat"),
-        "chat", "Ctrl+3", "Toggle chat panel"));
-    menu->items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
-        TRF("menu.window.rag", "RAG"),
-        "rag", "Ctrl+4", "Toggle RAG panel"));
-    menu->items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
-        TRF("menu.window.agents", "Agents"),
-        "agents", "Ctrl+5", "Toggle agents panel"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
+    // Переключатели окон вынесены в меню Window (populateWindowMenu формирует
+    // его динамически из WindowManager). Здесь остаются только элементы вида.
 
     // Подменю "Рабочая область" (перенесено из меню "Окно")
     AdvancedMenuItem workspace_submenu;
@@ -231,13 +212,6 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createViewMenu() {
         TRF("menu.window.workspace.reset", "Сбросить"),
         "reset_workspace", "", "Сбросить к настройкам по умолчанию"));
     menu->items.push_back(workspace_submenu);
-
-    menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
-
-    // Дополнительные элементы вида
-    menu->items.push_back(AdvancedMenuItemFactory::createWindowToggleItem(
-        TRF("menu.view.status_bar", "Status Bar"),
-        "status_bar", "", "Toggle status bar"));
 
     menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
 
@@ -484,7 +458,7 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createPerformanceMenu() {
 
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.performance.settings", "Performance Settings"),
-        "open_performance_settings", "", "Open performance settings"));
+        "open_settings_performance", "", "Open performance settings"));
 
     menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
 
@@ -540,7 +514,7 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createLoggingMenu() {
 
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.logging.settings", "Logging Settings"),
-        "open_logging_settings", "", "Configure logging"));
+        "open_settings_logging", "", "Configure logging"));
 
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.logging.view_logs", "View Logs"),

@@ -197,7 +197,6 @@ void host_menu_add_separator(LlamaPluginHost* host, LlamaPluginMenu* menu) {
                          ? ("__plugin_sep__" + pd->plugin->info.name)
                          : "__plugin_sep__";
     separator.type = ui::AdvancedMenuItemType::Separator;
-    separator.separator = true;
     ms->addMenuItem(handle->name, separator);
 
     // Сохраняем разделитель для восстановления после перестройки меню приложением.

@@ -271,6 +271,13 @@ public:
     nlohmann::json toJson() const;
     
     /**
+     * @brief Сериализовать в JSON объект без захвата мьютекса
+     * @details Вызывать ТОЛЬКО уже удерживая pimpl_->mutex
+     * @return JSON объект
+     */
+    nlohmann::json toJsonUnlocked() const;
+    
+    /**
      * @brief Загрузить из JSON объекта
      * @param json JSON объект
      */

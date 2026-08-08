@@ -20,8 +20,8 @@ ServerManager::ServerManager(Settings& settings)
     : settings_(settings)
     , server_running_(false)
     , shutting_down_(false)
-    , server_port_(8081)
-    , server_host_("localhost") {
+    , server_port_(settings.server_runtime().port > 0 ? settings.server_runtime().port : 8081)
+    , server_host_(settings.server_runtime().host.empty() ? "127.0.0.1" : settings.server_runtime().host) {
     // Get server binary path from settings, with auto-detect fallback
     server_binary_path_ = settings_.server_runtime().server_binary_path;
     

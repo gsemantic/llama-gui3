@@ -337,8 +337,11 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
         if (data.contains("choices") && data["choices"].is_array() && !data["choices"].empty()) {
             const auto& choice = data["choices"][0];
             if (choice.contains("message") && choice["message"].contains("content")) {
-                std::string raw_content = choice["message"]["content"].get<std::string>();
-                response.content = sanitize_response_text(raw_content);
+                const auto& content = choice["message"]["content"];
+                // Zhipu/GLM могут возвращать content массивом частей — берём только строку
+                if (content.is_string()) {
+                    response.content = sanitize_response_text(content.get<std::string>());
+                }
             }
             response.finish_reason = choice.value("finish_reason", "");
         }

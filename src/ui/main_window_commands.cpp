@@ -355,35 +355,10 @@ void MainWindow::connectSettingsMenuCommands() {
         nullptr
     ));
 
-    registerCommand("open_settings_ini_viewer", CommandFactory::createFunctionalCommand(
-        "open_settings_ini_viewer",
-        [this]() {
-            settings_viewer_dialog_->show();
-            window_coordinator_.bringToFront("settings_viewer");
-        },
-        "Open INI Settings Viewer",
-        "",
-        nullptr
-    ));
+    // Меню Performance и Logging (Admin workspace) используют те же команды,
+    // что и вкладки System в меню Settings.
 
-    // Команды меню Performance и Logging (Admin workspace) — реальные вкладки настроек
-    registerCommand("open_performance_settings", CommandFactory::createFunctionalCommand(
-        "open_performance_settings",
-        [this]() { settings_dialog_->show_performance_settings(); },
-        "Open Performance Settings",
-        "",
-        nullptr
-    ));
-
-    registerCommand("open_logging_settings", CommandFactory::createFunctionalCommand(
-        "open_logging_settings",
-        [this]() { settings_dialog_->show_logging_settings(); },
-        "Open Logging Settings",
-        "",
-        nullptr
-    ));
-
-    commands_count = 24;
+    commands_count = 21;
 
     std::cout << "✓ Connected settings menu commands (" << commands_count << " commands)" << std::endl;
 }

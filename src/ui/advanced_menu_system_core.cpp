@@ -306,9 +306,7 @@ AdvancedMenuItem createCommandItem(const std::string& name, const std::string& c
 
 AdvancedMenuItem createSeparator() {
     AdvancedMenuItem item;
-    item.name = "";
     item.type = AdvancedMenuItemType::Separator;
-    item.separator = true;
     return item;
 }
 

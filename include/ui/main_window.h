@@ -235,7 +235,6 @@ private:
     void reload_fonts();  // Перезагрузка шрифтов при смене языка
 
     // Main render loop
-    void render_frame();
     void render_ui();
 
     // UI setup
@@ -243,7 +242,6 @@ private:
     void on_first_frame();
     
     // Menu bar and main layout
-    void render_menu_bar_once();
     void render_main_layout();
     void render_status_bar();
     
