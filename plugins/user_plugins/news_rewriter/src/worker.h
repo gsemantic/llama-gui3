@@ -14,6 +14,7 @@
 #include "common.h"
 #include "config.h"
 #include "fetcher.h"
+#include "rewriter.h"
 
 namespace news_rewriter {
 
@@ -72,12 +73,14 @@ public:
     WorkerState snapshot() const;
     void set_log_callback(LogFn cb);      // main-поток: перенаправление в host log
     void set_fetcher(std::unique_ptr<IFetch> fetcher);  // тесты: подмена загрузчика
+    void set_llm(LlmFn llm);              // main-поток: рерайт (только worker)
     void stop_and_join();
 
 private:
     void loop();
     void process_run(const Config& cfg);
     void process_source(const Config& cfg, const SourceConfig& src);
+    bool rewrite(Article& a, const Config& cfg);  // рерайт статьи (worker)
     void log(const std::string& msg);
     void set_status(const Article& a, const std::string& msg);
 
@@ -94,6 +97,7 @@ private:
     std::vector<Article> pipeline_;       // полные данные конвейера
     LogFn log_callback_;
     std::unique_ptr<IFetch> fetcher_;
+    LlmFn llm_;
 };
 
 } // namespace news_rewriter

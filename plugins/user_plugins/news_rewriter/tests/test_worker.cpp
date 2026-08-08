@@ -215,6 +215,71 @@ static void test_worker_extracts_page_title_and_body() {
     worker.stop_and_join();
 }
 
+static void test_worker_llm_rewrites_articles() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) { return one_item("https://a.example/rss"); };
+    worker.set_fetcher(std::move(fetcher));
+
+    std::atomic<int> llm_calls{0};
+    worker.set_llm([&](const std::string& prompt, std::string& response, std::string&) -> bool {
+        llm_calls++;
+        TEST_ASSERT(prompt.find("{title}") == std::string::npos);  // подстановки применены
+        response = "Новый заголовок\n\nНовый текст";
+        return true;
+    });
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Done);
+    TEST_ASSERT_EQUAL(llm_calls.load(), 1);
+
+    worker.stop_and_join();
+}
+
+static void test_worker_llm_error_marks_article() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) { return one_item("https://a.example/rss"); };
+    worker.set_fetcher(std::move(fetcher));
+
+    worker.set_llm([](const std::string&, std::string&, std::string& error) -> bool {
+        error = "LLM не подключён";
+        return false;
+    });
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Error);
+    TEST_ASSERT_EQUAL(state.articles[0].error, "LLM не подключён");
+
+    worker.stop_and_join();
+}
+
 static void test_worker_ignores_rerun_while_running() {
     Worker worker;
     worker.set_config(make_test_config());
@@ -291,6 +356,8 @@ static void test_worker_no_fetcher_reports_error() {
 REGISTER_TEST(test_worker_run_completes);
 REGISTER_TEST(test_worker_extracts_rss_item_title);
 REGISTER_TEST(test_worker_extracts_page_title_and_body);
+REGISTER_TEST(test_worker_llm_rewrites_articles);
+REGISTER_TEST(test_worker_llm_error_marks_article);
 REGISTER_TEST(test_worker_config_reload);
 REGISTER_TEST(test_worker_does_not_run_disabled_sources);
 REGISTER_TEST(test_worker_ignores_rerun_while_running);

@@ -62,6 +62,11 @@ void Worker::set_fetcher(std::unique_ptr<IFetch> fetcher) {
     fetcher_ = std::move(fetcher);
 }
 
+void Worker::set_llm(LlmFn llm) {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    llm_ = std::move(llm);
+}
+
 void Worker::log(const std::string& msg) {
     std::lock_guard<std::mutex> lock(data_mutex_);
     state_.last_message = msg;
@@ -100,6 +105,27 @@ void Worker::set_status(const Article& a, const std::string& msg) {
         if (!view_found) state_.articles.push_back(view_of(a));
     }
     log(msg);
+}
+
+// Рерайт статьи через LLM (если настроен). Возвращает true, если рерайт
+// успешен или LLM не нужен; false — при ошибке (статья помечена Error).
+bool Worker::rewrite(Article& a, const Config& cfg) {
+    if (!llm_) {
+        a.status = TaskStatus::Done;
+        return true;
+    }
+    a.status = TaskStatus::Rewriting;
+    set_status(a, "рерайт: " + a.title_original);
+    const RewriteResult rr = rewrite_article(a, cfg.rewrite, llm_);
+    if (!rr.ok) {
+        a.status = TaskStatus::Error;
+        a.error = rr.error;
+        return false;
+    }
+    a.title_rewritten = rr.title;
+    a.body_rewritten = rr.body;
+    a.status = TaskStatus::Done;
+    return true;
 }
 
 void Worker::loop() {
@@ -219,13 +245,16 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
         a.title_original = ex.title;
         a.body_original = ex.body;
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
-        a.status = TaskStatus::Done;
+        if (!rewrite(a, cfg)) {
+            set_status(a, "ошибка рерайта: " + src.url + " — " + a.error);
+            return;
+        }
         set_status(a, "страница: " + (a.title_original.empty()
                                           ? src.url : a.title_original));
         return;
     }
 
-    // rss/atom: каждая новость — отдельная статья. Рерайт — с этапа 3.
+    // rss/atom: каждая новость — отдельная статья.
     for (const auto& item : res.items) {
         Article a;
         a.url = item.link.empty() ? src.url : item.link;
@@ -238,7 +267,10 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
         a.title_original = html_to_text(item.title);
         a.body_original = ex.body;
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
-        a.status = TaskStatus::Done;
+        if (!rewrite(a, cfg)) {
+            set_status(a, "ошибка рерайта: " + a.title_original + " — " + a.error);
+            continue;
+        }
         set_status(a, "новость: " + a.title_original);
     }
 

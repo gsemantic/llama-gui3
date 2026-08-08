@@ -34,6 +34,7 @@ set(NEWS_REWRITER_CORE_SOURCES
     src/xml.cpp
     src/fetcher.cpp
     src/extractor.cpp
+    src/rewriter.cpp
     src/worker.cpp
 )
 
@@ -75,6 +76,7 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_xml.cpp
         tests/test_fetcher.cpp
         tests/test_extractor.cpp
+        tests/test_rewriter.cpp
     )
     target_include_directories(news_rewriter_tests PRIVATE ${NEWS_REWRITER_INCLUDES})
     target_link_libraries(news_rewriter_tests PRIVATE news_rewriter_core)

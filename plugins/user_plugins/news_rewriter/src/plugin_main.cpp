@@ -78,7 +78,7 @@ static void cmd_about(void*) {
     if (g_api && g_host) {
         g_api->dialog_info(g_host, "News Rewriter",
                            "Агент: обход адресов, рерайт новостей через LLM, "
-                           "сохранение локально. v0.1.0 (этап 0: каркас).");
+                           "сохранение локально. v0.1.0 (этап 3: рерайт).");
     }
 }
 
@@ -128,6 +128,26 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         if (g_api && g_host) {
             g_api->log(g_host, LLAMA_LOG_INFO, msg.c_str());
         }
+    });
+    g_worker->set_llm([](const std::string& prompt,
+                         std::string& response, std::string& error) -> bool {
+        if (!g_api || !g_host) {
+            error = "хост недоступен";
+            return false;
+        }
+        if (g_api->llm_is_connected && g_api->llm_is_connected(g_host) != 1) {
+            error = "LLM не подключён (нет активного сервера/облака)";
+            return false;
+        }
+        char* out = nullptr;
+        const int rc = g_api->llm_complete(g_host, prompt.c_str(), &out);
+        if (rc != 1 || !out) {
+            error = "LLM вернул ошибку (код " + std::to_string(rc) + ")";
+            return false;
+        }
+        response = out;
+        g_api->free_string(g_host, out);
+        return true;
     });
     g_worker->start();
 
