@@ -1,0 +1,21 @@
+{
+    "$schema": "../plugin.schema.json",
+    "name": "news_rewriter",
+    "version": "0.1.0",
+    "description": "Агент: сбор новостей с указанных адресов, рерайт через LLM, сохранение локально",
+    "author": "llama-gui",
+    "api_version": "1.0.0",
+    "library": "libnews_rewriter.so",
+    "permissions": [
+        "network",
+        "filesystem_write",
+        "llm_access"
+    ],
+    "capabilities": [
+        "news_rewriter",
+        "ui_window",
+        "scheduler"
+    ],
+    "tags": ["news", "rewrite", "agent", "rss"],
+    "platforms": ["linux"]
+}

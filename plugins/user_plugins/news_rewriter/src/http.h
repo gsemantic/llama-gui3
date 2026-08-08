@@ -1,0 +1,43 @@
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <string>
+
+#include "config.h"
+
+namespace news_rewriter {
+
+// Результат HTTP-запроса.
+struct HttpResponse {
+    bool ok = false;          // транспонировалось ли (сеть/таймаут/обрезка)
+    int status = 0;           // HTTP-код (200, 404, ...)
+    std::string body;
+    std::string final_url;    // после редиректов
+    std::string error;
+};
+
+// HTTP-клиент на libcurl, загружаемом в рантайме через dlopen.
+// Полностью изолирован от системы сборки приложения (никаких линк-зависимостей).
+class HttpClient {
+public:
+    HttpClient();
+    ~HttpClient();
+
+    HttpClient(const HttpClient&) = delete;
+    HttpClient& operator=(const HttpClient&) = delete;
+
+    // Загружает libcurl и резолвит символы. Безопасно вызвать один раз.
+    bool init();
+    bool is_available() const { return available_; }
+
+    HttpResponse get(const std::string& url, const NetworkConfig& cfg,
+                     std::size_t max_bytes = 5 * 1024 * 1024);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    bool available_ = false;
+};
+
+} // namespace news_rewriter
