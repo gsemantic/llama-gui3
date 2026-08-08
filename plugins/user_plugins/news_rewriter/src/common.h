@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "json.h"
+
 namespace news_rewriter {
 
 // Общий колбэк логирования (main-поток перенаправляет в host log).
@@ -48,5 +50,8 @@ std::string iso8601_now();
 
 // Метка источника из URL (хост без схемы и порта).
 std::string host_of(const std::string& url);
+
+// Сериализация статьи в JSON (общая для Storage и Sink-ов).
+Json article_to_json(const Article& a);
 
 } // namespace news_rewriter

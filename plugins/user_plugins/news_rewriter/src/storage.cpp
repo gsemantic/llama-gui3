@@ -52,21 +52,6 @@ bool write_file(const fs::path& p, const std::string& content) {
     return out.good();
 }
 
-Json article_to_json(const Article& a) {
-    Json j = Json::object();
-    j["id"] = a.id;
-    j["url"] = a.url;
-    j["source"] = a.source;
-    j["fetched_at"] = a.fetched_at;
-    j["title_original"] = a.title_original;
-    j["body_original"] = a.body_original;
-    j["title_rewritten"] = a.title_rewritten;
-    j["body_rewritten"] = a.body_rewritten;
-    j["language"] = a.language;
-    j["content_hash"] = a.content_hash;
-    return j;
-}
-
 } // namespace
 
 bool Storage::init(const std::string& data_dir) {

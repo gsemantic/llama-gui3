@@ -31,6 +31,9 @@ const CURLoption kOptWriteFunction = 20011;
 const CURLoption kOptWriteData = 10001;
 const CURLoption kOptProxy = 10004;
 const CURLoption kOptHttpHeader = 10023;
+const CURLoption kOptPost = 47;               // CURLOPT_POST
+const CURLoption kOptPostFields = 10015;      // CURLOPT_POSTFIELDS
+const CURLoption kOptPostFieldSize = 60;      // CURLOPT_POSTFIELDSIZE
 
 // CURLINFO_* (код = тип-маска | номер)
 const CURLINFO kInfoResponseCode = 0x200000 + 2;  // CURLINFO_RESPONSE_CODE
@@ -103,6 +106,21 @@ std::size_t write_cb(char* ptr, std::size_t size, std::size_t nmemb, void* userd
     return chunk;
 }
 
+// Разбивает "Header: value\n..." на строки и добавляет в curl-slist.
+curl_slist* append_header_lines(curl_slist* sl, const std::string& text,
+                                curl_slist* (*append_fn)(curl_slist*, const char*)) {
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t nl = text.find('\n', start);
+        const std::string line = text.substr(
+            start, nl == std::string::npos ? std::string::npos : nl - start);
+        if (!line.empty()) sl = append_fn(sl, line.c_str());
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+    return sl;
+}
+
 } // namespace
 
 struct HttpClient::Impl {
@@ -166,6 +184,71 @@ HttpResponse HttpClient::get(const std::string& url, const NetworkConfig& cfg,
         }
         if (headers) b.curl_easy_setopt(easy, kOptHttpHeader, headers);
     }
+
+    const CURLcode rc = b.curl_easy_perform(easy);
+    if (rc != 0) {
+        resp.error = b.curl_easy_strerror ? b.curl_easy_strerror(rc) : "curl error";
+        if (ctx.overflow) resp.error = "ответ превышает лимит размера";
+    } else {
+        resp.ok = true;
+        long code = 0;
+        b.curl_easy_getinfo(easy, kInfoResponseCode, &code);
+        resp.status = static_cast<int>(code);
+        char* eff = nullptr;
+        if (b.curl_easy_getinfo(easy, kInfoEffectiveUrl, &eff) == 0 && eff) {
+            resp.final_url = eff;
+        }
+    }
+
+    if (headers) b.curl_slist_free_all(headers);
+    b.curl_easy_cleanup(easy);
+    return resp;
+}
+
+HttpResponse HttpClient::post(const std::string& url, const std::string& body,
+                              const NetworkConfig& cfg,
+                              const std::vector<std::string>& extra_headers,
+                              std::size_t max_bytes) {
+    HttpResponse resp;
+    if (!available_ || !impl_->curl.loaded) {
+        resp.error = "libcurl недоступен (dlopen не удался)";
+        return resp;
+    }
+
+    CurlBind& b = impl_->curl;
+    CURL* easy = b.curl_easy_init();
+    if (!easy) {
+        resp.error = "curl_easy_init не удался";
+        return resp;
+    }
+
+    WriteCtx ctx{&resp.body, max_bytes, false};
+
+    b.curl_easy_setopt(easy, kOptUrl, url.c_str());
+    b.curl_easy_setopt(easy, kOptTimeout, static_cast<long>(cfg.timeout_seconds));
+    b.curl_easy_setopt(easy, kOptConnectTimeout, static_cast<long>(cfg.timeout_seconds));
+    b.curl_easy_setopt(easy, kOptFollowLocation, 1L);
+    b.curl_easy_setopt(easy, kOptMaxRedirs, 10L);
+    b.curl_easy_setopt(easy, kOptNoSignal, 1L);
+    b.curl_easy_setopt(easy, kOptWriteFunction, reinterpret_cast<void*>(write_cb));
+    b.curl_easy_setopt(easy, kOptWriteData, &ctx);
+    b.curl_easy_setopt(easy, kOptPost, 1L);
+    b.curl_easy_setopt(easy, kOptPostFields, body.c_str());
+    b.curl_easy_setopt(easy, kOptPostFieldSize, static_cast<long>(body.size()));
+    if (!cfg.user_agent.empty()) {
+        b.curl_easy_setopt(easy, kOptUserAgent, cfg.user_agent.c_str());
+    }
+    if (!cfg.proxy.empty()) {
+        b.curl_easy_setopt(easy, kOptProxy, cfg.proxy.c_str());
+    }
+
+    curl_slist* headers = nullptr;
+    headers = append_header_lines(headers, cfg.extra_headers, b.curl_slist_append);
+    headers = b.curl_slist_append(headers, "Content-Type: application/json");
+    for (const std::string& h : extra_headers) {
+        if (!h.empty()) headers = b.curl_slist_append(headers, h.c_str());
+    }
+    if (headers) b.curl_easy_setopt(easy, kOptHttpHeader, headers);
 
     const CURLcode rc = b.curl_easy_perform(easy);
     if (rc != 0) {

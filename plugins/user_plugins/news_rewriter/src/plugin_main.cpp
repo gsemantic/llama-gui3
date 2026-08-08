@@ -133,8 +133,10 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         if (data_dir) g_worker->set_data_dir(data_dir);
     }
 
-    // Реестр sink-ов: v1 — только локальная запись на диск.
+    // Реестр sink-ов: v1 — запись на диск; этап 6 — отправка на сервер.
+    // Новые sink-ы добавляются здесь без правок ядра конвейера.
     SinkRegistry::instance().register_factory("local_file", make_local_file_sink);
+    SinkRegistry::instance().register_factory("http", make_http_sink);
 
     g_worker->set_log_callback([](const std::string& msg) {
         if (g_api && g_host) {

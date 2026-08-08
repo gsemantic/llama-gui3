@@ -18,7 +18,7 @@
 | 3 | Rewriter (LLM) | **реализован** |
 | 4 | Sink / Storage (диск, дедупликация) | **реализован** |
 | 5 | Scheduler (расписание, retry) | **реализован** |
-| 6 | Расширения (отправка на сервер и пр.) | запланирован |
+| 6 | Расширения (отправка на сервер и пр.) | 6.1 HttpSink — **реализован**; 6.2–6.3 — запланированы |
 
 ## Сборка
 
@@ -54,6 +54,11 @@ cmake --build build
   Сетевые сбои источника уходят в повторные попытки с backoff (5 с → 30 с →
   5 мин, `max_retries=3`); кнопка «Остановить обход» прерывает текущий обход и
   backoff мгновенно.
+- **Sink `http`** (этап 6.1): вместо локальной записи статьи можно отправлять
+  на сервер JSON-POST'ом (`article_to_json`, успех — HTTP 2xx). Параметры в
+  конфиге (`sink.params`): `url` (обязательный), `api_key` (→ заголовок
+  `Authorization: Bearer <key>`), `timeout_seconds` (20), `max_retries` (0),
+  `retry_delay_ms` (1000). Дедупликация остаётся на `index.json`.
 
 ## Тесты
 
@@ -77,6 +82,7 @@ src/extractor.*       — HTML→текст, title/body по маркерам/э
 src/rewriter.*        — промпт + рерайт через LLM, разбор ответа (этап 3)
 src/sink.h            — интерфейс Sink + реестр/фабрика (этап 4)
 src/sink_local_file.cpp — LocalFileSink: запись .json/.md на диск (этап 4)
+src/sink_http.cpp     — HttpSink: отправка статей JSON-POST на сервер (этап 6.1)
 src/storage.*         — каталоги, index.json, state.json, дедупликация (этап 4)
 src/scheduler.*       — расписание + политика ретраев (этап 5)
 src/worker.*          — фоновый поток + очередь команд + pipeline + таймер

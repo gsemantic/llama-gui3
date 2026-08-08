@@ -5,7 +5,8 @@
 готовности, порядок реализации и журнал решений. Читать вместе с
 `ARCHITECTURE.md`.
 
-Статус: **этапы 0–5 реализованы; этап 6 (расширения) следующий.**
+Статус: **этапы 0–5 и задача 6.1 (HttpSink) реализованы; остальные задачи
+этапа 6 — по мере надобности.**
 
 ---
 
@@ -30,6 +31,7 @@ plugins/user_plugins/news_rewriter/
 │   ├── rewriter.h/.cpp         # промпт-шаблон + llm_complete (только worker)
 │   ├── sink.h                  # интерфейс Sink + фабрика + реестр
 │   ├── sink_local_file.cpp     # LocalFileSink (v1)
+│   ├── sink_http.cpp           # HttpSink (этап 6.1): JSON-POST на сервер
 │   ├── storage.h / storage.cpp # структура каталогов, index.json, state.json, dedup
 │   ├── scheduler.h/.cpp        # расписание + политика ретраев (чистая логика)
 │   ├── worker.h / worker.cpp   # рабочий поток + потокобезопасная очередь команд
@@ -45,7 +47,8 @@ plugins/user_plugins/news_rewriter/
     ├── test_fetcher.cpp
     ├── test_extractor.cpp      # этап 2
     ├── test_storage.cpp        # этап 4
-    └── test_scheduler.cpp      # этап 5
+    ├── test_scheduler.cpp      # этап 5
+    └── test_sink_http.cpp      # этап 6.1 (HttpSink через MiniHttpServer)
 ```
 
 `user_plugins/CMakeLists.txt` (добавляется сейчас):
@@ -241,11 +244,16 @@ public:
 ```
 
 - v1: `LocalFileSink` (type `"local_file"`), регистрируется в `ll_plugin_init`.
-- Этап 6: `HttpSink` (type `"http"`) — регистрируется своим модулем, добавляется
-  **без правок** fetcher/extractor/rewriter/worker. Активный sink выбирается в
-  конфиге.
+- Этап 6.1 (✅): `HttpSink` (type `"http"`) — регистрируется в `ll_plugin_init`
+  (`make_http_sink`), добавляется **без правок** fetcher/extractor/rewriter/worker.
+  Активный sink выбирается в конфиге.
+  - Параметры (`cfg.params`): `url` (обязательный), `api_key` (→ заголовок
+    `Authorization: Bearer <key>`), `timeout_seconds` (по умолч. 20),
+    `max_retries` (по умолч. 0), `retry_delay_ms` (по умолч. 1000).
+  - Отправляет `article_to_json(article)` JSON-POST'ом; успех = HTTP 2xx.
 - `Storage&` передаётся, чтобы Sink не знал про каталоги, а только писал файлы
-  через интерфейс Storage (единая точка для index/state).
+  через интерфейс Storage (единая точка для index/state). HttpSink его не
+  использует для записи — дедупликация остаётся на index.json в Storage.
 
 ### 2.8 Storage (`storage.h`)
 
@@ -455,15 +463,21 @@ bool), повторяемые сетевые сбои уходят в retry с b
 
 ### Этап 6 — Расширения (масштабируемость)
 
-| # | Задача | Файлы | Критерий готовности |
-|---|---|---|---|
-| 6.1 | `HttpSink` (отправка на сервер: URL, API-ключ, ретраи) | `src/sink_http.cpp` (новый) | Выбирается из конфига; работает без правок ядра (проверка контракта Sink) |
-| 6.2 | Прокси/авторизация в HttpClient (`proxy`, `extra_headers`) | `src/http.cpp` | Уже заложено в `NetworkConfig`; интеграционный тест с локальным сервером |
-| 6.3 | Универсальный extractor (плотность текста) | `src/extractor.cpp` | Работает на страницах без маркеров; сравнимо с эвристикой на образцах |
-| 6.4 | Обновить ARCHITECTURE/PLAN по факту реализации | docs | Документация соответствует коду |
+| # | Задача | Файлы | Критерий готовности | Статус |
+|---|---|---|---|---|
+| 6.1 | `HttpSink` (отправка на сервер: URL, API-ключ, ретраи) | `src/sink_http.cpp` (новый), `tests/test_sink_http.cpp` | Выбирается из конфига; работает без правок ядра (проверка контракта Sink); тесты с локальным сервером (POST/2xx, 5xx, ретраи) | ✅ |
+| 6.2 | Прокси/авторизация в HttpClient (`proxy`, `extra_headers`) | `src/http.cpp` | Уже заложено в `NetworkConfig`; интеграционный тест с локальным сервером | запланирован |
+| 6.3 | Универсальный extractor (плотность текста) | `src/extractor.cpp` | Работает на страницах без маркеров; сравнимо с эвристикой на образцах | запланирован |
+| 6.4 | Обновить ARCHITECTURE/PLAN по факту реализации | docs | Документация соответствует коду | частично |
 
 **Критерий этапа:** новые возможности подключаются через конфиг/реестр без
-правок ядра плагина.
+правок ядра плагина. — **6.1 выполнен** (HttpSink регистрируется в
+`ll_plugin_init` рядом с `local_file`; worker не менялся).
+
+Реализация 6.1: `HttpClient::post()` (JSON-тело, `Content-Type:
+application/json`, дополнительные заголовки); `HttpSink` берёт параметры из
+`cfg.params`, шлёт `article_to_json(article)` и делает `max_retries` повторов с
+паузой `retry_delay_ms`; успех = HTTP 2xx.
 
 ---
 
@@ -492,7 +506,7 @@ bool), повторяемые сетевые сбои уходят в retry с b
 
 | Уровень | Инструмент | Что покрываем |
 |---|---|---|
-| Юнит-тесты плагина | Своя цель `news_rewriter_tests` (опция `BUILD_NEWS_REWRITER_TESTS`, использует копию `tests/test_framework.h` из приложения или свой мини-раннер) | json, xml, extractor, storage, scheduler (таймер с инъекцией часов), http (локальный сервер на std::thread+socket), worker (pipeline, расписание, retry через FakeFetcher) |
+| Юнит-тесты плагина | Своя цель `news_rewriter_tests` (опция `BUILD_NEWS_REWRITER_TESTS`, использует копию `tests/test_framework.h` из приложения или свой мини-раннер) | json, xml, extractor, storage, scheduler (таймер с инъекцией часов), http + sink_http (локальный сервер MiniHttpServer: GET/POST, статусы, ретраи), worker (pipeline, расписание, retry через FakeFetcher) |
 | Интеграция с хостом | `tests/core/test_plugin_loader` приложения | Загрузка/выгрузка `libnews_rewriter.so`, экспорт обязательных функций |
 | Ручной | GUI: запуск, меню, окно, обход реальных фидов | Поведение, отсутствие зависаний, файлы на диске |
 
@@ -518,8 +532,9 @@ bool), повторяемые сетевые сбои уходят в retry с b
 **Открытые вопросы (требуют решения перед этапами 3–4):**
 1. Хранить ли переписанный текст в RAG-индексе (через `rag_process_document`)?
    → требует решения на этапе 4/6.
-2. Формат отправки на сервер для HttpSink (JSON? поле подписи/подпись?) — на
-   этапе 6.
+2. Формат отправки на сервер для HttpSink — **решено**: `article_to_json`
+   (полный набор полей статьи), JSON-POST. Поле для подписи/подписи можно
+   добавить в параметрах sink-а при необходимости.
 3. Локализация UI (ru/en)? — на этапе 0, по умолчанию ru.
 
 ---

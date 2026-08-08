@@ -42,4 +42,9 @@ private:
 std::unique_ptr<Sink> make_local_file_sink(const SinkConfig& cfg, Storage& storage,
                                            const LogFn& log);
 
+// Фабрика HttpSink (этап 6). Регистрируется под "http"; отправляет статью
+// JSON-POST'ом на cfg.params.url (параметры: url, api_key, timeout_seconds).
+std::unique_ptr<Sink> make_http_sink(const SinkConfig& cfg, Storage& storage,
+                                     const LogFn& log);
+
 } // namespace news_rewriter

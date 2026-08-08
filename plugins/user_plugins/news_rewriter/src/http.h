@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "config.h"
 
@@ -33,6 +34,13 @@ public:
 
     HttpResponse get(const std::string& url, const NetworkConfig& cfg,
                      std::size_t max_bytes = 5 * 1024 * 1024);
+
+    // POST с JSON-телом; extra_headers (напр. Authorization) добавляются к
+    // заголовкам из cfg.extra_headers. Используется HttpSink (этап 6).
+    HttpResponse post(const std::string& url, const std::string& body,
+                      const NetworkConfig& cfg,
+                      const std::vector<std::string>& extra_headers = {},
+                      std::size_t max_bytes = 5 * 1024 * 1024);
 
 private:
     struct Impl;
