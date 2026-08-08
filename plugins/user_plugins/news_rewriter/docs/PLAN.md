@@ -5,7 +5,7 @@
 готовности, порядок реализации и журнал решений. Читать вместе с
 `ARCHITECTURE.md`.
 
-Статус: **этапы 0–1 реализованы; этап 2 (Extractor) следующий.**
+Статус: **этапы 0–2 реализованы; этап 3 (Rewriter) следующий.**
 
 ---
 
@@ -26,8 +26,7 @@ plugins/user_plugins/news_rewriter/
 │   ├── http.h / http.cpp       # обёртка над libcurl (dlopen, см. журнал решений)
 │   ├── xml.h / xml.cpp         # мини XML-парсер (RSS 2.0 / Atom)
 │   ├── fetcher.h / fetcher.cpp # загрузка по URL, разбор фидов/страниц
-│   ├── extractor.h/.cpp        # HTML→текст + извлечение title/body
-│   ├── rewriter.h/.cpp         # промпт-шаблон + llm_complete (только worker)
+│   ├── extractor.h/.cpp        # HTML→текст + извлечение title/body│   ├── rewriter.h/.cpp         # промпт-шаблон + llm_complete (только worker)
 │   ├── sink.h                  # интерфейс Sink + фабрика + реестр
 │   ├── sink_local_file.cpp     # LocalFileSink (v1)
 │   ├── storage.h / storage.cpp # структура каталогов, index.json, state.json, dedup
@@ -369,15 +368,15 @@ private:
 **Критерий этапа:** реальный RSS-фид грузится и выводится в лог/список без
 обработки текста. Коммит. — **выполнен.**
 
-### Этап 2 — Extractor
+### Этап 2 — Extractor ✅
 
-| # | Задача | Файлы | Критерий готовности |
-|---|---|---|---|
-| 2.1 | HTML→текст: теги, сущности, нормализация | `src/extractor.cpp` | Тест на образцах HTML даёт чистый текст без рекламы/скриптов/меню |
-| 2.2 | Извлечение title/body по маркерам + эвристика | `src/extractor.h/.cpp`, `tests/test_extractor.cpp` | Из образцов страниц/описаний достаются корректные заголовок и текст |
-| 2.3 | Wire extractor в pipeline, стадии `Extracting` | `src/worker.cpp` | В snapshot видны `title_original`/`body_original` |
+| # | Задача | Файлы | Критерий готовности | Статус |
+|---|---|---|---|---|
+| 2.1 | HTML→текст: теги, сущности, нормализация | `src/extractor.cpp` | Тест на образцах HTML даёт чистый текст без рекламы/скриптов/меню | ✅ |
+| 2.2 | Извлечение title/body по маркерам + эвристика | `src/extractor.h/.cpp`, `tests/test_extractor.cpp` | Из образцов страниц/описаний достаются корректные заголовок и текст | ✅ |
+| 2.3 | Wire extractor в pipeline, стадии `Extracting` | `src/worker.cpp` | В snapshot видны `title_original`/`body_original` | ✅ |
 
-**Критерий этапа:** по реальным страницам извлекается связный текст. Коммит.
+**Критерий этапа:** по реальным страницам извлекается связный текст. Коммит. — **выполнен.**
 
 ### Этап 3 — Rewriter
 

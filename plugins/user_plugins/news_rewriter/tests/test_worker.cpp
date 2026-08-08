@@ -44,6 +44,15 @@ FetchResult one_item(const std::string& url) {
     return r;
 }
 
+// Возвращает сырую HTML-страницу.
+FetchResult one_page(const std::string& html) {
+    FetchResult r;
+    r.ok = true;
+    r.http_status = 200;
+    r.html = html;
+    return r;
+}
+
 } // namespace
 
 static bool wait_until(const std::function<bool()>& cond, int timeout_ms = 5000) {
@@ -137,6 +146,75 @@ static void test_worker_does_not_run_disabled_sources() {
     worker.stop_and_join();
 }
 
+static void test_worker_extracts_rss_item_title() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = true;
+        r.http_status = 200;
+        FeedItem item;
+        item.title = "<b>Важная &amp; новость</b>";
+        item.link = "https://a.example/news/1";
+        item.description = "<p>Описание с <script>var x=1;</script>тегом.</p>";
+        r.items.push_back(item);
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    // заголовок очищен от тегов и сущностей
+    TEST_ASSERT_EQUAL(state.articles[0].title, "Важная & новость");
+
+    worker.stop_and_join();
+}
+
+static void test_worker_extracts_page_title_and_body() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/page", "page", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) {
+        return one_page(
+            "<html><head><title>Сайт</title></head><body>"
+            "<h1>Заголовок статьи</h1>"
+            "<p>Первый абзац длинного текста новости.</p>"
+            "<p>Второй абзац ещё длиннее, он и должен стать основным текстом "
+            "при эвристике по самому длинному блоку.</p>"
+            "</body></html>");
+    };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_EQUAL(state.articles[0].title, "Заголовок статьи");
+
+    worker.stop_and_join();
+}
+
 static void test_worker_ignores_rerun_while_running() {
     Worker worker;
     worker.set_config(make_test_config());
@@ -211,6 +289,8 @@ static void test_worker_no_fetcher_reports_error() {
 }
 
 REGISTER_TEST(test_worker_run_completes);
+REGISTER_TEST(test_worker_extracts_rss_item_title);
+REGISTER_TEST(test_worker_extracts_page_title_and_body);
 REGISTER_TEST(test_worker_config_reload);
 REGISTER_TEST(test_worker_does_not_run_disabled_sources);
 REGISTER_TEST(test_worker_ignores_rerun_while_running);

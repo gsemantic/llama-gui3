@@ -2,6 +2,8 @@
 
 #include <chrono>
 
+#include "extractor.h"
+
 namespace news_rewriter {
 
 Worker::Worker() : fetcher_(std::make_unique<Fetcher>()) {}
@@ -69,7 +71,7 @@ void Worker::log(const std::string& msg) {
 namespace {
 
 ArticleStatusView view_of(const Article& a) {
-    return ArticleStatusView{a.url, a.source, a.status, a.error, a.retry_count};
+    return ArticleStatusView{a.url, a.source, a.title_original, a.status, a.error, a.retry_count};
 }
 
 } // namespace
@@ -211,10 +213,15 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
 
     if (src.type == "page") {
         Article a = make_source_article();
+        a.status = TaskStatus::Extracting;
+        set_status(a, "извлечение текста: " + src.url);
+        const ExtractedArticle ex = extract_page(res.html, src.extract);
+        a.title_original = ex.title;
+        a.body_original = ex.body;
+        a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
         a.status = TaskStatus::Done;
-        a.body_original = res.html;
-        set_status(a, "загружена страница: " + src.url +
-                      " (" + std::to_string(res.html.size()) + " байт)");
+        set_status(a, "страница: " + (a.title_original.empty()
+                                          ? src.url : a.title_original));
         return;
     }
 
@@ -226,8 +233,10 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
         a.source = host_of(src.url);
         a.fetched_at = iso8601_now();
         a.language = cfg.rewrite.language;
-        a.title_original = item.title;
-        a.body_original = item.description;
+        a.status = TaskStatus::Extracting;
+        const ExtractedArticle ex = extract_from_description(item.description);
+        a.title_original = html_to_text(item.title);
+        a.body_original = ex.body;
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
         a.status = TaskStatus::Done;
         set_status(a, "новость: " + a.title_original);

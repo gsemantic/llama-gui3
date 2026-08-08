@@ -36,6 +36,7 @@ struct Command {
 struct ArticleStatusView {
     std::string url;
     std::string source;
+    std::string title;              // извлечённый заголовок (title_original)
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;
