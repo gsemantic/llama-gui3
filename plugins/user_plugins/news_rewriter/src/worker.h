@@ -15,6 +15,7 @@
 #include "config.h"
 #include "fetcher.h"
 #include "rewriter.h"
+#include "scheduler.h"
 #include "sink.h"
 #include "storage.h"
 
@@ -24,7 +25,8 @@ namespace news_rewriter {
 enum class CmdType {
     RunNow,          // обойти все включённые источники
     Stop,            // прервать текущий обход
-    ReloadConfig     // arg = JSON-конфигурация (обновить снапшот)
+    ReloadConfig,    // arg = JSON-конфигурация (обновить снапшот)
+    DebugForceDue    // тесты/отладка: сделать авто-запуск "пора сейчас"
 };
 
 struct Command {
@@ -49,6 +51,8 @@ struct ArticleStatusView {
 struct WorkerState {
     bool worker_active = false;   // поток запущен
     bool running = false;         // идёт обход
+    bool scheduled = false;       // расписание включено (schedule_minutes > 0)
+    int next_run_in_seconds = -1; // до авто-запуска (-1 = расписание выключено)
     int pending_tasks = 0;
     std::uint64_t last_run_unix = 0;
     std::string last_message;
@@ -77,14 +81,20 @@ public:
     void set_fetcher(std::unique_ptr<IFetch> fetcher);  // тесты: подмена загрузчика
     void set_llm(LlmFn llm);              // main-поток: рерайт (только worker)
     void set_data_dir(const std::string& data_dir);  // main: корень Storage
+    void set_retry_policy(const RetryPolicy& retry);  // тесты: ретраи без пауз
+    void debug_force_schedule_due();      // тесты: авто-запуск немедленно
     void stop_and_join();
 
 private:
     void loop();
     void process_run(const Config& cfg);
-    void process_source(const Config& cfg, const SourceConfig& src);
+    // Возвращает true, если источник обработан до конца (или сбой постоянный);
+    // false — повторяемый сбой (сеть/таймаут), caller выполняет retry.
+    bool process_source(const Config& cfg, const SourceConfig& src, uint32_t retries);
     bool rewrite(Article& a, const Config& cfg);  // рерайт статьи (worker)
     bool export_article(const Config& cfg, Article& a);  // рерайт + Sink
+    bool sleep_interruptible(const std::chrono::seconds& delay);
+    void remove_stale_source_error(const std::string& url);
     void log(const std::string& msg);
     void set_status(const Article& a, const std::string& msg);
 
@@ -94,6 +104,7 @@ private:
     std::queue<Command> queue_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> cancel_{false};
+    std::atomic<bool> thread_done_{false};
 
     mutable std::mutex data_mutex_;
     Config config_;
@@ -102,7 +113,9 @@ private:
     LogFn log_callback_;
     std::unique_ptr<IFetch> fetcher_;
     LlmFn llm_;
+    RetryPolicy retry_policy_;
     Storage storage_;
+    Scheduler scheduler_;                 // только worker-поток
 };
 
 } // namespace news_rewriter

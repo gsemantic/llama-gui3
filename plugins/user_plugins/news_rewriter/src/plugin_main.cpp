@@ -78,8 +78,9 @@ static void cmd_run(void*) {
 static void cmd_about(void*) {
     if (g_api && g_host) {
         g_api->dialog_info(g_host, "News Rewriter",
-                           "Агент: обход адресов, рерайт новостей через LLM, "
-                           "сохранение локально. v0.1.0 (этап 3: рерайт).");
+                           "Агент: обход адресов по расписанию, рерайт новостей "
+                           "через LLM, сохранение локально. v0.1.0 "
+                           "(этап 5: scheduler, retry).");
     }
 }
 

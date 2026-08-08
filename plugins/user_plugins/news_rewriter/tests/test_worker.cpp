@@ -388,6 +388,9 @@ static void test_worker_fetch_error_marks_article() {
         return r;
     };
     worker.set_fetcher(std::move(fetcher));
+    RetryPolicy rp;   // тест про маркировку ошибки, а не про ретраи
+    rp.max_retries = 0;
+    worker.set_retry_policy(rp);
     TEST_ASSERT_TRUE(worker.start());
 
     worker.post(Command{CmdType::RunNow});
@@ -403,6 +406,152 @@ static void test_worker_fetch_error_marks_article() {
         TEST_ASSERT_TRUE(a.status == TaskStatus::Error);
         TEST_ASSERT_EQUAL(a.error, "сеть недоступна");
     }
+
+    worker.stop_and_join();
+}
+
+static void test_worker_runs_scheduled_autonomously() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.schedule_minutes = 60;   // расписание включено
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string& url, const std::string&) { return one_item(url); };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.debug_force_schedule_due();   // без команды RunNow — по расписанию
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_TRUE(state.scheduled);
+    TEST_ASSERT_TRUE(state.next_run_in_seconds > 0);  // таймер сброшен после запуска
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+
+    worker.stop_and_join();
+}
+
+static void test_worker_retries_failing_source() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.schedule_minutes = 0;   // без расписания
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    FakeFetcher* f = fetcher.get();
+    std::atomic<int> fail_until{2};   // первые 2 вызова — сеть недоступна
+    f->impl = [&](const std::string& url, const std::string&) {
+        if (fail_until.load() > 0) {
+            fail_until--;
+            FetchResult r;
+            r.ok = false;
+            r.error = "сеть недоступна";
+            return r;
+        }
+        return one_item(url);
+    };
+    worker.set_fetcher(std::move(fetcher));
+    RetryPolicy rp;
+    rp.max_retries = 2;
+    rp.backoff_seconds = {0, 0, 0};   // без пауз — тест быстрый
+    worker.set_retry_policy(rp);
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    // 2 неудачи + 1 успех = 3 вызова; в снапшоте — только статья (успешная).
+    TEST_ASSERT_EQUAL(f->calls.load(), 3);
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Done);
+
+    worker.stop_and_join();
+}
+
+static void test_worker_retries_exhausted_marks_error() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.schedule_minutes = 0;
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    FakeFetcher* f = fetcher.get();
+    f->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = false;
+        r.error = "сеть недоступна";
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    RetryPolicy rp;
+    rp.max_retries = 2;
+    rp.backoff_seconds = {0, 0};
+    worker.set_retry_policy(rp);
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    // 1 первичная + 2 ретрая = 3 вызова, статья Error с retry_count=2.
+    TEST_ASSERT_EQUAL(f->calls.load(), 3);
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Error);
+    TEST_ASSERT_EQUAL(state.articles[0].retry_count, 2);
+
+    worker.stop_and_join();
+}
+
+static void test_worker_stop_aborts_backoff() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.schedule_minutes = 0;
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    FakeFetcher* f = fetcher.get();
+    f->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = false;
+        r.error = "сеть недоступна";
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    RetryPolicy rp;
+    rp.max_retries = 10;
+    rp.backoff_seconds = {300};   // долгий backoff — проверяем прерывание
+    worker.set_retry_policy(rp);
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    TEST_ASSERT_TRUE(wait_until([&] { return f->calls.load() >= 1; }));  // вошёл в обход
+    worker.post(Command{CmdType::Stop});
+
+    const bool stopped = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false;
+    }, 2000);
+    TEST_ASSERT_TRUE(stopped);   // backoff прерван, поток не завис
 
     worker.stop_and_join();
 }
@@ -440,3 +589,7 @@ REGISTER_TEST(test_worker_does_not_run_disabled_sources);
 REGISTER_TEST(test_worker_ignores_rerun_while_running);
 REGISTER_TEST(test_worker_fetch_error_marks_article);
 REGISTER_TEST(test_worker_no_fetcher_reports_error);
+REGISTER_TEST(test_worker_runs_scheduled_autonomously);
+REGISTER_TEST(test_worker_retries_failing_source);
+REGISTER_TEST(test_worker_retries_exhausted_marks_error);
+REGISTER_TEST(test_worker_stop_aborts_backoff);

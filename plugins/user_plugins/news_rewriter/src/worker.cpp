@@ -15,6 +15,7 @@ Worker::~Worker() {
 bool Worker::start() {
     if (thread_.joinable()) return true;
     stop_.store(false);
+    thread_done_.store(false);
     thread_ = std::thread(&Worker::loop, this);
     return true;
 }
@@ -23,7 +24,17 @@ void Worker::stop_and_join() {
     if (!thread_.joinable()) return;
     stop_.store(true);
     cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    // Ограниченное ожидание: в норме поток выходит сразу. Если идёт длинный
+    // рерайт/загрузка (непрерываемые вызовы), ждём его завершения, но логируем.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!thread_done_.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!thread_done_.load()) {
+        log("предупреждение: поток не завершился за 5 с "
+            "(возможно, идёт рерайт/загрузка), ждём завершения");
+    }
+    thread_.join();
 }
 
 void Worker::post(Command cmd) {
@@ -72,6 +83,15 @@ void Worker::set_data_dir(const std::string& data_dir) {
     if (!data_dir.empty()) storage_.init(data_dir);
 }
 
+void Worker::set_retry_policy(const RetryPolicy& retry) {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    retry_policy_ = retry;
+}
+
+void Worker::debug_force_schedule_due() {
+    post(Command{CmdType::DebugForceDue});
+}
+
 void Worker::log(const std::string& msg) {
     std::lock_guard<std::mutex> lock(data_mutex_);
     state_.last_message = msg;
@@ -110,6 +130,35 @@ void Worker::set_status(const Article& a, const std::string& msg) {
         if (!view_found) state_.articles.push_back(view_of(a));
     }
     log(msg);
+}
+
+// Прерываемый сон: даёт реагировать на Stop (cancel_) даже во время backoff.
+bool Worker::sleep_interruptible(const std::chrono::seconds& delay) {
+    const auto deadline = std::chrono::steady_clock::now() + delay;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (cancel_.load() || stop_.load()) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return true;
+}
+
+// Убирает устаревшую Error-заглушку источника (созданную при повторяемом сбое),
+// если последующий ретрай источника завершился успешно.
+void Worker::remove_stale_source_error(const std::string& url) {
+    const std::string id = sha256_hex(url);
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    for (auto it = pipeline_.begin(); it != pipeline_.end(); ++it) {
+        if (it->id == id) {
+            pipeline_.erase(it);
+            break;
+        }
+    }
+    for (auto it = state_.articles.begin(); it != state_.articles.end(); ++it) {
+        if (it->url == url) {
+            state_.articles.erase(it);
+            break;
+        }
+    }
 }
 
 // Полный экспорт статьи: рерайт (если LLM настроен) + запись через активный
@@ -171,35 +220,67 @@ void Worker::loop() {
     }
 
     for (;;) {
-        Command cmd;
+        // Применяем текущий конфиг/политику ретраев к планировщику и узнаём,
+        // сколько ждать до следующего авто-запуска.
+        RetryPolicy rp;
         {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            cv_.wait(lock, [this] { return stop_.load() || !queue_.empty(); });
-            if (stop_.load() && queue_.empty()) break;
-            if (queue_.empty()) continue;
-            cmd = std::move(queue_.front());
-            queue_.pop();
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            rp = retry_policy_;
+        }
+        scheduler_.configure(get_config(), rp);
+        const std::chrono::seconds delay = scheduler_.next_delay();
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            state_.scheduled = scheduler_.schedule_active();
+            state_.next_run_in_seconds =
+                scheduler_.schedule_active() ? static_cast<int>(delay.count()) : -1;
         }
 
-        switch (cmd.type) {
-            case CmdType::RunNow:
-                process_run(get_config());
-                break;
-            case CmdType::ReloadConfig: {
-                Config cfg = config_from_json(Json::parse(cmd.arg));
-                set_config(cfg);
-                log("конфигурация обновлена");
-                break;
+        Command cmd;
+        bool have_cmd = false;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            cv_.wait_for(lock, delay,
+                         [this] { return stop_.load() || !queue_.empty(); });
+            if (stop_.load() && queue_.empty()) break;
+            if (!queue_.empty()) {
+                cmd = std::move(queue_.front());
+                queue_.pop();
+                have_cmd = true;
             }
-            case CmdType::Stop:
-                log("обход прерван пользователем");
-                break;
+        }
+
+        if (have_cmd) {
+            switch (cmd.type) {
+                case CmdType::RunNow:
+                    process_run(get_config());
+                    break;
+                case CmdType::ReloadConfig: {
+                    Config cfg = config_from_json(Json::parse(cmd.arg));
+                    set_config(cfg);
+                    log("конфигурация обновлена");
+                    break;
+                }
+                case CmdType::Stop:
+                    log("обход прерван пользователем");
+                    break;
+                case CmdType::DebugForceDue:
+                    scheduler_.force_due();   // тесты: следующий авто-запуск сразу
+                    break;
+            }
+        } else if (!stop_.load() && scheduler_.due()) {
+            // Авто-запуск по расписанию (таймер истёк, команд нет).
+            log("автоматический запуск по расписанию");
+            process_run(get_config());
         }
     }
 
+    thread_done_.store(true);
     {
         std::lock_guard<std::mutex> lock(data_mutex_);
         state_.worker_active = false;
+        state_.scheduled = false;
+        state_.next_run_in_seconds = -1;
     }
 }
 
@@ -219,6 +300,7 @@ void Worker::process_run(const Config& cfg) {
                 std::chrono::system_clock::now().time_since_epoch()).count());
     }
     cancel_.store(false);
+    scheduler_.note_run_started();   // любой запуск сдвигает авто-расписание
 
     if (fetcher_ && !fetcher_->is_available()) {
         fetcher_->init();
@@ -231,8 +313,34 @@ void Worker::process_run(const Config& cfg) {
             log("обход прерван пользователем");
             break;
         }
-        process_source(cfg, src);
-        processed++;
+
+        // Источник: первичная попытка + ретраи с backoff при сетевых сбоях.
+        uint32_t retries = 0;
+        for (;;) {
+            if (cancel_.load()) {
+                log("обход прерван пользователем");
+                break;
+            }
+            if (process_source(cfg, src, retries)) {
+                processed++;
+                break;
+            }
+            if (!scheduler_.can_retry(retries)) {
+                log("источник " + src.url + ": попытки исчерпаны");
+                break;
+            }
+            const auto delay = scheduler_.retry_delay(retries);
+            log("источник " + src.url + ": повторная попытка " +
+                std::to_string(retries + 1) + " из " +
+                std::to_string(scheduler_.retry_policy().max_retries) +
+                " через " + std::to_string(delay.count()) + " с");
+            if (!sleep_interruptible(delay)) {
+                log("обход прерван пользователем");
+                break;
+            }
+            retries++;
+        }
+        if (cancel_.load()) break;
     }
 
     {
@@ -243,7 +351,7 @@ void Worker::process_run(const Config& cfg) {
     }
 }
 
-void Worker::process_source(const Config& cfg, const SourceConfig& src) {
+bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t retries) {
     auto make_source_article = [&]() {
         Article a;
         a.url = src.url;
@@ -259,19 +367,25 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
     if (!fetcher_ || !fetcher_->is_available()) {
         Article a = make_source_article();
         a.status = TaskStatus::Error;
+        a.retry_count = retries;
         a.error = "загрузчик недоступен (libcurl не найден)";
         set_status(a, "ошибка загрузки: " + src.url + " — " + a.error);
-        return;
+        return true;   // постоянный сбой: ретраи бессмысленны
     }
 
     const FetchResult res = fetcher_->fetch(src.url, src.type, cfg.network);
     if (!res.ok) {
         Article a = make_source_article();
         a.status = TaskStatus::Error;
+        a.retry_count = retries;
         a.error = res.error;
         set_status(a, "ошибка загрузки: " + src.url + " — " + res.error);
-        return;
+        return false;  // повторяемый сбой (сеть/таймаут) → caller ретраит
     }
+
+    // Источник, который раньше падал с Error-заглушкой, теперь успешен:
+    // убираем устаревшую заглушку из снапшота.
+    remove_stale_source_error(src.url);
 
     if (src.type == "page") {
         Article a = make_source_article();
@@ -283,11 +397,11 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
         if (!export_article(cfg, a)) {
             set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
-            return;
+            return true;
         }
         set_status(a, "страница: " + (a.title_original.empty()
                                           ? src.url : a.title_original));
-        return;
+        return true;
     }
 
     // rss/atom: каждая новость — отдельная статья.
@@ -311,6 +425,7 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
     }
 
     log("источник: " + src.url + " — новостей: " + std::to_string(res.items.size()));
+    return true;
 }
 
 } // namespace news_rewriter

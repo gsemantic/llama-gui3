@@ -17,7 +17,7 @@
 | 2 | Extractor (HTML → текст) | **реализован** |
 | 3 | Rewriter (LLM) | **реализован** |
 | 4 | Sink / Storage (диск, дедупликация) | **реализован** |
-| 5 | Scheduler (расписание, retry) | запланирован |
+| 5 | Scheduler (расписание, retry) | **реализован** |
 | 6 | Расширения (отправка на сервер и пр.) | запланирован |
 
 ## Сборка
@@ -49,6 +49,11 @@ cmake --build build
     в `path_data_dir()/news_rewriter/articles/<YYYY-MM-DD>/<slug>.{json,md}`;
     `index.json` и `state.json` обновляются. Дубли (повторный URL или тот же
     текст) отсекаются по id/content_hash, без перезаписи.
+- **Расписание** (этап 5): при `schedule_minutes > 0` обход запускается
+  автоматически по таймеру; статус и время до следующего запуска видны в окне.
+  Сетевые сбои источника уходят в повторные попытки с backoff (5 с → 30 с →
+  5 мин, `max_retries=3`); кнопка «Остановить обход» прерывает текущий обход и
+  backoff мгновенно.
 
 ## Тесты
 
@@ -73,7 +78,8 @@ src/rewriter.*        — промпт + рерайт через LLM, разбо
 src/sink.h            — интерфейс Sink + реестр/фабрика (этап 4)
 src/sink_local_file.cpp — LocalFileSink: запись .json/.md на диск (этап 4)
 src/storage.*         — каталоги, index.json, state.json, дедупликация (этап 4)
-src/worker.*          — фоновый поток + очередь команд + pipeline
+src/scheduler.*       — расписание + политика ретраев (этап 5)
+src/worker.*          — фоновый поток + очередь команд + pipeline + таймер
 src/ui.*              — ImGui-окно (только main-поток)
-tests/                — юнит-тесты (json, http, xml, fetcher, extractor, rewriter, storage, worker)
+tests/                — юнит-тесты (json, http, xml, fetcher, extractor, rewriter, scheduler, storage, worker)
 ```

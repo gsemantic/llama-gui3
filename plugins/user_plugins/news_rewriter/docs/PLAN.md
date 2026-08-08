@@ -5,7 +5,7 @@
 готовности, порядок реализации и журнал решений. Читать вместе с
 `ARCHITECTURE.md`.
 
-Статус: **этапы 0–4 реализованы; этап 5 (Scheduler) следующий.**
+Статус: **этапы 0–5 реализованы; этап 6 (расширения) следующий.**
 
 ---
 
@@ -31,7 +31,7 @@ plugins/user_plugins/news_rewriter/
 │   ├── sink.h                  # интерфейс Sink + фабрика + реестр
 │   ├── sink_local_file.cpp     # LocalFileSink (v1)
 │   ├── storage.h / storage.cpp # структура каталогов, index.json, state.json, dedup
-│   ├── scheduler.h/.cpp        # очередь задач, статусы, retry, таймер
+│   ├── scheduler.h/.cpp        # расписание + политика ретраев (чистая логика)
 │   ├── worker.h / worker.cpp   # рабочий поток + потокобезопасная очередь команд
 │   └── ui.h / ui.cpp           # ImGui-окно (только main-поток)
 └── tests/
@@ -44,7 +44,8 @@ plugins/user_plugins/news_rewriter/
     ├── test_xml.cpp
     ├── test_fetcher.cpp
     ├── test_extractor.cpp      # этап 2
-    └── test_storage.cpp        # этап 4
+    ├── test_storage.cpp        # этап 4
+    └── test_scheduler.cpp      # этап 5
 ```
 
 `user_plugins/CMakeLists.txt` (добавляется сейчас):
@@ -283,23 +284,41 @@ news_rewriter/
 ### 2.9 Scheduler (`scheduler.h`)
 
 ```cpp
-struct TaskHandle { std::string article_id; TaskStatus status; };
+struct RetryPolicy {
+    int max_retries = 3;                       // повторных попыток после 1-го сбоя
+    std::vector<int> backoff_seconds{5, 30, 300};  // 5с → 30с → 5мин
+};
 
 class Scheduler {
 public:
-    void configure(const Config& cfg);
-    void run_now();                     // форсирует проход всех включённых источников
-    // основной цикл в worker: fetch→extract→rewrite→sink для каждой задачи
-    std::vector<Article> drain_done();  // результаты для UI (snapshot)
-    bool has_pending() const;
-    void stop();
+    explicit Scheduler(NowFn now = nullptr);   // now — инъекция часов для тестов
+    void configure(const Config& cfg, const RetryPolicy& retry = RetryPolicy());
+
+    bool schedule_active() const;              // schedule_minutes > 0
+    std::chrono::seconds next_delay() const;   // до авто-запуска (0 = пора)
+    bool due() const;                          // next_delay() == 0
+    void note_run_started();                   // сброс таймера после запуска
+    void force_due();                          // тесты: "пора сейчас"
+
+    bool can_retry(uint32_t attempts_done) const;          // ещё есть попытки
+    std::chrono::seconds retry_delay(uint32_t attempts_done) const;  // backoff
 };
 ```
 
-Статусы задач и ретраи: при сбое шага `TaskStatus::Error` + `retry_count++`;
-после `max_retries` (по умолчанию 3) задача помечается `Error` окончательно и
-не блокирует очередь. Backoff: 5 с → 30 с → 5 мин (кумулятивно от числа
-ретраев).
+Scheduler — чистая логика (без потоков/сети); используется **worker-потоком**:
+- Таймер расписания: `configure()` выставляет `next_run = now + schedule_minutes*60`; смена
+  интервала сбрасывает таймер. `next_delay()`/`due()` — время до авто-запуска.
+- Ретраи: `attempts_done` = число уже сделанных повторных попыток.
+  `can_retry(attempts_done)` = `attempts_done < max_retries` (после `max_retries`
+  задача → `Error` окончательно и не блокирует очередь). `retry_delay()` — backoff
+  5 с → 30 с → 5 мин (индекс зажимается на последнем значении).
+- `note_run_started()` вызывается в начале любого обхода — и ручного, и по
+  расписанию — чтобы следующий авто-запуск был через полный интервал.
+
+Основной цикл живёт в `Worker::loop()` (см. 2.10): `cv_.wait_for(delay)` ждёт
+команду **или** истечение таймера; при тайм-ауте без команд выполняется
+авто-обход. Backoff прерывается по `cancel_`/`stop_` (`sleep_interruptible`),
+поэтому Stop реагирует мгновенно.
 
 ### 2.10 Worker + очередь команд (`worker.h`) — потоковая модель
 
@@ -315,17 +334,19 @@ UI читает SNAPSHOT (зам. lock) ◄────────┘   сос�
 ```
 
 ```cpp
-enum class CmdType { RunNow, Stop, ReloadConfig, SetSourceEnabled };
+enum class CmdType { RunNow, Stop, ReloadConfig, DebugForceDue };
 struct Command { CmdType type; std::string arg; };
 
 class Worker {
 public:
     bool start();                 // создаёт поток
     void post(Command cmd);       // thread-safe
-    StatusSnapshot snapshot() const; // для UI (mutex)
+    WorkerState snapshot() const; // для UI (mutex)
+    void set_retry_policy(const RetryPolicy& retry);  // тесты
+    void debug_force_schedule_due();                  // тесты
     void stop_and_join();         // в ll_plugin_shutdown
 private:
-    void loop();                  // condvar wait / таймер расписания
+    void loop();                  // cv_.wait_for(delay) + таймер расписания
 };
 ```
 
@@ -333,7 +354,8 @@ private:
 - ImGui вызывается **только** в main-потоке (`ll_plugin_render`).
 - `g_api->llm_complete` — **только** в worker.
 - UI никогда не зовёт блокирующие функции; только `post()` + чтение snapshot.
-- `ll_plugin_shutdown`: `stop` → `join` (с таймаутом 5 с) → сохранить config/state.
+- `ll_plugin_shutdown`: `stop` → `join` (ожидание до 5 с, затем блокирующий join
+  с предупреждением, если идёт непрерываемый рерайт) → сохранить config/state.
 
 ---
 
@@ -412,17 +434,24 @@ private:
 `SinkRegistry` регистрирует `local_file` в `ll_plugin_init`; worker после
 рерайта ставит `Exporting`, пропускает дубликаты и пишет через активный sink.
 
-### Этап 5 — Scheduler
+### Этап 5 — Scheduler ✅
 
-| # | Задача | Файлы | Критерий готовности |
-|---|---|---|---|
-| 5.1 | Таймер расписания (condvar `wait_until`) + ручной запуск | `src/scheduler.h/.cpp`, `src/worker.cpp` | Автономный обход по `schedule_minutes` без участия пользователя; смена интервала применяется |
-| 5.2 | Retry + backoff, max_retries | `src/scheduler.cpp` | Сбои уходят в retry с задержками; исчерпание → `Error` без блокировки очереди |
-| 5.3 | Чистое завершение: stop → join → save | `src/worker.cpp`, `src/plugin_main.cpp` | `ll_plugin_shutdown` завершает поток за ≤5 с, конфиг/state сохранены |
-| 5.4 | Статус-бар/прогресс в UI (активен ли worker, число задач) | `src/ui.cpp` | UI показывает текущее состояние цикла |
+| # | Задача | Файлы | Критерий готовности | Статус |
+|---|---|---|---|---|
+| 5.1 | Таймер расписания (condvar `wait_for`) + ручной запуск | `src/scheduler.h/.cpp`, `src/worker.cpp` | Автономный обход по `schedule_minutes` без участия пользователя; смена интервала применяется | ✅ |
+| 5.2 | Retry + backoff, max_retries | `src/scheduler.cpp`, `src/worker.cpp` | Сбои уходят в retry с задержками; исчерпание → `Error` без блокировки очереди; Stop прерывает backoff | ✅ |
+| 5.3 | Чистое завершение: stop → join → save | `src/worker.cpp`, `src/plugin_main.cpp` | `ll_plugin_shutdown` завершает поток за ≤5 с (с предупреждением при непрерываемом рерайте), конфиг/state сохранены | ✅ |
+| 5.4 | Статус-бар/прогресс в UI (расписание, следующий запуск) | `src/ui.cpp`, `src/worker.h` | UI показывает состояние цикла и время до авто-запуска | ✅ |
 
 **Критерий этапа:** плагин работает автономно по расписанию, останавливается
-чисто. Коммит.
+чисто. Коммит. — **выполнен.**
+
+Реализация: `Scheduler` (чистая логика: таймер + `RetryPolicy`) используется
+worker-потоком; `Worker::loop()` ждёт на `cv_.wait_for(next_delay())` — команду
+или истечение таймера. `process_run()` вызывает `process_source()` (возвращает
+bool), повторяемые сетевые сбои уходят в retry с backoff; при успехе после
+ретраев устаревшая Error-заглушка источника убирается из снапшота.
+`DebugForceDue` — команда для тестов (авто-запуск «сейчас»).
 
 ### Этап 6 — Расширения (масштабируемость)
 
@@ -463,7 +492,7 @@ private:
 
 | Уровень | Инструмент | Что покрываем |
 |---|---|---|
-| Юнит-тесты плагина | Своя цель `news_rewriter_tests` (опция `BUILD_NEWS_REWRITER_TESTS`, использует копию `tests/test_framework.h` из приложения или свой мини-раннер) | json, xml, extractor, storage, http (локальный сервер на std::thread+socket) |
+| Юнит-тесты плагина | Своя цель `news_rewriter_tests` (опция `BUILD_NEWS_REWRITER_TESTS`, использует копию `tests/test_framework.h` из приложения или свой мини-раннер) | json, xml, extractor, storage, scheduler (таймер с инъекцией часов), http (локальный сервер на std::thread+socket), worker (pipeline, расписание, retry через FakeFetcher) |
 | Интеграция с хостом | `tests/core/test_plugin_loader` приложения | Загрузка/выгрузка `libnews_rewriter.so`, экспорт обязательных функций |
 | Ручной | GUI: запуск, меню, окно, обход реальных фидов | Поведение, отсутствие зависаний, файлы на диске |
 
@@ -484,6 +513,7 @@ private:
 | Настройки через `settings_*` (JSON-строка) | Единый механизм persist приложения | Ключ один на весь конфиг; при больших конфигах — перезапись целиком | Принято для v1 |
 | Дедупликация по URL+content_hash | Простота и надёжность | Не ловит смысловые дубли (разные формулировки одной новости) | Зафиксировано как будущая задача (этап 6.5+) |
 | `llm_complete` только в worker | Избегаем зависания UI (документировано в PLUGIN_SYSTEM.md) | Очередь рерайтов блокирует последующие задачи до ответа LLM | Принято; ретраи не блокируют |
+| Scheduler как чистая логика (не поток) | Таймер/backoff тестируются без потоков и сети; worker интегрирует их в свой цикл | Контракт 2.9 отклоняется от исходного (run_now/drain_done живут в Worker) | Принято на этапе 5; открытый вопрос: вынести run_now/drain_done в Scheduler при рефакторинге |
 
 **Открытые вопросы (требуют решения перед этапами 3–4):**
 1. Хранить ли переписанный текст в RAG-индексе (через `rag_process_document`)?

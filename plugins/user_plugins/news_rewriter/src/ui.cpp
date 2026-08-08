@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <cstdio>
+#include <string>
 
 #include "imgui.h"
 
@@ -9,6 +10,16 @@
 #include "worker.h"
 
 namespace news_rewriter {
+
+namespace {
+
+std::string format_duration(int seconds) {
+    if (seconds < 0) return "-";
+    if (seconds < 60) return std::to_string(seconds) + " с";
+    return std::to_string(seconds / 60) + " мин";
+}
+
+} // namespace
 
 namespace {
 
@@ -57,7 +68,21 @@ void render_news_rewriter_window(UiDeps& deps) {
         }
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("расписание: каждые %d мин", cfg.schedule_minutes);
+    if (state.scheduled) {
+        if (state.running) {
+            ImGui::TextDisabled("расписание: каждые %d мин, следующий — после обхода",
+                                cfg.schedule_minutes);
+        } else if (state.next_run_in_seconds <= 0) {
+            ImGui::TextDisabled("расписание: каждые %d мин, запуск сейчас",
+                                cfg.schedule_minutes);
+        } else {
+            ImGui::TextDisabled("расписание: каждые %d мин, следующий через %s",
+                                cfg.schedule_minutes,
+                                format_duration(state.next_run_in_seconds).c_str());
+        }
+    } else {
+        ImGui::TextDisabled("расписание выключено (только ручной запуск)");
+    }
 
     ImGui::Separator();
 
