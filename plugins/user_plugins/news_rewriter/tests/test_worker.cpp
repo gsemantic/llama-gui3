@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <thread>
@@ -53,6 +54,28 @@ FetchResult one_page(const std::string& html) {
     return r;
 }
 
+// Временный каталог для экспорта (уникальный, авто-очистка).
+class TempDir {
+public:
+    TempDir() {
+        path_ = std::filesystem::temp_directory_path() /
+                ("news_rewriter_worker_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::filesystem::remove_all(path_);
+        std::filesystem::create_directories(path_);
+    }
+    ~TempDir() { std::filesystem::remove_all(path_); }
+    std::string path() const { return path_.string(); }
+
+private:
+    std::filesystem::path path_;
+};
+
+// Регистрирует LocalFileSink и задаёт каталог данных воркеру.
+void setup_worker_export(Worker& worker, const std::string& data_dir) {
+    SinkRegistry::instance().register_factory("local_file", make_local_file_sink);
+    worker.set_data_dir(data_dir);
+}
+
 } // namespace
 
 static bool wait_until(const std::function<bool()>& cond, int timeout_ms = 5000) {
@@ -75,6 +98,8 @@ static Config make_test_config() {
 
 static void test_worker_run_completes() {
     Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
     worker.set_config(make_test_config());
     auto fetcher = std::make_unique<FakeFetcher>();
     FakeFetcher* f = fetcher.get();
@@ -148,6 +173,8 @@ static void test_worker_does_not_run_disabled_sources() {
 
 static void test_worker_extracts_rss_item_title() {
     Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
     Config cfg = default_config();
     cfg.sources.clear();
     cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
@@ -184,6 +211,8 @@ static void test_worker_extracts_rss_item_title() {
 
 static void test_worker_extracts_page_title_and_body() {
     Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
     Config cfg = default_config();
     cfg.sources.clear();
     cfg.sources.push_back(SourceConfig{"https://a.example/page", "page", SourceExtract{}, true});
@@ -217,6 +246,8 @@ static void test_worker_extracts_page_title_and_body() {
 
 static void test_worker_llm_rewrites_articles() {
     Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
     Config cfg = default_config();
     cfg.sources.clear();
     cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
@@ -300,6 +331,51 @@ static void test_worker_ignores_rerun_while_running() {
     worker.stop_and_join();
 }
 
+static void test_worker_exports_and_dedups() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) { return one_item("https://a.example/rss"); };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    // Первый обход: статья сохраняется на диск.
+    worker.post(Command{CmdType::RunNow});
+    TEST_ASSERT_TRUE(wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    }));
+
+    const std::filesystem::path root =
+        std::filesystem::path(tmp.path()) / "news_rewriter" / "articles";
+    TEST_ASSERT_TRUE(std::filesystem::exists(root));
+    std::size_t file_count = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) file_count++;
+    }
+    TEST_ASSERT(file_count >= 2);  // .json + .md
+
+    // Второй обход: тот же URL — дубликат, файлы не добавляются.
+    worker.post(Command{CmdType::RunNow});
+    TEST_ASSERT_TRUE(wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    }));
+
+    std::size_t file_count2 = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) file_count2++;
+    }
+    TEST_ASSERT_EQUAL(file_count2, file_count);
+
+    worker.stop_and_join();
+}
+
 static void test_worker_fetch_error_marks_article() {
     Worker worker;
     Config cfg = make_test_config();
@@ -358,6 +434,7 @@ REGISTER_TEST(test_worker_extracts_rss_item_title);
 REGISTER_TEST(test_worker_extracts_page_title_and_body);
 REGISTER_TEST(test_worker_llm_rewrites_articles);
 REGISTER_TEST(test_worker_llm_error_marks_article);
+REGISTER_TEST(test_worker_exports_and_dedups);
 REGISTER_TEST(test_worker_config_reload);
 REGISTER_TEST(test_worker_does_not_run_disabled_sources);
 REGISTER_TEST(test_worker_ignores_rerun_while_running);

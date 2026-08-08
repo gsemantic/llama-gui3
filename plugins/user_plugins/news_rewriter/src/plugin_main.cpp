@@ -15,6 +15,7 @@
 #include <string>
 
 #include "config.h"
+#include "sink.h"
 #include "ui.h"
 #include "worker.h"
 
@@ -124,6 +125,16 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     // Воркер: фоновый поток, очередь команд. Хост-настройки не вызывает.
     g_worker = std::make_unique<Worker>();
     g_worker->set_config(g_config);
+
+    // Каталог данных (для Storage/Sink). path_data_dir доступен всегда.
+    if (g_api->path_data_dir) {
+        const char* data_dir = g_api->path_data_dir(g_host);
+        if (data_dir) g_worker->set_data_dir(data_dir);
+    }
+
+    // Реестр sink-ов: v1 — только локальная запись на диск.
+    SinkRegistry::instance().register_factory("local_file", make_local_file_sink);
+
     g_worker->set_log_callback([](const std::string& msg) {
         if (g_api && g_host) {
             g_api->log(g_host, LLAMA_LOG_INFO, msg.c_str());

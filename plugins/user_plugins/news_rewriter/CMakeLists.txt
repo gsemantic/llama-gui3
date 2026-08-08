@@ -35,6 +35,9 @@ set(NEWS_REWRITER_CORE_SOURCES
     src/fetcher.cpp
     src/extractor.cpp
     src/rewriter.cpp
+    src/storage.cpp
+    src/sink.cpp
+    src/sink_local_file.cpp
     src/worker.cpp
 )
 
@@ -77,6 +80,7 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_fetcher.cpp
         tests/test_extractor.cpp
         tests/test_rewriter.cpp
+        tests/test_storage.cpp
     )
     target_include_directories(news_rewriter_tests PRIVATE ${NEWS_REWRITER_INCLUDES})
     target_link_libraries(news_rewriter_tests PRIVATE news_rewriter_core)

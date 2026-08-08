@@ -1,10 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace news_rewriter {
+
+// Общий колбэк логирования (main-поток перенаправляет в host log).
+using LogFn = std::function<void(const std::string&)>;
 
 // Состояние задачи/статьи в конвейере.
 enum class TaskStatus {

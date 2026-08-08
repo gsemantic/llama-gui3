@@ -67,6 +67,11 @@ void Worker::set_llm(LlmFn llm) {
     llm_ = std::move(llm);
 }
 
+void Worker::set_data_dir(const std::string& data_dir) {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (!data_dir.empty()) storage_.init(data_dir);
+}
+
 void Worker::log(const std::string& msg) {
     std::lock_guard<std::mutex> lock(data_mutex_);
     state_.last_message = msg;
@@ -107,23 +112,54 @@ void Worker::set_status(const Article& a, const std::string& msg) {
     log(msg);
 }
 
-// Рерайт статьи через LLM (если настроен). Возвращает true, если рерайт
-// успешен или LLM не нужен; false — при ошибке (статья помечена Error).
-bool Worker::rewrite(Article& a, const Config& cfg) {
-    if (!llm_) {
-        a.status = TaskStatus::Done;
-        return true;
+// Полный экспорт статьи: рерайт (если LLM настроен) + запись через активный
+// Sink + дедупликация. Возвращает true, если статья успешно завершена.
+bool Worker::export_article(const Config& cfg, Article& a) {
+    // Рерайт
+    if (llm_) {
+        a.status = TaskStatus::Rewriting;
+        set_status(a, "рерайт: " + a.title_original);
+        const RewriteResult rr = rewrite_article(a, cfg.rewrite, llm_);
+        if (!rr.ok) {
+            a.status = TaskStatus::Error;
+            a.error = rr.error;
+            return false;
+        }
+        a.title_rewritten = rr.title;
+        a.body_rewritten = rr.body;
     }
-    a.status = TaskStatus::Rewriting;
-    set_status(a, "рерайт: " + a.title_original);
-    const RewriteResult rr = rewrite_article(a, cfg.rewrite, llm_);
-    if (!rr.ok) {
+
+    // Экспорт через активный Sink
+    a.status = TaskStatus::Exporting;
+    set_status(a, "экспорт: " + a.title_original);
+
+    if (!storage_.ready()) {
         a.status = TaskStatus::Error;
-        a.error = rr.error;
+        a.error = "хранилище не инициализировано (не задан каталог данных)";
         return false;
     }
-    a.title_rewritten = rr.title;
-    a.body_rewritten = rr.body;
+
+    if (storage_.is_duplicate(a)) {
+        a.status = TaskStatus::Done;
+        log("дубликат пропущен: " + a.title_original);
+        return true;
+    }
+
+    std::unique_ptr<Sink> sink = SinkRegistry::instance().create(
+        cfg.sink, storage_, log_callback_);
+    if (!sink) {
+        a.status = TaskStatus::Error;
+        a.error = "неизвестный тип sink: " + cfg.sink.type;
+        return false;
+    }
+
+    if (!sink->write(a)) {
+        a.status = TaskStatus::Error;
+        if (a.error.empty()) a.error = "ошибка записи sink";
+        return false;
+    }
+
+    storage_.mark_written(a);
     a.status = TaskStatus::Done;
     return true;
 }
@@ -245,8 +281,8 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
         a.title_original = ex.title;
         a.body_original = ex.body;
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
-        if (!rewrite(a, cfg)) {
-            set_status(a, "ошибка рерайта: " + src.url + " — " + a.error);
+        if (!export_article(cfg, a)) {
+            set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
             return;
         }
         set_status(a, "страница: " + (a.title_original.empty()
@@ -267,8 +303,8 @@ void Worker::process_source(const Config& cfg, const SourceConfig& src) {
         a.title_original = html_to_text(item.title);
         a.body_original = ex.body;
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
-        if (!rewrite(a, cfg)) {
-            set_status(a, "ошибка рерайта: " + a.title_original + " — " + a.error);
+        if (!export_article(cfg, a)) {
+            set_status(a, "ошибка обработки: " + a.title_original + " — " + a.error);
             continue;
         }
         set_status(a, "новость: " + a.title_original);

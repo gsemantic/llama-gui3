@@ -16,7 +16,7 @@
 | 1 | Fetcher (HTTP + RSS/Atom) | **реализован** |
 | 2 | Extractor (HTML → текст) | **реализован** |
 | 3 | Rewriter (LLM) | **реализован** |
-| 4 | Sink / Storage (диск, дедупликация) | запланирован |
+| 4 | Sink / Storage (диск, дедупликация) | **реализован** |
 | 5 | Scheduler (расписание, retry) | запланирован |
 | 6 | Расширения (отправка на сервер и пр.) | запланирован |
 
@@ -44,7 +44,11 @@ cmake --build build
     самый длинный блок) извлекается текст страницы.
   - Каждая статья рерайтится через `llm_complete` (если сервер/облако
     подключены); при недоступности LLM статья → `Error` с понятным текстом.
-  - Сохранение на диск — с этапа 4.
+  - Переписанная статья пишется через активный sink (`local_file` по
+    умолчанию): `.json` (метаданные + текст) и `.md` (человекочитаемый рерайт)
+    в `path_data_dir()/news_rewriter/articles/<YYYY-MM-DD>/<slug>.{json,md}`;
+    `index.json` и `state.json` обновляются. Дубли (повторный URL или тот же
+    текст) отсекаются по id/content_hash, без перезаписи.
 
 ## Тесты
 
@@ -66,7 +70,10 @@ src/xml.*             — мини XML-парсер RSS 2.0 / Atom (этап 1)
 src/fetcher.*         — загрузка по URL + разбор фидов (этап 1)
 src/extractor.*       — HTML→текст, title/body по маркерам/эвристике (этап 2)
 src/rewriter.*        — промпт + рерайт через LLM, разбор ответа (этап 3)
+src/sink.h            — интерфейс Sink + реестр/фабрика (этап 4)
+src/sink_local_file.cpp — LocalFileSink: запись .json/.md на диск (этап 4)
+src/storage.*         — каталоги, index.json, state.json, дедупликация (этап 4)
 src/worker.*          — фоновый поток + очередь команд + pipeline
 src/ui.*              — ImGui-окно (только main-поток)
-tests/                — юнит-тесты (json, http, xml, fetcher, extractor, rewriter, worker)
+tests/                — юнит-тесты (json, http, xml, fetcher, extractor, rewriter, storage, worker)
 ```

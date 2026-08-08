@@ -5,7 +5,7 @@
 готовности, порядок реализации и журнал решений. Читать вместе с
 `ARCHITECTURE.md`.
 
-Статус: **этапы 0–3 реализованы; этап 4 (Sink/Storage) следующий.**
+Статус: **этапы 0–4 реализованы; этап 5 (Scheduler) следующий.**
 
 ---
 
@@ -394,18 +394,23 @@ private:
 (там же проверка `llm_is_connected` и `free_string`); worker вызывает рерайт
 в фоновом потоке, статья проходит `Rewriting → Done/Error`.
 
-### Этап 4 — Sink / Storage
+### Этап 4 — Sink / Storage ✅
 
-| # | Задача | Файлы | Критерий готовности |
-|---|---|---|---|
-| 4.1 | Интерфейс `Sink`, реестр+фабрика | `src/sink.h` | Регистрация и создание sink по имени из конфига |
-| 4.2 | Storage: каталоги, json/md, index, state | `src/storage.h/.cpp`, `tests/test_storage.cpp` | Файлы в структуре `articles/<дата>/<slug>.{json,md}`; index/state согласованы |
-| 4.3 | LocalFileSink | `src/sink_local_file.cpp` | Запись на диск, обработка ошибок записи |
-| 4.4 | Дедупликация (id + content_hash) | `src/storage.cpp` | Повторный обход того же URL не дублирует; новый URL с тем же текстом помечается дублем |
-| 4.5 | Выбор активного sink из конфига, `Exporting` стадия | `src/worker.cpp`, `src/config.cpp`, `src/ui.cpp` | Смена sink в конфиге меняет поведение без пересборки ядра плагина |
+| # | Задача | Файлы | Критерий готовности | Статус |
+|---|---|---|---|---|
+| 4.1 | Интерфейс `Sink`, реестр+фабрика | `src/sink.h` | Регистрация и создание sink по имени из конфига | ✅ |
+| 4.2 | Storage: каталоги, json/md, index, state | `src/storage.h/.cpp`, `tests/test_storage.cpp` | Файлы в структуре `articles/<дата>/<slug>.{json,md}`; index/state согласованы | ✅ |
+| 4.3 | LocalFileSink | `src/sink_local_file.cpp` | Запись на диск, обработка ошибок записи | ✅ |
+| 4.4 | Дедупликация (id + content_hash) | `src/storage.cpp` | Повторный обход того же URL не дублирует; новый URL с тем же текстом помечается дублем | ✅ |
+| 4.5 | Выбор активного sink из конфига, `Exporting` стадия | `src/worker.cpp`, `src/config.cpp`, `src/ui.cpp` | Смена sink в конфиге меняет поведение без пересборки ядра плагина | ✅ |
 
 **Критерий этапа:** готовые `.json`/`.md` на диске; повторные запуски без
-дублей. Коммит.
+дублей. Коммит. — **выполнен.**
+
+Реализация: `Storage` работает с корнем `<data_dir>/news_rewriter/`
+(структура `articles/<дата>/<slug>.{json,md}`, `index.json`, `state.json`);
+`SinkRegistry` регистрирует `local_file` в `ll_plugin_init`; worker после
+рерайта ставит `Exporting`, пропускает дубликаты и пишет через активный sink.
 
 ### Этап 5 — Scheduler
 

@@ -15,6 +15,8 @@
 #include "config.h"
 #include "fetcher.h"
 #include "rewriter.h"
+#include "sink.h"
+#include "storage.h"
 
 namespace news_rewriter {
 
@@ -74,6 +76,7 @@ public:
     void set_log_callback(LogFn cb);      // main-поток: перенаправление в host log
     void set_fetcher(std::unique_ptr<IFetch> fetcher);  // тесты: подмена загрузчика
     void set_llm(LlmFn llm);              // main-поток: рерайт (только worker)
+    void set_data_dir(const std::string& data_dir);  // main: корень Storage
     void stop_and_join();
 
 private:
@@ -81,6 +84,7 @@ private:
     void process_run(const Config& cfg);
     void process_source(const Config& cfg, const SourceConfig& src);
     bool rewrite(Article& a, const Config& cfg);  // рерайт статьи (worker)
+    bool export_article(const Config& cfg, Article& a);  // рерайт + Sink
     void log(const std::string& msg);
     void set_status(const Article& a, const std::string& msg);
 
@@ -98,6 +102,7 @@ private:
     LogFn log_callback_;
     std::unique_ptr<IFetch> fetcher_;
     LlmFn llm_;
+    Storage storage_;
 };
 
 } // namespace news_rewriter
