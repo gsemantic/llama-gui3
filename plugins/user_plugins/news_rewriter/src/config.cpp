@@ -8,7 +8,8 @@ Config default_config() {
         "https://lenta.ru/rss", "rss", SourceExtract{}, true});
     cfg.rewrite = RewriteConfig{};
     cfg.schedule_minutes = 60;
-    cfg.sink = SinkConfig{"local_file", Json::object()};
+    cfg.sink.type = "local_file";
+    cfg.sink.params = Json::object();
     cfg.network = NetworkConfig{};
     return cfg;
 }
@@ -51,6 +52,7 @@ Json config_to_json(const Config& cfg) {
     rewrite["language"] = cfg.rewrite.language;
     rewrite["tone"] = cfg.rewrite.tone;
     rewrite["prompt_template"] = cfg.rewrite.prompt_template;
+    rewrite["max_words"] = cfg.rewrite.max_words;
     j["rewrite"] = rewrite;
 
     j["schedule_minutes"] = cfg.schedule_minutes;
@@ -58,6 +60,7 @@ Json config_to_json(const Config& cfg) {
     Json sink = Json::object();
     sink["type"] = cfg.sink.type;
     sink["params"] = cfg.sink.params;
+    sink["output_dir"] = cfg.sink.output_dir;
     j["sink"] = sink;
 
     Json network = Json::object();
@@ -66,6 +69,10 @@ Json config_to_json(const Config& cfg) {
     network["proxy"] = cfg.network.proxy;
     network["extra_headers"] = cfg.network.extra_headers;
     j["network"] = network;
+
+    j["max_items_per_source"] = cfg.max_items_per_source;
+    j["max_age_hours"] = cfg.max_age_hours;
+    j["max_retries"] = cfg.max_retries;
 
     return j;
 }
@@ -88,6 +95,8 @@ Config config_from_json(const Json& j) {
         cfg.rewrite.tone = rewrite.get("tone").as_string(cfg.rewrite.tone);
         cfg.rewrite.prompt_template =
             rewrite.get("prompt_template").as_string(cfg.rewrite.prompt_template);
+        cfg.rewrite.max_words =
+            static_cast<int>(rewrite.get("max_words").as_int(cfg.rewrite.max_words));
     }
 
     cfg.schedule_minutes =
@@ -98,6 +107,7 @@ Config config_from_json(const Json& j) {
         cfg.sink.type = sink.get("type").as_string(cfg.sink.type);
         const Json& params = sink.get("params");
         if (params.is_object()) cfg.sink.params = params;
+        cfg.sink.output_dir = sink.get("output_dir").as_string(cfg.sink.output_dir);
     }
 
     const Json& network = j.get("network");
@@ -109,6 +119,12 @@ Config config_from_json(const Json& j) {
         cfg.network.proxy = network.get("proxy").as_string();
         cfg.network.extra_headers = network.get("extra_headers").as_string();
     }
+
+    cfg.max_items_per_source =
+        static_cast<int>(j.get("max_items_per_source").as_int(cfg.max_items_per_source));
+    cfg.max_age_hours =
+        static_cast<int>(j.get("max_age_hours").as_int(cfg.max_age_hours));
+    cfg.max_retries = static_cast<int>(j.get("max_retries").as_int(cfg.max_retries));
 
     return cfg;
 }

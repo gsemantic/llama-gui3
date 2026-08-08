@@ -17,6 +17,10 @@ std::string build_prompt(const Article& src, const RewriteConfig& cfg) {
     replace("{body}", src.body_original);
     replace("{language}", cfg.language);
     replace("{tone}", cfg.tone);
+    replace("{max_words}", cfg.max_words > 0 ? std::to_string(cfg.max_words) : "");
+    if (cfg.max_words > 0) {
+        prompt += "\n\nОбъём: примерно " + std::to_string(cfg.max_words) + " слов.";
+    }
     return prompt;
 }
 

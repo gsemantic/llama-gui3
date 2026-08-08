@@ -14,6 +14,7 @@ backups/
 kv_cache/
 .mimocode/
 bench_results/
+/news_rewriter/
 profiles/.env
 settings.ini
 conversation.json

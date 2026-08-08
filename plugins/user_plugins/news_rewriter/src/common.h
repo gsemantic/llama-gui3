@@ -48,6 +48,11 @@ std::string sha256_hex(const std::string& data);
 // Текущее время UTC в ISO-8601, напр. "2026-08-08T12:00:00Z".
 std::string iso8601_now();
 
+// Разбор времени публикации ленты: RFC 822 ("Sat, 08 Aug 2026 11:51:47 +0300")
+// или ISO 8601 ("2026-08-08T11:51:47Z"). Возвращает секунды с эпохи (UTC)
+// или 0, если строка не распознана.
+std::int64_t parse_feed_time(const std::string& s);
+
 // Метка источника из URL (хост без схемы и порта).
 std::string host_of(const std::string& url);
 

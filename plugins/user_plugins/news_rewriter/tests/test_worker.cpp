@@ -379,6 +379,7 @@ static void test_worker_exports_and_dedups() {
 static void test_worker_fetch_error_marks_article() {
     Worker worker;
     Config cfg = make_test_config();
+    cfg.max_retries = 0;   // без ретраев — тест про маркировку ошибки
     worker.set_config(cfg);
     auto fetcher = std::make_unique<FakeFetcher>();
     fetcher->impl = [](const std::string&, const std::string&) {
@@ -388,9 +389,6 @@ static void test_worker_fetch_error_marks_article() {
         return r;
     };
     worker.set_fetcher(std::move(fetcher));
-    RetryPolicy rp;   // тест про маркировку ошибки, а не про ретраи
-    rp.max_retries = 0;
-    worker.set_retry_policy(rp);
     TEST_ASSERT_TRUE(worker.start());
 
     worker.post(Command{CmdType::RunNow});
@@ -445,6 +443,7 @@ static void test_worker_retries_failing_source() {
     cfg.sources.clear();
     cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
     cfg.schedule_minutes = 0;   // без расписания
+    cfg.max_retries = 2;        // количество попыток — из конфига
     worker.set_config(cfg);
     auto fetcher = std::make_unique<FakeFetcher>();
     FakeFetcher* f = fetcher.get();
@@ -461,7 +460,6 @@ static void test_worker_retries_failing_source() {
     };
     worker.set_fetcher(std::move(fetcher));
     RetryPolicy rp;
-    rp.max_retries = 2;
     rp.backoff_seconds = {0, 0, 0};   // без пауз — тест быстрый
     worker.set_retry_policy(rp);
     TEST_ASSERT_TRUE(worker.start());
@@ -488,6 +486,7 @@ static void test_worker_retries_exhausted_marks_error() {
     cfg.sources.clear();
     cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
     cfg.schedule_minutes = 0;
+    cfg.max_retries = 2;
     worker.set_config(cfg);
     auto fetcher = std::make_unique<FakeFetcher>();
     FakeFetcher* f = fetcher.get();
@@ -499,7 +498,6 @@ static void test_worker_retries_exhausted_marks_error() {
     };
     worker.set_fetcher(std::move(fetcher));
     RetryPolicy rp;
-    rp.max_retries = 2;
     rp.backoff_seconds = {0, 0};
     worker.set_retry_policy(rp);
     TEST_ASSERT_TRUE(worker.start());
@@ -527,6 +525,7 @@ static void test_worker_stop_aborts_backoff() {
     cfg.sources.clear();
     cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
     cfg.schedule_minutes = 0;
+    cfg.max_retries = 10;
     worker.set_config(cfg);
     auto fetcher = std::make_unique<FakeFetcher>();
     FakeFetcher* f = fetcher.get();
@@ -538,7 +537,6 @@ static void test_worker_stop_aborts_backoff() {
     };
     worker.set_fetcher(std::move(fetcher));
     RetryPolicy rp;
-    rp.max_retries = 10;
     rp.backoff_seconds = {300};   // долгий backoff — проверяем прерывание
     worker.set_retry_policy(rp);
     TEST_ASSERT_TRUE(worker.start());
@@ -578,6 +576,129 @@ static void test_worker_no_fetcher_reports_error() {
     worker.stop_and_join();
 }
 
+static void test_worker_filters_old_items() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.max_age_hours = 24;   // свежесть: статья старше суток пропускается
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = true;
+        r.http_status = 200;
+        FeedItem old_item;
+        old_item.title = "Старая новость";
+        old_item.link = "https://a.example/news/old";
+        old_item.description = "Текст";
+        old_item.pub_date = "Sat, 01 Aug 2026 00:00:00 +0000";   // 7 дней назад
+        FeedItem fresh_item;
+        fresh_item.title = "Свежая новость";
+        fresh_item.link = "https://a.example/news/fresh";
+        fresh_item.description = "Текст";
+        fresh_item.pub_date = iso8601_now();   // сейчас — заведомо свежая
+        r.items.push_back(old_item);
+        r.items.push_back(fresh_item);
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_EQUAL(state.articles[0].title, "Свежая новость");
+
+    worker.stop_and_join();
+}
+
+static void test_worker_limits_items_per_source() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.max_items_per_source = 2;   // берём не более 2 новостей с источника
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = true;
+        r.http_status = 200;
+        for (int i = 1; i <= 5; i++) {
+            FeedItem item;
+            item.title = "Новость " + std::to_string(i);
+            item.link = "https://a.example/news/" + std::to_string(i);
+            item.description = "Текст";
+            r.items.push_back(item);
+        }
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(2));
+
+    worker.stop_and_join();
+}
+
+static void test_worker_uses_config_max_retries() {
+    Worker worker;
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.schedule_minutes = 0;
+    cfg.max_retries = 2;   // количество попыток — из конфига (без set_retry_policy max_retries)
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    FakeFetcher* f = fetcher.get();
+    f->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = false;
+        r.error = "сеть недоступна";
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    RetryPolicy rp;
+    rp.backoff_seconds = {0, 0};   // только паузы; max_retries берётся из конфига
+    worker.set_retry_policy(rp);
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    // 1 первичная + 2 ретрая = 3 вызова; статья Error с retry_count=2.
+    TEST_ASSERT_EQUAL(f->calls.load(), 3);
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Error);
+    TEST_ASSERT_EQUAL(state.articles[0].retry_count, 2);
+
+    worker.stop_and_join();
+}
+
 REGISTER_TEST(test_worker_run_completes);
 REGISTER_TEST(test_worker_extracts_rss_item_title);
 REGISTER_TEST(test_worker_extracts_page_title_and_body);
@@ -593,3 +714,6 @@ REGISTER_TEST(test_worker_runs_scheduled_autonomously);
 REGISTER_TEST(test_worker_retries_failing_source);
 REGISTER_TEST(test_worker_retries_exhausted_marks_error);
 REGISTER_TEST(test_worker_stop_aborts_backoff);
+REGISTER_TEST(test_worker_filters_old_items);
+REGISTER_TEST(test_worker_limits_items_per_source);
+REGISTER_TEST(test_worker_uses_config_max_retries);

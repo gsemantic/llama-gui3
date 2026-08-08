@@ -56,7 +56,12 @@ bool write_file(const fs::path& p, const std::string& content) {
 
 bool Storage::init(const std::string& data_dir) {
     if (data_dir.empty()) return false;
-    root_ = (fs::path(data_dir) / "news_rewriter").string();
+    return init_root((fs::path(data_dir) / "news_rewriter").string());
+}
+
+bool Storage::init_root(const std::string& root) {
+    if (root.empty()) return false;
+    root_ = root;
     articles_dir_ = (fs::path(root_) / "articles").string();
 
     std::error_code ec;

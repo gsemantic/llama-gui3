@@ -113,7 +113,8 @@ private:
     LogFn log_callback_;
     std::unique_ptr<IFetch> fetcher_;
     LlmFn llm_;
-    RetryPolicy retry_policy_;
+    RetryPolicy retry_policy_;            // только backoff-задержки (max_retries — из конфига)
+    std::string data_dir_;                // корень Storage (из path_data_dir хоста)
     Storage storage_;
     Scheduler scheduler_;                 // только worker-поток
 };

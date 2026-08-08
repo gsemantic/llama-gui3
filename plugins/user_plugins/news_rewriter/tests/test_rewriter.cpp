@@ -88,6 +88,32 @@ static void test_rewrite_no_llm() {
     TEST_ASSERT_FALSE(r.error.empty());
 }
 
+static void test_build_prompt_max_words_appends_instruction() {
+    const Article a = make_article("Заголовок", "Тело");
+    RewriteConfig cfg;
+    cfg.max_words = 120;
+    const std::string prompt = build_prompt(a, cfg);
+    TEST_ASSERT(prompt.find("Объём: примерно 120 слов.") != std::string::npos);
+}
+
+static void test_build_prompt_max_words_zero_no_instruction() {
+    const Article a = make_article("Заголовок", "Тело");
+    RewriteConfig cfg;
+    cfg.max_words = 0;
+    const std::string prompt = build_prompt(a, cfg);
+    TEST_ASSERT(prompt.find("Объём:") == std::string::npos);
+}
+
+static void test_build_prompt_max_words_placeholder() {
+    const Article a = make_article("Заголовок", "Тело");
+    RewriteConfig cfg;
+    cfg.max_words = 75;
+    cfg.prompt_template = "Напиши {max_words} слов.";
+    const std::string prompt = build_prompt(a, cfg);
+    TEST_ASSERT(prompt.find("{max_words}") == std::string::npos);
+    TEST_ASSERT(prompt.find("Напиши 75 слов.") != std::string::npos);
+}
+
 REGISTER_TEST(test_build_prompt_substitutions);
 REGISTER_TEST(test_parse_response_title_and_body);
 REGISTER_TEST(test_parse_response_single_line);
@@ -96,5 +122,8 @@ REGISTER_TEST(test_parse_response_whitespace_only);
 REGISTER_TEST(test_rewrite_ok);
 REGISTER_TEST(test_rewrite_llm_error);
 REGISTER_TEST(test_rewrite_no_llm);
+REGISTER_TEST(test_build_prompt_max_words_appends_instruction);
+REGISTER_TEST(test_build_prompt_max_words_zero_no_instruction);
+REGISTER_TEST(test_build_prompt_max_words_placeholder);
 
 } // namespace

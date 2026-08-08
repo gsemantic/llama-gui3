@@ -1,6 +1,7 @@
 #include "worker.h"
 
 #include <chrono>
+#include <ctime>
 
 #include "extractor.h"
 
@@ -80,10 +81,13 @@ void Worker::set_llm(LlmFn llm) {
 
 void Worker::set_data_dir(const std::string& data_dir) {
     std::lock_guard<std::mutex> lock(data_mutex_);
+    data_dir_ = data_dir;
     if (!data_dir.empty()) storage_.init(data_dir);
 }
 
 void Worker::set_retry_policy(const RetryPolicy& retry) {
+    // Хранит только backoff-задержки. Количество попыток берётся из
+    // Config::max_retries (см. Worker::loop), поэтому тесты задают его в конфиге.
     std::lock_guard<std::mutex> lock(data_mutex_);
     retry_policy_ = retry;
 }
@@ -221,13 +225,18 @@ void Worker::loop() {
 
     for (;;) {
         // Применяем текущий конфиг/политику ретраев к планировщику и узнаём,
-        // сколько ждать до следующего авто-запуска.
+        // сколько ждать до следующего авто-запуска. Количество повторных
+        // попыток берётся из Config::max_retries (пользовательская настройка);
+        // backoff-задержки — из retry_policy_ (тесты задают 0 для скорости).
+        Config cfg_now;
         RetryPolicy rp;
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
+            cfg_now = config_;
             rp = retry_policy_;
+            rp.max_retries = config_.max_retries;
         }
-        scheduler_.configure(get_config(), rp);
+        scheduler_.configure(cfg_now, rp);
         const std::chrono::seconds delay = scheduler_.next_delay();
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
@@ -302,6 +311,22 @@ void Worker::process_run(const Config& cfg) {
     cancel_.store(false);
     scheduler_.note_run_started();   // любой запуск сдвигает авто-расписание
 
+    // Выходная папка: пользовательская (cfg.sink.output_dir) или дефолтная.
+    // Инициализируем Storage перед обходом — каталог данных мог измениться
+    // после ReloadConfig.
+    std::string storage_warn;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (!cfg.sink.output_dir.empty()) {
+            if (!storage_.init_root(cfg.sink.output_dir)) {
+                storage_warn = "не удалось создать выходной каталог: " + cfg.sink.output_dir;
+            }
+        } else if (!data_dir_.empty()) {
+            storage_.init(data_dir_);
+        }
+    }
+    if (!storage_warn.empty()) log("предупреждение: " + storage_warn);
+
     if (fetcher_ && !fetcher_->is_available()) {
         fetcher_->init();
     }
@@ -347,7 +372,10 @@ void Worker::process_run(const Config& cfg) {
         std::lock_guard<std::mutex> lock(data_mutex_);
         state_.running = false;
         state_.pending_tasks = 0;
-        state_.last_message = "обход завершён (источников: " + std::to_string(processed) + ")";
+        state_.last_message =
+            cancel_.load()
+                ? ("обход прерван пользователем (источников: " + std::to_string(processed) + ")")
+                : ("обход завершён (источников: " + std::to_string(processed) + ")");
     }
 }
 
@@ -404,8 +432,32 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         return true;
     }
 
-    // rss/atom: каждая новость — отдельная статья.
+    // rss/atom: каждая новость — отдельная статья. Применяем пользовательские
+    // ограничения: свежесть (max_age_hours) и лимит статей с источника.
+    int accepted = 0;
     for (const auto& item : res.items) {
+        if (cancel_.load()) {
+            log("обход прерван пользователем");
+            break;
+        }
+
+        // Свежесть: статьи старше max_age_hours пропускаем. Если дату не
+        // удалось распознать (pub_date пуст/невалиден), статью не фильтруем.
+        if (cfg.max_age_hours > 0) {
+            const std::int64_t pub = parse_feed_time(item.pub_date);
+            if (pub > 0) {
+                const std::int64_t now_sec = static_cast<std::int64_t>(std::time(nullptr));
+                if (now_sec - pub > static_cast<std::int64_t>(cfg.max_age_hours) * 3600) {
+                    continue;   // слишком старая новость
+                }
+            }
+        }
+
+        if (cfg.max_items_per_source > 0 && accepted >= cfg.max_items_per_source) {
+            break;   // взяли достаточно статей с этого источника
+        }
+        accepted++;
+
         Article a;
         a.url = item.link.empty() ? src.url : item.link;
         a.id = sha256_hex(a.url);
@@ -424,7 +476,8 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         set_status(a, "новость: " + a.title_original);
     }
 
-    log("источник: " + src.url + " — новостей: " + std::to_string(res.items.size()));
+    log("источник: " + src.url + " — новостей: " + std::to_string(res.items.size()) +
+        (cfg.max_items_per_source > 0 ? " (взято: " + std::to_string(accepted) + ")" : ""));
     return true;
 }
 

@@ -20,6 +20,10 @@ public:
     // Создаёт структуру каталогов. root = <data_dir>/news_rewriter/.
     bool init(const std::string& data_dir);
 
+    // Создаёт структуру каталогов в произвольном корне (пользовательская
+    // выходная папка). root используется напрямую, без суффикса news_rewriter.
+    bool init_root(const std::string& root);
+
     const std::string& root() const { return root_; }
     bool ready() const { return !root_.empty(); }
 

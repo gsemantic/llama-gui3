@@ -115,6 +115,134 @@ std::string iso8601_now() {
     return buf;
 }
 
+// ============================================================================
+// Разбор времени ленты (RFC 822 / ISO 8601)
+// ============================================================================
+
+namespace {
+
+// Дни с гражданской даты до эпохи (алгоритм Ховарда Хиннанта, proleptic
+// Gregorian). Возвращает количество дней с 1970-01-01.
+std::int64_t days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return static_cast<std::int64_t>(era) * 146097 + static_cast<std::int64_t>(doe) - 719468;
+}
+
+int month_from_name(const std::string& s) {
+    static const char* months[] = {"jan", "feb", "mar", "apr", "may", "jun",
+                                   "jul", "aug", "sep", "oct", "nov", "dec"};
+    for (int i = 0; i < 12; i++) {
+        if (s.size() >= 3 &&
+            (s[0] | 0x20) == months[i][0] &&
+            (s[1] | 0x20) == months[i][1] &&
+            (s[2] | 0x20) == months[i][2]) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+int parse_int(const std::string& s) {
+    if (s.empty()) return 0;
+    std::int64_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return 0;
+        v = v * 10 + (c - '0');
+        if (v > 100000) return 0;
+    }
+    return static_cast<int>(v);
+}
+
+// Смещение UTC в секундах из фрагмента "+HHMM", "+HH:MM", "Z" или "-HH:MM".
+int parse_zone_offset(const std::string& z) {
+    if (z.empty() || z == "Z" || z == "z" || z == "GMT" || z == "UTC") return 0;
+    int sign = 1;
+    std::size_t i = 0;
+    if (z[0] == '+' || z[0] == '-') {
+        if (z[0] == '-') sign = -1;
+        i = 1;
+    }
+    int hh = 0, mm = 0;
+    if (i < z.size() && z[i] >= '0' && z[i] <= '9') hh = parse_int(z.substr(i, 2));
+    std::size_t j = i + 2;
+    if (j < z.size() && z[j] == ':') j++;
+    if (j < z.size() && z[j] >= '0' && z[j] <= '9') mm = parse_int(z.substr(j, 2));
+    return sign * (hh * 3600 + mm * 60);
+}
+
+// RFC 822: [Wed, ]08 Aug 2026 11:51:47 [+0300|GMT]
+bool parse_rfc822(const std::string& s, std::int64_t& out) {
+    std::string t = s;
+    const std::size_t comma = t.find(',');
+    if (comma != std::string::npos) t = t.substr(comma + 1);
+    std::string day_s, mon_s, year_s, time_s, zone_s;
+    std::string rest = t;
+    // Пропускаем ведущие пробелы.
+    while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, 1);
+    auto next_token = [&rest](std::string& tok) {
+        tok.clear();
+        while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, 1);
+        while (!rest.empty() && rest[0] != ' ' && rest[0] != '\t') {
+            tok += rest[0];
+            rest.erase(0, 1);
+        }
+    };
+    next_token(day_s);
+    next_token(mon_s);
+    next_token(year_s);
+    next_token(time_s);
+    next_token(zone_s);
+    if (day_s.empty() || mon_s.empty() || year_s.empty() || time_s.empty()) return false;
+
+    const int day = parse_int(day_s);
+    const int month = month_from_name(mon_s);
+    const int year = parse_int(year_s);
+    if (day == 0 || month == 0 || year == 0) return false;
+
+    int hh = 0, mm = 0, ss = 0;
+    if (time_s.size() >= 2) hh = parse_int(time_s.substr(0, 2));
+    if (time_s.size() >= 5) mm = parse_int(time_s.substr(3, 2));
+    if (time_s.size() >= 8) ss = parse_int(time_s.substr(6, 2));
+    const int zone = parse_zone_offset(zone_s);
+
+    const std::int64_t days = days_from_civil(year, month, day);
+    out = days * 86400 + hh * 3600 + mm * 60 + ss - zone;
+    return true;
+}
+
+// ISO 8601: 2026-08-08T11:51:47[Z|+03:00|-0300]
+bool parse_iso8601(const std::string& s, std::int64_t& out) {
+    if (s.size() < 19) return false;
+    if (!(s[0] >= '0' && s[0] <= '9')) return false;
+    const int year = parse_int(s.substr(0, 4));
+    const int month = parse_int(s.substr(5, 2));
+    const int day = parse_int(s.substr(8, 2));
+    const int hh = parse_int(s.substr(11, 2));
+    const int mm = parse_int(s.substr(14, 2));
+    const int ss = parse_int(s.substr(17, 2));
+    if (year == 0 || month == 0 || day == 0) return false;
+    const std::string zone_s = s.size() > 19 ? s.substr(19) : "";
+    const int zone = parse_zone_offset(zone_s);
+    const std::int64_t days = days_from_civil(year, month, day);
+    out = days * 86400 + hh * 3600 + mm * 60 + ss - zone;
+    return true;
+}
+
+} // namespace
+
+std::int64_t parse_feed_time(const std::string& s) {
+    std::int64_t out = 0;
+    if (s.find('T') != std::string::npos || (s.size() >= 10 && s[4] == '-')) {
+        if (parse_iso8601(s, out)) return out;
+    }
+    if (parse_rfc822(s, out)) return out;
+    return 0;
+}
+
 std::string host_of(const std::string& url) {
     const std::size_t scheme = url.find("://");
     const std::size_t start = scheme == std::string::npos ? 0 : scheme + 3;

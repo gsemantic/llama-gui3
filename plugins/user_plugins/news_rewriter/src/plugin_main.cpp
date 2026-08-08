@@ -166,6 +166,13 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     g_worker->start();
 
     g_ui_deps.worker = g_worker.get();
+    g_ui_deps.on_save = [](const Config& cfg) {
+        g_config = cfg;
+        save_config(cfg);
+        if (g_worker) {
+            g_worker->post(Command{CmdType::ReloadConfig, config_to_json(cfg).dump()});
+        }
+    };
 
     // Команды
     g_api->command_register(g_host, "news_rewriter_run", cmd_run, nullptr,

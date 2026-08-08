@@ -22,7 +22,8 @@ using LlmFn = std::function<bool(const std::string& prompt,
                                  std::string& response, std::string& error)>;
 
 // Сборка промпта по шаблону config.rewrite.prompt_template с подстановками
-// {title}, {body}, {language}, {tone}.
+// {title}, {body}, {language}, {tone}, {max_words}. При max_words > 0 в конец
+// промпта добавляется инструкция о примерном объёме статьи.
 std::string build_prompt(const Article& src, const RewriteConfig& cfg);
 
 // Разбор ответа LLM: первая непустая строка — заголовок, остальное — тело.

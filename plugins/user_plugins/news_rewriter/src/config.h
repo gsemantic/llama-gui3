@@ -29,11 +29,13 @@ struct RewriteConfig {
     std::string prompt_template = "Перепиши новость своими словами. "
                                   "Сохрани все факты. Язык: {language}. Тон: {tone}.\n\n"
                                   "Заголовок: {title}\nТекст: {body}";
+    int max_words = 0;               // 0 = без ограничения (примерный объём статьи)
 };
 
 struct SinkConfig {
     std::string type = "local_file";
     Json params = Json::object();
+    std::string output_dir;          // пусто = каталог данных приложения
 };
 
 struct NetworkConfig {
@@ -49,6 +51,9 @@ struct Config {
     int schedule_minutes = 60;   // 0 = только ручной запуск
     SinkConfig sink;
     NetworkConfig network;
+    int max_items_per_source = 0;    // 0 = без ограничения (кол-во свежих статей)
+    int max_age_hours = 0;           // 0 = без ограничения (свежесть в часах)
+    int max_retries = 3;             // повторных попыток после 1-го сбоя источника
 };
 
 // Чистая сериализация/десериализация (без зависимостей от хоста).
