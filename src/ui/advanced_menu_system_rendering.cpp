@@ -72,8 +72,14 @@ void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& it
                 ImGui::Separator();
                 break;
 
-            case AdvancedMenuItemType::Item:
-                if (ImGui::MenuItem(item.name.c_str(), item.shortcut.c_str(), item.checked, item.enabled)) {
+            case AdvancedMenuItemType::Item: {
+                // Уникальный ImGui-ID для пункта: ImGui использует текст пункта
+                // как ID, поэтому пункты с одинаковым именем в одном меню (например
+                // "RAG Search" у приложения и у плагина) давали бы ID collision.
+                // Часть после "##" не отображается, поэтому текст пункта не меняется.
+                const std::string label =
+                    item.command.empty() ? item.name : (item.name + "##" + item.command);
+                if (ImGui::MenuItem(label.c_str(), item.shortcut.c_str(), item.checked, item.enabled)) {
                     if (item.callback) {
                         item.callback();
                     } else if (!item.command.empty() && command_manager_) {
@@ -84,6 +90,7 @@ void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& it
                     }
                 }
                 break;
+            }
 
             case AdvancedMenuItemType::Submenu: {
                 // Проверяем, есть ли в подменю хотя бы один видимый элемент

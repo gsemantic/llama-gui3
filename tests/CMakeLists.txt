@@ -63,6 +63,16 @@ if(BUILD_PLUGINS)
         target_link_libraries(test_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
     endif()
     add_test(NAME PluginLoader COMMAND test_plugin_loader)
+
+    # Восстановление пунктов меню плагинов после перестройки меню приложением
+    add_executable(test_menu_restore core/test_menu_restore.cpp)
+    target_link_libraries(test_menu_restore PRIVATE plugin_core ui core managers imgui_lib)
+    target_include_directories(test_menu_restore PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_compile_definitions(test_menu_restore PRIVATE PLUGIN_TEST_DIR="${CMAKE_BINARY_DIR}/plugins")
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_menu_restore PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+    add_test(NAME MenuRestore COMMAND test_menu_restore)
 endif()
 
 # ============================================================================
@@ -71,6 +81,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_plugin_loader
+    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_plugin_loader test_menu_restore
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

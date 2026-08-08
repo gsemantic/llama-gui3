@@ -90,6 +90,12 @@ struct LoadedPlugin {
     std::vector<std::unique_ptr<PluginHandle>> menu_handles;
     std::vector<std::unique_ptr<PluginHandle>> window_handles;
     std::vector<std::unique_ptr<PluginHandle>> command_handles;
+
+    // Пункты меню, добавленные плагином, сгруппированные по ключу меню.
+    // Хранятся, чтобы восстановить их после перестройки меню приложением
+    // (rebuildModernMenu, например при смене языка), когда пункты плагина
+    // пропадают из пересозданных меню.
+    std::unordered_map<std::string, std::vector<ui::AdvancedMenuItem>> menu_items;
 };
 
 /** Непрозрачный хост-хендл плагина (передаётся как LlamaPluginHost*). */
@@ -168,6 +174,11 @@ void host_menu_add_item(LlamaPluginHost* host, LlamaPluginMenu* menu,
     if (shortcut) item.shortcut = shortcut;
     item.type = ui::AdvancedMenuItemType::Item;
     ms->addMenuItem(handle->name, item);
+
+    // Сохраняем пункт для восстановления после перестройки меню приложением.
+    if (pd->plugin) {
+        pd->plugin->menu_items[handle->name].push_back(std::move(item));
+    }
 }
 
 void host_menu_add_separator(LlamaPluginHost* host, LlamaPluginMenu* menu) {
@@ -177,7 +188,22 @@ void host_menu_add_separator(LlamaPluginHost* host, LlamaPluginMenu* menu) {
     if (!ms) return;
 
     auto* handle = reinterpret_cast<PluginHandle*>(menu);
-    ms->addSeparator(handle->name);
+    // Разделитель помечаем именем-маркером по имени плагина, чтобы при
+    // восстановлении/удалении отличать его от разделителей приложения и других
+    // плагинов. Маркер не отображается: тип Separator рендерится как
+    // ImGui::Separator(), имя игнорируется.
+    ui::AdvancedMenuItem separator;
+    separator.name = pd->plugin
+                         ? ("__plugin_sep__" + pd->plugin->info.name)
+                         : "__plugin_sep__";
+    separator.type = ui::AdvancedMenuItemType::Separator;
+    separator.separator = true;
+    ms->addMenuItem(handle->name, separator);
+
+    // Сохраняем разделитель для восстановления после перестройки меню приложением.
+    if (pd->plugin) {
+        pd->plugin->menu_items[handle->name].push_back(std::move(separator));
+    }
 }
 
 LlamaPluginCommand* host_command_register(LlamaPluginHost* host, const char* name,
@@ -364,9 +390,25 @@ int host_chat_add_message(LlamaPluginHost* host, const char* role, const char* c
 int host_llm_is_connected(LlamaPluginHost* host) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager) return 0;
+
+    // Локальный сервер здоров — LLM доступен.
     auto* li = pd->manager->subsystems.llama_interface;
-    if (!li) return 0;
-    return li->is_server_healthy() ? 1 : 0;
+    if (li && li->is_server_healthy()) return 1;
+
+    // Локальный сервер недоступен — проверяем облачного провайдера
+    // (те же условия, что и в host_llm_complete_local_or_cloud).
+    auto* settings = pd->manager->subsystems.settings;
+    if (settings) {
+        const auto& cp = settings->cloud_provider();
+        if (cp.enabled && !cp.model_id.empty()) {
+            const std::string key_name =
+                core::EnvManager::cloud_provider_api_key_name(cp.provider_name, cp.endpoint_url);
+            const std::string api_key =
+                core::EnvManager::read_key(key_name, settings->get_profiles_directory());
+            if (!api_key.empty()) return 1;
+        }
+    }
+    return 0;
 }
 
 namespace {
@@ -878,10 +920,45 @@ void PluginManager::render_plugins() {
         // приложением (например, при смене языка). Ищем и по ключу, и по имени,
         // чтобы не создавать дубликат существующего меню (например "Agents").
         if (impl_->subsystems.menu_system) {
+            auto* ms = impl_->subsystems.menu_system;
             for (const auto& menu_name : p->menu_names) {
-                if (!impl_->subsystems.menu_system->getMenuByKey(menu_name) &&
-                    !impl_->subsystems.menu_system->getMenu(menu_name)) {
-                    impl_->subsystems.menu_system->addMenu(menu_name, {});
+                if (!ms->getMenuByKey(menu_name) && !ms->getMenu(menu_name)) {
+                    ms->addMenu(menu_name, {});
+                }
+            }
+
+            // Восстанавливаем пункты меню плагина: после перестройки меню
+            // приложением (rebuildModernMenu, например при смене языка) пункты
+            // плагина пропадают. Чтобы не дублировать их (в т.ч. когда несколько
+            // плагинов добавляют пункты в одно меню), каждый кадр сначала
+            // удаляем ранее добавленные пункты плагина, затем дозаписываем блок
+            // в конец меню заново — структура меню детерминирована и не растёт.
+            for (const auto& [menu_key, items] : p->menu_items) {
+                if (items.empty()) continue;
+                ui::AdvancedMenu* menu = ms->getMenuByKey(menu_key);
+                if (!menu) menu = ms->getMenu(menu_key);
+                if (!menu) continue;
+
+                // Удаляем ранее добавленные пункты плагина. Обычные пункты
+                // ищем по типу/имени/команде, разделители — по имени-маркеру.
+                for (const auto& item : items) {
+                    auto& list = menu->items;
+                    for (auto it = list.begin(); it != list.end(); ++it) {
+                        const bool match =
+                            (it->type == item.type) &&
+                            (item.type == ui::AdvancedMenuItemType::Separator
+                                 ? (it->name == item.name)
+                                 : (it->name == item.name && it->command == item.command));
+                        if (match) {
+                            list.erase(it);
+                            break;
+                        }
+                    }
+                }
+
+                // Дозаписываем блок пунктов плагина в конец меню.
+                for (const auto& item : items) {
+                    menu->items.push_back(item);
                 }
             }
         }
