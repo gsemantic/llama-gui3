@@ -179,7 +179,6 @@ void MainWindow::reset_workspace() {
     show_conversations_ = false;
     show_files_ = false;
     show_rag_ = false;
-    show_agents_ = false;
     show_settings_ = false;
     show_cloud_services_ = false;
     show_rag_settings_ = false;

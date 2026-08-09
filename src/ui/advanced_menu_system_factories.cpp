@@ -313,44 +313,6 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createHelpMenu() {
     return menu;
 }
 
-std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createAgentsMenu() {
-    auto menu = std::make_unique<AdvancedMenu>();
-    menu->menu_key = "Agents";
-    menu->name = TRF("menu.agents", "Agents");
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.panel", "Agents Panel"),
-        "toggle_window_agents", "", "Show/hide Agents Panel"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.status", "Agent Status"),
-        "agents_status", "", "Show agent system status"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.list", "List Agents"),
-        "agents_list", "", "List all available agents"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.rag_search", "RAG Search"),
-        "rag", "", "Search documents using RAG"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.web_search", "Web Search"),
-        "search", "", "Search the web"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.code", "Generate Code"),
-        "code", "", "Generate code with AI"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.agents.summarize", "Summarize"),
-        "summarize", "", "Summarize text"));
-
-    return menu;
-}
-
 std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createDeveloperMenu() {
     auto menu = std::make_unique<AdvancedMenu>();
     menu->menu_key = "Developer";

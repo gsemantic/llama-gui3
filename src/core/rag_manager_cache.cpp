@@ -27,26 +27,39 @@ void RagManager::cleanup_old_chunks() {
 
 void RagManager::rebuild_index() {
 #ifdef USE_FAISS
+    // Используем фактическую размерность текущего индекса (или из генератора),
+    // а не жёстко заданную константу EMBEDDING_DIMENSION
+    int dim = EMBEDDING_DIMENSION;
+    if (external_docs_index_) {
+        dim = static_cast<int>(external_docs_index_->d);
+    } else if (embedding_generator_) {
+        dim = embedding_generator_->get_embedding_dimension();
+    }
+
     if (external_chunks_.empty()) {
-        external_docs_index_ = create_optimized_index(EMBEDDING_DIMENSION);
+        external_docs_index_ = create_optimized_index(dim);
         return;
     }
 
     // Пересоздаем индекс с текущими векторами
-    auto new_index = create_optimized_index(EMBEDDING_DIMENSION);
+    auto new_index = create_optimized_index(dim);
 
     if (new_index) {
         std::vector<float> all_vectors;
-        all_vectors.reserve(external_chunks_.size() * EMBEDDING_DIMENSION);
+        all_vectors.reserve(external_chunks_.size() * static_cast<size_t>(dim));
 
         for (const auto& chunk : external_chunks_) {
-            all_vectors.insert(all_vectors.end(),
-                             chunk.embedding.begin(),
-                             chunk.embedding.end());
+            if (static_cast<int>(chunk.embedding.size()) == dim) {
+                all_vectors.insert(all_vectors.end(),
+                                 chunk.embedding.begin(),
+                                 chunk.embedding.end());
+            }
         }
 
-        new_index->train(external_chunks_.size(), all_vectors.data());
-        new_index->add(external_chunks_.size(), all_vectors.data());
+        if (!all_vectors.empty()) {
+            size_t count = all_vectors.size() / static_cast<size_t>(dim);
+            new_index->add(static_cast<int>(count), all_vectors.data());
+        }
 
         external_docs_index_ = std::move(new_index);
     }
@@ -114,6 +127,7 @@ void RagManager::set_similarity_threshold(float threshold) {
 }
 
 void RagManager::set_embedding_server_url(const std::string& url) {
+    embedding_server_url_ = url;
     if (embedding_generator_) {
         embedding_generator_->set_server_url(url);
         std::cout << "[RAG] Embedding server URL set to: " << url << std::endl;
@@ -137,6 +151,11 @@ void RagManager::update_from_settings(const core::RagSettings& settings) {
     // URL сервера эмбеддингов
     if (!settings.embedding_server_url.empty()) {
         set_embedding_server_url(settings.embedding_server_url);
+    }
+
+    // Размерность эмбеддингов из настроек (если задана)
+    if (settings.embedding_dimension > 0 && embedding_generator_) {
+        embedding_generator_->set_embedding_dimension(settings.embedding_dimension);
     }
 
     // Embedding Proxy

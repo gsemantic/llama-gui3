@@ -32,8 +32,9 @@ public:
     bool is_modified() const { return modified_; }
     void set_modified(bool value) { modified_ = value; }
 
-    /// Колбэк для открытия диалога выбора файла модели
-    using BrowseCallback = std::function<bool(std::string& out_path)>;
+    /// Колбэк для открытия диалога выбора файла модели.
+    /// Вызывается с обработчиком результата: on_result(path), path="" при отмене.
+    using BrowseCallback = std::function<void(std::function<void(const std::string&)>)>;
     void setBrowseCallback(BrowseCallback cb) { browse_callback_ = std::move(cb); }
 
 private:

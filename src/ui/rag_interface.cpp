@@ -177,6 +177,36 @@ void RagInterface::show_profile_selector() {
     }
 }
 
+void RagInterface::reindex_with_notice() {
+    if (!rag_manager_) {
+        status_message_ = "RAG manager not initialized";
+        return;
+    }
+
+    std::string profile = rag_manager_->get_current_index_profile();
+    if (profile.empty()) {
+        status_message_ = "Error: No current profile selected";
+        return;
+    }
+
+    std::string src_dir = rag_manager_->get_current_profile_source_directory();
+    std::vector<std::string> docs = rag_manager_->get_current_profile_documents();
+    if (src_dir.empty() && docs.empty()) {
+        status_message_ = "Error: Profile has no source directory or documents";
+        return;
+    }
+
+    processing_ = true;
+    indexing_active_.store(true);
+    status_message_ = "Reindexing: " + profile + "...";
+    std::thread([this, profile]() {
+        rag_manager_->reindex_current_profile();
+        processing_ = false;
+        indexing_active_.store(false);
+        status_message_ = "Reindexed: " + profile;
+    }).detach();
+}
+
 void RagInterface::sync_rag_state_with_chat() {
     // Синхронизируем состояние RAG между RagInterface и ChatInterface
     if (chat_interface_) {
@@ -205,6 +235,24 @@ void RagInterface::render_ui(bool* visible) {
     ImGui::Separator();
     show_profile_selector();
     ImGui::Separator();
+
+    // === Уведомление о необходимости переиндексации ===
+    // Индекс построен другой моделью эмбеддингов или размерностью — векторы
+    // несопоставимы, поиск будет неверным. Информируем пользователя.
+    if (rag_manager_ && rag_manager_->needs_reindex()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+        ImGui::TextWrapped("⚠ %s", rag_manager_->get_reindex_reason().c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::Button("Reindex now")) {
+            reindex_with_notice();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Переиндексирует текущий профиль активной моделью эмбеддингов.\n"
+                              "Профиль должен иметь source directory или документы.");
+        }
+        ImGui::Separator();
+    }
 
     bool prev_rag_enabled = rag_enabled_;
     ImGui::Checkbox("Enable RAG", &rag_enabled_);

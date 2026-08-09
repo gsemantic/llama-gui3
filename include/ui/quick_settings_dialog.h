@@ -38,8 +38,9 @@ public:
     // Отрисовка
     void render();
 
-    // Колбэк для выбора файла модели
-    using BrowseCallback = std::function<bool(std::string& out_path)>;
+    // Колбэк для выбора файла модели.
+    // Вызывается с обработчиком результата: on_result(path), path="" при отмене.
+    using BrowseCallback = std::function<void(std::function<void(const std::string&)>)>;
     void setBrowseCallback(BrowseCallback cb) { browse_callback_ = std::move(cb); }
 
     // Server control callbacks

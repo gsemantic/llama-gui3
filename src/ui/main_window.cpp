@@ -92,14 +92,19 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     });
 
     // Set model browse callback for file dialog in settings
-    settings_dialog_->setModelBrowseCallback([this](std::string& out_path) -> bool {
-        return file_dialog_manager_->tryOpenModelFileDialog(out_path);
+    settings_dialog_->setModelBrowseCallback([this](std::function<void(const std::string&)> done) {
+        file_dialog_manager_->pick_file("Select Model File", std::move(done), "", "model_files");
     });
 
     // Set model browse callback for quick settings dialog
-    quick_settings_dialog_->setBrowseCallback([this](std::string& out_path) -> bool {
-        return file_dialog_manager_->tryOpenModelFileDialog(out_path);
+    quick_settings_dialog_->setBrowseCallback([this](std::function<void(const std::string&)> done) {
+        file_dialog_manager_->pick_file("Select Model File", std::move(done), "", "model_files");
     });
+
+    // File dialogs in FileManager go through FileDialogManager (native or built-in picker)
+    if (file_manager_) {
+        file_manager_->set_file_dialog_manager(file_dialog_manager_.get());
+    }
 
     // Set server control callbacks for quick settings dialog
     quick_settings_dialog_->setStartServerCallback([this]() {
@@ -274,9 +279,38 @@ bool MainWindow::initialize(int width, int height) {
     // Initialize RAG manager
     std::string embedding_model_path = settings_.get_embedding_model_path();
     if (!embedding_model_path.empty()) {
+        // Запускаем выделенный сервер эмбеддингов (bge-m3) при старте,
+        // если пользователь не указал внешний URL сервера вручную.
+        std::string auto_embedding_url;
+        if (settings_.rag().embedding_server_url.empty()) {
+            embedding_server_ = std::make_unique<llama_gui::core::EmbeddingServer>();
+            embedding_server_->set_model_path(embedding_model_path);
+            // Если пользователь настроил свой путь к бинарю llama-server — используем его.
+            // Иначе оставляем автоопределённый абсолютный путь (в settings.ini лежит
+            // голое имя "llama-server", которого нет в PATH).
+            if (settings_.server_runtime().server_binary_path != "llama-server") {
+                embedding_server_->set_server_binary_path(settings_.server_runtime().server_binary_path);
+            }
+            if (embedding_server_->start_server()) {
+                auto_embedding_url = embedding_server_->get_server_url();
+                LOG_INFO("EmbeddingServer запущен: " + auto_embedding_url + " (модель: " + embedding_model_path + ")");
+            } else {
+                LOG_ERROR("EmbeddingServer не удалось запустить для модели: " + embedding_model_path);
+            }
+        }
+
         rag_manager_ = std::make_unique<llama_gui::core::RagManager>(embedding_model_path);
         if (rag_manager_) {
             rag_manager_->initialize_indexes();
+
+            // Если пользователь не указал внешний URL — используем наш встроенный сервер
+            if (!auto_embedding_url.empty()) {
+                rag_manager_->set_embedding_server_url(auto_embedding_url);
+            }
+
+            // Применяем настройки RAG (URL сервера эмбеддингов, размерность и т.п.)
+            rag_manager_->update_from_settings(settings_.rag());
+
             chat_interface_->set_rag_manager(rag_manager_.get());
 
             bool rag_enabled = settings_.rag().enable_rag;
@@ -366,10 +400,14 @@ bool MainWindow::initialize(int width, int height) {
             [this]() { shutdown(); },
             [this]() { open_settings(); },
             [this]() {
-                std::string model_path;
-                if (file_dialog_manager_->tryOpenModelFileDialog(model_path)) {
-                    load_model_from_path(model_path);
-                }
+                file_dialog_manager_->pick_file(
+                    "Select Model File",
+                    [this](const std::string& model_path) {
+                        if (!model_path.empty()) {
+                            load_model_from_path(model_path);
+                        }
+                    },
+                    "", "model_files");
             },
             [this](ServerControlCommand::Action action) { on_server_control_command(action); },
             [this](const std::string& help_type) { show_help(help_type); }
@@ -383,10 +421,15 @@ bool MainWindow::initialize(int width, int height) {
 
     // Подключаем файловые колбэки к CommandManager
     command_manager_->setOpenFileCallback([this]() {
-        std::string path;
-        if (conversation_file_manager_->tryOpenConversationFileDialog(path)) {
-            conversation_file_manager_->openConversationFile(path);
-        }
+        // Встроенный пикер — ОСНОВНОЙ путь; нативный диалог — опциональный ускоритель
+        file_dialog_manager_->pick_file(
+            "Open Conversation",
+            [this](const std::string& path) {
+                if (!path.empty()) {
+                    conversation_file_manager_->openConversationFile(path);
+                }
+            },
+            "", "json_files");
     });
     command_manager_->setSaveFileCallback([this]() {
         if (conversation_file_manager_->getCurrentConversationPath().empty()) {
@@ -655,6 +698,13 @@ void MainWindow::shutdown() {
     // потому что WorkspaceLayoutManager::save() читает позиции/размеры из ImGui::GetCurrentContext().
     // Вызов здесь (после destroy Context) привёл бы к сохранению устаревших данных WindowManager.
 
+    // Останавливаем выделенный сервер эмбеддингов (bge-m3)
+    if (embedding_server_) {
+        embedding_server_->stop_server(true);
+        embedding_server_.reset();
+        LOG_INFO("EmbeddingServer остановлен");
+    }
+
     // Выгружаем плагины до уничтожения UI-подсистем
     if (plugin_manager_) {
         plugin_manager_->shutdown();
@@ -689,7 +739,6 @@ void MainWindow::initializeNewUISystem() {
     window_manager_.addWindow("conversations", show_conversations_, ImVec2(10, 100), ImVec2(250, 500));
     window_manager_.addWindow("files", show_files_, ImVec2(870, 100), ImVec2(300, 500));
     window_manager_.addWindow("rag", show_rag_, ImVec2(270, 100), ImVec2(400, 500));
-    window_manager_.addWindow("agents", show_agents_, ImVec2(690, 100), ImVec2(200, 500));
 
     // Регистрация диалоговых окон (начально скрыты)
     window_manager_.addWindow("settings", show_settings_, ImVec2(200, 100), ImVec2(400, 600));
@@ -706,7 +755,6 @@ void MainWindow::initializeNewUISystem() {
     window_manager_.setImGuiName("conversations", TR("conversations.title"));
     window_manager_.setImGuiName("files", TR("files.title"));
     window_manager_.setImGuiName("rag", "RAG");
-    window_manager_.setImGuiName("agents", TR("agents.title"));
     window_manager_.setImGuiName("profile_manager", "Управление профилями");
     window_manager_.setImGuiName("backup_manager", "Резервные копии");
     window_manager_.setImGuiName("cloud_services", "Cloud Services / Облачные сервисы");
@@ -756,6 +804,17 @@ void MainWindow::initializeNewUISystem() {
             if (rag_settings_dialog_->has_pending_file_dialog()) {
                 rag_settings_dialog_->open_embedding_model_file_dialog();
             }
+
+            // Когда диалог закрылся — применяем новые настройки к RAG менеджеру
+            // (срабатывает и на OK, и на Cancel; на Cancel настройки не менялись,
+            // повторное применение безвредно и идемпотентно)
+            bool visible_now = rag_settings_dialog_->is_visible();
+            if (rag_settings_visible_prev_ && !visible_now) {
+                if (rag_manager_) {
+                    rag_manager_->update_from_settings(settings_.rag());
+                }
+            }
+            rag_settings_visible_prev_ = visible_now;
         }
     }, true);
     window_coordinator_.registerWindow("settings_viewer", [this]() {
@@ -828,7 +887,6 @@ void MainWindow::syncWindowFlagsFromManager() {
     show_conversations_ = window_manager_.isWindowVisible("conversations");
     show_files_ = window_manager_.isWindowVisible("files");
     show_rag_ = window_manager_.isWindowVisible("rag");
-    show_agents_ = window_manager_.isWindowVisible("agents");
     show_settings_ = window_manager_.isWindowVisible("settings");
     show_cloud_services_ = window_manager_.isWindowVisible("cloud_services");
     show_rag_settings_ = window_manager_.isWindowVisible("rag_settings");
@@ -863,7 +921,7 @@ void MainWindow::refreshLocalizedWindowNames() {
 
     // Окна, чьи ImGui-имена локализованы через TR() (см. initializeNewUISystem)
     const char* localized_windows[] = {
-        "conversations", "files", "agents", "grid_snapping", "rag_settings"
+        "conversations", "files", "grid_snapping", "rag_settings"
     };
     for (const char* wm_name : localized_windows) {
         capture(wm_name);
@@ -871,7 +929,6 @@ void MainWindow::refreshLocalizedWindowNames() {
 
     window_manager_.setImGuiName("conversations", TR("conversations.title"));
     window_manager_.setImGuiName("files", TR("files.title"));
-    window_manager_.setImGuiName("agents", TR("agents.title"));
     window_manager_.setImGuiName("grid_snapping", TR("grid_snapping.title"));
     window_manager_.setImGuiName("rag_settings", TR("rag_settings.title"));
 
@@ -1264,6 +1321,11 @@ void MainWindow::render_ui() {
     // Рендерим диалоги DialogManager
     dialog_manager_.render();
 
+    // Рендерим FileDialogManager (встроенный пикер + доставка результатов)
+    if (file_dialog_manager_) {
+        file_dialog_manager_->render();
+    }
+
     // Quick settings dialog (не управляется WindowManager)
     if (quick_settings_dialog_) {
         quick_settings_dialog_->render();
@@ -1334,11 +1396,8 @@ void MainWindow::reload_fonts() {
     // The fonts are already built in load_fonts_with_cyrillic()
 }
 
-bool MainWindow::try_open_embedding_model_file_dialog(std::string& selected_path) {
-    return file_dialog_manager_->tryOpenNativeFileDialog(
-        selected_path,
-        "Выберите модель эмбеддинга"
-    );
+void MainWindow::open_embedding_model_picker(const std::function<void(const std::string&)>& on_result) {
+    file_dialog_manager_->pick_file("Выберите модель эмбеддинга", on_result, "", "embedding_model_files");
 }
 
 void MainWindow::toggle_fullscreen() {

@@ -251,13 +251,14 @@ void QuickSettingsDialog::render_models_tab() {
     ImGui::SameLine();
     if (ImGui::Button("Browse...")) {
         if (browse_callback_) {
-            std::string path;
-            if (browse_callback_(path) && !path.empty()) {
-                strncpy(model_path_buf, path.c_str(), sizeof(model_path_buf) - 1);
-                model_path_buf[sizeof(model_path_buf) - 1] = '\0';
-                settings_.set_model_path(path);
-                settings_modified_ = true;
-            }
+            browse_callback_([this](const std::string& path) {
+                if (!path.empty()) {
+                    strncpy(model_path_buf, path.c_str(), sizeof(model_path_buf) - 1);
+                    model_path_buf[sizeof(model_path_buf) - 1] = '\0';
+                    settings_.set_model_path(path);
+                    settings_modified_ = true;
+                }
+            });
         }
     }
     ImGui::SameLine();

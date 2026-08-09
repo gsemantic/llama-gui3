@@ -143,7 +143,10 @@ void FileBrowser::render_footer() {
         ImGui::Text(TRF("file_browser.selected", "Selected: %s"), filename.c_str());
 
         ImGui::SameLine();
-        if (ImGui::Button(TR("file_browser.open"))) {
+        const char* open_label = (pick_mode_ == PickMode::Directory)
+            ? TR("file_picker.select_folder")
+            : TR("file_browser.open");
+        if (ImGui::Button(open_label)) {
             if (on_file_selected_) {
                 on_file_selected_(selected_file_);
             }

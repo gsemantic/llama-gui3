@@ -11,6 +11,7 @@
 #include <atomic>
 #include "core/llama_interface.h"
 #include "core/server_manager.h"
+#include "core/embedding_server.h"
 #include "core/state_manager.h"
 #include "core/settings.h"
 #include "core/model_manager.h"
@@ -220,10 +221,7 @@ public:
     const LlamaInterface& get_llama_interface() const { return llama_interface_; }
 
     // File dialog methods - public interface
-    bool try_open_embedding_model_file_dialog(std::string& selected_path);
-    bool try_zenity_embedding_model_file_dialog(std::string& selected_path);
-    bool try_kdialog_embedding_model_file_dialog(std::string& selected_path);
-    bool try_python_embedding_model_file_dialog(std::string& selected_path);
+    void open_embedding_model_picker(const std::function<void(const std::string&)>& on_result);
 
 private:
     // Platform-specific initialization
@@ -281,7 +279,11 @@ private:
     StateManager& state_manager_;
     LlamaInterface& llama_interface_;
     std::shared_ptr<ServerManager> server_manager_;
+    std::unique_ptr<llama_gui::core::EmbeddingServer> embedding_server_;
     std::unique_ptr<llama_gui::core::RagManager> rag_manager_;
+
+    // Отслеживание видимости диалога настроек RAG для применения изменений
+    bool rag_settings_visible_prev_ = false;
 
     // UI components
     std::unique_ptr<ChatInterface> chat_interface_;
@@ -401,7 +403,6 @@ private:
     bool show_conversations_ = false;  // Флаг показа окна бесед
     bool show_files_ = false;  // Флаг показа окна файлов
     bool show_rag_ = false;  // Флаг показа окна RAG
-    bool show_agents_ = false;  // Флаг показа окна агентов
     bool show_settings_ = false;  // Флаг показа настроек
     bool show_cloud_services_ = false;  // Флаг показа облачных сервисов
     bool show_rag_settings_ = false;  // Флаг показа настроек RAG

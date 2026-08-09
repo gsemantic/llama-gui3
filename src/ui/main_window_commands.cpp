@@ -435,14 +435,6 @@ void MainWindow::connectStubCommands() {
     // Help stubs
     registerStub("check_updates", "Check for Updates");
 
-    // Agents stubs
-    registerStub("agents_status", "Agent Status");
-    registerStub("agents_list", "List Agents");
-    registerStub("rag", "RAG Search");
-    registerStub("search", "Web Search");
-    registerStub("code", "Generate Code");
-    registerStub("summarize", "Summarize");
-
     // Developer stubs
     registerStub("toggle_debug_mode", "Debug Mode");
     registerStub("show_command_manager_state", "Command Manager State");

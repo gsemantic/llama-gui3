@@ -335,19 +335,6 @@ void CommandManager::initializeDefaultCommands(
         "",
         nullptr));
 
-    registerCommand("toggle_window_agents", CommandFactory::createFunctionalCommand(
-        "toggle_window_agents",
-        [this]() {
-            if (toggle_window_callback_) {
-                toggle_window_callback_("agents");
-            } else {
-                std::cout << "Toggle window callback not set" << std::endl;
-            }
-        },
-        "Toggle Agents Panel",
-        "",
-        nullptr));
-
     registerCommand("toggle_window_settings", CommandFactory::createFunctionalCommand(
         "toggle_window_settings",
         [this]() {
@@ -501,7 +488,6 @@ void CommandManager::initializeDefaultCommands(
     registerShortcut("Ctrl+2", "toggle_window_files");
     registerShortcut("Ctrl+3", "toggle_window_chat");
     registerShortcut("Ctrl+4", "toggle_window_rag");
-    registerShortcut("Ctrl+5", "toggle_window_agents");
     
     std::cout << "✓ Default commands initialized (" << commands_.size() << " commands, " 
               << shortcuts_.size() << " shortcuts)" << std::endl;

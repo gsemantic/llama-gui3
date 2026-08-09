@@ -24,7 +24,7 @@ public:
     void set_main_window(void* main_window) { main_window_ptr_ = main_window; }
 
     // Вызов диалога выбора файла (должен вызываться из основного цикла)
-    bool open_embedding_model_file_dialog();
+    void open_embedding_model_file_dialog();
     
     // Получить результат выбора файла
     std::string get_selected_file_path() const { return selected_file_path_; }
@@ -38,6 +38,7 @@ private:
 
     // Временные переменные для редактирования настроек
     char embedding_model_path_buffer_[512];
+    char embedding_server_url_buffer_[512];
     int max_chunks_in_memory_;
     float similarity_threshold_;
     int max_embedding_cache_size_;

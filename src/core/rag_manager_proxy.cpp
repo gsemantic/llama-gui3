@@ -12,8 +12,8 @@ bool RagManager::start_embedding_proxy(int port) {
         return true;
     }
 
-    // Get the local server URL from settings
-    std::string local_server_url = "http://localhost:8081"; // default
+    // Get the local server URL: explicit user setting or the built-in embedding server
+    std::string local_server_url = embedding_server_url_.empty() ? "http://localhost:8081" : embedding_server_url_;
 
     embedding_proxy_ = std::make_unique<EmbeddingProxy>(local_server_url, port);
 

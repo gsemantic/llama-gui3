@@ -15,7 +15,6 @@ void LocalizationManager::initializeMenuTranslations() {
     addTranslation("menu.view", "Вид", "View");
     addTranslation("menu.window", "Окно", "Window");
     addTranslation("menu.help", "Справка", "Help");
-    addTranslation("menu.agents", "Агенты", "Agents");
     addTranslation("menu.tools", "Инструменты", "Tools");
     addTranslation("menu.debug", "Отладка", "Debug");
     addTranslation("menu.performance", "Производительность", "Performance");
@@ -53,7 +52,6 @@ void LocalizationManager::initializeMenuTranslations() {
     addTranslation("menu.window.files", "Файлы", "Files");
     addTranslation("menu.window.chat", "Чат", "Chat");
     addTranslation("menu.window.rag", "RAG", "RAG");
-    addTranslation("menu.window.agents", "Агенты", "Agents");
     addTranslation("menu.window.workspace", "Рабочая область", "Workspace");
     addTranslation("menu.window.workspace.save", "Сохранить рабочую область", "Save Workspace");
     addTranslation("menu.window.workspace.load", "Загрузить рабочую область", "Load Workspace");
@@ -67,15 +65,6 @@ void LocalizationManager::initializeMenuTranslations() {
     addTranslation("menu.help.keyboard_shortcuts", "Горячие клавиши", "Keyboard Shortcuts");
     addTranslation("menu.help.about", "О программе", "About");
     addTranslation("menu.help.check_updates", "Проверить обновления", "Check for Updates");
-
-    // Agents Menu Items
-    addTranslation("menu.agents.panel", "Панель агентов", "Agents Panel");
-    addTranslation("menu.agents.status", "Статус агентов", "Agent Status");
-    addTranslation("menu.agents.list", "Список агентов", "List Agents");
-    addTranslation("menu.agents.rag_search", "RAG поиск", "RAG Search");
-    addTranslation("menu.agents.web_search", "Веб-поиск", "Web Search");
-    addTranslation("menu.agents.code", "Генерация кода", "Generate Code");
-    addTranslation("menu.agents.summarize", "Суммаризация", "Summarize");
 
     // Tools Menu Items (Developer)
     addTranslation("menu.tools.plugins", "Плагины", "Plugins");

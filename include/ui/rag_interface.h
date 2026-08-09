@@ -21,6 +21,7 @@ namespace ui {
 // Forward declaration
 class RagSettingsDialog;
 class ChatInterface;
+class FileDialogManager;
 
 class RagInterface {
 public:
@@ -40,11 +41,17 @@ public:
     // Установка ссылки на Settings для сохранения
     void set_settings(llama_gui::core::Settings* settings) { settings_ = settings; }
 
+    // Диалоги выбора файлов/папок идут через FileDialogManager
+    void set_file_dialog_manager(FileDialogManager* mgr) { file_dialog_manager_ = mgr; }
+
     // Синхронизация состояния RAG с ChatInterface
     void sync_rag_state_with_chat();
 
     // === Управление профилями индексов ===
     void show_profile_selector();
+
+    // Переиндексация текущего профиля по запросу пользователя (кнопка в уведомлении)
+    void reindex_with_notice();
 
     // === Indexing progress accessors (for mini-indicator in ChatInterface) ===
     bool is_indexing() const { return indexing_active_.load(); }
@@ -111,6 +118,9 @@ private:
     
     // Указатель на Settings для сохранения
     llama_gui::core::Settings* settings_ = nullptr;
+
+    // Указатель на FileDialogManager для гарантированного выбора файлов/папок
+    FileDialogManager* file_dialog_manager_ = nullptr;
 };
 
 } // namespace ui

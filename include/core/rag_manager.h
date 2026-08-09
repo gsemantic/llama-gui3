@@ -225,6 +225,19 @@ public:
     std::string get_default_index_path() const;
     void clear_all_indexes();
 
+    // === Проверка совместимости индекса с текущей моделью эмбеддингов ===
+    /// true, если загруженный индекс построен другой моделью/размерностью
+    /// и требуется переиндексация для корректного поиска
+    bool needs_reindex() const { return index_needs_reindex_; }
+    /// Имя модели, которой построен текущий индекс (из metadata)
+    std::string get_index_embedding_model() const { return index_embedding_model_; }
+    /// Имя текущей модели эмбеддингов
+    std::string get_active_embedding_model() const { return embedding_model_path_; }
+    /// Причина необходимости переиндексации (для уведомления пользователя)
+    std::string get_reindex_reason() const { return reindex_reason_; }
+    /// Сбросить флаг после переиндексации
+    void reset_needs_reindex() { index_needs_reindex_ = false; reindex_reason_.clear(); }
+
     // === Управление профилями индексов ===
     bool initialize_profile_manager(const std::string& profiles_directory = "");
     bool create_index_profile(const std::string& profile_name, const std::string& source_directory = "");
@@ -236,6 +249,8 @@ public:
     std::string get_current_profile_source_directory() const;
     bool load_index_for_current_profile();
     bool reindex_current_profile();
+    /// Список документов текущего профиля (пути к файлам)
+    std::vector<std::string> get_current_profile_documents() const;
 
     // === KV-cache persistence для документов ===
 
@@ -329,6 +344,17 @@ private:
     // GGUF модель для эмбеддингов
     std::unique_ptr<EmbeddingGenerator> embedding_generator_;
 
+    // URL сервера эмбеддингов (используется прокси для форвардинга)
+    std::string embedding_server_url_;
+
+    // Модель эмбеддингов (путь к gguf), которой строится индекс
+    std::string embedding_model_path_;
+
+    // Совместимость индекса с текущей моделью эмбеддингов
+    bool index_needs_reindex_ = false;
+    std::string index_embedding_model_;  // Модель из metadata загруженного индекса
+    std::string reindex_reason_;         // Причина несовместимости (для UI)
+
     // Embedding Proxy (OpenAI-compatible HTTP server)
     std::unique_ptr<EmbeddingProxy> embedding_proxy_;
 
@@ -336,7 +362,7 @@ private:
     int max_chunks_in_memory_ = 1000;  // Ограничение для экономии памяти
     float similarity_threshold_ = 0.7f; // Порог схожести
     int max_tokens_per_chunk_ = 256;   // Размер чанка в токенах
-    static constexpr int EMBEDDING_DIMENSION = 384; // Размер эмбеддинга all-MiniLM-L6-v2
+    static constexpr int EMBEDDING_DIMENSION = 384; // Размер эмбеддинга granite-embedding-107m
     
     // MMR параметры
     bool enable_mmr_ = false;  // Включить MMR

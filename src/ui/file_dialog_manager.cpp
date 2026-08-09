@@ -1,6 +1,9 @@
 #include "file_dialog_manager.h"
 #include "file_dialog_helper.h"
+#include "file_picker_dialog.h"
 #include <iostream>
+#include <mutex>
+#include <vector>
 
 namespace llama_gui {
 namespace ui {
@@ -8,6 +11,67 @@ namespace ui {
 FileDialogManager::FileDialogManager()
     : last_open_path_()
     , last_save_path_() {
+}
+
+void FileDialogManager::pick_file(const std::string& title, FileDialogManager::PickerCallback callback,
+                                  const std::string& start_dir, const std::string& filter_type) {
+    // Встроенный пикер — ОСНОВНОЙ и гарантированный путь.
+    // Внешняя цепочка (zenity/kdialog/python) — только опциональный ускоритель.
+    FilePickerDialog::NativeAccelerator accelerator;
+    if (FileDialogHelper::is_available()) {
+        accelerator = [this, title, filter_type, callback]() {
+            FileDialogHelper helper;
+            helper.open_file_dialog(title, [this, callback](const std::string& path) {
+                enqueue_result(callback, path);
+            }, filter_type);
+        };
+    }
+    file_picker_.set_native_accelerator(std::move(accelerator));
+    file_picker_.open(FilePickerDialog::Mode::File, title, start_dir, std::move(callback));
+}
+
+void FileDialogManager::pick_directory(const std::string& title, FileDialogManager::PickerCallback callback,
+                                       const std::string& start_dir) {
+    // Встроенный пикер — ОСНОВНОЙ и гарантированный путь.
+    // Внешняя цепочка (zenity/kdialog/python) — только опциональный ускоритель.
+    FilePickerDialog::NativeAccelerator accelerator;
+    if (FileDialogHelper::is_available()) {
+        accelerator = [this, title, callback]() {
+            FileDialogHelper helper;
+            helper.open_directory_dialog(title, [this, callback](const std::string& path) {
+                enqueue_result(callback, path);
+            });
+        };
+    }
+    file_picker_.set_native_accelerator(std::move(accelerator));
+    file_picker_.open(FilePickerDialog::Mode::Directory, title, start_dir, std::move(callback));
+}
+
+void FileDialogManager::render() {
+    std::vector<FileDialogManager::PendingResult> ready;
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        ready.swap(pending_results_);
+    }
+    for (auto& result : ready) {
+        if (result.callback) {
+            result.callback(result.path);
+        }
+    }
+    file_picker_.render();
+}
+
+bool FileDialogManager::is_picker_open() const {
+    return file_picker_.is_open();
+}
+
+void FileDialogManager::cancel_picker() {
+    file_picker_.cancel();
+}
+
+void FileDialogManager::enqueue_result(FileDialogManager::PickerCallback callback, const std::string& path) {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending_results_.push_back({std::move(callback), path});
 }
 
 bool FileDialogManager::tryOpenNativeFileDialog(std::string& selected_path, const std::string& title) {

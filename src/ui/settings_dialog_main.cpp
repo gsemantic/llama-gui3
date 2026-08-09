@@ -88,7 +88,7 @@ SettingsDialog::SettingsDialog(Settings& settings, ServerManager* server_manager
 // Деструктор должен быть после всех include для корректного уничтожения unique_ptr
 SettingsDialog::~SettingsDialog() = default;
 
-void SettingsDialog::setModelBrowseCallback(std::function<bool(std::string& out_path)> cb) {
+void SettingsDialog::setModelBrowseCallback(std::function<void(std::function<void(const std::string&)>)> cb) {
     if (model_settings_dialog_) {
         model_settings_dialog_->setBrowseCallback(std::move(cb));
     }

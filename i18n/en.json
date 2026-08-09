@@ -9,7 +9,6 @@
     "menu.view": "View",
     "menu.window": "Window",
     "menu.help": "Help",
-    "menu.agents": "Agents",
     "menu.tools": "Tools",
     "menu.debug": "Debug",
     "menu.performance": "Performance",
@@ -69,7 +68,6 @@
     "menu.window.files": "Files",
     "menu.window.chat": "Chat",
     "menu.window.rag": "RAG",
-    "menu.window.agents": "Agents",
     "menu.window.workspace": "Workspace",
     "menu.window.workspace.save": "Save",
     "menu.window.workspace.save_as": "Save As...",
@@ -94,14 +92,6 @@
     "menu.help.keyboard_shortcuts": "Keyboard Shortcuts",
     "menu.help.about": "About",
     "menu.help.check_updates": "Check for Updates",
-
-    "menu.agents.panel": "Agents Panel",
-    "menu.agents.status": "Agent Status",
-    "menu.agents.list": "List Agents",
-    "menu.agents.rag_search": "RAG Search",
-    "menu.agents.web_search": "Web Search",
-    "menu.agents.code": "Generate Code",
-    "menu.agents.summarize": "Summarize",
 
     "menu.tools.plugins": "Plugins",
     "menu.tools.extensions": "Extensions",
@@ -421,6 +411,7 @@
     "file_browser.selected": "Selected: %s",
     "file_browser.open": "Open",
     "file_browser.no_selection": "No file selected",
+    "file_picker.native_dialog": "System dialog",
 
     "server.config": "Server Configuration",
     "server.url": "Server URL",

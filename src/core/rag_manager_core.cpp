@@ -24,6 +24,9 @@ namespace llama_gui {
 namespace core {
 
 RagManager::RagManager(const std::string& embedding_model_path) {
+    // Сохраняем путь модели для проверки совместимости индексов
+    embedding_model_path_ = embedding_model_path;
+
     // Инициализируем генератор эмбеддингов
     embedding_generator_ = std::make_unique<EmbeddingGenerator>(embedding_model_path);
 

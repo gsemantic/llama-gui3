@@ -59,8 +59,7 @@ WorkspaceConfiguration WorkspaceManager::createDefaultUserWorkspace() const {
         {"File", "File", true, {}, {}},
         {"Settings", "Settings", true, {}, {}},
         {"View", "View", true, {}, {}},
-        {"Agents", "Agents", true, {}, {}},
-        {"Help", "Help", true, {}, {}}
+        {"Help", "Help", true, {}}
     };
 
     // Доступные команды - только основные (быстрые) настройки
@@ -69,7 +68,7 @@ WorkspaceConfiguration WorkspaceManager::createDefaultUserWorkspace() const {
         "toggle_window_chat", "toggle_window_files", "toggle_window_rag",
         "toggle_window_status_bar",
         // Переключение окон через меню Window (все окна)
-        "toggle_window_conversations", "toggle_window_agents",
+        "toggle_window_conversations",
         "toggle_window_settings", "toggle_window_cloud_services",
         "toggle_window_rag_settings", "toggle_window_settings_viewer",
         "toggle_window_grid_snapping", "toggle_window_profile_manager",
@@ -114,7 +113,6 @@ WorkspaceConfiguration WorkspaceManager::createDefaultDeveloperWorkspace() const
         {"File", "File", true, {}, {}},
         {"Settings", "Settings", true, {}, {}},
         {"View", "View", true, {}, {}},
-        {"Agents", "Agents", true, {}, {}},
         {"Developer", "Developer", true, {}, {}},
         {"Tools", "Tools", true, {}, {}},
         {"Help", "Help", true, {}, {}}

@@ -72,6 +72,7 @@ set(CORE_SOURCES
     document_parser.cpp
     embedding_generator.cpp
     embedding_proxy.cpp
+    embedding_server.cpp
     env_manager.cpp
     file_dialog_filters.cpp
     ini_section_parser.cpp

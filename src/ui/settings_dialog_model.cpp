@@ -47,11 +47,12 @@ void ModelSettingsDialog::render() {
 
         if (ImGui::Button(TR("model.browse"))) {
             if (browse_callback_) {
-                std::string path;
-                if (browse_callback_(path) && !path.empty()) {
-                    settings_.set_model_path(path);
-                    modified_ = true;
-                }
+                browse_callback_([this](const std::string& path) {
+                    if (!path.empty()) {
+                        settings_.set_model_path(path);
+                        modified_ = true;
+                    }
+                });
             }
         }
     }

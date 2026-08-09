@@ -236,11 +236,22 @@ bool RagManager::process_text_chunk(const std::string& text, const std::string& 
         // Преобразуем вектор в формат FAISS
         std::vector<float> vector_for_faiss = chunk.embedding;
 
-        // Проверяем, что размер вектора соответствует размерности индекса
+        // Проверяем, что размер вектора соответствует размерности индекса.
+        // Если нет - пересоздаём индекс под фактическую размерность эмбеддинга,
+        // чтобы индексация не молча отбрасывала все чанки (когда сервер меняет
+        // размерность модели эмбеддингов).
         if (vector_for_faiss.size() != external_docs_index_->d) {
-            std::cerr << "Error: Embedding dimension mismatch. Expected: " << external_docs_index_->d
-                      << ", got: " << vector_for_faiss.size() << std::endl;
-            return false;
+            std::cerr << "[RAG] Embedding dimension changed from "
+                      << external_docs_index_->d << " to " << vector_for_faiss.size()
+                      << ", rebuilding index" << std::endl;
+            external_docs_index_ = create_optimized_index(static_cast<int>(vector_for_faiss.size()));
+            // Векторы прежней размерности несовместимы с новым индексом
+            external_chunks_.clear();
+            if (!external_docs_index_) {
+                std::cerr << "Error: Failed to recreate FAISS index for dimension "
+                          << vector_for_faiss.size() << std::endl;
+                return false;
+            }
         }
 
         // Нормализуем вектор для косинусного сходства

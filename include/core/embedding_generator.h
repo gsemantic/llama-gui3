@@ -18,6 +18,9 @@ public:
     std::vector<float> generate_embedding(const std::string& text);
     bool is_loaded() const { return model_loaded_; }
     int get_embedding_dimension() const { return embedding_dimension_; }
+    void set_embedding_dimension(int dim) {
+        if (dim > 0) embedding_dimension_ = dim;
+    }
 
     // Server-based embedding via llama.cpp /v1/embeddings endpoint
     void set_server_url(const std::string& url) { server_url_ = url; }

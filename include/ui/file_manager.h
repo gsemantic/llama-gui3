@@ -7,12 +7,12 @@
 #include "core/llama_interface.h"
 #include "core/state_manager.h"
 #include "core/settings.h"
-#include "file_dialog_helper.h"
 #include "file_browser.h"
 #include "recent_files_manager.h"
 
 // Forward declaration for RAG integration
 namespace llama_gui { namespace core { class RagManager; } }
+namespace llama_gui { namespace ui { class FileDialogManager; } }
 
 namespace llama_gui {
 namespace ui {
@@ -77,6 +77,9 @@ public:
     }
     void enable_rag(bool enable) { rag_enabled_ = enable; }
 
+    // File dialogs go through FileDialogManager (native or built-in picker)
+    void set_file_dialog_manager(FileDialogManager* mgr) { file_dialog_manager_ = mgr; }
+
 private:
     void render_file_tree();
     void render_browse_files();
@@ -96,9 +99,9 @@ private:
     std::string current_directory_;
 
     // Components
-    FileDialogHelper dialog_helper_;
     FileBrowser file_browser_;
     RecentFilesManager recent_files_manager_;
+    FileDialogManager* file_dialog_manager_ = nullptr;
 
     // Callbacks
     AttachmentChangedCallback on_attachment_changed_;

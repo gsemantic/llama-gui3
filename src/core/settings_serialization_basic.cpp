@@ -112,6 +112,7 @@ void Settings::serializePerformanceSettings(json& j) const {
 void Settings::serializeRagSettings(json& j) const {
     j["rag"] = {
         {"embedding_model_path", rag_settings_.embedding_model_path},
+        {"embedding_server_url", rag_settings_.embedding_server_url},
         {"max_chunks_in_memory", rag_settings_.max_chunks_in_memory},
         {"similarity_threshold", rag_settings_.similarity_threshold},
         {"max_embedding_cache_size", rag_settings_.max_embedding_cache_size},
@@ -262,6 +263,7 @@ void Settings::deserializeRagSettings(const json& j) {
     if (j.contains("rag")) {
         auto& r = j["rag"];
         rag_settings_.embedding_model_path = r.value("embedding_model_path", "");
+        rag_settings_.embedding_server_url = r.value("embedding_server_url", "");
         rag_settings_.max_chunks_in_memory = r.value("max_chunks_in_memory", 100);
         rag_settings_.similarity_threshold = r.value("similarity_threshold", 0.7f);
         rag_settings_.max_embedding_cache_size = r.value("max_embedding_cache_size", 50);

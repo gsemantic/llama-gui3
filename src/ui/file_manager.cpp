@@ -1,5 +1,6 @@
 #include "../include/ui/file_manager.h"
 #include "../include/core/rag_manager.h"
+#include "../include/ui/file_dialog_manager.h"
 #include "../external/imgui/imgui.h"
 #include "../include/ui/localization_manager.h"
 #include <iostream>
@@ -87,18 +88,22 @@ void FileManager::open_file(const std::string& file_path) {
 }
 
 void FileManager::open_file_dialog(const std::string& title, std::function<void(const std::string&)> callback) {
-    dialog_helper_.open_file_dialog(title, callback);
+    if (file_dialog_manager_) {
+        file_dialog_manager_->pick_file(title, std::move(callback));
+    }
 }
 
 void FileManager::open_file_dialog(const std::string& title, std::function<void(const std::string&)> callback,
                                    const std::string& filter) {
-    // For now, just use the regular dialog without filter support
-    // TODO: Extend FileDialogHelper to support file filters
-    dialog_helper_.open_file_dialog(title, callback);
+    if (file_dialog_manager_) {
+        file_dialog_manager_->pick_file(title, std::move(callback), "", filter);
+    }
 }
 
 void FileManager::open_directory_dialog(const std::string& title, std::function<void(const std::string&)> callback) {
-    dialog_helper_.open_directory_dialog(title, callback);
+    if (file_dialog_manager_) {
+        file_dialog_manager_->pick_directory(title, std::move(callback));
+    }
 }
 
 void FileManager::add_recent_file(const std::string& file_path) {

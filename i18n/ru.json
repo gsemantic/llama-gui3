@@ -9,7 +9,6 @@
     "menu.view": "Вид",
     "menu.window": "Окно",
     "menu.help": "Справка",
-    "menu.agents": "Агенты",
     "menu.tools": "Инструменты",
     "menu.debug": "Отладка",
     "menu.performance": "Производительность",
@@ -87,7 +86,6 @@
     "menu.window.files": "Файлы",
     "menu.window.chat": "Чат",
     "menu.window.rag": "RAG",
-    "menu.window.agents": "Агенты",
     "menu.window.workspace": "Рабочая область",
     "menu.window.workspace.save": "Сохранить",
     "menu.window.workspace.save_as": "Сохранить как...",
@@ -112,14 +110,6 @@
     "menu.help.keyboard_shortcuts": "Горячие клавиши",
     "menu.help.about": "О программе",
     "menu.help.check_updates": "Проверить обновления",
-
-    "menu.agents.panel": "Панель агентов",
-    "menu.agents.status": "Статус агентов",
-    "menu.agents.list": "Список агентов",
-    "menu.agents.rag_search": "RAG поиск",
-    "menu.agents.web_search": "Веб-поиск",
-    "menu.agents.code": "Генерация кода",
-    "menu.agents.summarize": "Суммаризация",
 
     "menu.tools.plugins": "Плагины",
     "menu.tools.extensions": "Расширения",
@@ -439,6 +429,7 @@
     "file_browser.selected": "Выбрано: %s",
     "file_browser.open": "Открыть",
     "file_browser.no_selection": "Файл не выбран",
+    "file_picker.native_dialog": "Системный диалог",
 
     "server.config": "Конфигурация сервера",
     "server.url": "URL сервера",

@@ -52,6 +52,10 @@ RagSettingsDialog::RagSettingsDialog(void* settings, void* main_window)
     // Копируем строку в буфер
     strncpy(embedding_model_path_buffer_, settings_obj->rag().embedding_model_path.c_str(), sizeof(embedding_model_path_buffer_) - 1);
     embedding_model_path_buffer_[sizeof(embedding_model_path_buffer_) - 1] = '\0';
+
+    // URL сервера эмбеддингов (llama-server /v1/embeddings)
+    strncpy(embedding_server_url_buffer_, settings_obj->rag().embedding_server_url.c_str(), sizeof(embedding_server_url_buffer_) - 1);
+    embedding_server_url_buffer_[sizeof(embedding_server_url_buffer_) - 1] = '\0';
 }
 
 void RagSettingsDialog::render() {
@@ -83,6 +87,22 @@ void RagSettingsDialog::render() {
 
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(TR("rag_settings.embedding_model_tooltip"));
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // URL сервера эмбеддингов (llama-server /v1/embeddings)
+        ImGui::Text("URL сервера эмбеддингов (llama-server)");
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::InputText("##embedding_server_url", embedding_server_url_buffer_, sizeof(embedding_server_url_buffer_));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("HTTP endpoint llama-server с моделью эмбеддингов.\n"
+                              "Пример: http://localhost:8083\n"
+                              "Запросы будут идти на <URL>/v1/embeddings.\n"
+                              "Рекомендуется granite-embedding-107m-multilingual (384-dim).\n"
+                              "Пусто = встроенный сервер запускается автоматически.\n"
+                              "После смены сервера нужно переиндексировать профили!");
         }
 
         ImGui::Spacing();
@@ -351,6 +371,7 @@ void RagSettingsDialog::render() {
             // Сохраняем изменения в настройках
             llama_gui::core::RagSettings new_settings;
             new_settings.embedding_model_path = std::string(embedding_model_path_buffer_);
+            new_settings.embedding_server_url = std::string(embedding_server_url_buffer_);
             new_settings.max_chunks_in_memory = max_chunks_in_memory_;
             new_settings.similarity_threshold = similarity_threshold_;
             new_settings.max_embedding_cache_size = max_embedding_cache_size_;
@@ -412,6 +433,8 @@ void RagSettingsDialog::render() {
             // Восстанавливаем значения из настроек
             strncpy(embedding_model_path_buffer_, settings_obj->rag().embedding_model_path.c_str(), sizeof(embedding_model_path_buffer_) - 1);
             embedding_model_path_buffer_[sizeof(embedding_model_path_buffer_) - 1] = '\0';
+            strncpy(embedding_server_url_buffer_, settings_obj->rag().embedding_server_url.c_str(), sizeof(embedding_server_url_buffer_) - 1);
+            embedding_server_url_buffer_[sizeof(embedding_server_url_buffer_) - 1] = '\0';
             max_chunks_in_memory_ = settings_obj->rag().max_chunks_in_memory;
             similarity_threshold_ = settings_obj->rag().similarity_threshold;
             max_embedding_cache_size_ = settings_obj->rag().max_embedding_cache_size;
@@ -446,21 +469,21 @@ void RagSettingsDialog::render() {
     ImGui::End();
 }
 
-bool RagSettingsDialog::open_embedding_model_file_dialog() {
+void RagSettingsDialog::open_embedding_model_file_dialog() {
     if (!pending_file_dialog_ || !main_window_ptr_) {
-        return false;
+        return;
     }
 
-    MainWindow* main_window = static_cast<MainWindow*>(main_window_ptr_);
-    if (main_window->try_open_embedding_model_file_dialog(selected_file_path_)) {
-        // Копируем путь в буфер
-        strncpy(embedding_model_path_buffer_, selected_file_path_.c_str(), sizeof(embedding_model_path_buffer_) - 1);
-        embedding_model_path_buffer_[sizeof(embedding_model_path_buffer_) - 1] = '\0';
-        pending_file_dialog_ = false;
-        return true;
-    }
+    // Сбрасываем флаг сразу - запускаем асинхронный выбор
     pending_file_dialog_ = false;
-    return false;
+
+    MainWindow* main_window = static_cast<MainWindow*>(main_window_ptr_);
+    main_window->open_embedding_model_picker([this](const std::string& path) {
+        if (!path.empty()) {
+            strncpy(embedding_model_path_buffer_, path.c_str(), sizeof(embedding_model_path_buffer_) - 1);
+            embedding_model_path_buffer_[sizeof(embedding_model_path_buffer_) - 1] = '\0';
+        }
+    });
 }
 
 } // namespace ui

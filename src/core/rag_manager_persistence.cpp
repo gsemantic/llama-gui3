@@ -2,6 +2,7 @@
 #include "../include/core/embedding_generator.h"
 #include <fstream>
 #include <iostream>
+#include <cstdio>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
@@ -78,9 +79,16 @@ bool RagManager::save_index(const std::string& index_path) {
 
         // Сохраняем метаданные чанков в JSON
         nlohmann::json metadata;
-        metadata["version"] = 2;  // Bumped for code-aware metadata
+        metadata["version"] = 3;  // Bumped: хранится embedding_model для проверки совместимости
         metadata["chunk_count"] = external_chunks_.size();
-        metadata["embedding_dimension"] = EMBEDDING_DIMENSION;
+        // Используем фактическую размерность индекса, а не жёстко заданную константу
+        metadata["embedding_dimension"] = external_docs_index_
+            ? static_cast<int>(external_docs_index_->d)
+            : EMBEDDING_DIMENSION;
+        // Модель, которой построен индекс (basename пути) — для проверки при загрузке
+        metadata["embedding_model"] = embedding_model_path_.empty()
+            ? "unknown"
+            : std::filesystem::path(embedding_model_path_).filename().string();
 
         // Сохраняем информацию о каждом чанке (без эмбеддингов - они в индексе)
         nlohmann::json chunks_json = nlohmann::json::array();
@@ -102,6 +110,19 @@ bool RagManager::save_index(const std::string& index_path) {
 
         metadata["chunks"] = chunks_json;
 
+        // Сериализуем в строку ПЕРЕД открытием файла:
+        // - error_handler_t::replace заменяет невалидные UTF-8 байты на U+FFFD
+        //   вместо выброса исключения type_error.316 (иначе остаётся пустой файл)
+        // - Если бы dump() бросил исключение, файл с пустым содержимым не создался бы
+        std::string metadata_str;
+        try {
+            metadata_str = metadata.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+        } catch (const std::exception& e) {
+            std::cerr << "[RAG PERSISTENCE] Error: Failed to serialize metadata: " << e.what() << std::endl;
+            std::remove(metadata_path.c_str());
+            return false;
+        }
+
         // Записываем JSON
         std::ofstream meta_file(metadata_path);
         if (!meta_file.is_open()) {
@@ -109,7 +130,7 @@ bool RagManager::save_index(const std::string& index_path) {
             return false;
         }
 
-        meta_file << metadata.dump(2);  // Красивый JSON с отступами
+        meta_file << metadata_str;
         meta_file.close();
 
         std::cout << "[RAG PERSISTENCE] Metadata saved successfully ("
@@ -163,6 +184,8 @@ bool RagManager::load_index(const std::string& index_path) {
 
         int chunk_count = metadata.value("chunk_count", 0);
         int embedding_dim = metadata.value("embedding_dimension", EMBEDDING_DIMENSION);
+        std::string index_model = metadata.value("embedding_model", "");
+        int metadata_version = metadata.value("version", 0);
 
         std::cout << "[RAG PERSISTENCE] Metadata loaded: " << chunk_count << " chunks, "
                   << embedding_dim << " dimensions" << std::endl;
@@ -180,6 +203,12 @@ bool RagManager::load_index(const std::string& index_path) {
             std::cerr << "[RAG PERSISTENCE] Error: Embedding dimension mismatch. Expected: "
                       << embedding_dim << ", got: " << external_docs_index_->d << std::endl;
             return false;
+        }
+
+        // Синхронизируем размерность генератора с загруженным индексом,
+        // чтобы запросы эмбеддились в ту же размерность
+        if (embedding_generator_) {
+            embedding_generator_->set_embedding_dimension(static_cast<int>(external_docs_index_->d));
         }
 
         std::cout << "[RAG PERSISTENCE] FAISS index loaded successfully" << std::endl;
@@ -220,6 +249,40 @@ bool RagManager::load_index(const std::string& index_path) {
         // =========================================
 
         std::cout << "[RAG PERSISTENCE] RAG index ready for use!" << std::endl;
+
+        // === Проверка совместимости индекса с текущей моделью эмбеддингов ===
+        // Индекс построен эмбеддингами определённой модели. Если активная модель
+        // сменилась, векторы из разных моделей несопоставимы и поиск будет неверным.
+        index_needs_reindex_ = false;
+        reindex_reason_.clear();
+        index_embedding_model_ = index_model;
+
+        std::string active_model = embedding_model_path_.empty()
+            ? "" : std::filesystem::path(embedding_model_path_).filename().string();
+
+        // Старые индексы (version < 3) не записывали embedding_model в metadata —
+        // они построены n-gram fallback и несопоставимы с серверными эмбеддингами
+        // даже при совпадении размерности.
+        if (metadata_version < 3) {
+            index_needs_reindex_ = true;
+            reindex_reason_ = "Индекс создан старой версией (без метаданных модели эмбеддингов) "
+                "и построен без серверных эмбеддингов. Требуется переиндексация.";
+            std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
+        } else if (!active_model.empty() && !index_model.empty() && active_model != index_model) {
+            index_needs_reindex_ = true;
+            reindex_reason_ = "Индекс построен моделью «" + index_model
+                + "», а активная модель — «" + active_model
+                + "». Векторы разных моделей несопоставимы. Требуется переиндексация.";
+            std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
+        } else if (embedding_generator_ &&
+                   static_cast<int>(external_docs_index_->d) != embedding_generator_->get_embedding_dimension()) {
+            index_needs_reindex_ = true;
+            reindex_reason_ = "Индекс имеет размерность " + std::to_string(external_docs_index_->d)
+                + ", а текущая модель эмбеддингов — "
+                + std::to_string(embedding_generator_->get_embedding_dimension())
+                + ". Требуется переиндексация.";
+            std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
+        }
 
         return true;
 
@@ -375,13 +438,15 @@ bool RagManager::reindex_current_profile() {
     }
 
     std::string source_dir = profile->source_directory;
-    if (source_dir.empty()) {
-        std::cerr << "[RAG PROFILE] Error: Profile has no source directory: " << current << std::endl;
+    std::vector<std::string> documents = profile->documents;
+
+    if (source_dir.empty() && documents.empty()) {
+        std::cerr << "[RAG PROFILE] Error: Profile has no source directory or documents: " << current << std::endl;
         return false;
     }
 
     std::cout << "[RAG PROFILE] Reindexing profile: " << current
-              << " from: " << source_dir << std::endl;
+              << " from: " << (source_dir.empty() ? "documents list" : source_dir) << std::endl;
 
     // Clear existing index
     clear_all_indexes();
@@ -392,15 +457,26 @@ bool RagManager::reindex_current_profile() {
     // Process all supported files in the directory
     namespace fs = std::filesystem;
     int indexed_count = 0;
-    for (const auto& entry : fs::recursive_directory_iterator(source_dir)) {
-        if (!entry.is_regular_file()) continue;
 
-        std::string ext = entry.path().extension().string();
-        if (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv" ||
-            ext == ".log" || ext == ".py" || ext == ".js" || ext == ".cpp" ||
-            ext == ".h" || ext == ".java" || ext == ".rs" || ext == ".go") {
-            std::cout << "[RAG PROFILE] Indexing: " << entry.path().string() << std::endl;
-            if (process_document(entry.path().string(), false)) {
+    if (!source_dir.empty()) {
+        for (const auto& entry : fs::recursive_directory_iterator(source_dir)) {
+            if (!entry.is_regular_file()) continue;
+
+            std::string ext = entry.path().extension().string();
+            if (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv" ||
+                ext == ".log" || ext == ".py" || ext == ".js" || ext == ".cpp" ||
+                ext == ".h" || ext == ".java" || ext == ".rs" || ext == ".go") {
+                std::cout << "[RAG PROFILE] Indexing: " << entry.path().string() << std::endl;
+                if (process_document(entry.path().string(), false)) {
+                    indexed_count++;
+                }
+            }
+        }
+    } else {
+        // Профиль без source directory, но со списком документов
+        for (const auto& doc : documents) {
+            std::cout << "[RAG PROFILE] Indexing: " << doc << std::endl;
+            if (process_document(doc, false)) {
                 indexed_count++;
             }
         }
@@ -411,7 +487,18 @@ bool RagManager::reindex_current_profile() {
     // Save the updated index
     save_index();
 
+    // После успешной переиндексации флаг несовместимости сбрасывается
+    reset_needs_reindex();
+
     return true;
+}
+
+std::vector<std::string> RagManager::get_current_profile_documents() const {
+    std::string current = profile_manager_.get_current_profile();
+    if (current.empty()) return {};
+    const RagIndexProfile* profile = profile_manager_.get_profile(current);
+    if (!profile) return {};
+    return profile->documents;
 }
 
 } // namespace core

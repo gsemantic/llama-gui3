@@ -203,7 +203,6 @@ private:
     std::unique_ptr<AdvancedMenu> createWindowMenu();
     std::unique_ptr<AdvancedMenu> createHelpMenu();
     std::unique_ptr<AdvancedMenu> createDeveloperMenu();
-    std::unique_ptr<AdvancedMenu> createAgentsMenu();
 
     // Новые меню для разных workspace
     std::unique_ptr<AdvancedMenu> createToolsMenu();       // Для Developer

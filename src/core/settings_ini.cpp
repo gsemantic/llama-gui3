@@ -201,6 +201,7 @@ void Settings::load_file_settings(const IniParser::Document& doc) {
 
 void Settings::load_rag_settings(const IniParser::Document& doc) {
     set_from_ini(doc, "rag", "embedding_model_path", rag_settings_.embedding_model_path);
+    set_from_ini(doc, "rag", "embedding_server_url", rag_settings_.embedding_server_url);
     set_from_ini(doc, "rag", "max_chunks_in_memory", rag_settings_.max_chunks_in_memory);
     set_from_ini(doc, "rag", "similarity_threshold", rag_settings_.similarity_threshold);
     set_from_ini(doc, "rag", "max_embedding_cache_size", rag_settings_.max_embedding_cache_size);

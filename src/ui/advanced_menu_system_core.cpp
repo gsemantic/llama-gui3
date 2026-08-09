@@ -44,7 +44,6 @@ void AdvancedMenuSystem::buildModernMenu() {
     auto settings_menu = createSettingsMenu();
     auto view_menu = createViewMenu();
     auto window_menu = createWindowMenu();
-    auto agents_menu = createAgentsMenu();
 
     // Создаем меню для Developer workspace
     auto developer_menu = createDeveloperMenu();
@@ -67,8 +66,6 @@ void AdvancedMenuSystem::buildModernMenu() {
     else std::cerr << "Warning: view_menu is null" << std::endl;
     if (window_menu) addMenu(std::move(window_menu));
     else std::cerr << "Warning: window_menu is null" << std::endl;
-    if (agents_menu) addMenu(std::move(agents_menu));
-    else std::cerr << "Warning: agents_menu is null" << std::endl;
 
     // Добавляем меню для разработчика
     if (developer_menu) addMenu(std::move(developer_menu));

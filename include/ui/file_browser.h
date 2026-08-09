@@ -16,6 +16,9 @@ class FileBrowser {
 public:
     using FileSelectedCallback = std::function<void(const std::string&)>;
 
+    /// Режим выбора: обычный просмотр, выбор файла или выбор папки
+    enum class PickMode { None, File, Directory };
+
     FileBrowser();
     ~FileBrowser() = default;
 
@@ -27,6 +30,10 @@ public:
     void go_up();
     void go_home();
     void refresh();
+
+    // Pick mode
+    void set_pick_mode(PickMode mode) { pick_mode_ = mode; }
+    PickMode get_pick_mode() const { return pick_mode_; }
 
     // Callbacks
     void set_file_selected_callback(FileSelectedCallback callback) {
@@ -72,6 +79,7 @@ private:
 
     // UI state
     bool show_hidden_files_ = false;
+    PickMode pick_mode_ = PickMode::None;
     int sort_mode_ = 0; // 0=name, 1=size, 2=type
     bool sort_ascending_ = true;
     float name_column_width_ = 200.0f;

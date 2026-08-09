@@ -443,7 +443,11 @@ struct ProxyContext {
         if (settings.rag().enable_rag && !settings.get_embedding_model_path().empty()) {
             auto r = std::make_unique<RagManager>(settings.get_embedding_model_path());
             if (r->initialize_indexes()) {
-                r->initialize_profile_manager(settings.get_profiles_directory());
+                r->update_from_settings(settings.rag());
+                // НЕ переопределяем профили здесь: конструктор RagManager уже
+                // инициализировал менеджер профилей через ~/.llama-gui/rag_profiles/.
+                // get_profiles_directory() возвращает относительный "profiles",
+                // где индексов нет — RAG вернул бы 0 результатов.
                 r->load_index_for_current_profile();
                 LOG_INFO("Cloud proxy: RAG инициализирован (локальный поиск)");
                 rag = std::move(r);

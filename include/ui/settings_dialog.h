@@ -92,7 +92,7 @@ public:
     void set_model_changed_callback(std::function<void(const std::string&)> callback) { model_changed_callback_ = std::move(callback); }
 
     // Колбэк для выбора файла модели (browse button)
-    void setModelBrowseCallback(std::function<bool(std::string& out_path)> cb);
+    void setModelBrowseCallback(std::function<void(std::function<void(const std::string&)>)> cb);
 
     // =========================================================================
     // Методы для открытия конкретных вкладок настроек из меню
