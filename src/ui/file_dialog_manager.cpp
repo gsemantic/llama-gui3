@@ -47,6 +47,24 @@ void FileDialogManager::pick_directory(const std::string& title, FileDialogManag
     file_picker_.open(FilePickerDialog::Mode::Directory, title, start_dir, std::move(callback));
 }
 
+void FileDialogManager::pick_save(const std::string& title, const std::string& default_name,
+                                  FileDialogManager::PickerCallback callback,
+                                  const std::string& start_dir) {
+    // Встроенный пикер — ОСНОВНОЙ и гарантированный путь.
+    // Внешняя цепочка (zenity/kdialog/python) — только опциональный ускоритель.
+    FilePickerDialog::NativeAccelerator accelerator;
+    if (FileDialogHelper::is_available()) {
+        accelerator = [this, title, default_name, callback]() {
+            FileDialogHelper helper;
+            helper.save_file_dialog(title, default_name, [this, callback](const std::string& path) {
+                enqueue_result(callback, path);
+            });
+        };
+    }
+    file_picker_.set_native_accelerator(std::move(accelerator));
+    file_picker_.open(FilePickerDialog::Mode::Save, title, start_dir, std::move(callback), default_name);
+}
+
 void FileDialogManager::render() {
     std::vector<FileDialogManager::PendingResult> ready;
     {

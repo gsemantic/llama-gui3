@@ -430,6 +430,8 @@
     "file_browser.open": "Открыть",
     "file_browser.no_selection": "Файл не выбран",
     "file_picker.native_dialog": "Системный диалог",
+    "file_picker.file_name": "Имя файла:",
+    "file_picker.save": "Сохранить",
 
     "server.config": "Конфигурация сервера",
     "server.url": "URL сервера",

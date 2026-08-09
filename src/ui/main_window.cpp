@@ -161,6 +161,9 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     chat_interface_->set_model_load_progress(&model_load_progress_);
     chat_interface_->set_model_load_status(&model_load_status_);
 
+    // File dialogs через встроенный пикер (FileDialogManager)
+    chat_interface_->set_file_dialog_manager(file_dialog_manager_.get());
+
     // Set up attachment sync
     file_manager_->set_attachment_changed_callback([this](const std::vector<std::string>& attachments) {
         chat_interface_->set_attachments(attachments);
@@ -325,6 +328,7 @@ bool MainWindow::initialize(int width, int height) {
             rag_interface_->set_rag_settings_dialog(rag_settings_dialog_.get());
             rag_interface_->set_chat_interface(chat_interface_.get());
             rag_interface_->set_settings(&settings_);
+            rag_interface_->set_file_dialog_manager(file_dialog_manager_.get());
             rag_interface_->set_enabled(rag_enabled);
 
             // Connect ChatInterface to RagInterface for mini indicator
@@ -433,19 +437,23 @@ bool MainWindow::initialize(int width, int height) {
     });
     command_manager_->setSaveFileCallback([this]() {
         if (conversation_file_manager_->getCurrentConversationPath().empty()) {
-            std::string path;
-            if (conversation_file_manager_->trySaveConversationFileDialog(path)) {
-                conversation_file_manager_->saveCurrentConversationAs(path);
-            }
+            file_dialog_manager_->pick_save("Save Conversation", "conversation.json",
+                [this](const std::string& path) {
+                    if (!path.empty()) {
+                        conversation_file_manager_->saveCurrentConversationAs(path);
+                    }
+                });
         } else {
             conversation_file_manager_->saveCurrentConversation();
         }
     });
     command_manager_->setSaveFileAsCallback([this](const std::string&) {
-        std::string path;
-        if (conversation_file_manager_->trySaveConversationFileDialog(path)) {
-            conversation_file_manager_->saveCurrentConversationAs(path);
-        }
+        file_dialog_manager_->pick_save("Save Conversation As", "conversation.json",
+            [this](const std::string& path) {
+                if (!path.empty()) {
+                    conversation_file_manager_->saveCurrentConversationAs(path);
+                }
+            });
     });
 
     std::cout << "[DEBUG] Before connectWorkspaceCommands()" << std::endl;

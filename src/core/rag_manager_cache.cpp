@@ -12,6 +12,11 @@ namespace llama_gui {
 namespace core {
 
 void RagManager::cleanup_old_chunks() {
+    // 0 = без ограничений (не выкидывать чанки)
+    if (max_chunks_in_memory_ <= 0) {
+        return;
+    }
+
     if (static_cast<int>(external_chunks_.size()) >= max_chunks_in_memory_) {
         int excess = static_cast<int>(external_chunks_.size()) - max_chunks_in_memory_ + 1;
 
@@ -119,7 +124,9 @@ void RagManager::cleanup_embedding_cache() {
 }
 
 void RagManager::set_max_chunks(int max_chunks) {
-    max_chunks_in_memory_ = std::min(max_chunks, 10000); // Ограничиваем максимальное значение
+    // Жёсткого потолка нет: лимит определяется доступной памятью.
+    // Отрицательные значения трактуем как «без ограничений» (0 = не выкидывать чанки).
+    max_chunks_in_memory_ = std::max(0, max_chunks);
 }
 
 void RagManager::set_similarity_threshold(float threshold) {

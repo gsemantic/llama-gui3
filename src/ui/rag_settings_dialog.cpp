@@ -137,7 +137,7 @@ void RagSettingsDialog::render() {
         ImGui::Spacing();
 
         // Максимальное количество чанков в памяти
-        ImGui::SliderInt(TR("rag_settings.max_chunks"), &max_chunks_in_memory_, 100, 10000);
+        ImGui::SliderInt(TR("rag_settings.max_chunks"), &max_chunks_in_memory_, 100, 1000000);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(TR("rag_settings.max_chunks_tooltip"));
         }

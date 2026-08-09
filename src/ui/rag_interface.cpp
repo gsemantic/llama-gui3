@@ -1,6 +1,7 @@
 #include "../include/ui/rag_interface.h"
 #include "../include/ui/rag_settings_dialog.h"
 #include "../include/ui/file_dialog_helper.h"
+#include "../include/ui/file_dialog_manager.h"
 #include "../include/core/rag_manager.h"
 #include "../include/core/settings.h"
 #include "../include/ui/chat_interface.h"
@@ -132,10 +133,16 @@ void RagInterface::show_profile_selector() {
         ImGui::InputText("##source_dir", source_dir_buf, sizeof(source_dir_buf));
         ImGui::SameLine();
         if (ImGui::Button("Browse...##dir", ImVec2(70, 0))) {
-            FileDialogHelper helper;
-            helper.open_directory_dialog("Select documents folder", [](const std::string& path) {
-                s_pending_dir_path = path;
-            });
+            if (file_dialog_manager_) {
+                file_dialog_manager_->pick_directory("Select documents folder", [](const std::string& path) {
+                    s_pending_dir_path = path;
+                });
+            } else {
+                FileDialogHelper helper;
+                helper.open_directory_dialog("Select documents folder", [](const std::string& path) {
+                    s_pending_dir_path = path;
+                });
+            }
         }
 
         ImGui::Separator();
@@ -366,28 +373,25 @@ void RagInterface::render_ui(bool* visible) {
 }
 
 void RagInterface::handle_document_upload() {
-    // Для простоты будем использовать один файл за раз
-    // В реальной реализации можно добавить поддержку выбора нескольких файлов
-    std::string file_path;
-    
-    // Используем существующий метод для выбора одного файла
-    // Для этого нужно создать временную переменную и использовать callback
-    auto callback = [&file_path](const std::string& path) {
-        file_path = path;
-    };
-    
-    // Вызываем метод FileDialogHelper для выбора файла
-    // Используем существующую реализацию
-    FileDialogHelper helper;
-    helper.open_file_dialog("Select document", [this, callback](const std::string& path) {
+    // Выбор файла через FileDialogManager: основной путь — встроенный пикер файлов
+    // (FilePickerDialog), нативный диалог (zenity/kdialog/python) доступен как ускоритель.
+    auto on_selected = [this](const std::string& path) {
         if (!path.empty()) {
             loaded_documents_.push_back(path);
-            
+
             // Асинхронно обрабатываем документы
             std::thread processing_thread(&RagInterface::process_uploaded_documents, this);
             processing_thread.detach();
         }
-    });
+    };
+
+    if (file_dialog_manager_) {
+        file_dialog_manager_->pick_file("Select document", std::move(on_selected));
+    } else {
+        // Fallback, если FileDialogManager не подключён
+        FileDialogHelper helper;
+        helper.open_file_dialog("Select document", std::move(on_selected));
+    }
 }
 
 void RagInterface::process_uploaded_documents() {

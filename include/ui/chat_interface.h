@@ -17,7 +17,7 @@
 // Forward declarations
 struct ImGuiInputTextCallbackData;
 namespace llama_gui { namespace core { class ModelManager; } }
-namespace llama_gui { namespace ui { class RagInterface; } }
+namespace llama_gui { namespace ui { class RagInterface; class FileDialogManager; } }
 
 namespace llama_gui {
 namespace ui {
@@ -132,6 +132,9 @@ public:
 
     // RagInterface access for mini indicator
     void set_rag_interface(RagInterface* rag_interface) { rag_interface_ = rag_interface; }
+
+    // Диалоги выбора файлов идут через FileDialogManager (встроенный пикер — основной путь)
+    void set_file_dialog_manager(FileDialogManager* mgr) { file_dialog_manager_ = mgr; }
     
     // Model loading progress access (для отображения в чате)
     void set_model_load_progress(float* progress) { model_load_progress_ = progress; }
@@ -222,6 +225,9 @@ private:
     llama_gui::core::RagManager* rag_manager_ = nullptr;
     RagInterface* rag_interface_ = nullptr;
     bool rag_enabled_ = false;
+
+    // File dialogs
+    FileDialogManager* file_dialog_manager_ = nullptr;
 
     // Window manager for dock support
     class WindowManager* window_manager_ = nullptr;

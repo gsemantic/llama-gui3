@@ -195,6 +195,18 @@ bool RagIndexProfileManager::delete_profile(const std::string& profile_name, boo
         }
     }
 
+    // Удаляем файл конфигурации профиля с диска, иначе после перезапуска
+    // load_all_profiles() снова найдёт его и профиль появится в списке
+    try {
+        std::string config_path = get_profile_config_path(profile_name);
+        if (fs::exists(config_path)) {
+            fs::remove(config_path);
+            std::cout << "[RAG PROFILE] Deleted profile config: " << config_path << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[RAG PROFILE] Error deleting profile config: " << e.what() << std::endl;
+    }
+
     // Удаляем профиль из списка
     profiles_.erase(profile_name);
 

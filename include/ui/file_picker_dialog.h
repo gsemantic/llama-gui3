@@ -20,14 +20,14 @@ public:
     using PickerCallback = std::function<void(const std::string&)>;
     using NativeAccelerator = std::function<void()>;
 
-    enum class Mode { File, Directory };
+    enum class Mode { File, Directory, Save };
 
     FilePickerDialog() = default;
     ~FilePickerDialog() = default;
 
     /// Начать выбор. callback вызывается с выбранным путём (или "" при отмене).
     void open(Mode mode, const std::string& title, const std::string& start_dir,
-              PickerCallback callback);
+              PickerCallback callback, const std::string& default_filename = "");
 
     /// Отменить выбор (закрывает окно и вызывает callback с пустым путём).
     void cancel();
@@ -51,6 +51,7 @@ private:
     bool delivered_ = false;
     bool native_launched_ = false;
     std::string title_ = "File Picker";
+    std::string save_filename_;
     PickerCallback callback_;
     NativeAccelerator native_accelerator_;
     FileBrowser file_browser_;

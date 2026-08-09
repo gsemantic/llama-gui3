@@ -2,18 +2,21 @@
 #include "../external/imgui/imgui.h"
 #include "../include/ui/localization_manager.h"
 #include <filesystem>
+#include <cstring>
 
 namespace llama_gui {
 namespace ui {
 
 void FilePickerDialog::open(Mode mode, const std::string& title,
-                            const std::string& start_dir, PickerCallback callback) {
+                            const std::string& start_dir, PickerCallback callback,
+                            const std::string& default_filename) {
     mode_ = mode;
     title_ = title.empty() ? "File Picker" : title;
     callback_ = std::move(callback);
     delivered_ = false;
     native_launched_ = false;
     is_open_ = true;
+    save_filename_ = default_filename;
 
     file_browser_.set_pick_mode(mode == Mode::Directory
                                     ? FileBrowser::PickMode::Directory
@@ -55,6 +58,31 @@ void FilePickerDialog::render() {
     if (ImGui::Begin(title_.c_str(), &is_open_, ImGuiWindowFlags_NoSavedSettings)) {
         file_browser_.render();
         ImGui::Separator();
+
+        // Режим сохранения: поле ввода имени файла
+        if (mode_ == Mode::Save) {
+            char name_buf[256];
+            strncpy(name_buf, save_filename_.c_str(), sizeof(name_buf) - 1);
+            name_buf[sizeof(name_buf) - 1] = '\0';
+
+            ImGui::Text("%s", TR("file_picker.file_name"));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 70.0f);
+            if (ImGui::InputText("##save_filename", name_buf, sizeof(name_buf))) {
+                save_filename_ = name_buf;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(TR("file_picker.save"))) {
+                if (!save_filename_.empty()) {
+                    std::string dir = file_browser_.get_current_directory();
+                    if (dir.empty()) {
+                        dir = "/";
+                    }
+                    finish(dir + "/" + save_filename_);
+                }
+            }
+            ImGui::Separator();
+        }
 
         // Опциональный ускоритель: нативный диалог (если внешняя цепочка доступна)
         if (native_accelerator_) {

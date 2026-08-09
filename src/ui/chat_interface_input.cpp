@@ -2,6 +2,7 @@
 #include "../include/core/state_manager.h"
 #include "../include/ui/localization_manager.h"
 #include "../include/ui/file_dialog_helper.h"
+#include "../include/ui/file_dialog_manager.h"
 #include "imgui.h"
 #include <iostream>
 #include <algorithm>
@@ -179,12 +180,17 @@ void ChatInterface::render_input_area() {
     ImGui::SameLine();
 
     if (ImGui::Button(TRF("chat.attach", "Attach"), ImVec2(100, 0))) {
-        FileDialogHelper dialog_helper;
-        dialog_helper.open_file_dialog("Select File to Attach", [this](const std::string& file_path) {
+        auto on_attach = [this](const std::string& file_path) {
             if (!file_path.empty()) {
                 add_file_attachment(file_path);
             }
-        });
+        };
+        if (file_dialog_manager_) {
+            file_dialog_manager_->pick_file("Select File to Attach", std::move(on_attach));
+        } else {
+            FileDialogHelper dialog_helper;
+            dialog_helper.open_file_dialog("Select File to Attach", std::move(on_attach));
+        }
     }
 
     ImGui::SameLine();

@@ -38,6 +38,10 @@ public:
     void pick_directory(const std::string& title, PickerCallback callback,
                         const std::string& start_dir = "");
 
+    // Выбор имени файла для сохранения (callback вызывается с полным путём или "" при отмене)
+    void pick_save(const std::string& title, const std::string& default_name,
+                   PickerCallback callback, const std::string& start_dir = "");
+
     // Рендеринг встроенного пикера и доставка результатов нативных диалогов
     // в главный поток (вызывается каждый кадр).
     void render();
