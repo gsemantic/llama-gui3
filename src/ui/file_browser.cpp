@@ -4,6 +4,7 @@
 #include "../include/ui/localization_manager.h"
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 #include <sys/stat.h>
 
 namespace llama_gui {
@@ -15,10 +16,22 @@ FileBrowser::FileBrowser() {
 }
 
 void FileBrowser::render() {
-    render_header();
+    render_toolbar();
     render_breadcrumbs();
     ImGui::Separator();
-    render_file_list();
+
+    // Таблица должна заполнять оставшуюся высоту (минус нижняя панель), чтобы был
+    // только один скролл — внутри таблицы, а не у родительского окна.
+    float bottom_block = ImGui::GetFrameHeightWithSpacing()      // строка footer
+                       + ImGui::GetStyle().ItemSpacing.y * 2.0f  // сепараторы/отступы
+                       + 4.0f
+                       + extra_bottom_reserve_;
+    float table_height = ImGui::GetContentRegionAvail().y - bottom_block;
+    if (table_height < 40.0f) {
+        table_height = 40.0f;
+    }
+    render_file_list(table_height);
+
     ImGui::Separator();
     render_footer();
 }
@@ -52,35 +65,53 @@ void FileBrowser::refresh() {
     scan_directory();
 }
 
-void FileBrowser::render_header() {
-    // Navigation buttons
-    if (ImGui::Button(TR("file_browser.parent"))) {
+void FileBrowser::render_toolbar() {
+    // Навигация одной строкой: ↑ / домой / обновить + показ скрытых + поиск
+    if (ImGui::Button(FontAwesomeIcons::ArrowUp)) {
         go_up();
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", TR("file_browser.parent"));
+    }
     ImGui::SameLine();
-    if (ImGui::Button(TR("file_browser.home"))) {
+    if (ImGui::Button(FontAwesomeIcons::Home)) {
         go_home();
         scan_directory();
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", TR("file_browser.home"));
+    }
     ImGui::SameLine();
-    if (ImGui::Button(TR("file_browser.refresh"))) {
+    if (ImGui::Button(FontAwesomeIcons::RotateRight)) {
         refresh();
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", TR("file_browser.refresh"));
+    }
 
-    // Options
     ImGui::SameLine();
     ImGui::Checkbox(TR("file_browser.show_hidden"), &show_hidden_files_);
+
+    ImGui::SameLine();
+    float search_width = ImGui::GetContentRegionAvail().x;
+    if (search_width < 80.0f) {
+        search_width = 80.0f;
+    }
+    ImGui::SetNextItemWidth(search_width);
+    ImGui::InputTextWithHint("##file_search", TR("file_browser.search_hint"),
+                             search_buf_, sizeof(search_buf_));
 }
 
 void FileBrowser::render_breadcrumbs() {
     ImGui::Text("%s %s", FontAwesomeIcons::Folder, current_path_.c_str());
 }
 
-void FileBrowser::render_file_list() {
+void FileBrowser::render_file_list(float table_height) {
     // Table header
     if (ImGui::BeginTable("FileList", 3, ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
                                         ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
-                                        ImGuiTableFlags_ScrollY)) {
+                                        ImGuiTableFlags_ScrollY,
+                          ImVec2(0.0f, table_height))) {
         ImGui::TableSetupColumn(TR("file_browser.name"), ImGuiTableColumnFlags_WidthFixed, name_column_width_);
         ImGui::TableSetupColumn(TR("file_browser.size"), ImGuiTableColumnFlags_WidthFixed, size_column_width_);
         ImGui::TableSetupColumn(TR("file_browser.type"), ImGuiTableColumnFlags_WidthStretch);
@@ -90,6 +121,11 @@ void FileBrowser::render_file_list() {
         for (const auto& entry : entries_) {
             // Skip hidden files if option disabled
             if (!show_hidden_files_ && entry.name[0] == '.') {
+                continue;
+            }
+
+            // Фильтр по поисковому запросу
+            if (!matches_search(entry)) {
                 continue;
             }
 
@@ -230,6 +266,21 @@ std::string FileBrowser::get_parent_directory(const std::string& path) const {
         // Ignore errors
     }
     return "";
+}
+
+bool FileBrowser::matches_search(const FileEntry& entry) const {
+    if (search_buf_[0] == '\0') {
+        return true;
+    }
+
+    std::string query = search_buf_;
+    std::string name = entry.name;
+    std::transform(query.begin(), query.end(), query.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    return name.find(query) != std::string::npos;
 }
 
 } // namespace ui

@@ -411,6 +411,7 @@
     "file_browser.selected": "Selected: %s",
     "file_browser.open": "Open",
     "file_browser.no_selection": "No file selected",
+    "file_browser.search_hint": "Search...",
     "file_picker.native_dialog": "System dialog",
     "file_picker.file_name": "File name:",
     "file_picker.save": "Save",

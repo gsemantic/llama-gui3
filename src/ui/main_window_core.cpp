@@ -133,14 +133,19 @@ void MainWindow::load_fonts_with_cyrillic() {
         }
     }
 
-    // Add FontAwesome as secondary font (not default)
+    // Add FontAwesome merged into the main font, so icons render inline everywhere
     if (!fontawesome_path.empty()) {
-        ImFontConfig config;
-        config.OversampleH = 2;
-        config.OversampleV = 2;
-        config.PixelSnapH = true;
-        float icon_size = font_size * 0.89f; // icons slightly smaller
-        io.Fonts->AddFontFromFileTTF(fontawesome_path.c_str(), icon_size, &config, io.Fonts->GetGlyphRangesCyrillic());
+        ImFontConfig icons_config;
+        icons_config.MergeMode = true;
+        icons_config.OversampleH = 2;
+        icons_config.OversampleV = 2;
+        icons_config.PixelSnapH = true;
+        icons_config.GlyphMinAdvanceX = font_size * 0.9f;
+        icons_config.GlyphMaxAdvanceX = font_size * 0.9f;
+        icons_config.GlyphOffset = ImVec2(0.0f, font_size * 0.03f);
+        // Диапазон иконок FontAwesome (private use area)
+        static const ImWchar icon_ranges[] = { 0xf000, 0xf8ff, 0 };
+        io.Fonts->AddFontFromFileTTF(fontawesome_path.c_str(), font_size, &icons_config, icon_ranges);
     }
 
     last_font_size_ = font_size;

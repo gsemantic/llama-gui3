@@ -40,6 +40,10 @@ public:
         on_file_selected_ = callback;
     }
 
+    // Зарезервировать место внизу (для контента, который родитель рисует после браузера).
+    // Нужно, чтобы таблица файлов занимала ровно оставшуюся высоту и был один скролл.
+    void set_extra_bottom_reserve(float height) { extra_bottom_reserve_ = height; }
+
     // Get current state
     std::string get_current_directory() const { return current_path_; }
     std::string get_selected_file() const { return selected_file_; }
@@ -54,8 +58,8 @@ private:
     };
 
     // Rendering helpers
-    void render_header();
-    void render_file_list();
+    void render_toolbar();
+    void render_file_list(float table_height);
     void render_breadcrumbs();
     void render_footer();
 
@@ -70,6 +74,7 @@ private:
     // Helpers
     std::string format_size(uintmax_t size) const;
     std::string get_parent_directory(const std::string& path) const;
+    bool matches_search(const FileEntry& entry) const;
 
     // State
     std::string current_path_;
@@ -78,6 +83,8 @@ private:
     FileSelectedCallback on_file_selected_;
 
     // UI state
+    char search_buf_[128] = "";
+    float extra_bottom_reserve_ = 0.0f;
     bool show_hidden_files_ = false;
     PickMode pick_mode_ = PickMode::None;
     int sort_mode_ = 0; // 0=name, 1=size, 2=type

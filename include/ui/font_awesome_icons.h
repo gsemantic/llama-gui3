@@ -23,6 +23,8 @@
 #define ICON_FA_FILE "\xef\x85\x9b"         // U+F15B
 #define ICON_FA_CHEVRON_LEFT "\xef\x81\x93" // U+F053
 #define ICON_FA_CHEVRON_RIGHT "\xef\x81\x94"// U+F054
+#define ICON_FA_HOME "\xef\x80\x95"         // U+F015
+#define ICON_FA_ROTATE_RIGHT "\xef\x8b\xb1" // U+F2F1
 #define ICON_FA_DOWNLOAD "\xef\x87\x83"     // U+F019
 #define ICON_FA_WINDOW_CLOSE "\xef\x90\x98" // U+F410
 #define ICON_FA_GLOBE "\xef\x80\xac"        // U+F0AC
@@ -48,6 +50,8 @@ struct FontAwesomeIcons {
     static constexpr const char* File = ICON_FA_FILE;
     static constexpr const char* ChevronLeft = ICON_FA_CHEVRON_LEFT;
     static constexpr const char* ChevronRight = ICON_FA_CHEVRON_RIGHT;
+    static constexpr const char* Home = ICON_FA_HOME;
+    static constexpr const char* RotateRight = ICON_FA_ROTATE_RIGHT;
     static constexpr const char* Download = ICON_FA_DOWNLOAD;
     static constexpr const char* WindowClose = ICON_FA_WINDOW_CLOSE;
     static constexpr const char* Globe = ICON_FA_GLOBE;

@@ -56,6 +56,13 @@ void FilePickerDialog::render() {
 
     ImGui::SetNextWindowSize(ImVec2(560, 420), ImGuiCond_FirstUseEver);
     if (ImGui::Begin(title_.c_str(), &is_open_, ImGuiWindowFlags_NoSavedSettings)) {
+        // Зарезервируем место под нижние кнопки пикера, чтобы таблица файлов
+        // заполняла ровно оставшуюся высоту (единый скролл)
+        float reserve = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 2.0f + 4.0f;
+        if (mode_ == Mode::Save) {
+            reserve += ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+        }
+        file_browser_.set_extra_bottom_reserve(reserve);
         file_browser_.render();
         ImGui::Separator();
 
