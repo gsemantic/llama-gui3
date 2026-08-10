@@ -99,6 +99,7 @@ public:
 
     // Кэширование чат-истории
     std::string find_cached_response(const std::string& query);
+    std::string cached_response_for_chunk(const RagChunk& chunk);
     void cache_query_response(const std::string& query, const std::string& response);
 
     // Поиск по внешним документам

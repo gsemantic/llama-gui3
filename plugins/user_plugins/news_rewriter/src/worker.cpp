@@ -7,7 +7,12 @@
 
 namespace news_rewriter {
 
-Worker::Worker() : fetcher_(std::make_unique<Fetcher>()) {}
+Worker::Worker() : fetcher_(std::make_unique<Fetcher>()) {
+    // Ретраи рерайта по умолчанию как в чате: 1 первичная + 2 повторные (всего
+    // 3 попытки), короткий backoff 1с → 2с. Тесты могут переопределить.
+    llm_retry_policy_.max_retries = 2;
+    llm_retry_policy_.backoff_seconds = {1, 2};
+}
 
 Worker::~Worker() {
     stop_and_join();
@@ -92,6 +97,11 @@ void Worker::set_retry_policy(const RetryPolicy& retry) {
     retry_policy_ = retry;
 }
 
+void Worker::set_llm_retry_policy(const RetryPolicy& retry) {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    llm_retry_policy_ = retry;
+}
+
 void Worker::debug_force_schedule_due() {
     post(Command{CmdType::DebugForceDue});
 }
@@ -165,21 +175,63 @@ void Worker::remove_stale_source_error(const std::string& url) {
     }
 }
 
+namespace {
+std::chrono::seconds llm_backoff_delay(const RetryPolicy& rp, int attempt) {
+    if (rp.backoff_seconds.empty()) return std::chrono::seconds(0);
+    std::size_t idx = static_cast<std::size_t>(attempt);
+    if (idx >= rp.backoff_seconds.size()) idx = rp.backoff_seconds.size() - 1;
+    return std::chrono::seconds(rp.backoff_seconds[idx]);
+}
+} // namespace
+
+// Рерайт статьи через LLM с ретраями (как в чате: 1 первичная + max_retries
+// повторных, короткий backoff). Ошибки LLM транзиентны (модель могла не
+// ответить), поэтому не отбрасываем статью с первой попытки. Возвращает false,
+// когда попытки исчерпаны или обход прерван пользователем (a.error заполнена).
+bool Worker::rewrite(Article& a, const Config& cfg) {
+    if (!llm_) return true;   // рерайт не настроен — экспортируем оригинал
+
+    a.status = TaskStatus::Rewriting;
+    set_status(a, "рерайт: " + a.title_original);
+
+    RetryPolicy rp;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        rp = llm_retry_policy_;
+    }
+    if (rp.max_retries < 0) rp.max_retries = 0;
+    const int max_attempts = 1 + rp.max_retries;
+
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        const RewriteResult rr = rewrite_article(a, cfg.rewrite, llm_);
+        a.retry_count = static_cast<uint32_t>(attempt);
+        if (rr.ok) {
+            a.title_rewritten = rr.title;
+            a.body_rewritten = rr.body;
+            return true;
+        }
+        a.error = rr.error;
+        if (attempt == max_attempts - 1) break;
+
+        const std::chrono::seconds delay = llm_backoff_delay(rp, attempt);
+        log("рерайт: попытка " + std::to_string(attempt + 1) + "/" +
+            std::to_string(max_attempts) + " не удалась («" + a.title_original +
+            "» — " + rr.error + "), повтор через " + std::to_string(delay.count()) + " с");
+        if (!sleep_interruptible(delay)) {
+            a.error = "обход прерван пользователем";
+            return false;
+        }
+    }
+    return false;
+}
+
 // Полный экспорт статьи: рерайт (если LLM настроен) + запись через активный
 // Sink + дедупликация. Возвращает true, если статья успешно завершена.
 bool Worker::export_article(const Config& cfg, Article& a) {
-    // Рерайт
-    if (llm_) {
-        a.status = TaskStatus::Rewriting;
-        set_status(a, "рерайт: " + a.title_original);
-        const RewriteResult rr = rewrite_article(a, cfg.rewrite, llm_);
-        if (!rr.ok) {
-            a.status = TaskStatus::Error;
-            a.error = rr.error;
-            return false;
-        }
-        a.title_rewritten = rr.title;
-        a.body_rewritten = rr.body;
+    // Рерайт (с ретраями, как в чате)
+    if (!rewrite(a, cfg)) {
+        a.status = TaskStatus::Error;
+        return false;
     }
 
     // Экспорт через активный Sink
@@ -372,10 +424,27 @@ void Worker::process_run(const Config& cfg) {
         std::lock_guard<std::mutex> lock(data_mutex_);
         state_.running = false;
         state_.pending_tasks = 0;
-        state_.last_message =
-            cancel_.load()
-                ? ("обход прерван пользователем (источников: " + std::to_string(processed) + ")")
-                : ("обход завершён (источников: " + std::to_string(processed) + ")");
+
+        // Итог по статьям: успешные и с ошибкой — для честного отчёта в UI.
+        int done = 0;
+        int errors = 0;
+        for (const auto& v : state_.articles) {
+            if (v.status == TaskStatus::Done) done++;
+            else if (v.status == TaskStatus::Error) errors++;
+        }
+        state_.done_count = done;
+        state_.error_count = errors;
+
+        const std::string summary =
+            "источников: " + std::to_string(processed) +
+            ", статей: " + std::to_string(done) + ", ошибок: " + std::to_string(errors);
+        if (cancel_.load()) {
+            state_.last_message = "обход прерван пользователем (" + summary + ")";
+        } else if (errors > 0) {
+            state_.last_message = "обход завершён с ошибками (" + summary + ")";
+        } else {
+            state_.last_message = "обход завершён (" + summary + ")";
+        }
     }
 }
 

@@ -26,11 +26,15 @@ void input_text(const char* label, std::string& value) {
     if (ImGui::InputText(label, buf, sizeof(buf))) value = buf;
 }
 
+// Многострочное поле: название — отдельной строкой НАД полем. ImGui рисует
+// label справа от виджета, а ширина -1.0f растягивает поле на всю ширину окна —
+// длинное название уезжало бы за правую границу. Здесь label в строке сверху.
 void input_text_multiline(const char* label, std::string& value, float height) {
+    ImGui::TextWrapped("%s", label);
     char buf[16384];
     std::snprintf(buf, sizeof(buf), "%s", value.c_str());
-    if (ImGui::InputTextMultiline(label, buf, sizeof(buf),
-                                  ImVec2(-1.0f, height))) {
+    if (ImGui::InputTextMultiline(("##" + std::string(label)).c_str(),
+                                  buf, sizeof(buf), ImVec2(-1.0f, height))) {
         value = buf;
     }
 }
@@ -221,6 +225,11 @@ void render_news_rewriter_window(UiDeps& deps) {
         return;
     }
 
+    // Прокручиваемое содержимое: контент (статус, настройки, задачи) выше
+    // дефолтной высоты окна, без скролла нижние поля обрезались бы и не
+    // принимали ввод (в т.ч. вставку из буфера обмена).
+    ImGui::BeginChild("scroll", ImVec2(0, 0), false);
+
     ImGui::TextUnformatted("Агент: обход адресов, рерайт новостей через LLM, сохранение локально");
     ImGui::Separator();
 
@@ -230,6 +239,15 @@ void render_news_rewriter_window(UiDeps& deps) {
                        "Воркер: %s", state.running ? "обход идёт" : "простаивает");
     ImGui::Text("Поток: %s", state.worker_active ? "активен" : "остановлен");
     ImGui::Text("Ожидающих задач: %d", state.pending_tasks);
+    if (state.error_count > 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                           "Итог последнего обхода: обработано %d, ОШИБОК: %d",
+                           state.done_count, state.error_count);
+    } else if (state.done_count > 0) {
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
+                           "Итог последнего обхода: обработано %d, ошибок: %d",
+                           state.done_count, state.error_count);
+    }
     ImGui::TextWrapped("Последнее: %s", state.last_message.c_str());
 
     if (state.running) {
@@ -282,6 +300,7 @@ void render_news_rewriter_window(UiDeps& deps) {
         }
     }
 
+    ImGui::EndChild();
     ImGui::End();
 }
 

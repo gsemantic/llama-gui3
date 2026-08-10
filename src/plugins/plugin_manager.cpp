@@ -346,6 +346,11 @@ int host_settings_set(LlamaPluginHost* host, const char* key, const char* json_v
     auto* s = pd->manager->subsystems.settings;
     if (!s) return 0;
     s->set_custom_setting(key, json_value);
+    // Custom-настройки плагинов хранятся только в памяти Settings и попадают
+    // на диск лишь при сохранении профиля. Чтобы настройки переживали перезапуск
+    // приложения, персистим их в текущий профиль сразу после записи.
+    const std::string profile = s->get_current_profile_name();
+    s->save_profile(profile.empty() ? "default" : profile);
     return 1;
 }
 

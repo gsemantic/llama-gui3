@@ -290,10 +290,16 @@ static void test_worker_llm_error_marks_article() {
     fetcher->impl = [](const std::string&, const std::string&) { return one_item("https://a.example/rss"); };
     worker.set_fetcher(std::move(fetcher));
 
-    worker.set_llm([](const std::string&, std::string&, std::string& error) -> bool {
+    std::atomic<int> llm_calls{0};
+    worker.set_llm([&](const std::string&, std::string&, std::string& error) -> bool {
+        llm_calls++;
         error = "LLM не подключён";
         return false;
     });
+    RetryPolicy rp;
+    rp.max_retries = 2;                 // всего 3 попытки, как в чате
+    rp.backoff_seconds = {0, 0};        // без пауз — тест быстрый
+    worker.set_llm_retry_policy(rp);
     TEST_ASSERT_TRUE(worker.start());
 
     worker.post(Command{CmdType::RunNow});
@@ -307,6 +313,122 @@ static void test_worker_llm_error_marks_article() {
     TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
     TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Error);
     TEST_ASSERT_EQUAL(state.articles[0].error, "LLM не подключён");
+    TEST_ASSERT_EQUAL(state.articles[0].retry_count, 2);  // 3 попытки всего
+    TEST_ASSERT_EQUAL(llm_calls.load(), 3);
+    TEST_ASSERT_EQUAL(state.error_count, 1);
+    TEST_ASSERT_EQUAL(state.done_count, 0);
+    TEST_ASSERT_TRUE(state.last_message.find("с ошибками") != std::string::npos);
+
+    worker.stop_and_join();
+}
+
+static void test_worker_llm_retries_then_succeeds() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) { return one_item("https://a.example/rss"); };
+    worker.set_fetcher(std::move(fetcher));
+
+    std::atomic<int> llm_calls{0};
+    worker.set_llm([&](const std::string&, std::string& response, std::string& error) -> bool {
+        if (llm_calls.fetch_add(1) < 2) {   // 2 сбоя, затем успех
+            error = "модель не ответила";
+            return false;
+        }
+        response = "Заголовок после ретраев\n\nТекст";
+        return true;
+    });
+    RetryPolicy rp;
+    rp.max_retries = 2;
+    rp.backoff_seconds = {0, 0};
+    worker.set_llm_retry_policy(rp);
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Done);
+    TEST_ASSERT_EQUAL(llm_calls.load(), 3);          // 2 неудачи + 1 успех
+    TEST_ASSERT_EQUAL(state.done_count, 1);
+    TEST_ASSERT_EQUAL(state.error_count, 0);
+
+    worker.stop_and_join();
+}
+
+static void test_worker_llm_retries_exhausted_reports_error() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) { return one_item("https://a.example/rss"); };
+    worker.set_fetcher(std::move(fetcher));
+
+    std::atomic<int> llm_calls{0};
+    worker.set_llm([&](const std::string&, std::string&, std::string& error) -> bool {
+        llm_calls++;
+        error = "таймаут облачной модели";
+        return false;
+    });
+    RetryPolicy rp;
+    rp.max_retries = 2;
+    rp.backoff_seconds = {0, 0};
+    worker.set_llm_retry_policy(rp);
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Error);
+    TEST_ASSERT_EQUAL(state.articles[0].error, "таймаут облачной модели");
+    TEST_ASSERT_EQUAL(llm_calls.load(), 3);          // попытки исчерпаны
+    TEST_ASSERT_EQUAL(state.error_count, 1);
+    TEST_ASSERT_TRUE(state.last_message.find("с ошибками") != std::string::npos);
+
+    worker.stop_and_join();
+}
+
+static void test_worker_summary_reports_no_errors() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    worker.set_config(make_test_config());
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string& url, const std::string&) { return one_item(url); };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.done_count, 2);          // 2 новости без LLM
+    TEST_ASSERT_EQUAL(state.error_count, 0);
+    TEST_ASSERT_TRUE(state.last_message.find("с ошибками") == std::string::npos);
 
     worker.stop_and_join();
 }
@@ -704,6 +826,9 @@ REGISTER_TEST(test_worker_extracts_rss_item_title);
 REGISTER_TEST(test_worker_extracts_page_title_and_body);
 REGISTER_TEST(test_worker_llm_rewrites_articles);
 REGISTER_TEST(test_worker_llm_error_marks_article);
+REGISTER_TEST(test_worker_llm_retries_then_succeeds);
+REGISTER_TEST(test_worker_llm_retries_exhausted_reports_error);
+REGISTER_TEST(test_worker_summary_reports_no_errors);
 REGISTER_TEST(test_worker_exports_and_dedups);
 REGISTER_TEST(test_worker_config_reload);
 REGISTER_TEST(test_worker_does_not_run_disabled_sources);

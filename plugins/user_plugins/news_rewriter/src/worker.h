@@ -56,6 +56,8 @@ struct WorkerState {
     int pending_tasks = 0;
     std::uint64_t last_run_unix = 0;
     std::string last_message;
+    int done_count = 0;           // статей обработано успешно (последний обход)
+    int error_count = 0;          // статей с ошибкой (последний обход)
     std::vector<ArticleStatusView> articles;
 };
 
@@ -82,6 +84,7 @@ public:
     void set_llm(LlmFn llm);              // main-поток: рерайт (только worker)
     void set_data_dir(const std::string& data_dir);  // main: корень Storage
     void set_retry_policy(const RetryPolicy& retry);  // тесты: ретраи без пауз
+    void set_llm_retry_policy(const RetryPolicy& retry);  // тесты: ретраи LLM без пауз
     void debug_force_schedule_due();      // тесты: авто-запуск немедленно
     void stop_and_join();
 
@@ -91,7 +94,9 @@ private:
     // Возвращает true, если источник обработан до конца (или сбой постоянный);
     // false — повторяемый сбой (сеть/таймаут), caller выполняет retry.
     bool process_source(const Config& cfg, const SourceConfig& src, uint32_t retries);
-    bool rewrite(Article& a, const Config& cfg);  // рерайт статьи (worker)
+    // Рерайт статьи через LLM с ретраями (как в чате: до 3 попыток). Возвращает
+    // false, если все попытки исчерпаны (a.error — текст последней ошибки).
+    bool rewrite(Article& a, const Config& cfg);
     bool export_article(const Config& cfg, Article& a);  // рерайт + Sink
     bool sleep_interruptible(const std::chrono::seconds& delay);
     void remove_stale_source_error(const std::string& url);
@@ -114,6 +119,7 @@ private:
     std::unique_ptr<IFetch> fetcher_;
     LlmFn llm_;
     RetryPolicy retry_policy_;            // только backoff-задержки (max_retries — из конфига)
+    RetryPolicy llm_retry_policy_;        // ретраи рерайта: 1 + max_retries попыток, backoff
     std::string data_dir_;                // корень Storage (из path_data_dir хоста)
     Storage storage_;
     Scheduler scheduler_;                 // только worker-поток

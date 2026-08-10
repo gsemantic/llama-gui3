@@ -282,7 +282,7 @@ std::string ChatInterface::process_with_rag(const std::string& user_input, bool 
     // Флаг устанавливается ПЕРЕД вызовом этой функции в send_message()
 
     // Сначала проверяем кэш чат-истории (только для локальной модели)
-    if (use_cache) {
+    if (use_cache && settings_.rag().enable_caching) {
         std::string cached_response = rag_manager_->find_cached_response(user_input);
         if (!cached_response.empty()) {
             std::cout << "[RAG DEBUG] Found cached response for query: " << user_input << std::endl;

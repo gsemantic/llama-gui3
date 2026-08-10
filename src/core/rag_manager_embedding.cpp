@@ -148,7 +148,7 @@ std::string RagManager::find_cached_response(const std::string& query) {
             float similarity = cosine_similarity(query_embedding, chunk.embedding);
 
             if (similarity >= EXACT_CACHE_THRESHOLD) {
-                return "Cached response for: " + chunk.content;
+                return cached_response_for_chunk(chunk);
             }
         }
 
@@ -156,12 +156,25 @@ std::string RagManager::find_cached_response(const std::string& query) {
         for (const auto& chunk : similar_queries) {
             float similarity = cosine_similarity(query_embedding, chunk.embedding);
             if (similarity >= SEMANTIC_CACHE_THRESHOLD && similarity < EXACT_CACHE_THRESHOLD) {
-                return "Cached response for: " + chunk.content;
+                return cached_response_for_chunk(chunk);
             }
         }
     }
 
     return "";
+}
+
+// Возвращает настоящий ответ, соответствующий найденному фрагменту чат-истории.
+// Запросы и ответы хранятся парами: чётный chunk_index — запрос, нечётный — ответ.
+// Если совпадение пришлось на сам ответ — возвращаем его, если на запрос — парный ответ.
+std::string RagManager::cached_response_for_chunk(const RagChunk& chunk) {
+    if (chunk.chunk_index % 2 == 1) {
+        return chunk.content;
+    }
+    if (chunk.chunk_index + 1 < chat_history_chunks_.size()) {
+        return chat_history_chunks_[chunk.chunk_index + 1].content;
+    }
+    return chunk.content;
 }
 
 void RagManager::cache_query_response(const std::string& query, const std::string& response) {

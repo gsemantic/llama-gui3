@@ -88,6 +88,41 @@ static std::string transliterate_ru_to_en(const std::string& text) {
     return result;
 }
 
+// Приведение кириллицы к нижнему регистру (UTF-8)
+static std::string to_lower_utf8(const std::string& text) {
+    std::string result = text;
+    for (size_t i = 0; i + 1 < result.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(result[i]);
+        if (c == 0xD0) {
+            unsigned char d = static_cast<unsigned char>(result[i + 1]);
+            if (d >= 0x90 && d <= 0x9F) {
+                result[i + 1] = d + 0x20;      // А..П → а..п
+            } else if (d >= 0xA0 && d <= 0xAF) {
+                result[i] = 0xD1;
+                result[i + 1] = d - 0x20;      // Р..Я → р..я
+            } else if (d == 0x81) {
+                result[i] = 0xD1;
+                result[i + 1] = 0x91;          // Ё → ё
+            }
+            ++i;
+        }
+    }
+    return result;
+}
+
+// Косинусная близость между векторами
+static float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.size() != b.size()) return 0.0f;
+    float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        dot += a[i] * b[i];
+        norm_a += a[i] * a[i];
+        norm_b += b[i] * b[i];
+    }
+    if (norm_a == 0 || norm_b == 0) return 0.0f;
+    return dot / (std::sqrt(norm_a) * std::sqrt(norm_b));
+}
+
 // Токенизация текста (с поддержкой UTF-8 для русских букв)
 static std::vector<std::string> tokenize_text(const std::string& text) {
     std::vector<std::string> tokens;
@@ -129,16 +164,7 @@ static std::vector<std::string> tokenize_text(const std::string& text) {
         } else {
             // Конец токена
             if (!current_token.empty()) {
-                // Конвертируем в lowercase для ASCII
-                std::string lower_token;
-                for (char tc : current_token) {
-                    if (tc >= 'A' && tc <= 'Z') {
-                        lower_token += tc - 'A' + 'a';
-                    } else {
-                        lower_token += tc;
-                    }
-                }
-                tokens.push_back(lower_token);
+                tokens.push_back(to_lower_utf8(current_token));
                 current_token.clear();
             }
             i++;
@@ -146,15 +172,7 @@ static std::vector<std::string> tokenize_text(const std::string& text) {
     }
 
     if (!current_token.empty()) {
-        std::string lower_token;
-        for (char tc : current_token) {
-            if (tc >= 'A' && tc <= 'Z') {
-                lower_token += tc - 'A' + 'a';
-            } else {
-                lower_token += tc;
-            }
-        }
-        tokens.push_back(lower_token);
+        tokens.push_back(to_lower_utf8(current_token));
     }
 
     return tokens;
@@ -176,6 +194,7 @@ static std::vector<std::string> extract_keywords(const std::string& query) {
         // Русские глаголы-связки
         "сказано", "говорится", "пишут", "документе", "тексте", "документ", "текст",
         "есть", "был", "была", "было", "были", "будет", "будут",
+        "тогда", "можно", "нужно", "надо",
         "про", "о", "об", "насчет",
         // Английские вопросительные и служебные
         "what", "how", "where", "when", "why", "which", "who", "whom", "whose",
@@ -261,23 +280,22 @@ float RagManager::keyword_boost_score(const RagChunk& chunk,
         return 1.0f;
     }
 
-    std::string chunk_lower = chunk.content;
-    std::transform(chunk_lower.begin(), chunk_lower.end(),
-                  chunk_lower.begin(), ::tolower);
+    std::string chunk_lower = to_lower_utf8(chunk.content);
 
     int matches = 0;
     int total_weight = 0;
     int best_match_length = 0;
 
     for (const auto& keyword : keywords) {
-        std::string keyword_lower = keyword;
-        std::transform(keyword_lower.begin(), keyword_lower.end(),
-                      keyword_lower.begin(), ::tolower);
+        std::string keyword_lower = to_lower_utf8(keyword);
 
         // Пропускаем очень короткие ключевые слова (< 3 символов)
         if (keyword_lower.length() < 3) {
             continue;
         }
+
+        // Стем ключевого слова для учёта морфологии (омар/омары/омарами)
+        std::string stem = Stemmer::stem(keyword_lower);
 
         // 1. ТОЧНОЕ ВХОЖДЕНИЕ (наибольший вес)
         size_t pos = chunk_lower.find(keyword_lower);
@@ -293,6 +311,16 @@ float RagManager::keyword_boost_score(const RagChunk& chunk,
             // Запоминаем длину лучшего совпадения
             if (static_cast<int>(keyword_lower.length()) > best_match_length) {
                 best_match_length = keyword_lower.length();
+            }
+        } else if (stem.length() >= 3 && stem != keyword_lower) {
+            // 1b. МОРФОЛОГИЧЕСКОЕ СОВПАДЕНИЕ (стем: омарами -> омар)
+            size_t stem_pos = chunk_lower.find(stem);
+            if (stem_pos != std::string::npos) {
+                matches++;
+                total_weight += 3;
+                if (static_cast<int>(stem.length()) > best_match_length) {
+                    best_match_length = stem.length();
+                }
             }
         }
 
@@ -339,9 +367,12 @@ float RagManager::keyword_boost_score(const RagChunk& chunk,
 std::vector<RagChunk> RagManager::rerank_results(const std::string& query,
                                                   const std::vector<RagChunk>& results,
                                                   const std::vector<std::string>& keywords) {
-    if (results.empty() || keywords.empty()) {
+    if (results.empty()) {
         return results;
     }
+
+    // Генерируем эмбеддинг запроса для учёта векторной близости
+    std::vector<float> query_embedding = generate_embedding(query);
 
     // Копируем результаты для сортировки
     std::vector<std::pair<RagChunk, float>> scored_results;
@@ -349,10 +380,21 @@ std::vector<RagChunk> RagManager::rerank_results(const std::string& query,
 
     for (const auto& chunk : results) {
         float boost = keyword_boost_score(chunk, keywords);
-        scored_results.push_back({chunk, boost});
+
+        // Векторная близость запроса и чанка (0..1)
+        float vector_sim = 0.0f;
+        if (!query_embedding.empty() && !chunk.embedding.empty() &&
+            chunk.embedding.size() == query_embedding.size()) {
+            vector_sim = cosine_similarity(query_embedding, chunk.embedding);
+            if (vector_sim < 0.0f) vector_sim = 0.0f;
+        }
+
+        // Итоговый скор: буст ключевых слов + векторная близость
+        float score = boost + vector_sim * keyword_boost_weight_;
+        scored_results.push_back({chunk, score});
     }
 
-    // Сортируем по убыванию boost score
+    // Сортируем по убыванию score
     std::sort(scored_results.begin(), scored_results.end(),
               [](const auto& a, const auto& b) {
                   return a.second > b.second;
@@ -398,17 +440,23 @@ std::vector<RagChunk> RagManager::search_hybrid(const std::string& query, int k,
     // === ШАГ 3: ПОЛНОТЕКСТОВЫЙ ПОИСК ===
     std::vector<RagChunk> exact_matches;
 
+    // Учитываем морфологию: для каждого ключевого слова проверяем и само слово,
+    // и его стем (омарами -> омар), чтобы находить чанки с любой формой слова.
     for (const auto& keyword : keywords) {
-        std::string keyword_lower = keyword;
-        std::transform(keyword_lower.begin(), keyword_lower.end(),
-                      keyword_lower.begin(), ::tolower);
+        std::string keyword_lower = to_lower_utf8(keyword);
+        std::string stem = Stemmer::stem(keyword_lower);
+        std::string match_term = (stem.length() >= 3 && stem != keyword_lower)
+                                     ? stem : keyword_lower;
 
         for (const auto& chunk : external_chunks_) {
-            std::string chunk_lower = chunk.content;
-            std::transform(chunk_lower.begin(), chunk_lower.end(),
-                          chunk_lower.begin(), ::tolower);
+            std::string chunk_lower = to_lower_utf8(chunk.content);
 
-            if (chunk_lower.find(keyword_lower) != std::string::npos) {
+            bool matched = chunk_lower.find(keyword_lower) != std::string::npos;
+            if (!matched && match_term != keyword_lower) {
+                matched = chunk_lower.find(match_term) != std::string::npos;
+            }
+
+            if (matched) {
                 bool already_added = false;
                 for (const auto& existing : exact_matches) {
                     if (existing.document_id == chunk.document_id &&

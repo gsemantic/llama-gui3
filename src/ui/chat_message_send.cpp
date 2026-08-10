@@ -257,9 +257,10 @@ void ChatInterface::send_message() {
 
     // Проверка кэш-истории
     bool use_cache = (settings_.rag().rag_mode == llama_gui::core::RagMode::CacheOnly ||
-                      settings_.rag().rag_mode == llama_gui::core::RagMode::Both);
+                      settings_.rag().rag_mode == llama_gui::core::RagMode::Both) &&
+                     settings_.rag().enable_caching;
 
-    if (use_cache && rag_enabled_ && rag_manager_ && settings_.rag().enable_rag && settings_.rag().enable_caching) {
+    if (use_cache && rag_enabled_ && rag_manager_ && settings_.rag().enable_rag) {
         std::string cached_response = rag_manager_->find_cached_response(message_content);
 
         if (!cached_response.empty()) {
@@ -356,7 +357,7 @@ void ChatInterface::send_message() {
         auto* state = &state_manager_;
         auto* self = this;
 
-        std::thread([self, msg_copy, conv_id, rag_enabled, use_documents, has_attachments, attachments_ctx,
+        std::thread([self, msg_copy, conv_id, rag_enabled, use_cache, use_documents, has_attachments, attachments_ctx,
                      settings_ptr, rag_mgr, compressor, monitor, llama, state]() mutable {
             try {
                 // --- RAG processing (SLOW - runs in background) ---
@@ -366,7 +367,7 @@ void ChatInterface::send_message() {
 
                 if (use_documents && rag_enabled && rag_mgr) {
                     self->processing_rag_document_ = true;
-                    std::string rag_prompt = self->process_with_rag(msg_copy);
+                    std::string rag_prompt = self->process_with_rag(msg_copy, use_cache);
 
                     // Check if deep analysis returned a final answer (not a RAG prompt)
                     // Deep analysis results don't start with "=== КОНТЕКСТ ==="
