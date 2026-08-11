@@ -27,6 +27,7 @@ using LlmFn = std::function<bool(const std::string& prompt,
 std::string build_prompt(const Article& src, const RewriteConfig& cfg);
 
 // Разбор ответа LLM: первая непустая строка — заголовок, остальное — тело.
+// Один длинный абзац без разделения считается телом новости (заголовок пуст).
 RewriteResult parse_response(const std::string& response);
 
 // Полный рерайт: промпт → llm → разбор ответа. Ошибки LLM не бросают

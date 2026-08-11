@@ -93,20 +93,18 @@ bool Storage::save_article_json(const Article& a) {
 }
 
 bool Storage::save_article_md(const Article& a) {
+    // Заголовок файла — переписанный (если есть), иначе оригинальный.
+    const std::string& title = a.title_rewritten.empty() ? a.title_original : a.title_rewritten;
+    const std::string& body = a.body_rewritten.empty() ? a.body_original : a.body_rewritten;
+
+    // Порядок: заголовок → текст новости → ссылка и дата.
     std::string md;
-    md += "# " + a.title_original + "\n\n";
-    if (!a.title_rewritten.empty() && a.title_rewritten != a.title_original) {
-        md += "### Переписанный заголовок\n\n" + a.title_rewritten + "\n\n";
+    md += "# " + title + "\n\n";
+    if (!body.empty()) {
+        md += body + "\n\n";
     }
     md += "Источник: " + a.url + "\n";
-    md += "Дата: " + a.fetched_at + "\n\n";
-    md += "---\n\n";
-    if (!a.body_rewritten.empty()) {
-        md += "## Текст (рерайт)\n\n" + a.body_rewritten + "\n\n";
-    }
-    if (!a.body_original.empty()) {
-        md += "## Текст (оригинал)\n\n" + a.body_original + "\n";
-    }
+    md += "Дата: " + a.fetched_at + "\n";
     return write_file(article_md_path(a), md);
 }
 

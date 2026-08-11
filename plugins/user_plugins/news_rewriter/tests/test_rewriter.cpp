@@ -44,6 +44,28 @@ static void test_parse_response_single_line() {
     TEST_ASSERT_TRUE(r.body.empty());
 }
 
+static void test_parse_response_long_single_line_is_body() {
+    const std::string long_line(200, 'x');
+    const RewriteResult r = parse_response(long_line);
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_TRUE(r.title.empty());
+    TEST_ASSERT_EQUAL(r.body, long_line);
+}
+
+static void test_rewrite_single_long_paragraph() {
+    const Article a = make_article("Старый заголовок", "Старый текст");
+    RewriteConfig cfg;
+    const std::string text(200, 'a');
+    LlmFn llm = [&](const std::string&, std::string& response, std::string&) -> bool {
+        response = text;
+        return true;
+    };
+    const RewriteResult r = rewrite_article(a, cfg, llm);
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_TRUE(r.title.empty());
+    TEST_ASSERT_EQUAL(r.body, text);
+}
+
 static void test_parse_response_empty() {
     const RewriteResult r = parse_response("");
     TEST_ASSERT_FALSE(r.ok);
@@ -117,6 +139,8 @@ static void test_build_prompt_max_words_placeholder() {
 REGISTER_TEST(test_build_prompt_substitutions);
 REGISTER_TEST(test_parse_response_title_and_body);
 REGISTER_TEST(test_parse_response_single_line);
+REGISTER_TEST(test_parse_response_long_single_line_is_body);
+REGISTER_TEST(test_rewrite_single_long_paragraph);
 REGISTER_TEST(test_parse_response_empty);
 REGISTER_TEST(test_parse_response_whitespace_only);
 REGISTER_TEST(test_rewrite_ok);

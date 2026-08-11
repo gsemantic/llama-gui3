@@ -71,6 +71,19 @@ static void test_storage_save_json_and_md() {
     std::ifstream in(s.article_md_path(a));
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     TEST_ASSERT(content.find("Переписан") != std::string::npos);
+    TEST_ASSERT(content.find("Текст (оригинал)") == std::string::npos);
+    TEST_ASSERT(content.find("Переписанный заголовок") == std::string::npos);
+    // заголовок файла — переписанный, а не оригинальный
+    TEST_ASSERT(content.find("# Переписан: Заголовок") != std::string::npos);
+    // порядок: заголовок → текст рерайта → ссылка и дата
+    const std::size_t p_body = content.find("Переписан: Текст");
+    const std::size_t p_src = content.find("Источник:");
+    const std::size_t p_date = content.find("Дата:");
+    TEST_ASSERT(p_body != std::string::npos);
+    TEST_ASSERT(p_src != std::string::npos);
+    TEST_ASSERT(p_date != std::string::npos);
+    TEST_ASSERT(p_body < p_src);
+    TEST_ASSERT(p_src < p_date);
 }
 
 static void test_storage_index_roundtrip() {

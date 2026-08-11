@@ -59,6 +59,7 @@ RewriteResult parse_response(const std::string& response) {
     // Первая непустая строка — заголовок, остальное — тело.
     std::string first;
     std::string body;
+    int non_empty_lines = 0;
     std::size_t start = 0;
     while (start < response.size()) {
         const std::size_t nl = response.find('\n', start);
@@ -66,6 +67,7 @@ RewriteResult parse_response(const std::string& response) {
             start, nl == std::string::npos ? std::string::npos : nl - start);
         const std::string clean = trim_collapse(line);
         if (!clean.empty()) {
+            ++non_empty_lines;
             if (first.empty()) {
                 first = clean;
             } else if (body.empty()) {
@@ -80,6 +82,15 @@ RewriteResult parse_response(const std::string& response) {
 
     if (first.empty()) {
         result.error = "пустой ответ LLM";
+        return result;
+    }
+
+    // Модель иногда возвращает весь текст рерайта одним абзацем, не разделяя
+    // заголовок и тело. Одинокую длинную строку считаем телом новости, а не
+    // заголовком (заголовок в этом случае останется оригинальным).
+    if (non_empty_lines == 1 && first.size() > 150) {
+        result.ok = true;
+        result.body = first;
         return result;
     }
 
