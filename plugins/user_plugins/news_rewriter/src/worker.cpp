@@ -477,7 +477,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         a.retry_count = retries;
         a.error = res.error;
         set_status(a, "ошибка загрузки: " + src.url + " — " + res.error);
-        return false;  // повторяемый сбой (сеть/таймаут) → caller ретраит
+        return res.permanent;  // false (повторяемый) → caller ретраит; true (постоянный) → стоп
     }
 
     // Источник, который раньше падал с Error-заглушкой, теперь успешен:

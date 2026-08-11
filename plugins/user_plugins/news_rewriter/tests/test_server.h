@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -22,7 +23,7 @@ class MiniHttpServer {
 public:
     ~MiniHttpServer() { stop(); }
 
-    // Запускает сервер на 127.0.0.1:0 (эпhemeral порт).
+    // Запускает сервер на 127.0.0.1:0 (эephmeral порт).
     bool start(int status, const std::string& body,
                const std::string& content_type = "text/plain",
                int delay_ms = 0) {
@@ -55,6 +56,13 @@ public:
         return true;
     }
 
+    // Дополнительные маршруты: путь → тело. Основной body_ остаётся fallback'ом.
+    void add_route(const std::string& path, const std::string& body,
+                   const std::string& content_type = "text/plain") {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        routes_[path] = Route{body, content_type};
+    }
+
     int port() const { return port_; }
     std::string base_url() const {
         return "http://127.0.0.1:" + std::to_string(port_);
@@ -79,6 +87,22 @@ public:
     }
 
 private:
+    struct Route {
+        std::string body;
+        std::string content_type;
+    };
+
+    std::string request_path(const std::string& req) const {
+        const std::size_t start = req.find(' ');
+        if (start == std::string::npos) return "/";
+        const std::size_t end = req.find(' ', start + 1);
+        if (end == std::string::npos) return "/";
+        std::string p = req.substr(start + 1, end - start - 1);
+        const std::size_t q = p.find('?');
+        if (q != std::string::npos) p = p.substr(0, q);
+        return p;
+    }
+
     void serve() {
         for (int n = 0; running_ && n < 64; n++) {
             sockaddr_in client{};
@@ -105,16 +129,30 @@ private:
                 request_ += req;
             }
 
+            // Выбираем ответ: маршрут или fallback-тело.
+            std::string body = body_;
+            std::string ctype = content_type_;
+            int status = status_;
+            {
+                std::lock_guard<std::mutex> lock(routes_mutex_);
+                const auto it = routes_.find(request_path(req));
+                if (it != routes_.end()) {
+                    body = it->second.body;
+                    ctype = it->second.content_type;
+                    status = 200;
+                }
+            }
+
             if (delay_ms_ > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
             }
 
-            const char* reason = (status_ >= 400) ? " Error" : " OK";
+            const char* reason = (status >= 400) ? " Error" : " OK";
             const std::string resp =
-                "HTTP/1.1 " + std::to_string(status_) + reason + "\r\n"
-                "Content-Type: " + content_type_ + "\r\n"
-                "Content-Length: " + std::to_string(body_.size()) + "\r\n"
-                "Connection: close\r\n\r\n" + body_;
+                "HTTP/1.1 " + std::to_string(status) + reason + "\r\n"
+                "Content-Type: " + ctype + "\r\n"
+                "Content-Length: " + std::to_string(body.size()) + "\r\n"
+                "Connection: close\r\n\r\n" + body;
             send(c, resp.data(), resp.size(), 0);
             close(c);
         }
@@ -131,6 +169,8 @@ private:
     std::string request_;
     mutable std::mutex req_mutex_;
     std::atomic<int> request_count_{0};
+    std::map<std::string, Route> routes_;
+    mutable std::mutex routes_mutex_;
 };
 
 } // namespace news_rewriter_test

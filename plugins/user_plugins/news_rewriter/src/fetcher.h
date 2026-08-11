@@ -24,6 +24,7 @@ struct FetchResult {
     std::string final_url;
     std::string html;                    // для type="page" (сырой HTML)
     std::vector<FeedItem> items;         // для rss/atom
+    bool permanent = false;              // сбой не повторяемый (ретраи бессмысленны)
 };
 
 // Интерфейс загрузки (внедряется в Worker; тесты подставляют фейк).
