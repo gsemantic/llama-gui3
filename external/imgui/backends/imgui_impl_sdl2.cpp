@@ -332,6 +332,46 @@ ImGuiKey ImGui_ImplSDL2_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode sca
     // Fallback to scancode
     switch (scancode)
     {
+    // Letters: needed for non-Latin layouts (e.g. Russian) where the keycode
+    // returns a Cyrillic symbol that has no SDLK_* mapping. Physical position
+    // is layout-independent, so scancode A-Z reliably maps to ImGuiKey_A-Z.
+    case SDL_SCANCODE_A: return ImGuiKey_A;
+    case SDL_SCANCODE_B: return ImGuiKey_B;
+    case SDL_SCANCODE_C: return ImGuiKey_C;
+    case SDL_SCANCODE_D: return ImGuiKey_D;
+    case SDL_SCANCODE_E: return ImGuiKey_E;
+    case SDL_SCANCODE_F: return ImGuiKey_F;
+    case SDL_SCANCODE_G: return ImGuiKey_G;
+    case SDL_SCANCODE_H: return ImGuiKey_H;
+    case SDL_SCANCODE_I: return ImGuiKey_I;
+    case SDL_SCANCODE_J: return ImGuiKey_J;
+    case SDL_SCANCODE_K: return ImGuiKey_K;
+    case SDL_SCANCODE_L: return ImGuiKey_L;
+    case SDL_SCANCODE_M: return ImGuiKey_M;
+    case SDL_SCANCODE_N: return ImGuiKey_N;
+    case SDL_SCANCODE_O: return ImGuiKey_O;
+    case SDL_SCANCODE_P: return ImGuiKey_P;
+    case SDL_SCANCODE_Q: return ImGuiKey_Q;
+    case SDL_SCANCODE_R: return ImGuiKey_R;
+    case SDL_SCANCODE_S: return ImGuiKey_S;
+    case SDL_SCANCODE_T: return ImGuiKey_T;
+    case SDL_SCANCODE_U: return ImGuiKey_U;
+    case SDL_SCANCODE_V: return ImGuiKey_V;
+    case SDL_SCANCODE_W: return ImGuiKey_W;
+    case SDL_SCANCODE_X: return ImGuiKey_X;
+    case SDL_SCANCODE_Y: return ImGuiKey_Y;
+    case SDL_SCANCODE_Z: return ImGuiKey_Z;
+    // Digits
+    case SDL_SCANCODE_0: return ImGuiKey_0;
+    case SDL_SCANCODE_1: return ImGuiKey_1;
+    case SDL_SCANCODE_2: return ImGuiKey_2;
+    case SDL_SCANCODE_3: return ImGuiKey_3;
+    case SDL_SCANCODE_4: return ImGuiKey_4;
+    case SDL_SCANCODE_5: return ImGuiKey_5;
+    case SDL_SCANCODE_6: return ImGuiKey_6;
+    case SDL_SCANCODE_7: return ImGuiKey_7;
+    case SDL_SCANCODE_8: return ImGuiKey_8;
+    case SDL_SCANCODE_9: return ImGuiKey_9;
     case SDL_SCANCODE_GRAVE: return ImGuiKey_GraveAccent;
     case SDL_SCANCODE_MINUS: return ImGuiKey_Minus;
     case SDL_SCANCODE_EQUALS: return ImGuiKey_Equal;
