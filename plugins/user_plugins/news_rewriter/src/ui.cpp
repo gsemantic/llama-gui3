@@ -160,15 +160,26 @@ void render_settings(UiDeps& deps, Config& draft) {
     ImGui::Separator();
 
     // ---- Действия ------------------------------------------------------------
+    static double saved_at = 0.0;   // время последнего нажатия «Сохранить»
     if (ImGui::Button("Сохранить")) {
         if (deps.on_save) deps.on_save(draft);
+        saved_at = ImGui::GetTime();
     }
     ImGui::SameLine();
     if (ImGui::Button("Сбросить")) {
         if (deps.worker) draft = deps.worker->get_config();
     }
+    if (saved_at > 0.0) {
+        const double elapsed = ImGui::GetTime() - saved_at;
+        if (elapsed < 5.0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Сохранено");
+        } else {
+            saved_at = 0.0;
+        }
+    }
     ImGui::SameLine();
-    ImGui::TextDisabled("Настройки применяются воркеру и сохраняются");
+    ImGui::TextDisabled("Настройки сохраняются по кнопке «Сохранить» или при закрытии окна");
 }
 
 const ImVec4 status_color_task(TaskStatus s) {
@@ -213,8 +224,9 @@ void render_news_rewriter_window(UiDeps& deps) {
     ImGui::SetNextWindowSize(ImVec2(560, 520), ImGuiCond_FirstUseEver);
     const bool visible = ImGui::Begin("News Rewriter", &s_window_open);
     if (!s_window_open) {
-        // Крестик нажат — скрываем окно в хосте.
+        // Крестик нажат — применяем черновик настроек (автосейв) и скрываем окно.
         ImGui::End();
+        if (deps.on_save) deps.on_save(draft);
         if (deps.on_close) deps.on_close();
         s_reset_open = true;
         return;
