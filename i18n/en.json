@@ -295,6 +295,7 @@
     "context.cut": "Cut",
     "context.copy": "Copy",
     "context.paste": "Paste",
+    "context.select_all": "Select All",
     "context.clear": "Clear",
 
     "message.user": "User",

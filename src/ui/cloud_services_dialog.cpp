@@ -1,6 +1,7 @@
 #include "../include/ui/cloud_services_dialog.h"
 #include "../include/core/env_manager.h"
 #include "../include/ui/localization_manager.h"
+#include "../include/ui/input_text_context_menu.h"
 #include "../include/core/logger.h"
 #include <imgui.h>
 #include <cstring>
@@ -253,6 +254,7 @@ void CloudServicesDialog::render_model_list() {
     if (ImGui::InputTextWithHint("##model_search", "Filter...", model_search_buf_, sizeof(model_search_buf_))) {
         filter_models();
     }
+    InputTextContextMenu();
 
     // Loading indicator
     if (models_loading_) {
@@ -346,6 +348,7 @@ void CloudServicesDialog::render() {
             settings_modified_ = true;
             models_loaded_ = false; // Invalidate model list on endpoint change
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         if (ImGui::SmallButton("Paste##ep")) {
             const char* clip = ImGui::GetClipboardText();
@@ -366,6 +369,7 @@ void CloudServicesDialog::render() {
                 settings_modified_ = true;
                 models_loaded_ = false; // Invalidate model list on key change
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             if (ImGui::SmallButton(show_api_key_ ? "Hide" : "Show")) {
                 show_api_key_ = !show_api_key_;
@@ -388,6 +392,7 @@ void CloudServicesDialog::render() {
         if (ImGui::InputText("##model_id", model_id_buf_, sizeof(model_id_buf_))) {
             settings_modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         if (ImGui::SmallButton("Paste##model")) {
             const char* clip = ImGui::GetClipboardText();

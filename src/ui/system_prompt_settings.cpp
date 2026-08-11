@@ -1,5 +1,6 @@
 #include "../include/ui/system_prompt_settings.h"
 #include "../include/core/settings.h"
+#include "../include/ui/input_text_context_menu.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
 #include <cstring>
@@ -34,6 +35,7 @@ void SystemPromptSettings::render() {
                              sizeof(system_prompt_buffer_),
                              ImVec2(-1, 150),
                              ImGuiInputTextFlags_AllowTabInput);
+    InputTextContextMenu();
     
     // Apply button to update settings
     if (ImGui::Button("Apply System Prompt")) {

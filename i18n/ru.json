@@ -313,6 +313,7 @@
     "context.cut": "Вырезать",
     "context.copy": "Копировать",
     "context.paste": "Вставить",
+    "context.select_all": "Выделить всё",
     "context.clear": "Очистить",
 
     "message.user": "Пользователь",

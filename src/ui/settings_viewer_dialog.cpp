@@ -1,6 +1,7 @@
 #include "../include/ui/settings_viewer_dialog.h"
 #include "../include/core/ini_parser.h"
 #include "../include/ui/localization_manager.h"
+#include "../include/ui/input_text_context_menu.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
 #include <algorithm>
@@ -244,6 +245,7 @@ void SettingsViewerDialog::render_filter_panel() {
     static char search_buffer[256] = "";
     bool search_changed = ImGui::InputText("##Search", search_buffer, sizeof(search_buffer),
                                            ImGuiInputTextFlags_EnterReturnsTrue);
+    InputTextContextMenu();
     
     // Обновляем search_filter_ каждый кадр для мгновенной реакции
     std::string current_input = search_buffer;
@@ -524,24 +526,7 @@ void SettingsViewerDialog::render_edit_modal() {
                             ImGuiInputTextFlags_EnterReturnsTrue)) {
             enter_pressed = true;
         }
-        // Правый клик для контекстного меню (копировать/вставить/вырезать)
-        if (ImGui::BeginPopupContextItem("EditValueContext")) {
-            if (ImGui::MenuItem(TR("settings.viewer.cut"), "Ctrl+X")) {
-                ImGui::SetClipboardText(current_edit_buffer_);
-                current_edit_buffer_[0] = '\0';
-            }
-            if (ImGui::MenuItem(TR("settings.viewer.copy"), "Ctrl+C")) {
-                ImGui::SetClipboardText(current_edit_buffer_);
-            }
-            if (ImGui::MenuItem(TR("settings.viewer.paste"), "Ctrl+V")) {
-                const char* clipboard = ImGui::GetClipboardText();
-                if (clipboard && strlen(clipboard) > 0) {
-                    strncpy(current_edit_buffer_, clipboard, sizeof(current_edit_buffer_) - 1);
-                    current_edit_buffer_[sizeof(current_edit_buffer_) - 1] = '\0';
-                }
-            }
-            ImGui::EndPopup();
-        }
+        InputTextContextMenu();
 
         ImGui::Spacing();
         ImGui::Separator();

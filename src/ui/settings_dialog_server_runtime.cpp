@@ -1,5 +1,6 @@
 #include "../include/ui/settings_dialog_server_runtime.h"
 #include "../include/ui/localization_manager.h"
+#include "../include/ui/input_text_context_menu.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
 #include <sstream>
@@ -40,6 +41,7 @@ void ServerRuntimeDialog::render_api_key_editor(size_t index) {
         keys[index] = key_buf;
         modified_ = true;
     }
+    InputTextContextMenu();
 
     ImGui::SameLine();
     if (ImGui::SmallButton("Remove##remove_key")) {
@@ -68,6 +70,7 @@ void ServerRuntimeDialog::render_network_section() {
             runtime.host = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Host to bind server to");
     }
@@ -106,6 +109,7 @@ void ServerRuntimeDialog::render_network_section() {
             runtime.api_prefix = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("URL prefix for API endpoints");
     }
@@ -144,6 +148,7 @@ void ServerRuntimeDialog::render_network_section() {
             runtime.static_path = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to serve static files from");
     }
@@ -179,6 +184,7 @@ void ServerRuntimeDialog::render_security_section() {
     // Add new API key
     ImGui::SetNextItemWidth(250);
     ImGui::InputText("New API Key##new_api_key", new_api_key_, sizeof(new_api_key_), ImGuiInputTextFlags_Password);
+    InputTextContextMenu();
 
     ImGui::SameLine();
     if (ImGui::Button("Add##add_api_key")) {
@@ -201,6 +207,7 @@ void ServerRuntimeDialog::render_security_section() {
             runtime.api_key_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("File containing API keys (one per line)");
 
@@ -221,6 +228,7 @@ void ServerRuntimeDialog::render_security_section() {
             runtime.ssl_key_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to SSL private key file");
 
@@ -239,6 +247,7 @@ void ServerRuntimeDialog::render_security_section() {
             runtime.ssl_cert_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to SSL certificate file");
 
@@ -312,6 +321,7 @@ void ServerRuntimeDialog::render_kv_cache_section() {
             runtime.slot_save_path = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker(TR("settings.kv_cache.slot_save_path.tooltip"));
     }

@@ -1,6 +1,7 @@
 #include "../include/ui/settings_dialog.h"
 #include "../include/ui/localization_manager.h"
 #include "../include/ui/language_selector.h"
+#include "../include/ui/input_text_context_menu.h"
 #include "../external/imgui/imgui.h"
 #include <cstring>
 
@@ -135,6 +136,7 @@ void SettingsDialog::render_file_settings() {
             files.default_save_path = save_path;
             settings_modified_ = true;
         }
+        InputTextContextMenu();
 
         // Auto-save path
         char auto_path[512];
@@ -144,6 +146,7 @@ void SettingsDialog::render_file_settings() {
             files.auto_save_path = auto_path;
             settings_modified_ = true;
         }
+        InputTextContextMenu();
     }
 
     if (ImGui::CollapsingHeader(TRF("settings.files.auto_save", "Auto-save"), ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -177,6 +180,7 @@ void SettingsDialog::render_security_settings() {
             server.auth_token = token;
             settings_modified_ = true;
         }
+        InputTextContextMenu();
         HelpMarker(TRF("settings.security.token.help", "Token for server authentication (if enabled)"));
     }
 }
