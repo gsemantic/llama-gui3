@@ -10,7 +10,10 @@
 #include "layout_controller.h"
 #include "input_handler.h"
 #include "core/logger.h"
+#include <cstdio>
+#include <cstring>
 #include <iostream>
+#include <string>
 #include <SDL2/SDL.h>
 
 #include "../external/imgui/backends/imgui_impl_sdl2.h"
@@ -19,6 +22,56 @@
 
 namespace llama_gui {
 namespace ui {
+
+namespace {
+
+// ---- Буфер обмена --------------------------------------------------------
+// SDL2 на X11 (2.26.x) периодически возвращает пустую строку из
+// SDL_GetClipboardText() (известный баг с владельцем выборки). Пока буфер
+// системный работает (xclip читает) — подстраховываемся xclip.
+
+std::string run_clipboard_tool(const char* cmd) {
+    std::string out;
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return out;
+    char buf[4096];
+    std::size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), pipe)) > 0) out.append(buf, n);
+    pclose(pipe);
+    return out;
+}
+
+std::string g_clipboard_text;
+
+const char* app_get_clipboard_text(ImGuiContext*) {
+    g_clipboard_text.clear();
+    bool sdl_empty = true;
+    if (char* sdl_text = SDL_GetClipboardText()) {
+        if (*sdl_text) {
+            g_clipboard_text = sdl_text;
+            sdl_empty = false;
+        }
+        SDL_free(sdl_text);
+    }
+    if (sdl_empty) {
+        g_clipboard_text = run_clipboard_tool("xclip -selection clipboard -o 2>/dev/null");
+        std::cout << "[clipboard] SDL_GetClipboardText пуст, xclip вернул "
+                  << g_clipboard_text.size() << " байт" << std::endl;
+    }
+    return g_clipboard_text.c_str();
+}
+
+void app_set_clipboard_text(ImGuiContext*, const char* text) {
+    if (!text) text = "";
+    if (SDL_SetClipboardText(text) != 0) {
+        if (FILE* pipe = popen("xclip -selection clipboard 2>/dev/null", "w")) {
+            fwrite(text, 1, std::strlen(text), pipe);
+            pclose(pipe);
+        }
+    }
+}
+
+} // namespace
 
 MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInterface& llama_interface)
     : settings_(settings)
@@ -555,6 +608,12 @@ void MainWindow::run() {
         }
     }
 #endif
+
+    // Надёжный буфер обмена: SDL на X11 иногда отдаёт пустую строку —
+    // подстраховываемся xclip (ставим ПОСЛЕ инициализации SDL2-бэкенда).
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    platform_io.Platform_GetClipboardTextFn = app_get_clipboard_text;
+    platform_io.Platform_SetClipboardTextFn = app_set_clipboard_text;
 
 #ifdef USE_OPENGL
     if (gl_context_) {
