@@ -2,6 +2,7 @@
 #include "../include/ui/localization_manager.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -42,6 +43,7 @@ void ModelSettingsDialog::render() {
             settings_.set_model_path(buf);
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker(TR("model.path.help"));
 
@@ -66,6 +68,7 @@ void ModelSettingsDialog::render() {
             model.model_url = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker(TR("model.url.help"));
     }
@@ -79,6 +82,7 @@ void ModelSettingsDialog::render() {
             model.model_alias = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker(TR("model.alias.help"));
     }
@@ -97,6 +101,7 @@ void ModelSettingsDialog::render() {
                 model.hf_repo = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.hf_repo.help"));
         }
@@ -110,6 +115,7 @@ void ModelSettingsDialog::render() {
                 model.hf_file = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.hf_file.help"));
         }
@@ -123,6 +129,7 @@ void ModelSettingsDialog::render() {
                 model.hf_token = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.hf_token.help"));
         }
@@ -146,6 +153,7 @@ void ModelSettingsDialog::render() {
                 model.model_draft = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.draft.path.help"));
         }
@@ -159,6 +167,7 @@ void ModelSettingsDialog::render() {
                 model.hf_repo_draft = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.draft.hf_repo.help"));
         }
@@ -218,6 +227,7 @@ void ModelSettingsDialog::render() {
                 model.lora_base = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.lora_base.help"));
         }
@@ -227,6 +237,7 @@ void ModelSettingsDialog::render() {
 
         ImGui::Text(TR("model.lora.add"));
         ImGui::InputTextWithHint("##new_lora_path", TR("model.lora.path"), new_lora_path_, sizeof(new_lora_path_));
+        InputTextContextMenu();
         ImGui::SameLine();
         
         float lora_scale = 1.0f;
@@ -256,6 +267,7 @@ void ModelSettingsDialog::render() {
                 model.mmproj = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.mmproj.path.help"));
         }
@@ -269,6 +281,7 @@ void ModelSettingsDialog::render() {
                 model.mmproj_url = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.mmproj.url.help"));
         }
@@ -308,6 +321,7 @@ void ModelSettingsDialog::render() {
                 model.device = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.device.help"));
         }
@@ -321,6 +335,7 @@ void ModelSettingsDialog::render() {
                 model.device_draft = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             HelpMarker(TR("model.device_draft.help"));
         }

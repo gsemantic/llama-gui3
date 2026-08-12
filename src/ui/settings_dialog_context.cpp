@@ -2,6 +2,7 @@
 #include "../include/ui/localization_manager.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -285,6 +286,7 @@ void ContextDialog::render() {
             cache.slot_save_path = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker(TR("context.slot_path.help"));
     }

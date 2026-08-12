@@ -2,6 +2,7 @@
 #include "../external/imgui/imgui.h"
 #include <iostream>
 #include <sstream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -103,6 +104,7 @@ void GPUSettingsDialog::render() {
             gpu.tensor_split = tensor_split_buf_;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Comma-separated ratios (e.g., \"3,2,1\") for each GPU");
     }

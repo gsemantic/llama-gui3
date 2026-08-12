@@ -2,6 +2,7 @@
 #include "../include/ui/localization_manager.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -337,6 +338,7 @@ void AdvancedSettingsDialog::render_model_loading_tab() {
         model_loading.model_path = model_path_buf;
         settings_modified_ = true;
     }
+    InputTextContextMenu();
 }
 
 void AdvancedSettingsDialog::render_batch_tab() {
@@ -368,6 +370,7 @@ void AdvancedSettingsDialog::render_server_runtime_tab() {
         server_runtime.host = host_buf;
         settings_modified_ = true;
     }
+    InputTextContextMenu();
 
     if (ImGui::InputInt("Port", &server_runtime.port)) {
         settings_modified_ = true;
@@ -395,6 +398,7 @@ void AdvancedSettingsDialog::render_server_runtime_tab() {
             server_runtime.slot_save_path = path_buf;
             settings_modified_ = true;
         }
+        InputTextContextMenu();
         HelpMarker("Directory path for saving KV-cache slots (--slot-save-path)");
     }
 
@@ -491,6 +495,7 @@ void AdvancedSettingsDialog::render_grammar_tab() {
         grammar.grammar_file = grammar_buf;
         settings_modified_ = true;
     }
+    InputTextContextMenu();
 
     ImGui::Separator();
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Reasoning Format");

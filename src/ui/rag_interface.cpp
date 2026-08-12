@@ -14,6 +14,7 @@
 #include <string>
 #include <iomanip>
 #include <sstream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace {
     // Directory dialog result storage
@@ -128,9 +129,11 @@ void RagInterface::show_profile_selector() {
 
         ImGui::Text("Profile Name:");
         ImGui::InputText("##profile_name", profile_name_buf, sizeof(profile_name_buf));
+        InputTextContextMenu();
 
         ImGui::Text("Source Directory (optional):");
         ImGui::InputText("##source_dir", source_dir_buf, sizeof(source_dir_buf));
+        InputTextContextMenu();
         ImGui::SameLine();
         if (ImGui::Button("Browse...##dir", ImVec2(70, 0))) {
             if (file_dialog_manager_) {

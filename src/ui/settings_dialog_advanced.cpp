@@ -1,6 +1,7 @@
 #include "../include/ui/settings_dialog_advanced.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -41,6 +42,7 @@ void AdvancedDialog::render_control_vector_editor(size_t index) {
         cv.path = path_buf;
         modified_ = true;
     }
+    InputTextContextMenu();
 
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);
@@ -76,6 +78,7 @@ void AdvancedDialog::render_tensor_override_editor(size_t index) {
         to.pattern = pattern_buf;
         modified_ = true;
     }
+    InputTextContextMenu();
 
     ImGui::SameLine();
     char buf_type_buf[64];
@@ -87,6 +90,7 @@ void AdvancedDialog::render_tensor_override_editor(size_t index) {
         to.buffer_type = buf_type_buf;
         modified_ = true;
     }
+    InputTextContextMenu();
 
     ImGui::SameLine();
     if (ImGui::SmallButton("Remove##remove_to")) {
@@ -123,6 +127,7 @@ void AdvancedDialog::render_control_vectors_section() {
 
     ImGui::SetNextItemWidth(300);
     ImGui::InputText("Path##new_cv_path", new_cv_path_, sizeof(new_cv_path_));
+    InputTextContextMenu();
 
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);
@@ -189,10 +194,12 @@ void AdvancedDialog::render_tensor_override_section() {
 
     ImGui::SetNextItemWidth(200);
     ImGui::InputText("Pattern##new_to_pattern", new_to_pattern_, sizeof(new_to_pattern_));
+    InputTextContextMenu();
 
     ImGui::SameLine();
     ImGui::SetNextItemWidth(120);
     ImGui::InputText("Buffer Type##new_to_buffer", new_to_buffer_type_, sizeof(new_to_buffer_type_));
+    InputTextContextMenu();
 
     ImGui::SameLine();
     if (ImGui::Button("Add##add_to")) {
@@ -245,6 +252,7 @@ void AdvancedDialog::render_speculative_decoding_section() {
             model.model_draft = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to draft model for speculative decoding");
     }
@@ -259,6 +267,7 @@ void AdvancedDialog::render_speculative_decoding_section() {
             model.hf_repo_draft = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Hugging Face repo for draft model");
     }

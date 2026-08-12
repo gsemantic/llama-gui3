@@ -2,6 +2,7 @@
 #include "../include/ui/localization_manager.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -51,6 +52,7 @@ void LoggingDialog::render_output_section() {
             runtime.log_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker(TR("logging.file.help"));
 

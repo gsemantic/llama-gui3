@@ -3,6 +3,7 @@
 #include "../include/ui/localization_manager.h"
 #include <filesystem>
 #include <cstring>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -78,6 +79,7 @@ void FilePickerDialog::render() {
             if (ImGui::InputText("##save_filename", name_buf, sizeof(name_buf))) {
                 save_filename_ = name_buf;
             }
+            InputTextContextMenu();
             ImGui::SameLine();
             if (ImGui::Button(TR("file_picker.save"))) {
                 if (!save_filename_.empty()) {

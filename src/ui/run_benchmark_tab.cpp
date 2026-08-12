@@ -1,5 +1,6 @@
 #include "run_benchmark_tab.h"
 #include "core/logger.h"
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -59,6 +60,7 @@ void RunBenchmarkTab::renderProfileSelection()
     if (ImGui::InputTextWithHint("##ProfileFilter", "Search profiles...", filter_buf, IM_ARRAYSIZE(filter_buf))) {
         // TODO: Реализовать фильтрацию
     }
+    InputTextContextMenu();
 
     ImGui::Spacing();
 

@@ -5,6 +5,7 @@
 #include "../external/imgui/imgui.h"
 #include <cstring>
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -90,6 +91,7 @@ void SettingsDialog::render_performance_settings() {
         if (ImGui::InputText("##LogPath", log_path_buffer, sizeof(log_path_buffer))) {
             perf.log_file_path = log_path_buffer;
         }
+        InputTextContextMenu();
     }
 }
 
@@ -151,6 +153,7 @@ void SettingsDialog::render_advanced_settings() {
     if (ImGui::InputText("Tensor Split", tensor_split_buffer, sizeof(tensor_split_buffer))) {
         chat_settings.tensor_split = tensor_split_buffer;
     }
+    InputTextContextMenu();
     ImGui::SameLine();
     HelpMarker("Tensor Split:\nDistribution of tensors across multiple GPUs.\nExample: '1,1' for equal distribution between 2 GPUs.");
 
@@ -194,6 +197,7 @@ void SettingsDialog::render_advanced_settings() {
     if (ImGui::InputText(TR("performance.lora_base"), lora_base_buffer, sizeof(lora_base_buffer))) {
         chat_settings.lora_base = lora_base_buffer;
     }
+    InputTextContextMenu();
     ImGui::SameLine();
     HelpMarker("LoRA Base Model:\nBase model for applying LoRA adapters.");
 
@@ -206,6 +210,7 @@ void SettingsDialog::render_advanced_settings() {
     if (ImGui::InputText(TR("performance.mm_projector"), mmproj_buffer, sizeof(mmproj_buffer))) {
         chat_settings.mmproj = mmproj_buffer;
     }
+    InputTextContextMenu();
     ImGui::SameLine();
     HelpMarker("Multimodal Projector:\nPath to projector file for processing images and other modalities.");
 
@@ -215,6 +220,7 @@ void SettingsDialog::render_advanced_settings() {
     if (ImGui::InputText(TR("performance.grammar_file"), grammar_buffer, sizeof(grammar_buffer))) {
         chat_settings.grammar = grammar_buffer;
     }
+    InputTextContextMenu();
     ImGui::SameLine();
     HelpMarker("Grammar File:\nGrammar file for constraining model output (e.g., JSON schema).");
 
@@ -224,6 +230,7 @@ void SettingsDialog::render_advanced_settings() {
     if (ImGui::InputText(TR("performance.chat_template"), chat_template_buffer, sizeof(chat_template_buffer))) {
         chat_settings.chat_template = chat_template_buffer;
     }
+    InputTextContextMenu();
     ImGui::SameLine();
     HelpMarker("Chat Template:\nTemplate for formatting chat messages.");
 

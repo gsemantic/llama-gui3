@@ -2,6 +2,7 @@
 #include "../include/ui/localization_manager.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -117,6 +118,7 @@ void QuickSettingsDialog::render_server_tab() {
         server.host = host_buf;
         settings_modified_ = true;
     }
+    InputTextContextMenu();
 
     int port = server.port;
     if (ImGui::InputInt("Port", &port)) {
@@ -172,6 +174,7 @@ void QuickSettingsDialog::render_chat_tab() {
         chat.default_system_prompt = system_prompt_buf;
         settings_modified_ = true;
     }
+    InputTextContextMenu();
 
     ImGui::Separator();
 
@@ -248,6 +251,7 @@ void QuickSettingsDialog::render_models_tab() {
         settings_.set_model_path(model_path_buf);
         settings_modified_ = true;
     }
+    InputTextContextMenu();
     ImGui::SameLine();
     if (ImGui::Button("Browse...")) {
         if (browse_callback_) {
@@ -287,6 +291,7 @@ void QuickSettingsDialog::render_models_tab() {
         settings_.set_embedding_model_path(emb_model_buf);
         settings_modified_ = true;
     }
+    InputTextContextMenu();
 }
 
 void QuickSettingsDialog::render_ui_tab() {

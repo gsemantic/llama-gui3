@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -21,6 +22,7 @@ void SettingsDialog::render_server_settings() {
     if (ImGui::InputText(TR("server.url"), url_buffer, sizeof(url_buffer))) {
         server_settings.api_url = url_buffer;
     }
+    InputTextContextMenu();
 
     // Timeout
     ImGui::InputInt(TR("server.timeout"), &server_settings.connection_timeout);

@@ -1,6 +1,7 @@
 #include "../include/ui/settings_dialog_grammar.h"
 #include "../external/imgui/imgui.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -43,6 +44,7 @@ void GrammarDialog::render() {
             grammar.grammar = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("GBNF grammar rules (inline)");
     }
@@ -57,6 +59,7 @@ void GrammarDialog::render() {
             grammar.grammar_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to GBNF grammar file");
 
@@ -87,6 +90,7 @@ void GrammarDialog::render() {
             grammar.json_schema = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("JSON Schema (inline)");
     }
@@ -101,6 +105,7 @@ void GrammarDialog::render() {
             grammar.json_schema_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to JSON Schema file");
 
@@ -157,6 +162,7 @@ void GrammarDialog::render() {
             grammar.chat_template = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Chat template string (Jinja2 format)");
     }
@@ -171,6 +177,7 @@ void GrammarDialog::render() {
             grammar.chat_template_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to chat template file");
     }
@@ -185,6 +192,7 @@ void GrammarDialog::render() {
             grammar.chat_template_kwargs = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Additional kwargs for template (JSON format)");
     }
@@ -223,6 +231,7 @@ void GrammarDialog::render() {
             grammar.system_prompt_file = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Path to system prompt file");
     }
@@ -238,6 +247,7 @@ void GrammarDialog::render() {
             grammar.default_system_prompt = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
     }
 
     ImGui::Separator();

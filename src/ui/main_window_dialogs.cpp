@@ -2,6 +2,7 @@
 #include "advanced_menu_system.h"
 #include <iostream>
 #include <cstring>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -22,6 +23,7 @@ void MainWindow::render_workspace_save_dialog() {
     if (ImGui::Begin("Save Workspace", &show_workspace_save_dialog_, ImGuiWindowFlags_AlwaysAutoResize)) {
         static char workspace_name[256] = "";
         ImGui::InputText("Name", workspace_name, sizeof(workspace_name));
+        InputTextContextMenu();
 
         bool name_exists = workspace_layout_manager_.exists(workspace_name);
         if (name_exists) {

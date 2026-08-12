@@ -2,6 +2,7 @@
 #include "../include/ui/workspace_manager.h"
 #include "../external/imgui/imgui.h"
 #include <cstring>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -231,6 +232,7 @@ void ProfileManagerDialog::renderCreateDialog() {
 
         ImGui::SetNextItemWidth(250);
         ImGui::InputText("##name", new_profile_name_, sizeof(new_profile_name_));
+        InputTextContextMenu();
         
         // Устанавливаем фокус только один раз при открытии диалога
         if (request_focus_create_dialog_) {
@@ -320,6 +322,7 @@ void ProfileManagerDialog::renderRenameDialog() {
 
         ImGui::SetNextItemWidth(250);
         ImGui::InputText("##name", profile_name_buffer_, sizeof(profile_name_buffer_));
+        InputTextContextMenu();
 
         // Устанавливаем фокус только один раз при открытии диалога
         if (request_focus_rename_dialog_) {

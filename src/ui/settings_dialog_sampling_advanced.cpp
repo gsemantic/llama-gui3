@@ -2,6 +2,7 @@
 #include "../external/imgui/imgui.h"
 #include <iostream>
 #include <sstream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -96,6 +97,7 @@ void SamplingAdvancedDialog::render() {
             breakers[i] = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
 
         ImGui::SameLine();
         if (ImGui::SmallButton("Remove##remove_breaker")) {
@@ -111,6 +113,7 @@ void SamplingAdvancedDialog::render() {
     // Add new breaker
     ImGui::SetNextItemWidth(150);
     ImGui::InputText("New Breaker##new_breaker", new_dry_breaker_, sizeof(new_dry_breaker_));
+    InputTextContextMenu();
 
     ImGui::SameLine();
     if (ImGui::Button("Add##add_breaker")) {
@@ -290,6 +293,7 @@ void SamplingAdvancedDialog::render() {
             sampling.samplers_order = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("Order: e=entropy, d=dry, s=softmax, k=top-k, p=top-p, y=typical, m=min-p, x=xtc");
 

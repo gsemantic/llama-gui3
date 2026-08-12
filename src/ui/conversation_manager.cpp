@@ -2,6 +2,7 @@
 #include "../external/imgui/imgui.h"
 #include "../include/ui/localization_manager.h"
 #include <iostream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -143,6 +144,7 @@ void ConversationManager::render_search_bar() {
     if (ImGui::InputText(TR("conversations.search"), buffer, sizeof(buffer))) {
         set_search_query(buffer);
     }
+    InputTextContextMenu();
 }
 
 void ConversationManager::render_conversation_context_menu(const std::string& conversation_id) {

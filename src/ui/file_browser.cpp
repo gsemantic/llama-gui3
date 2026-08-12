@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sys/stat.h>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -100,6 +101,7 @@ void FileBrowser::render_toolbar() {
     ImGui::SetNextItemWidth(search_width);
     ImGui::InputTextWithHint("##file_search", TR("file_browser.search_hint"),
                              search_buf_, sizeof(search_buf_));
+    InputTextContextMenu();
 }
 
 void FileBrowser::render_breadcrumbs() {

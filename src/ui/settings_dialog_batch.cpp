@@ -2,6 +2,7 @@
 #include "../external/imgui/imgui.h"
 #include <iostream>
 #include <sstream>
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -154,6 +155,7 @@ void BatchDialog::render_cpu_affinity_section() {
             batch.cpu_mask = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("CPU mask (e.g., \"0-3\" or \"0,2,4,6\")");
     }
@@ -168,6 +170,7 @@ void BatchDialog::render_cpu_affinity_section() {
             batch.cpu_range = buf;
             modified_ = true;
         }
+        InputTextContextMenu();
         ImGui::SameLine();
         HelpMarker("CPU range (e.g., \"0-7\")");
     }
@@ -223,6 +226,7 @@ void BatchDialog::render_cpu_affinity_section() {
                 batch.cpu_mask_batch = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
         }
 
         // CPU Range Batch
@@ -235,6 +239,7 @@ void BatchDialog::render_cpu_affinity_section() {
                 batch.cpu_range_batch = buf;
                 modified_ = true;
             }
+            InputTextContextMenu();
         }
 
         // CPU Strict Batch

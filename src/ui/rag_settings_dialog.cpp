@@ -5,6 +5,7 @@
 #include "../include/core/settings.h"
 #include "../include/ui/main_window.h"
 #include "../include/ui/localization_manager.h"
+#include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
 namespace ui {
@@ -76,6 +77,7 @@ void RagSettingsDialog::render() {
         // Поле ввода пути (занимает часть строки)
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 100);
         ImGui::InputText("##embedding_model_path", embedding_model_path_buffer_, sizeof(embedding_model_path_buffer_));
+        InputTextContextMenu();
 
         ImGui::SameLine();
 
@@ -96,6 +98,7 @@ void RagSettingsDialog::render() {
         ImGui::Text("URL сервера эмбеддингов (llama-server)");
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
         ImGui::InputText("##embedding_server_url", embedding_server_url_buffer_, sizeof(embedding_server_url_buffer_));
+        InputTextContextMenu();
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("HTTP endpoint llama-server с моделью эмбеддингов.\n"
                               "Пример: http://localhost:8083\n"

@@ -5,6 +5,8 @@
 
 #include "imgui.h"
 
+#include "ui/input_text_context_menu.h"
+
 #include "common.h"
 #include "worker.h"
 
@@ -24,6 +26,7 @@ void input_text(const char* label, std::string& value) {
     char buf[2048];
     std::snprintf(buf, sizeof(buf), "%s", value.c_str());
     if (ImGui::InputText(label, buf, sizeof(buf))) value = buf;
+    llama_gui::ui::InputTextContextMenu();
 }
 
 // Многострочное поле: название — отдельной строкой НАД полем. ImGui рисует
@@ -37,6 +40,7 @@ void input_text_multiline(const char* label, std::string& value, float height) {
                                   buf, sizeof(buf), ImVec2(-1.0f, height))) {
         value = buf;
     }
+    llama_gui::ui::InputTextContextMenu();
 }
 
 void combo_type(const char* label, std::string& type) {
@@ -75,6 +79,7 @@ void render_settings(UiDeps& deps, Config& draft) {
         ImGui::SetNextItemWidth(-90.0f);
         if (ImGui::InputText(label, url, sizeof(url))) s.url = url;
         ImGui::SameLine();
+        llama_gui::ui::InputTextContextMenu();
         std::snprintf(label, sizeof(label), "Удалить##%zu", i);
         if (ImGui::Button(label)) remove_index = static_cast<int>(i);
     }
@@ -95,6 +100,7 @@ void render_settings(UiDeps& deps, Config& draft) {
         new_url = new_url_buf;
     }
     ImGui::SameLine();
+    llama_gui::ui::InputTextContextMenu();
     if (ImGui::Button("Добавить источник") && !new_url.empty()) {
         draft.sources.push_back(SourceConfig{new_url, new_type, SourceExtract{}, true});
         new_url.clear();
