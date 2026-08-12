@@ -45,6 +45,21 @@ std::unique_ptr<Sink> make_local_file_sink(const SinkConfig& cfg, Storage& stora
 // Фабрика HttpSink (этап 6). Регистрируется под "http"; отправляет статью
 // JSON-POST'ом на cfg.params.url (параметры: url, api_key, timeout_seconds).
 std::unique_ptr<Sink> make_http_sink(const SinkConfig& cfg, Storage& storage,
-                                     const LogFn& log);
+                                      const LogFn& log);
+
+// Фабрика WordPressSink (этап 7). Регистрируется под "wordpress"; публикует
+// статью в WP через REST API (/wp-json/wp/v2/posts) с Basic-авторизацией
+// (Application Password). Параметры: site_url, username, app_password, status,
+// categories, tags, author, excerpt, slug, featured_image, timeout_seconds,
+// max_retries, retry_delay_ms.
+std::unique_ptr<Sink> make_wordpress_sink(const SinkConfig& cfg, Storage& storage,
+                                          const LogFn& log);
+
+// Проверка связи с WordPress: аутентифицируется через
+// GET {site_url}/wp-json/wp/v2/users/me (Application Password, Basic).
+// Возвращает человекочитаемый статус (начинается с "OK" при успехе).
+std::string wordpress_check_connection(const std::string& site_url,
+                                       const std::string& user,
+                                       const std::string& app_password);
 
 } // namespace news_rewriter

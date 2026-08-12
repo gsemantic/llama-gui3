@@ -1,7 +1,7 @@
 {
     "$schema": "../plugin.schema.json",
     "name": "news_rewriter",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Агент: сбор новостей с указанных адресов, рерайт через LLM, сохранение локально",
     "author": "llama-gui",
     "api_version": "1.0.0",

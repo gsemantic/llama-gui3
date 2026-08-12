@@ -250,8 +250,15 @@ bool Worker::export_article(const Config& cfg, Article& a) {
         return true;
     }
 
+    // Передаём каталог данных плагина в sink (для пути к .env с секретами),
+    // чтобы он не зависел от output_dir.
+    SinkConfig sink_cfg = cfg.sink;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        sink_cfg.data_dir = data_dir_;
+    }
     std::unique_ptr<Sink> sink = SinkRegistry::instance().create(
-        cfg.sink, storage_, log_callback_);
+        sink_cfg, storage_, log_callback_);
     if (!sink) {
         a.status = TaskStatus::Error;
         a.error = "неизвестный тип sink: " + cfg.sink.type;

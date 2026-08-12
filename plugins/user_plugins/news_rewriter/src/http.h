@@ -33,6 +33,11 @@ public:
     bool is_available() const { return available_; }
 
     HttpResponse get(const std::string& url, const NetworkConfig& cfg,
+                      std::size_t max_bytes = 5 * 1024 * 1024);
+
+    // GET с дополнительными заголовками (напр. Authorization), как в post.
+    HttpResponse get(const std::string& url, const NetworkConfig& cfg,
+                     const std::vector<std::string>& extra_headers,
                      std::size_t max_bytes = 5 * 1024 * 1024);
 
     // POST с JSON-телом; extra_headers (напр. Authorization) добавляются к

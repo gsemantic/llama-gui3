@@ -1,6 +1,8 @@
 #include "ui.h"
 
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "imgui.h"
@@ -8,6 +10,8 @@
 #include "ui/input_text_context_menu.h"
 
 #include "common.h"
+#include "dotenv.h"
+#include "sink.h"
 #include "worker.h"
 
 namespace news_rewriter {
@@ -56,6 +60,36 @@ void combo_type(const char* label, std::string& type) {
 // InputInt с запретом отрицательных значений (0 = выключено/без лимита).
 void input_int_min0(const char* label, int& value) {
     if (ImGui::InputInt(label, &value) && value < 0) value = 0;
+}
+
+// Список чисел (id) через запятую <-> JSON-массив (для categories/tags WP).
+std::string int_list_to_csv(const Json& arr) {
+    std::string out;
+    if (arr.is_array()) {
+        for (std::size_t i = 0; i < arr.size(); ++i) {
+            if (i) out += ",";
+            out += std::to_string(static_cast<int>(arr[i].as_int(0)));
+        }
+    }
+    return out;
+}
+
+Json csv_to_int_list(const std::string& csv) {
+    Json arr = Json::array();
+    std::string tok;
+    for (char c : csv) {
+        if (c == ',') {
+            if (!tok.empty()) {
+                arr.push(static_cast<int64_t>(std::strtol(tok.c_str(), nullptr, 10)));
+                tok.clear();
+            }
+        } else if (!std::isspace(static_cast<unsigned char>(c))) {
+            tok += c;
+        }
+    }
+    if (!tok.empty())
+        arr.push(static_cast<int64_t>(std::strtol(tok.c_str(), nullptr, 10)));
+    return arr;
 }
 
 // Раздел настроек. draft — редактируемая копия конфигурации.
@@ -133,7 +167,7 @@ void render_settings(UiDeps& deps, Config& draft) {
     // ---- Выход --------------------------------------------------------------
     ImGui::TextUnformatted("Выход:");
     if (ImGui::BeginCombo("Тип вывода", draft.sink.type.c_str())) {
-        for (const char* t : {"local_file", "http"}) {
+        for (const char* t : {"local_file", "http", "wordpress"}) {
             const bool selected = (draft.sink.type == t);
             if (ImGui::Selectable(t, selected)) draft.sink.type = t;
         }
@@ -151,6 +185,102 @@ void render_settings(UiDeps& deps, Config& draft) {
         int timeout = static_cast<int>(draft.sink.params["timeout_seconds"].as_int(20));
         if (ImGui::InputInt("Таймаут отправки, с", &timeout) && timeout < 0) timeout = 0;
         draft.sink.params["timeout_seconds"] = timeout;
+    } else if (draft.sink.type == "wordpress") {
+        // Путь к .env плагина (секреты вне settings.ini — по конвенции проекта).
+        const std::string env_path = deps.data_dir.empty()
+            ? std::string(".env")
+            : deps.data_dir + "/news_rewriter/.env";
+
+        std::string site_url = draft.sink.params["site_url"].as_string();
+        input_text("WP-сайт (site_url)", site_url);
+        draft.sink.params["site_url"] = site_url;
+
+        std::string status = draft.sink.params["status"].as_string("draft");
+        if (ImGui::BeginCombo("Статус публикации", status.c_str())) {
+            for (const char* s : {"draft", "publish", "pending", "private"}) {
+                const bool selected = (status == s);
+                if (ImGui::Selectable(s, selected)) status = s;
+            }
+            ImGui::EndCombo();
+        }
+        draft.sink.params["status"] = status;
+
+        std::string cats = int_list_to_csv(draft.sink.params["categories"]);
+        input_text("Категории (id через запятую)", cats);
+        draft.sink.params["categories"] = csv_to_int_list(cats);
+
+        std::string tags = int_list_to_csv(draft.sink.params["tags"]);
+        input_text("Теги (id через запятую)", tags);
+        draft.sink.params["tags"] = csv_to_int_list(tags);
+
+        int author = static_cast<int>(draft.sink.params["author"].as_int(0));
+        if (ImGui::InputInt("Автор (id, 0 = по умолчанию)", &author) && author < 0) author = 0;
+        draft.sink.params["author"] = static_cast<int64_t>(author);
+
+        std::string excerpt = draft.sink.params["excerpt"].as_string();
+        input_text("Excerpt (необязательно)", excerpt);
+        draft.sink.params["excerpt"] = excerpt;
+
+        std::string slug = draft.sink.params["slug"].as_string();
+        input_text("Slug (необязательно)", slug);
+        draft.sink.params["slug"] = slug;
+
+        std::string featured = draft.sink.params["featured_image"].as_string();
+        input_text("Обложка (URL картинки, необязательно)", featured);
+        draft.sink.params["featured_image"] = featured;
+
+        // Учётные данные — только в .env, НЕ в настройках плагина.
+        static std::string wp_user, wp_pass;
+        static bool wp_loaded = false;
+        if (!wp_loaded) {
+            wp_user = dotenv_read(env_path, kNewsRewriterWpUser);
+            wp_pass = dotenv_read(env_path, kNewsRewriterWpPass);
+            wp_loaded = true;
+        }
+        std::string old = wp_user;
+        input_text("WP-пользователь", wp_user);
+        if (wp_user != old) dotenv_write(env_path, kNewsRewriterWpUser, wp_user);
+        old = wp_pass;
+        char passbuf[2048];
+        std::snprintf(passbuf, sizeof(passbuf), "%s", wp_pass.c_str());
+        if (ImGui::InputText("Application Password",
+                             passbuf, sizeof(passbuf),
+                             ImGuiInputTextFlags_Password)) {
+            wp_pass = passbuf;
+            dotenv_write(env_path, kNewsRewriterWpPass, wp_pass);
+        }
+        ImGui::TextDisabled("Логин/пароль хранятся в %s (вне settings.ini)",
+                            env_path.c_str());
+
+        // Проверка связи с WP (аутентификация через /wp-json/wp/v2/users/me).
+        static std::string check_result;
+        static double check_time = 0.0;
+        if (ImGui::Button("Проверить подключение")) {
+            check_result = wordpress_check_connection(site_url, wp_user, wp_pass);
+            check_time = ImGui::GetTime();
+        }
+        if (check_time > 0.0) {
+            const double elapsed = ImGui::GetTime() - check_time;
+            if (elapsed < 12.0) {
+                const bool ok = check_result.rfind("OK", 0) == 0;
+                ImGui::TextColored(ok ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f)
+                                      : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                                 "%s", check_result.c_str());
+            } else {
+                check_time = 0.0;
+            }
+        }
+
+        int retries = static_cast<int>(draft.sink.params["max_retries"].as_int(0));
+        if (ImGui::InputInt("Повторов при сбое сети", &retries) && retries < 0) retries = 0;
+        draft.sink.params["max_retries"] = static_cast<int64_t>(retries);
+        int rdelay = static_cast<int>(draft.sink.params["retry_delay_ms"].as_int(1000));
+        if (ImGui::InputInt("Пауза между повторами, мс", &rdelay) && rdelay < 0) rdelay = 0;
+        draft.sink.params["retry_delay_ms"] = static_cast<int64_t>(rdelay);
+
+        // Гарантируем, что секреты не попадут в settings.ini.
+        draft.sink.params["username"] = "";
+        draft.sink.params["app_password"] = "";
     }
 
     ImGui::Separator();

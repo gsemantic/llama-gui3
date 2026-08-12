@@ -38,6 +38,7 @@ struct SinkConfig {
     std::string type = "local_file";
     Json params = Json::object();
     std::string output_dir;          // пусто = каталог данных приложения
+    std::string data_dir;            // каталог данных приложения (runtime, для .env)
 };
 
 struct NetworkConfig {

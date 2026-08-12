@@ -97,7 +97,7 @@ LLAMA_PLUGIN_EXPORT const char* ll_plugin_api_version(void) {
 LLAMA_PLUGIN_EXPORT const LlamaPluginInfo* ll_plugin_info(void) {
     static const LlamaPluginInfo info = {
         "news_rewriter",
-        "0.1.0",
+        "0.1.1",
         "Агент: сбор новостей с указанных адресов, рерайт через LLM, "
         "сохранение локально",
         "llama-gui"
@@ -130,13 +130,17 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     // Каталог данных (для Storage/Sink). path_data_dir доступен всегда.
     if (g_api->path_data_dir) {
         const char* data_dir = g_api->path_data_dir(g_host);
-        if (data_dir) g_worker->set_data_dir(data_dir);
+        if (data_dir) {
+            g_worker->set_data_dir(data_dir);
+            g_ui_deps.data_dir = data_dir;
+        }
     }
 
     // Реестр sink-ов: v1 — запись на диск; этап 6 — отправка на сервер.
     // Новые sink-ы добавляются здесь без правок ядра конвейера.
     SinkRegistry::instance().register_factory("local_file", make_local_file_sink);
     SinkRegistry::instance().register_factory("http", make_http_sink);
+    SinkRegistry::instance().register_factory("wordpress", make_wordpress_sink);
 
     g_worker->set_log_callback([](const std::string& msg) {
         if (g_api && g_host) {

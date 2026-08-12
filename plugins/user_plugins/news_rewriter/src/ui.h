@@ -13,6 +13,8 @@ class Worker;
 // (ll_plugin_render).
 struct UiDeps {
     Worker* worker = nullptr;
+    // Каталог данных приложения (для пути к .env с секретами плагина).
+    std::string data_dir;
     // Колбэк сохранения конфигурации (main-поток): применяет её воркеру
     // (ReloadConfig) и сохраняет в настройки хоста.
     std::function<void(const Config&)> on_save = nullptr;
