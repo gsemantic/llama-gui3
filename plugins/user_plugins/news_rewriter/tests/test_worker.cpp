@@ -839,6 +839,113 @@ REGISTER_TEST(test_worker_runs_scheduled_autonomously);
 REGISTER_TEST(test_worker_retries_failing_source);
 REGISTER_TEST(test_worker_retries_exhausted_marks_error);
 REGISTER_TEST(test_worker_stop_aborts_backoff);
+static void test_worker_filters_old_page_items() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/category", "page",
+                                       SourceExtract{}, true});
+    cfg.max_age_hours = 24;   // свежесть: статья старше суток пропускается
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    FakeFetcher* f = fetcher.get();
+    f->impl = [&](const std::string& url, const std::string&) {
+        if (url == "https://a.example/category") {
+            // Листинг: старая (2024) и свежая (сейчас) новость со <time datetime>.
+            return one_page(
+                "<html><body>"
+                "<article><time datetime=\"2024-01-01T00:00:00Z\"></time>"
+                "<h2><a href=\"/news/old\">Старая новость</a></h2></article>"
+                "<article><time datetime=\"" + iso8601_now() + "\"></time>"
+                "<h2><a href=\"/news/fresh\">Свежая новость</a></h2></article>"
+                "</body></html>");
+        }
+        // Страница отдельной статьи (должна догрузиться только свежая).
+        FetchResult r;
+        r.ok = true;
+        r.http_status = 200;
+        r.html = "<html><head><title>Сайт</title></head><body>"
+                 "<h1>Заголовок статьи</h1>"
+                 "<p>Длинный основной текст свежей новости.</p>"
+                 "</body></html>";
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));  // старая отфильтрована
+    TEST_ASSERT_EQUAL(state.articles[0].title, "Заголовок статьи");
+    // 1 загрузка листинга + 1 загрузка свежей статьи; старая НЕ грузилась.
+    TEST_ASSERT_EQUAL(f->calls.load(), 2);
+
+    worker.stop_and_join();
+}
+
 REGISTER_TEST(test_worker_filters_old_items);
+REGISTER_TEST(test_worker_filters_old_page_items);
+
+// Сбой модели (rate limit) на шаге SEO не должен ронять статью: она
+// публикуется без SEO-мета, но это отражается в итоге обхода («без SEO»).
+static void test_worker_reports_seo_missing() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://a.example/rss", "rss", SourceExtract{}, true});
+    cfg.rewrite.seo.enabled = true;   // авто-SEO включён
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string&, const std::string&) {
+        FetchResult r;
+        r.ok = true;
+        r.http_status = 200;
+        FeedItem item;
+        item.title = "Новость";
+        item.link = "https://a.example/news/1";
+        item.description = "Текст";
+        r.items.push_back(item);
+        return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    // Рерайт успешен; SEO-запрос (промпт с «SEO-редактор») падает по rate limit.
+    worker.set_llm([&](const std::string& prompt, std::string& response,
+                       std::string& error) -> bool {
+        if (prompt.find("SEO-редактор") != std::string::npos) {
+            error = "Превышен лимит запросов (Rate Limit)";
+            return false;
+        }
+        response = "Переписанный заголовок\n\nПереписанный текст новости.";
+        return true;
+    });
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
+    TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Done);  // статья не потеряна
+    TEST_ASSERT_TRUE(state.last_message.find("без SEO") != std::string::npos);
+    TEST_ASSERT_EQUAL(state.seo_missing, 1);
+
+    worker.stop_and_join();
+}
+
+REGISTER_TEST(test_worker_reports_seo_missing);
 REGISTER_TEST(test_worker_limits_items_per_source);
 REGISTER_TEST(test_worker_uses_config_max_retries);

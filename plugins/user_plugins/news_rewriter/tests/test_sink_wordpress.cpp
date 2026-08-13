@@ -182,6 +182,54 @@ REGISTER_TEST(test_wp_sink_retries_on_failure);
 REGISTER_TEST(test_wp_sink_empty_rewrite);
 REGISTER_TEST(test_wp_sink_missing_config);
 
+// Произвольный тип записи (custom post type): endpoint строится по slug.
+static void test_wp_sink_custom_post_type() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":55}"));
+
+    SinkConfig cfg = make_config(srv.base_url());
+    cfg.params["post_type"] = "product";
+    Json pcats = Json::array(); pcats.push(static_cast<int64_t>(7));
+    cfg.params["categories"] = pcats;
+    Json ptags = Json::array(); ptags.push(static_cast<int64_t>(9));
+    cfg.params["tags"] = ptags;
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+    TEST_ASSERT_TRUE(sink->write(make_article()));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("POST /wp-json/wp/v2/product") != std::string::npos);
+    // Категории/теги шлются для произвольного типа (если CPT их поддерживает).
+    TEST_ASSERT(req.find("\"categories\"") != std::string::npos);
+    TEST_ASSERT(req.find("\"tags\"") != std::string::npos);
+}
+
+// Стандартные «страницы» (pages) не принимают категории/теги → не шлём их.
+static void test_wp_sink_pages_skips_taxonomy() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":77}"));
+
+    SinkConfig cfg = make_config(srv.base_url());
+    cfg.params["post_type"] = "pages";
+    Json pcats = Json::array(); pcats.push(static_cast<int64_t>(3));
+    cfg.params["categories"] = pcats;
+    Json ptags = Json::array(); ptags.push(static_cast<int64_t>(4));
+    cfg.params["tags"] = ptags;
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+    TEST_ASSERT_TRUE(sink->write(make_article()));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("POST /wp-json/wp/v2/pages") != std::string::npos);
+    TEST_ASSERT(req.find("\"categories\"") == std::string::npos);
+    TEST_ASSERT(req.find("\"tags\"") == std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_custom_post_type);
+REGISTER_TEST(test_wp_sink_pages_skips_taxonomy);
+
 // Секрет берётся из .env, а не из params (конвенция проекта: секреты вне
 // settings.ini). Проверяем, что в заголовке — creds из .env, а не из params.
 static void test_wp_sink_credentials_from_env() {

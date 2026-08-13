@@ -485,11 +485,16 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
         }
         if (!response.error.empty()) {
             host_log(host, LLAMA_LOG_WARNING,
-                     ("cloud fallback failed: " + response.error).c_str());
+                      ("cloud fallback failed: " + response.error).c_str());
+            // Передаём текст ошибки плагину (через out_response даже при
+            // неудаче), чтобы он мог отличить rate-limit от транзиентного сбоя
+            // и сделать длинный backoff вместо агрессивного ретрая.
+            *out_response = strdup(response.error.c_str());
         }
     } catch (const std::exception& e) {
         host_log(host, LLAMA_LOG_WARNING,
-                 ("cloud fallback failed: " + std::string(e.what())).c_str());
+                  ("cloud fallback failed: " + std::string(e.what())).c_str());
+        *out_response = strdup(e.what());
     }
     return 0;
 }

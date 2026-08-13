@@ -14,6 +14,7 @@ struct FeedItem {
     std::string link;
     std::string description;
     std::string pub_date;
+    std::string image;   // URL заглавного изображения (media:content / enclosure / itunes:image / первый <img>)
 };
 
 // Результат загрузки источника.

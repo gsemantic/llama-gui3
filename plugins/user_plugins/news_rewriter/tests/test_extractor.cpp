@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "common.h"
 #include "extractor.h"
 
 using namespace news_rewriter;
@@ -175,6 +176,31 @@ static void test_extract_body_single_block() {
     TEST_ASSERT(ex.body.find("не потеряв ни одного слова") != std::string::npos);
 }
 
+// Служебный баннер cookies («Обновление правил использования cookies») не должен
+// подменять собой текст новости: он лежит в div с «шумным» классом и исключается.
+static void test_extract_body_excludes_cookie_banner() {
+    const std::string html =
+        "<html><head><title>Важная новость дня</title></head><body>"
+        "<div class=\"article\">"
+        "<h1>Важная новость дня</h1>"
+        "<p>Первый абзац основной новости, в котором рассказывается о произошедшем событии подробно.</p>"
+        "<p>Второй абзац продолжает материал и раскрывает важные детали и обстоятельства.</p>"
+        "<p>Третий абзац завершает текст и подводит итог произошедшему.</p>"
+        "</div>"
+        "<div class=\"cookie-consent\" id=\"cookieBanner\">"
+        "Обновление правил использования cookies на сайте. Мы используем файлы cookie, "
+        "чтобы улучшить работу сайта. Продолжая, вы соглашаетесь с политикой конфиденциальности."
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.title, "Важная новость дня");
+    TEST_ASSERT(ex.body.find("Первый абзац основной новости") != std::string::npos);
+    TEST_ASSERT(ex.body.find("Второй абзац") != std::string::npos);
+    TEST_ASSERT(ex.body.find("Третий абзац") != std::string::npos);
+    TEST_ASSERT(ex.body.find("Обновление правил использования cookies") == std::string::npos);
+    TEST_ASSERT(ex.body.find("соглашаетесь с политикой") == std::string::npos);
+}
+
 // Заголовок статьи (h1) не дублируется в теле.
 static void test_extract_body_excludes_title() {
     const std::string html =
@@ -202,6 +228,113 @@ REGISTER_TEST(test_extract_body_skips_nav_footer);
 REGISTER_TEST(test_extract_body_merges_paragraphs);
 REGISTER_TEST(test_extract_body_prefers_dense_text);
 REGISTER_TEST(test_extract_body_single_block);
+REGISTER_TEST(test_extract_body_excludes_cookie_banner);
 REGISTER_TEST(test_extract_body_excludes_title);
+
+static void test_extract_page_items_listing_splits_articles() {
+    const std::string html =
+        "<html><body>"
+        "<article><h2><a href=\"/news/a1\">Первая новость</a></h2>"
+        "<img src=\"http://x/1.jpg\"><p>Текст первой новости про событие.</p></article>"
+        "<article><h2><a href=\"/news/a2\">Вторая новость</a></h2>"
+        "<img src=\"http://x/2.jpg\"><p>Текст второй новости про другое.</p></article>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://example.com/category", SourceExtract{});
+    TEST_ASSERT_EQUAL(items.size(), 2u);
+    TEST_ASSERT_EQUAL(items[0].url, "http://example.com/news/a1");
+    TEST_ASSERT_EQUAL(items[0].title, "Первая новость");
+    TEST_ASSERT_EQUAL(items[0].image, "http://x/1.jpg");
+    TEST_ASSERT(items[0].body.find("Текст первой новости") != std::string::npos);
+    TEST_ASSERT_EQUAL(items[1].url, "http://example.com/news/a2");
+    TEST_ASSERT_EQUAL(items[1].image, "http://x/2.jpg");
+}
+
+static void test_extract_page_items_single_article_stays_one() {
+    const std::string html =
+        "<html><head><title>Одна статья</title></head><body>"
+        "<h1>Одна статья</h1>"
+        "<p>Единственный абзац основного текста статьи.</p>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://example.com/post", SourceExtract{});
+    TEST_ASSERT_EQUAL(items.size(), 1u);
+    TEST_ASSERT_EQUAL(items[0].title, "Одна статья");
+    TEST_ASSERT(items[0].body.find("Единственный абзац") != std::string::npos);
+}
+
+REGISTER_TEST(test_extract_page_items_listing_splits_articles);
+REGISTER_TEST(test_extract_page_items_single_article_stays_one);
+
+static void test_extract_page_items_skips_sidebar_widget() {
+    const std::string html =
+        "<html><body>"
+        "<article><h2><a href=\"/news/a1\">Свежая новость</a></h2>"
+        "<img src=\"http://x/1.jpg\"><p>Текст свежей новости.</p></article>"
+        "<article><h2><a href=\"/news/a2\">Ещё одна свежая новость</a></h2>"
+        "<img src=\"http://x/2.jpg\"><p>Текст второй новости.</p></article>"
+        "<aside class=\"sidebar\"><h2>Постоянная правая информация</h2>"
+        "<article><a href=\"/widget/w1\">Давно размещённый виджет</a>"
+        "<p>Старая справочная плашка.</p></article></aside>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://example.com/cat", SourceExtract{});
+    // Реальных новостей две; «постоянная правая информация» исключена сайдбаром.
+    TEST_ASSERT_EQUAL(items.size(), 2u);
+    TEST_ASSERT_EQUAL(items[0].url, "http://example.com/news/a1");
+    TEST_ASSERT_EQUAL(items[1].url, "http://example.com/news/a2");
+    for (const auto& it : items) {
+        TEST_ASSERT(it.title.find("Постоянная правая") == std::string::npos);
+        TEST_ASSERT(it.url.find("/widget/") == std::string::npos);
+    }
+}
+
+REGISTER_TEST(test_extract_page_items_skips_sidebar_widget);
+
+// <time datetime="..."> на листинге разбирается в published_at (Unix UTC).
+static void test_extract_page_items_parses_time_datetime() {
+    const std::string html =
+        "<html><body>"
+        "<article><time datetime=\"2026-08-13T10:00:00Z\"></time>"
+        "<h2><a href=\"/news/a1\">Первая новость</a></h2>"
+        "<p>Текст первой новости.</p></article>"
+        "<article><time datetime=\"2026-08-12T09:00:00+03:00\"></time>"
+        "<h2><a href=\"/news/a2\">Вторая новость</a></h2>"
+        "<p>Текст второй новости.</p></article>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://example.com/cat", SourceExtract{});
+    TEST_ASSERT_EQUAL(items.size(), 2u);
+    TEST_ASSERT_EQUAL(items[0].published_at,
+                      parse_feed_time("2026-08-13T10:00:00Z"));
+    TEST_ASSERT_EQUAL(items[1].published_at,
+                      parse_feed_time("2026-08-12T09:00:00+03:00"));
+}
+
+// Текстовые даты (рус «13 августа 2026» и англ «Aug 11, 2026») тоже
+// разбираются в published_at.
+static void test_extract_page_items_parses_textual_date() {
+    const std::string html =
+        "<html><body>"
+        "<article><span class=\"date\">13 августа 2026</span>"
+        "<h2><a href=\"/news/a1\">Первая новость</a></h2>"
+        "<p>Текст первой новости.</p></article>"
+        "<article><span class=\"date\">Aug 11, 2026</span>"
+        "<h2><a href=\"/news/a2\">Вторая новость</a></h2>"
+        "<p>Текст второй новости.</p></article>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://example.com/cat", SourceExtract{});
+    TEST_ASSERT_EQUAL(items.size(), 2u);
+    // «13 августа 2026» → 2026-08-13 (полночь UTC).
+    TEST_ASSERT_EQUAL(items[0].published_at,
+                      parse_feed_time("2026-08-13T00:00:00"));
+    // «Aug 11, 2026» → 2026-08-11 (полночь UTC).
+    TEST_ASSERT_EQUAL(items[1].published_at,
+                      parse_feed_time("2026-08-11T00:00:00"));
+}
+
+REGISTER_TEST(test_extract_page_items_parses_time_datetime);
+REGISTER_TEST(test_extract_page_items_parses_textual_date);
 
 } // namespace

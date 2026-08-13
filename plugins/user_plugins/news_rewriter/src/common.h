@@ -36,6 +36,10 @@ struct Article {
     std::string title_rewritten;
     std::string body_rewritten;
     std::string language;
+    std::string source_image;       // URL заглавного изображения из источника (если есть)
+    std::string seo_focus_keyword;  // ключевое слово (модель, SEO-шаг)
+    std::string seo_meta_description;// meta-описание (модель, SEO-шаг)
+    std::string seo_title;          // SEO-заголовок (модель, SEO-шаг)
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;

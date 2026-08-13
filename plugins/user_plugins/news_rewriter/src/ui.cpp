@@ -160,7 +160,18 @@ void render_settings(UiDeps& deps, Config& draft) {
     input_int_min0("Примерный объём статьи, слов (0 = без ограничения)",
                    draft.rewrite.max_words);
     input_text_multiline("Промпт ({title} {body} {language} {tone} {max_words})",
-                         draft.rewrite.prompt_template, 140.0f);
+                          draft.rewrite.prompt_template, 140.0f);
+
+    ImGui::Checkbox("Авто-SEO (ключевое слово, meta-описание, SEO-заголовок)",
+                    &draft.rewrite.seo.enabled);
+    if (draft.rewrite.seo.enabled) {
+        ImGui::Checkbox("SEO в одном запросе с рерайтом (экономит лимиты облака)",
+                        &draft.rewrite.seo.combine_with_rewrite);
+        ImGui::TextDisabled("Рерайт и SEO в одном ответе LLM. При сбое разбора "
+                            "плагин откатывается к двум отдельным вызовам.");
+    }
+    ImGui::TextDisabled("Ключевое слово используется как alt для обложки и "
+                        "пишется в meta плагинов (Yoast/RankMath).");
 
     ImGui::Separator();
 
@@ -195,6 +206,28 @@ void render_settings(UiDeps& deps, Config& draft) {
         input_text("WP-сайт (site_url)", site_url);
         draft.sink.params["site_url"] = site_url;
 
+        // Тип записи WP (таксономия): стандартные posts/pages + пользовательские.
+        std::string post_type = draft.sink.params["post_type"].as_string("posts");
+        std::string pt_label = post_type == "posts" ? "posts — Записи"
+                             : post_type == "pages" ? "pages — Страницы"
+                             : (post_type.empty() ? "(произвольный тип…)" : post_type);
+        if (ImGui::BeginCombo("Тип записи WP", pt_label.c_str())) {
+            if (ImGui::Selectable("posts — Записи")) post_type = "posts";
+            if (ImGui::Selectable("pages — Страницы")) post_type = "pages";
+            if (ImGui::Selectable("(произвольный тип…)")) {
+                if (post_type != "posts" && post_type != "pages") post_type.clear();
+                else post_type = "";
+            }
+            ImGui::EndCombo();
+        }
+        if (post_type != "posts" && post_type != "pages") {
+            input_text("Произвольный тип (slug, напр. product)", post_type);
+        }
+        draft.sink.params["post_type"] = post_type;
+        if (post_type == "pages") {
+            ImGui::TextDisabled("Страницы не поддерживают категории/теги — они игнорируются");
+        }
+
         std::string status = draft.sink.params["status"].as_string("draft");
         if (ImGui::BeginCombo("Статус публикации", status.c_str())) {
             for (const char* s : {"draft", "publish", "pending", "private"}) {
@@ -225,9 +258,19 @@ void render_settings(UiDeps& deps, Config& draft) {
         input_text("Slug (необязательно)", slug);
         draft.sink.params["slug"] = slug;
 
+        bool verify = draft.sink.params["verify_site_state"].as_bool(true);
+        ImGui::Checkbox("Сверять дедуп с сайтом (не дублировать удалённые)",
+                        &verify);
+        draft.sink.params["verify_site_state"] = verify;
+        ImGui::TextDisabled("Перед публикацией плагин спрашивает WP, есть ли уже "
+                            "такой пост. Если черновик удалили на сайте — он "
+                            "переиздастся; если сайт недоступен — пропустит.");
+
         std::string featured = draft.sink.params["featured_image"].as_string();
         input_text("Обложка (URL картинки, необязательно)", featured);
         draft.sink.params["featured_image"] = featured;
+        ImGui::TextDisabled("Если URL пуст — подставится заглавное изображение "
+                            "из источника (og:image / enclosure), с alt = ключевое слово.");
 
         // Учётные данные — только в .env, НЕ в настройках плагина.
         static std::string wp_user, wp_pass;

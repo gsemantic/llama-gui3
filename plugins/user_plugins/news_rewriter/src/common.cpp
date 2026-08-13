@@ -266,6 +266,11 @@ Json article_to_json(const Article& a) {
     j["body_rewritten"] = a.body_rewritten;
     j["language"] = a.language;
     j["content_hash"] = a.content_hash;
+    // Авто-SEO и заглавное изображение (заполняются конвейером, могут быть пусты).
+    if (!a.source_image.empty()) j["source_image"] = a.source_image;
+    if (!a.seo_focus_keyword.empty()) j["seo_focus_keyword"] = a.seo_focus_keyword;
+    if (!a.seo_meta_description.empty()) j["seo_meta_description"] = a.seo_meta_description;
+    if (!a.seo_title.empty()) j["seo_title"] = a.seo_title;
     return j;
 }
 

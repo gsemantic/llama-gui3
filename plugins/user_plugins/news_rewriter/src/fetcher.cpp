@@ -22,6 +22,42 @@ std::string rss_body(const XmlNode& item) {
     return "";
 }
 
+// Заглавное изображение RSS-элемента: media:content (medium=image) →
+// media:thumbnail → enclosure (type image) → itunes:image (href) → первый <img>.
+bool equals_ci(const std::string& a, const std::string& b);  // см. ниже
+
+std::string rss_image(const XmlNode& item, const std::string& description) {
+    for (const auto& c : item.children) {
+        if (c.name == "content" && c.attrs.count("url")) {
+            const std::string medium =
+                c.attrs.count("medium") ? c.attrs.at("medium") : "";
+            if (medium.empty() || equals_ci(medium, "image")) return c.attrs.at("url");
+        }
+        if (c.name == "thumbnail" && c.attrs.count("url")) return c.attrs.at("url");
+    }
+    for (const auto& c : item.children) {
+        if (c.name == "enclosure" && c.attrs.count("url")) {
+            const std::string type = c.attrs.count("type") ? c.attrs.at("type") : "";
+            if (type.empty() || type.find("image/") == 0) return c.attrs.at("url");
+        }
+        if (c.name == "image" && c.attrs.count("href")) return c.attrs.at("href");
+    }
+    // fallback: <img> внутри описания
+    std::size_t pos = description.find("<img");
+    if (pos != std::string::npos) {
+        const std::size_t gt = description.find('>', pos);
+        if (gt != std::string::npos) {
+            const std::string tag = description.substr(pos, gt - pos + 1);
+            const std::size_t q1 = tag.find("src=\"");
+            if (q1 != std::string::npos) {
+                const std::size_t e = tag.find('"', q1 + 5);
+                if (e != std::string::npos) return tag.substr(q1 + 5, e - (q1 + 5));
+            }
+        }
+    }
+    return "";
+}
+
 // Извлечение RSS 2.0: <rss><channel><item>...
 std::vector<FeedItem> extract_rss(const XmlNode& root) {
     std::vector<FeedItem> items;
@@ -33,11 +69,44 @@ std::vector<FeedItem> extract_rss(const XmlNode& root) {
         f.link = child_text(*item, "link");
         f.description = rss_body(*item);
         f.pub_date = child_text(*item, "pubDate");
+        f.image = rss_image(*item, f.description);
         if (!f.title.empty() || !f.link.empty()) {
             items.push_back(std::move(f));
         }
     }
     return items;
+}
+
+// Заглавное изображение Atom-элемента: media:content/thumbnail (url) →
+// itunes:image (href) → <link rel="image|icon|thumbnail"> (href) → первый <img>.
+std::string atom_image(const XmlNode& entry, const std::string& content) {
+    for (const auto& c : entry.children) {
+        if ((c.name == "content" || c.name == "thumbnail") && c.attrs.count("url"))
+            return c.attrs.at("url");
+        if (c.name == "image" && c.attrs.count("href")) return c.attrs.at("href");
+    }
+    for (const auto& c : entry.children) {
+        if (c.name == "link") {
+            const std::string rel = c.attrs.count("rel") ? c.attrs.at("rel") : "";
+            if (rel == "image" || rel == "icon" || rel == "thumbnail") {
+                const std::string href = c.attrs.count("href") ? c.attrs.at("href") : "";
+                if (!href.empty()) return href;
+            }
+        }
+    }
+    std::size_t pos = content.find("<img");
+    if (pos != std::string::npos) {
+        const std::size_t gt = content.find('>', pos);
+        if (gt != std::string::npos) {
+            const std::string tag = content.substr(pos, gt - pos + 1);
+            const std::size_t q1 = tag.find("src=\"");
+            if (q1 != std::string::npos) {
+                const std::size_t e = tag.find('"', q1 + 5);
+                if (e != std::string::npos) return tag.substr(q1 + 5, e - (q1 + 5));
+            }
+        }
+    }
+    return "";
 }
 
 // Извлечение Atom: <feed><entry>...
@@ -61,6 +130,7 @@ std::vector<FeedItem> extract_atom(const XmlNode& root) {
                 }
             }
         }
+        f.image = atom_image(*entry, f.description);
         if (!f.title.empty() || !f.link.empty()) {
             items.push_back(std::move(f));
         }

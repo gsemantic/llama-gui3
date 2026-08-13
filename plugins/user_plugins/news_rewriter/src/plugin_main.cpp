@@ -160,7 +160,14 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         char* out = nullptr;
         const int rc = g_api->llm_complete(g_host, prompt.c_str(), &out);
         if (rc != 1 || !out) {
-            error = "LLM вернул ошибку (код " + std::to_string(rc) + ")";
+            // Хост может вернуть текст ошибки облака в out_response даже при
+            // неудаче (rc=0): используем его, чтобы распознать rate-limit.
+            if (out) {
+                error = out;
+                g_api->free_string(g_host, out);
+            } else {
+                error = "LLM вернул ошибку (код " + std::to_string(rc) + ")";
+            }
             return false;
         }
         response = out;

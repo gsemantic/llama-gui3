@@ -82,7 +82,7 @@
     "control_vectors": [],
     "custom": {
         "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
-        "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"PASTE-OK-12345\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_words\":0,\"prompt_template\":\"Перепиши текст подробно, как опытный рерайтер. Избегай штампов ии-генерации, длинных предложений, пассивного залога,используй переходные слова, не злоупотребляй списками. В начале - краткая вводная. Пиши в активном залоге: избегай конструкций «был/была/было + причастие» («была проведена проверка», «было установлено», «был назначен штраф»), указывай деятеля подлежащим («прокурор провёл проверку», «инспекция установила», «суд исполнил решение»).\\nФормат ответа: первая строка - переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n Язык: {language}. Тон: {tone}.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/Alex/Desktop/rerait/\",\"params\":{},\"type\":\"local_file\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"type\":\"rss\",\"url\":\"https://epp.genproc.gov.ru/ru/proc_33/\"},{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"type\":\"rss\",\"url\":\"https://kolchadm.ru/index.php/novosti\"}]}"
+        "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_words\":0,\"prompt_template\":\"Перепиши текст подробно, как опытный рерайтер. Избегай штампов ии-генерации, длинных предложений, пассивного залога,используй переходные слова, не злоупотребляй списками. В начале - краткая вводная. Пиши в активном залоге: избегай конструкций «был/была/было + причастие» («была проведена проверка», «было установлено», «был назначен штраф»), указывай деятеля подлежащим («прокурор провёл проверку», «инспекция установила», «суд исполнил решение»).\\nФормат ответа: первая строка - переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n Язык: {language}. Тон: {tone}.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"seo\":{\"combine_with_rewrite\":true,\"enabled\":true,\"prompt_template\":\"Ты — SEO-редактор. По переписанной новости верни ТОЛЬКО валидный JSON без пояснений и без markdown-разметки, в точности такого вида:\\n{\\\"focus_keyword\\\":\\\"...\\\",\\\"meta_description\\\":\\\"...\\\",\\\"seo_title\\\":\\\"...\\\"}\\nПравила:\\n- focus_keyword — ключевая фраза из текста, 2-4 слова, строго в нижнем регистре, на языке статьи;\\n- meta_description — одно предложение, 150-160 символов, без кавычек по краям, описывает суть новости;\\n- seo_title — до 60 символов, привлекательный, с ключевым словом в начале (может совпадать с заголовком).\\nОтвет строго JSON.\\n\\nЯзык: {language}\\nЗаголовок: {title}\\nТекст: {body}\"},\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/Alex/Desktop/rerait/\",\"params\":{\"api_key\":\"\",\"app_password\":\"\",\"author\":0,\"categories\":[1],\"excerpt\":\"\",\"featured_image\":\"\",\"max_retries\":5,\"post_type\":\"posts\",\"retry_delay_ms\":1000,\"site_url\":\"https://gsemantic.ru/\",\"slug\":\"\",\"status\":\"draft\",\"tags\":[],\"timeout_seconds\":20,\"url\":\"\",\"username\":\"\",\"verify_site_state\":true},\"type\":\"wordpress\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"type\":\"page\",\"url\":\"https://zebra-tv.ru/\"}]}"
     },
     "display": {
         "auto_resize": true,
@@ -168,16 +168,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 8426,
-            "avg_response_time_ms": 888.6,
-            "avg_tokens_generated": 157,
-            "avg_tokens_per_second": 77.95,
-            "first_used": "Wed Aug 12 10:39:02 2026",
-            "last_used": "Wed Aug 12 10:39:02 2026",
+            "avg_context_used": 6139,
+            "avg_response_time_ms": 2505.72,
+            "avg_tokens_generated": 287,
+            "avg_tokens_per_second": 101.07,
+            "first_used": "Thu Aug 13 18:32:45 2026",
+            "last_used": "Thu Aug 13 18:32:45 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 11
+            "total_generations": 16
         }
     },
     "output": {
@@ -221,7 +221,7 @@
         "enable_hybrid_search": true,
         "enable_mmr": false,
         "enable_query_expansion": true,
-        "enable_rag": true,
+        "enable_rag": false,
         "keyword_boost_weight": 2.5,
         "max_chunks_in_memory": 500,
         "max_embedding_cache_size": 100,

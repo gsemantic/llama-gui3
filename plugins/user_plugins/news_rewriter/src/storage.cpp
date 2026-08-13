@@ -97,14 +97,34 @@ bool Storage::save_article_md(const Article& a) {
     const std::string& title = a.title_rewritten.empty() ? a.title_original : a.title_rewritten;
     const std::string& body = a.body_rewritten.empty() ? a.body_original : a.body_rewritten;
 
-    // Порядок: заголовок → текст новости → ссылка и дата.
+    // Порядок: заголовок → (обложка) → текст новости → ссылка, дата и SEO-блок.
     std::string md;
     md += "# " + title + "\n\n";
+
+    // Заглавное изображение из источника (если есть) с alt = ключевое слово
+    // модели (SEO). Пустой alt оставляем только если ключевое слово не задано.
+    if (!a.source_image.empty()) {
+        const std::string alt = a.seo_focus_keyword.empty()
+                                    ? title : a.seo_focus_keyword;
+        md += "![" + alt + "](" + a.source_image + ")\n\n";
+    }
+
     if (!body.empty()) {
         md += body + "\n\n";
     }
     md += "Источник: " + a.url + "\n";
     md += "Дата: " + a.fetched_at + "\n";
+
+    // SEO-мета (заполняется авто-SEO, если включено).
+    if (!a.seo_focus_keyword.empty() || !a.seo_meta_description.empty() ||
+        !a.seo_title.empty()) {
+        md += "---\n";
+        if (!a.seo_title.empty()) md += "SEO-заголовок: " + a.seo_title + "\n";
+        if (!a.seo_focus_keyword.empty())
+            md += "Ключевое слово: " + a.seo_focus_keyword + "\n";
+        if (!a.seo_meta_description.empty())
+            md += "Meta-описание: " + a.seo_meta_description + "\n";
+    }
     return write_file(article_md_path(a), md);
 }
 
@@ -169,6 +189,27 @@ void Storage::mark_written(const Article& a) {
     entry["content_hash"] = a.content_hash;
     index[a.id] = entry;
     save_index(index);
+}
+
+void Storage::forget(const Article& a) {
+    Json index;
+    load_index(index);
+    if (!index.is_object()) return;
+
+    // Мини-JSON не имеет erase: перестраиваем объект без удаляемых ключей.
+    Json new_index = Json::object();
+    bool changed = false;
+    for (const std::string& key : index.keys()) {
+        if (key == a.id) { changed = true; continue; }
+        const Json& entry = index.get(key);
+        if (!a.content_hash.empty() && entry.is_object() &&
+            entry.get("content_hash").as_string() == a.content_hash) {
+            changed = true;
+            continue;
+        }
+        new_index[key] = entry;
+    }
+    if (changed) save_index(new_index);
 }
 
 } // namespace news_rewriter

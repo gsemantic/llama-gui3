@@ -58,6 +58,7 @@ struct WorkerState {
     std::string last_message;
     int done_count = 0;           // статей обработано успешно (последний обход)
     int error_count = 0;          // статей с ошибкой (последний обход)
+    int seo_missing = 0;          // опубликовано без SEO-мета (модель не ответила на SEO)
     std::vector<ArticleStatusView> articles;
 };
 
@@ -123,6 +124,10 @@ private:
     std::string data_dir_;                // корень Storage (из path_data_dir хоста)
     Storage storage_;
     Scheduler scheduler_;                 // только worker-поток
+    std::atomic<int> run_seo_missing_{0}; // статей без SEO в текущем обходе
+    // SEO отключён на остаток обхода из-за rate-limit (чтобы не долбить
+    // облако повторными SEO-вызовами и не расходовать квоту).
+    std::atomic<bool> seo_skipped_{false};
 };
 
 } // namespace news_rewriter

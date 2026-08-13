@@ -10,6 +10,9 @@ namespace news_rewriter {
 struct ExtractedArticle {
     std::string title;
     std::string body;
+    std::string image;   // URL заглавного изображения (og:image / twitter:image / первый <img>)
+    std::string url;     // ссылка на статью (для страниц-списков: заполняется краулером)
+    std::int64_t published_at = 0;  // время публикации (Unix UTC), 0 = неизвестно
 };
 
 // HTML → чистый текст: снять теги, декодировать сущности, нормализовать
@@ -24,5 +27,16 @@ ExtractedArticle extract_from_description(const std::string& desc);
 // заголовок из <h1>/<title>, тело — самый длинный связный набор «прозы» по
 // плотности текста (исключая nav/header/footer/aside/form и заголовки h1..h6).
 ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg);
+
+// HTML-страница (в т.ч. список/категория) → один или несколько блоков статей.
+// Если страница — список (несколько <article> / повторяющихся ссылок на
+// новости), возвращает по одному ExtractedArticle на каждую найденную статью
+// (title/url/image/короткий сниппет). Иначе — один элемент (вся страница как
+// одна статья, поведение extract_page). base_url нужен для резолва относительных
+// ссылок. Вызывающий (worker) для каждого элемента с непустым url подгружает
+// реальную страницу статьи и извлекает полный текст.
+std::vector<ExtractedArticle> extract_page_items(const std::string& html,
+                                                const std::string& base_url,
+                                                const SourceExtract& cfg);
 
 } // namespace news_rewriter

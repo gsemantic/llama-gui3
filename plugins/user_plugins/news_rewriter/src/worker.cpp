@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <ctime>
+#include <vector>
 
 #include "extractor.h"
 
@@ -182,6 +183,29 @@ std::chrono::seconds llm_backoff_delay(const RetryPolicy& rp, int attempt) {
     if (idx >= rp.backoff_seconds.size()) idx = rp.backoff_seconds.size() - 1;
     return std::chrono::seconds(rp.backoff_seconds[idx]);
 }
+
+// Распознавание rate-limit по тексту ошибки облака (код 1305/1302, "Rate
+// limit", китайские сообщения Zhipu и т.п.). Используется, чтобы делать
+// длинную паузу вместо агрессивного ретрая и не исчерпывать квоту ещё сильнее.
+bool is_rate_limit_error(const std::string& err) {
+    const std::string e = err;
+    auto has = [&e](const char* sub) {
+        return e.find(sub) != std::string::npos;
+    };
+    return has("1305") || has("1302") || has("429") ||
+           has("Rate limit") || has("rate limit") ||
+           has("лимит запрос") || has("Превышен лимит") ||
+           has("访问量过大") || has("速率限制");
+}
+
+// Длинная пауза при rate-limit: аккаунт/модель перегружены, короткий backoff
+// (1-2 с) только ухудшает — квота исчерпывается (код 1302). 30с → 60с → 120с.
+std::chrono::seconds rate_limit_backoff(int attempt) {
+    static const std::vector<int> b{30, 60, 120};
+    std::size_t idx = static_cast<std::size_t>(attempt);
+    if (idx >= b.size()) idx = b.size() - 1;
+    return std::chrono::seconds(b[idx]);
+}
 } // namespace
 
 // Рерайт статьи через LLM с ретраями (как в чате: 1 первичная + max_retries
@@ -202,21 +226,78 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
     if (rp.max_retries < 0) rp.max_retries = 0;
     const int max_attempts = 1 + rp.max_retries;
 
-    for (int attempt = 0; attempt < max_attempts; ++attempt) {
-        const RewriteResult rr = rewrite_article(a, cfg.rewrite, llm_);
-        a.retry_count = static_cast<uint32_t>(attempt);
-        if (rr.ok) {
-            a.title_rewritten = rr.title;
-            a.body_rewritten = rr.body;
-            return true;
+    const bool seo_enabled = cfg.rewrite.seo.enabled && llm_;
+    // Комбинированный путь: рерайт + SEO в ОДНОМ облачном вызове (экономит
+    // квоту/лимиты). Отключается, если SEO выключен, запрещён combine или уже
+    // пропущен из-за rate-limit в этом обходе.
+    const bool combine = seo_enabled && cfg.rewrite.seo.combine_with_rewrite &&
+                         !seo_skipped_.load();
+
+    auto apply_seo = [&](const SeoResult& sr) {
+        if (sr.ok) {
+            a.seo_focus_keyword = sr.focus_keyword;
+            a.seo_meta_description = sr.meta_description;
+            a.seo_title = sr.seo_title;
+        } else {
+            // SEO — best-effort: не роняем статью. При rate-limit отключаем SEO
+            // на остаток обхода, чтобы не долбить облако и не тратить квоту.
+            log("ВНИМАНИЕ: SEO не сгенерирован («" + a.title_original +
+                "» — " + sr.error +
+                "); статья будет опубликована БЕЗ SEO-мета");
+            run_seo_missing_.fetch_add(1);
+            if (is_rate_limit_error(sr.error)) seo_skipped_.store(true);
         }
-        a.error = rr.error;
+    };
+
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        a.retry_count = static_cast<uint32_t>(attempt);
+        RewriteResult rr;
+
+        if (combine) {
+            // ОДИН вызов: рерайт + SEO сразу.
+            const RewriteSeoResult cr = rewrite_and_seo(a, cfg.rewrite, llm_);
+            if (cr.ok && !cr.title.empty() && !cr.body.empty()) {
+                a.title_rewritten = cr.title;
+                a.body_rewritten = cr.body;
+                apply_seo(cr.seo);
+                return true;
+            }
+            // Комбинированный вызов не дал валидного рерайта — откатываемся к
+            // двум отдельным вызовам в рамках этой же попытки.
+            if (is_rate_limit_error(cr.error)) seo_skipped_.store(true);
+            rr = rewrite_article(a, cfg.rewrite, llm_);
+            if (rr.ok) {
+                a.title_rewritten = rr.title;
+                a.body_rewritten = rr.body;
+                apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
+                return true;
+            }
+            a.error = cr.error.empty() ? rr.error : cr.error;
+        } else {
+            // Обычный путь: рерайт (1 вызов) + при необходимости SEO (2-й вызов).
+            rr = rewrite_article(a, cfg.rewrite, llm_);
+            if (rr.ok) {
+                a.title_rewritten = rr.title;
+                a.body_rewritten = rr.body;
+                if (seo_enabled && !seo_skipped_.load()) {
+                    apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
+                }
+                return true;
+            }
+            a.error = rr.error;
+        }
+
         if (attempt == max_attempts - 1) break;
 
-        const std::chrono::seconds delay = llm_backoff_delay(rp, attempt);
+        // Rate-limit требует длинной паузы; иначе — обычный backoff рерайта.
+        const bool rate = is_rate_limit_error(a.error);
+        const std::chrono::seconds delay =
+            rate ? rate_limit_backoff(attempt) : llm_backoff_delay(rp, attempt);
         log("рерайт: попытка " + std::to_string(attempt + 1) + "/" +
             std::to_string(max_attempts) + " не удалась («" + a.title_original +
-            "» — " + rr.error + "), повтор через " + std::to_string(delay.count()) + " с");
+            "» — " + a.error + ")" +
+            (rate ? ", rate-limit — длинная пауза" : "") +
+            ", повтор через " + std::to_string(delay.count()) + " с");
         if (!sleep_interruptible(delay)) {
             a.error = "обход прерван пользователем";
             return false;
@@ -244,12 +325,8 @@ bool Worker::export_article(const Config& cfg, Article& a) {
         return false;
     }
 
-    if (storage_.is_duplicate(a)) {
-        a.status = TaskStatus::Done;
-        log("дубликат пропущен: " + a.title_original);
-        return true;
-    }
-
+    // Sink создаём ДО проверки дедупа, чтобы он мог свериться с реальным
+    // состоянием приёмника (сайт/хранилище), а не только с локальным индексом.
     // Передаём каталог данных плагина в sink (для пути к .env с секретами),
     // чтобы он не зависел от output_dir.
     SinkConfig sink_cfg = cfg.sink;
@@ -263,6 +340,32 @@ bool Worker::export_article(const Config& cfg, Article& a) {
         a.status = TaskStatus::Error;
         a.error = "неизвестный тип sink: " + cfg.sink.type;
         return false;
+    }
+
+    // Дедуп с учётом реального состояния приёмника.
+    const Presence p = sink->presence(a);
+    if (p == Presence::Present) {
+        // Уже опубликовано в приёмнике — не дублируем, держим индекс в актуале.
+        a.status = TaskStatus::Done;
+        storage_.mark_written(a);
+        log("пропущено: уже есть в приёмнике («" + a.title_original + "»)");
+        return true;
+    }
+    if (storage_.is_duplicate(a)) {
+        if (p == Presence::Absent) {
+            // Локально помечено, но в приёмнике НЕТ (удалили вручную) —
+            // сбрасываем устаревшую метку и переиздаём.
+            storage_.forget(a);
+            log("локальная метка дедупа устарела (нет в приёмнике), "
+                "переиздаём: " + a.title_original);
+        } else {
+            // Unknown: состояние приёмника недоступно (нет связи/прав/опция
+            // выключена) — консервативно пропускаем, чтобы не создать дубликат.
+            a.status = TaskStatus::Done;
+            log("дубликат пропущен (состояние приёмника недоступно): " +
+                a.title_original);
+            return true;
+        }
     }
 
     if (!sink->write(a)) {
@@ -363,6 +466,9 @@ void Worker::process_run(const Config& cfg) {
         pipeline_.clear();
         state_.articles.clear();
         state_.pending_tasks = 0;
+        state_.seo_missing = 0;
+        run_seo_missing_.store(0);
+        seo_skipped_.store(false);
         state_.last_run_unix = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
@@ -442,13 +548,19 @@ void Worker::process_run(const Config& cfg) {
         state_.done_count = done;
         state_.error_count = errors;
 
+        const int seo_missing = run_seo_missing_.load();
+        state_.seo_missing = seo_missing;
         const std::string summary =
             "источников: " + std::to_string(processed) +
-            ", статей: " + std::to_string(done) + ", ошибок: " + std::to_string(errors);
+            ", статей: " + std::to_string(done) + ", ошибок: " + std::to_string(errors) +
+            (seo_missing > 0 ? ", без SEO: " + std::to_string(seo_missing) : "");
         if (cancel_.load()) {
             state_.last_message = "обход прерван пользователем (" + summary + ")";
         } else if (errors > 0) {
             state_.last_message = "обход завершён с ошибками (" + summary + ")";
+        } else if (seo_missing > 0) {
+            state_.last_message =
+                "обход завершён: статьи опубликованы БЕЗ SEO-мета (" + summary + ")";
         } else {
             state_.last_message = "обход завершён (" + summary + ")";
         }
@@ -492,19 +604,104 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
     remove_stale_source_error(src.url);
 
     if (src.type == "page") {
-        Article a = make_source_article();
-        a.status = TaskStatus::Extracting;
-        set_status(a, "извлечение текста: " + src.url);
-        const ExtractedArticle ex = extract_page(res.html, src.extract);
-        a.title_original = ex.title;
-        a.body_original = ex.body;
-        a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
-        if (!export_article(cfg, a)) {
+        // Страница может быть либо одной статьёй, либо списком/категорией.
+        // extract_page_items возвращает 1 элемент для одиночной статьи и N —
+        // для списка (каждый со своим url/заголовком/картинкой).
+        const std::vector<ExtractedArticle> items =
+            extract_page_items(res.html, src.url, src.extract);
+        if (items.empty()) {
+            Article a = make_source_article();
+            a.status = TaskStatus::Error;
+            a.error = "не удалось извлечь текст страницы";
             set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
             return true;
         }
-        set_status(a, "страница: " + (a.title_original.empty()
-                                          ? src.url : a.title_original));
+
+        // Одна статья — поведение как раньше, без доп. загрузок.
+        if (items.size() == 1) {
+            Article a = make_source_article();
+            a.status = TaskStatus::Extracting;
+            set_status(a, "извлечение текста: " + src.url);
+            const ExtractedArticle& ex = items.front();
+            a.title_original = ex.title;
+            a.body_original = ex.body;
+            a.source_image = ex.image;
+            a.content_hash =
+                sha256_hex(a.title_original + "\n" + a.body_original);
+            if (!export_article(cfg, a)) {
+                set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
+                return true;
+            }
+            set_status(a, "страница: " + (a.title_original.empty()
+                                              ? src.url : a.title_original));
+            return true;
+        }
+
+        // Список: краулим каждую статью — подгружаем её реальную страницу и
+        // извлекаем полный текст + свою hero-картинку. При сбое загрузки
+        // откатываемся на сниппет/картинку с листинга.
+        int accepted = 0;
+        int no_url_idx = 0;
+        for (const auto& item : items) {
+            if (cancel_.load()) {
+                log("обход прерван пользователем");
+                break;
+            }
+            if (cfg.max_items_per_source > 0 && accepted >= cfg.max_items_per_source) {
+                break;
+            }
+
+            // Свежесть (page-режим): статьи старше max_age_hours пропускаем,
+            // если удалось распознать дату публикации на листинге.
+            if (cfg.max_age_hours > 0 && item.published_at > 0) {
+                const std::int64_t now_sec =
+                    static_cast<std::int64_t>(std::time(nullptr));
+                if (now_sec - item.published_at >
+                    static_cast<std::int64_t>(cfg.max_age_hours) * 3600) {
+                    log("пропущена старая новость: " +
+                        (item.title.empty() ? item.url : item.title));
+                    continue;
+                }
+            }
+
+            ++accepted;
+
+            Article a;
+            if (item.url.empty()) {
+                // Нет ссылки — берём сниппет с листинга, url делаем уникальным.
+                a.url = src.url + "#item" + std::to_string(++no_url_idx);
+            } else {
+                a.url = item.url;
+            }
+            a.id = sha256_hex(a.url);
+            a.source = host_of(src.url);
+            a.fetched_at = iso8601_now();
+            a.language = cfg.rewrite.language;
+            a.status = TaskStatus::Extracting;
+            set_status(a, "извлечение: " + (item.title.empty() ? a.url : item.title));
+
+            ExtractedArticle ex = item;
+            if (!item.url.empty()) {
+                const FetchResult ar = fetcher_->fetch(item.url, "page", cfg.network);
+                if (ar.ok) ex = extract_page(ar.html, src.extract);
+                // иначе оставляем сниппет с листинга
+            }
+            a.title_original = ex.title;
+            a.body_original = ex.body;
+            // Картинка: предпочитаем hero со страницы статьи, иначе с листинга.
+            a.source_image = ex.image.empty() ? item.image : ex.image;
+            a.content_hash =
+                sha256_hex(a.title_original + "\n" + a.body_original);
+
+            if (!export_article(cfg, a)) {
+                set_status(a, "ошибка обработки: " +
+                                  (item.title.empty() ? a.url : item.title) +
+                                  " — " + a.error);
+                continue;
+            }
+            set_status(a, "статья: " + (a.title_original.empty()
+                                            ? a.url : a.title_original));
+        }
         return true;
     }
 
@@ -544,6 +741,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         const ExtractedArticle ex = extract_from_description(item.description);
         a.title_original = html_to_text(item.title);
         a.body_original = ex.body;
+        a.source_image = item.image;   // заглавное изображение из ленты (media:content/enclosure/itunes)
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
         if (!export_article(cfg, a)) {
             set_status(a, "ошибка обработки: " + a.title_original + " — " + a.error);

@@ -1,6 +1,10 @@
 #include "sink.h"
 
+#include <filesystem>
+
 namespace news_rewriter {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -23,6 +27,14 @@ public:
         }
         if (log_) log_("LocalFileSink: сохранено " + article.url);
         return true;
+    }
+
+    // Статья уже записана, если существует её .json-файл. Если файл удалили
+    // вручную, дедуп это узнает и переиздаст статью.
+    Presence presence(const Article& a) const override {
+        if (!storage_.ready()) return Presence::Unknown;
+        return fs::exists(storage_.article_json_path(a)) ? Presence::Present
+                                                         : Presence::Absent;
     }
 
     const char* name() const override { return "local_file"; }

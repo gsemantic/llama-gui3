@@ -48,6 +48,9 @@ public:
     bool is_duplicate(const Article& a) const;
     // Заносит статью в index.json (id → путь + content_hash).
     void mark_written(const Article& a);
+    // Удаляет устаревшую метку дедупа (id и content_hash) — когда статью
+    // удалили в приёмнике, но локальный index.json всё ещё помнит о ней.
+    void forget(const Article& a);
 
 private:
     std::string root_;        // <data_dir>/news_rewriter/

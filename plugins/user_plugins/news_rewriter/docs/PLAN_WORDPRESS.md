@@ -35,6 +35,7 @@ extractor / rewriter / worker не меняются).
 | — | Хранение секретов в `.env` (НЕ в settings.ini) — решение A | `src/dotenv.{h,cpp}`, `src/sink_wordpress.cpp`, `src/ui.cpp` | ✅ сделано |
 | — | UI-поля WordPress (site_url, status, categories, tags, author, excerpt, slug, featured_image, max_retries, пароль-поле) | `src/ui.cpp`, `src/ui.h` | ✅ сделано |
 | — | Кнопка «Проверить подключение» (GET /wp/v2/users/me, статус авторизации) | `src/sink_wordpress.cpp` (`wordpress_check_connection`), `src/ui.cpp`, `src/http.cpp` (перегрузка `get` с заголовками) | ✅ сделано |
+| 7.5 | Расширение таксономии: `post_type` (posts/pages/кастомные CPT) — endpoint строится по slug, страницы не шлют категории/теги, листинг доступных типов в проверке связи | `src/sink_wordpress.cpp`, `src/ui.cpp`, `tests/test_sink_wordpress.cpp` | ✅ сделано |
 | — | Бамп версии до 0.1.1 (видно в логе загрузки) | `src/plugin_main.cpp`, `plugin.json` | ✅ сделано |
 
 **Хранение секретов (решение пользователя — вариант A):** логин/Application
@@ -43,10 +44,12 @@ Password WordPress пишутся в `<data_dir>/news_rewriter/.env` (ключи
 `WordPressSink` читает их из `.env` (с fallback на `params` для тестов/обратной
 совместимости). В UI поля логина/пароля не попадают в сохраняемый JSON-конфиг.
 
-**Текущая точка:** реализация завершена, тесты зелёные (120). Если сессия прервана —
-запусти `./build.sh --tests`; при падении теста WP см. `tests/test_sink_wordpress.cpp`
-и `src/sink_wordpress.cpp`. Не реализовано из плана: полная Markdown-поддержка (6.x,
-отмечено как отдельная задача) и ручное E2E-тестирование против живого WP-хоста.
+**Текущая точка:** реализация завершена (включая расширение таксономии 7.5), тесты
+зелёные (125). Если сессия прервана — запусти `./build.sh --tests`; при падении теста
+WP см. `tests/test_sink_wordpress.cpp` и `src/sink_wordpress.cpp`. Не реализовано из
+плана: полная Markdown-поддержка (6.x, отмечено как отдельная задача) и ручное
+E2E-тестирование против живого WP-хоста (сделано пользователем: gsemantic.ru, тип
+`posts`, Application Password — работает).
 
 ---
 
@@ -108,6 +111,7 @@ plugins/user_plugins/news_rewriter/
 | `username` | обязательный | WP-пользователь с правом `edit_posts` |
 | `app_password` | обязательный | Application Password (с пробелами или без — нормализуем) |
 | `status` | опционально | `draft` (по умолчанию) / `publish` / `pending` / `private` |
+| `post_type` | опционально | тип записи WP: `posts` (по умолчанию) / `pages` / кастомный CPT (его `rest_base`, напр. `product`). Endpoint строится по slug |
 | `categories` | опционально | массив числовых id категорий WP |
 | `tags` | опционально | массив id тегов |
 | `author` | опционально | id автора |
@@ -122,7 +126,10 @@ plugins/user_plugins/news_rewriter/
 1. Валидация: `site_url`, `username`, `app_password`, непустые
    `title_rewritten`/`body_rewritten` (если рерайт пуст — `log_` + `return false`,
    чтобы worker пометил `Error`, а не слал пустоту).
-2. Формируем endpoint: `rtrim(site_url,'/') + "/wp-json/wp/v2/posts"`.
+ 2. Формируем endpoint: `rtrim(site_url,'/') + "/wp-json/wp/v2/" + post_type`
+    (параметр `post_type`, по умолчанию `"posts"`; для кастомных типов записи —
+    их `rest_base`, напр. `"product"`; стандартные `"pages"` не принимают
+    категории/теги — для них таксономия не шлётся).
 3. Заголовки: `Content-Type: application/json`,
    `Authorization: Basic <base64(user:app_password)>`
    (пробелы в app_password удаляем перед кодированием).

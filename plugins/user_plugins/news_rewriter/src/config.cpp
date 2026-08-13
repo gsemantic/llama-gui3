@@ -53,6 +53,11 @@ Json config_to_json(const Config& cfg) {
     rewrite["tone"] = cfg.rewrite.tone;
     rewrite["prompt_template"] = cfg.rewrite.prompt_template;
     rewrite["max_words"] = cfg.rewrite.max_words;
+    Json seo = Json::object();
+    seo["enabled"] = cfg.rewrite.seo.enabled;
+    seo["combine_with_rewrite"] = cfg.rewrite.seo.combine_with_rewrite;
+    seo["prompt_template"] = cfg.rewrite.seo.prompt_template;
+    rewrite["seo"] = seo;
     j["rewrite"] = rewrite;
 
     j["schedule_minutes"] = cfg.schedule_minutes;
@@ -97,6 +102,14 @@ Config config_from_json(const Json& j) {
             rewrite.get("prompt_template").as_string(cfg.rewrite.prompt_template);
         cfg.rewrite.max_words =
             static_cast<int>(rewrite.get("max_words").as_int(cfg.rewrite.max_words));
+        const Json& seo = rewrite.get("seo");
+        if (seo.is_object()) {
+            cfg.rewrite.seo.enabled = seo.get("enabled").as_bool(cfg.rewrite.seo.enabled);
+            cfg.rewrite.seo.combine_with_rewrite = seo.get("combine_with_rewrite")
+                .as_bool(cfg.rewrite.seo.combine_with_rewrite);
+            cfg.rewrite.seo.prompt_template =
+                seo.get("prompt_template").as_string(cfg.rewrite.seo.prompt_template);
+        }
     }
 
     cfg.schedule_minutes =

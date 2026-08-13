@@ -181,10 +181,14 @@ public:
                        ? cfg.data_dir + "/news_rewriter/.env"
                        : (storage.root().empty() ? std::string(".env")
                                                  : storage.root() + "/.env")),
+          storage_(storage),
+          verify_site_state_(
+              cfg.params.get("verify_site_state").as_bool(true)),
           site_url_(rtrim(cfg.params.get("site_url").as_string(), '/')),
           username_(cfg.params.get("username").as_string()),
           app_password_(cfg.params.get("app_password").as_string()),
           status_(cfg.params.get("status").as_string("draft")),
+          post_type_(cfg.params.get("post_type").as_string("posts")),
           excerpt_(cfg.params.get("excerpt").as_string()),
           slug_(cfg.params.get("slug").as_string()),
           featured_image_(cfg.params.get("featured_image").as_string()),
@@ -241,7 +245,7 @@ public:
             return false;
         }
 
-        const std::string endpoint = site_url_ + "/wp-json/wp/v2/posts";
+        const std::string endpoint = site_url_ + "/wp-json/wp/v2/" + post_type_;
         const std::string auth = base64_encode(user + ":" + pass);
         const std::string html = body_to_html(article.body_rewritten);
 
@@ -250,18 +254,48 @@ public:
         body["content"] = html;
         body["status"] = status_;
         if (!excerpt_.empty()) body["excerpt"] = excerpt_;
-        if (!slug_.empty()) body["slug"] = slug_;
-        if (!categories_.empty()) {
-            Json arr = Json::array();
-            for (int id : categories_) arr.push(static_cast<int64_t>(id));
-            body["categories"] = arr;
-        }
-        if (!tags_.empty()) {
-            Json arr = Json::array();
-            for (int id : tags_) arr.push(static_cast<int64_t>(id));
-            body["tags"] = arr;
+        // Стабильный slug от источника (если не задан вручную в params),
+        // чтобы дедуп по сайту мог надёжно находить ранее созданный пост.
+        body["slug"] = slug_.empty() ? storage_.slug_for(article.url) : slug_;
+        // Категории/теги поддерживают не все типы: стандартные «страницы»
+        // (pages) их не принимают — WP вернёт 400. Для них не шлём таксономию.
+        if (post_type_ != "pages") {
+            if (!categories_.empty()) {
+                Json arr = Json::array();
+                for (int id : categories_) arr.push(static_cast<int64_t>(id));
+                body["categories"] = arr;
+            }
+            if (!tags_.empty()) {
+                Json arr = Json::array();
+                for (int id : tags_) arr.push(static_cast<int64_t>(id));
+                body["tags"] = arr;
+            }
         }
         if (author_ != 0) body["author"] = static_cast<int64_t>(author_);
+
+        // Авто-SEO: прокидываем мета-поля плагинов (Yoast и RankMath). Поля
+        // заполняются рерайтером только если в конфиге включен seo.enabled.
+        {
+            Json meta = Json::object();
+            if (!article.seo_focus_keyword.empty()) {
+                meta["yoast_wpseo_focuskw"] = article.seo_focus_keyword;
+                meta["rank_math_focus_keyword"] = article.seo_focus_keyword;
+            }
+            if (!article.seo_meta_description.empty()) {
+                meta["yoast_wpseo_metadesc"] = article.seo_meta_description;
+                meta["rank_math_description"] = article.seo_meta_description;
+            }
+            if (!article.seo_title.empty()) {
+                meta["yoast_wpseo_title"] = article.seo_title;
+                meta["rank_math_title"] = article.seo_title;
+            }
+            if (!meta.empty()) body["meta"] = meta;
+        }
+
+        // Excerpt из SEO-meta, если не задан вручную в параметрах sink.
+        if (excerpt_.empty() && !article.seo_meta_description.empty()) {
+            body["excerpt"] = article.seo_meta_description;
+        }
 
         NetworkConfig nc;
         nc.timeout_seconds = timeout_;
@@ -290,22 +324,76 @@ public:
 
         const int post_id = parse_post_id(resp.body);
         if (log_) {
-            log_("WordPressSink: пост создан id=" + std::to_string(post_id) +
-                 " (HTTP 201) для " + article.url);
+            log_("WordPressSink: объект «" + post_type_ + "» создан id=" +
+                 std::to_string(post_id) + " (HTTP 201) для " + article.url);
         }
 
-        // 7.3 — опциональная загрузка обложки.
-        if (!featured_image_.empty() && post_id != 0) {
-            upload_featured_media(post_id, featured_image_, nc, user, pass);
+        // 7.3 — опциональная загрузка обложки: ручной URL из параметров sink,
+        // либо авто — заглавное изображение из источника (Article.source_image).
+        const std::string image_url =
+            featured_image_.empty() ? article.source_image : featured_image_;
+        if (!image_url.empty() && post_id != 0) {
+            // alt для обложки = ключевое слово модели (SEO), иначе заголовок.
+            const std::string alt = article.seo_focus_keyword.empty()
+                                        ? article.title_rewritten
+                                        : article.seo_focus_keyword;
+            upload_featured_media(post_id, image_url, nc, user, pass, alt);
         }
         return true;
     }
 
     const char* name() const override { return "wordpress"; }
 
-private:
-    static int parse_post_id(const std::string& body) {
+    // Реальное состояние статьи на сайте: есть ли уже пост с нашим slug-ом.
+    // Возвращает Present/Absent (при успешном запросе) либо Unknown, если
+    // сверка отключена или сайт недоступен/нет прав.
+    Presence presence(const Article& a) const override {
+        if (!verify_site_state_) return Presence::Unknown;
+        std::string user, pass;
+        if (!resolve_credentials(user, pass)) return Presence::Unknown;
+
+        HttpClient client;
+        if (!client.init()) return Presence::Unknown;
+        const std::string slug = storage_.slug_for(a.url);
+        const std::string ep = site_url_ + "/wp-json/wp/v2/" + post_type_ +
+                               "?slug=" + slug + "&status=any&per_page=1";
+        NetworkConfig nc;
+        nc.timeout_seconds = timeout_;
+        const std::string auth = "Authorization: Basic " +
+                                 base64_encode(user + ":" + pass);
+        HttpResponse resp = client.get(ep, nc, std::vector<std::string>{auth});
+        if (!resp.ok || resp.status != 200) {
+            if (log_) {
+                log_("WordPressSink: не удалось сверить состояние сайта "
+                     "(HTTP " + std::to_string(resp.status) + "), дедуп по "
+                     "локальному индексу");
+            }
+            return Presence::Unknown;
+        }
         bool ok = false;
+        Json j = Json::parse(resp.body, &ok);
+        if (!ok || !j.is_array()) return Presence::Unknown;
+        return j.size() > 0 ? Presence::Present : Presence::Absent;
+    }
+
+private:
+    // Считывает учётные данные (.env приоритет, иначе params) и нормализует
+    // app_password. Возвращает false, если заданы не все данные.
+    bool resolve_credentials(std::string& user, std::string& pass) const {
+        user = dotenv_read(env_path_, kNewsRewriterWpUser);
+        if (user.empty()) user = username_;
+        pass = dotenv_read(env_path_, kNewsRewriterWpPass);
+        if (pass.empty()) pass = app_password_;
+        auto norm = [](std::string s) {
+            std::string out;
+            for (char c : s) if (c != ' ') out += c;
+            return out;
+        };
+        pass = norm(pass);
+        return !site_url_.empty() && !user.empty() && !pass.empty();
+    }
+
+    static int parse_post_id(const std::string& body) {        bool ok = false;
         Json j = Json::parse(body, &ok);
         if (!ok) return 0;
         const Json& id = j["id"];
@@ -314,9 +402,10 @@ private:
     }
 
     // Загружает картинку по URL в медиабиблиотеку WP и ставит обложкой поста.
+    // alt — alt-текст обложки (обычно ключевое слово модели из SEO-шага).
     void upload_featured_media(int post_id, const std::string& image_url,
-                               const NetworkConfig& nc, const std::string& user,
-                               const std::string& pass) {
+                                const NetworkConfig& nc, const std::string& user,
+                                const std::string& pass, const std::string& alt = "") {
         HttpResponse img = client_.get(image_url, nc);
         if (!img.ok || img.body.empty()) {
             if (log_) log_("WordPressSink: не удалось скачать featured_image " +
@@ -344,11 +433,22 @@ private:
         const int media_id = parse_post_id(media_resp.body);
         if (media_id == 0) return;
 
+        // alt-текст обложки (ключевое слово модели из SEO-шага).
+        if (!alt.empty()) {
+            Json altpatch = Json::object();
+            altpatch["alt_text"] = alt;
+            std::vector<std::string> ah = {
+                "Content-Type: application/json",
+                "Authorization: Basic " + auth};
+            client_.post(media_ep + "/" + std::to_string(media_id),
+                         altpatch.dump(), nc, ah);
+        }
+
         // Привязываем обложку к посту.
         Json patch = Json::object();
         patch["featured_media"] = static_cast<int64_t>(media_id);
-        const std::string ep = site_url_ + "/wp-json/wp/v2/posts/" +
-                              std::to_string(post_id);
+        const std::string ep = site_url_ + "/wp-json/wp/v2/" + post_type_ + "/" +
+                               std::to_string(post_id);
         std::vector<std::string> ph = {
             "Content-Type: application/json",
             "Authorization: Basic " + auth};
@@ -360,10 +460,13 @@ private:
 
     HttpClient client_;
     std::string env_path_;      // <data_dir>/news_rewriter/.env (секреты)
+    Storage& storage_;         // для стабильного slug-а (сверка с сайтом)
+    bool verify_site_state_ = true;  // сверять дедуп с реальным состоянием сайта
     std::string site_url_;
     std::string username_;
     std::string app_password_;
     std::string status_;
+    std::string post_type_;
     std::string excerpt_;
     std::string slug_;
     std::string featured_image_;
@@ -375,6 +478,29 @@ private:
     int retry_delay_ms_ = 1000;
     LogFn log_;
 };
+
+// Список доступных типов записей (включая пользовательские) для подсказки
+// пользователю — возвращает «Название (slug)» через запятую.
+std::string wordpress_list_types(HttpClient& client, const std::string& site_url) {
+    const std::string ep = site_url + "/wp-json/wp/v2/types";
+    NetworkConfig nc;
+    nc.timeout_seconds = 10;
+    HttpResponse r = client.get(ep, nc);
+    if (!r.ok || r.status != 200) return "(не удалось получить список типов)";
+    bool ok = false;
+    Json j = Json::parse(r.body, &ok);
+    if (!ok || !j.is_object()) return "(нет данных о типах)";
+    std::string out;
+    for (const std::string& key : j.keys()) {
+        const Json& v = j.get(key);
+        const std::string rb = v.get("rest_base").as_string();
+        const std::string nm = v.get("name").as_string();
+        if (!out.empty()) out += ", ";
+        if (nm.empty()) out += key;
+        else out += nm + " (" + (rb.empty() ? key : rb) + ")";
+    }
+    return out.empty() ? "(типов нет)" : out;
+}
 
 } // namespace
 
@@ -411,9 +537,11 @@ std::string wordpress_check_connection(const std::string& site_url,
     if (resp.status == 200) {
         bool ok = false;
         Json j = Json::parse(resp.body, &ok);
-        std::string name = ok ? j["name"].as_string() : std::string();
-        return "OK: авторизован" + (name.empty() ? std::string("")
-                                                  : " как «" + name + "»");
+        std::string name = ok ? j.get("name").as_string() : std::string();
+        std::string result = "OK: авторизован" +
+                             (name.empty() ? std::string("") : " как «" + name + "»");
+        result += "\nТипы записей WP:\n" + wordpress_list_types(client, su);
+        return result;
     }
     if (resp.status == 401 || resp.status == 403) {
         std::string body = resp.body;
