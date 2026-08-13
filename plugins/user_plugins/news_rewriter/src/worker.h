@@ -42,6 +42,8 @@ struct ArticleStatusView {
     std::string url;
     std::string source;
     std::string title;              // извлечённый заголовок (title_original)
+    std::string source_image;       // заглавное изображение (URL из статьи)
+    std::int64_t published_at = 0;  // время публикации оригинала (Unix UTC)
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;

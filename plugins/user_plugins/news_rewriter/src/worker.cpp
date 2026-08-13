@@ -1,7 +1,9 @@
 #include "worker.h"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <set>
 #include <vector>
 
 #include "extractor.h"
@@ -116,7 +118,16 @@ void Worker::log(const std::string& msg) {
 namespace {
 
 ArticleStatusView view_of(const Article& a) {
-    return ArticleStatusView{a.url, a.source, a.title_original, a.status, a.error, a.retry_count};
+    ArticleStatusView v;
+    v.url = a.url;
+    v.source = a.source;
+    v.title = a.title_original;
+    v.source_image = a.source_image;
+    v.published_at = a.published_at;
+    v.status = a.status;
+    v.error = a.error;
+    v.retry_count = a.retry_count;
+    return v;
 }
 
 } // namespace
@@ -182,6 +193,46 @@ std::chrono::seconds llm_backoff_delay(const RetryPolicy& rp, int attempt) {
     std::size_t idx = static_cast<std::size_t>(attempt);
     if (idx >= rp.backoff_seconds.size()) idx = rp.backoff_seconds.size() - 1;
     return std::chrono::seconds(rp.backoff_seconds[idx]);
+}
+
+// Убирает из URL трекинг-параметры (erid, utm_*, fbclid, yclid, _ga, ref и
+// т.п.), чтобы ссылка статьи была стабильной и корректно дедуплицировалась
+// (иначе одна и та же статья с разными метками считается разными, а WordPress
+// часто не принимает «?erid=...» в slug).
+std::string strip_tracking_params(const std::string& url) {
+    const std::size_t q = url.find('?');
+    if (q == std::string::npos) return url;
+    const std::string base = url.substr(0, q);
+    const std::string query = url.substr(q + 1);
+    static const char* kDrop[] = {
+        "erid", "utm_source", "utm_medium", "utm_campaign", "utm_term",
+        "utm_content", "fbclid", "gclid", "yclid", "ym_", "_ga", "ref",
+        "roistat", "sub", "yclid"
+    };
+    std::vector<std::string> keep;
+    std::size_t pos = 0;
+    while (pos < query.size()) {
+        std::size_t amp = query.find('&', pos);
+        const std::string pair = query.substr(pos, amp == std::string::npos
+                                                      ? std::string::npos : amp - pos);
+        std::size_t eq = pair.find('=');
+        const std::string key = eq == std::string::npos
+                                    ? pair : pair.substr(0, eq);
+        bool drop = false;
+        for (const char* k : kDrop) {
+            if (key == k || key.rfind(k, 0) == 0) { drop = true; break; }
+        }
+        if (!drop && !pair.empty()) keep.push_back(pair);
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    if (keep.empty()) return base;
+    std::string out = base + "?";
+    for (std::size_t i = 0; i < keep.size(); ++i) {
+        if (i) out += '&';
+        out += keep[i];
+    }
+    return out;
 }
 
 // Распознавание rate-limit по тексту ошибки облака (код 1305/1302, "Rate
@@ -607,7 +658,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         // Страница может быть либо одной статьёй, либо списком/категорией.
         // extract_page_items возвращает 1 элемент для одиночной статьи и N —
         // для списка (каждый со своим url/заголовком/картинкой).
-        const std::vector<ExtractedArticle> items =
+        std::vector<ExtractedArticle> items =
             extract_page_items(res.html, src.url, src.extract);
         if (items.empty()) {
             Article a = make_source_article();
@@ -617,8 +668,16 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             return true;
         }
 
-        // Одна статья — поведение как раньше, без доп. загрузок.
-        if (items.size() == 1) {
+        // Список/категория, если среди извлечённых элементов есть реальные
+        // ссылки на статьи: обходим каждую (подгружаем её страницу и берём
+        // картинку/ссылку именно статьи, а не листинга). Иначе — это
+        // действительно одиночная статья: используем страницу как есть.
+        bool list_has_link = false;
+        for (const auto& it : items) {
+            if (!it.url.empty()) { list_has_link = true; break; }
+        }
+        if (items.size() == 1 && !list_has_link) {
+            // Одиночная статья — без доп. загрузок.
             Article a = make_source_article();
             a.status = TaskStatus::Extracting;
             set_status(a, "извлечение текста: " + src.url);
@@ -640,6 +699,28 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         // Список: краулим каждую статью — подгружаем её реальную страницу и
         // извлекаем полный текст + свою hero-картинку. При сбое загрузки
         // откатываемся на сниппет/картинку с листинга.
+        // Свежие сверху: сначала те, у кого удалось распознать дату публикации.
+        std::stable_sort(items.begin(), items.end(),
+                         [](const ExtractedArticle& x, const ExtractedArticle& y) {
+                             return x.published_at > y.published_at;
+                         });
+        // Один и тот же материал часто встречается в листинге несколько раз
+        // (ссылка на картинку + на заголовок, либо desktop/mobile варианты) с
+        // одинаковым URL — убираем дубликаты, иначе они впустую тратят квоту
+        // max_items_per_source и один из них отбрасывается дедупом приёмника.
+        {
+            std::vector<ExtractedArticle> uniq;
+            std::set<std::string> seen;
+            for (auto& it : items) {
+                const std::string u = strip_tracking_params(it.url);
+                if (u.empty()) {
+                    uniq.push_back(std::move(it));
+                    continue;
+                }
+                if (seen.insert(u).second) uniq.push_back(std::move(it));
+            }
+            items = std::move(uniq);
+        }
         int accepted = 0;
         int no_url_idx = 0;
         for (const auto& item : items) {
@@ -671,11 +752,12 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
                 // Нет ссылки — берём сниппет с листинга, url делаем уникальным.
                 a.url = src.url + "#item" + std::to_string(++no_url_idx);
             } else {
-                a.url = item.url;
+                a.url = strip_tracking_params(item.url);
             }
             a.id = sha256_hex(a.url);
             a.source = host_of(src.url);
             a.fetched_at = iso8601_now();
+            a.published_at = item.published_at;
             a.language = cfg.rewrite.language;
             a.status = TaskStatus::Extracting;
             set_status(a, "извлечение: " + (item.title.empty() ? a.url : item.title));
@@ -736,6 +818,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         a.id = sha256_hex(a.url);
         a.source = host_of(src.url);
         a.fetched_at = iso8601_now();
+        a.published_at = parse_feed_time(item.pub_date);
         a.language = cfg.rewrite.language;
         a.status = TaskStatus::Extracting;
         const ExtractedArticle ex = extract_from_description(item.description);

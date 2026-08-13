@@ -894,6 +894,74 @@ static void test_worker_filters_old_page_items() {
 REGISTER_TEST(test_worker_filters_old_items);
 REGISTER_TEST(test_worker_filters_old_page_items);
 
+// Список/категория обходится: для каждой найденной статьи берётся ЕЁ страница
+// (ссылка и картинка статьи, а не логотип/главная страница листинга), а в
+// вывод попадает дата публикации оригинала. Регрессия на баг, когда page-режим
+// при 1 найденной статье трактовал всю главную как статью (логотип + homepage).
+static void test_worker_crawls_listing_uses_article_image_and_url() {
+    Worker worker;
+    TempDir tmp;
+    setup_worker_export(worker, tmp.path());
+    Config cfg = default_config();
+    cfg.sources.clear();
+    cfg.sources.push_back(SourceConfig{"https://news.example/", "page",
+                                        SourceExtract{}, true});
+    cfg.max_items_per_source = 3;
+    worker.set_config(cfg);
+    auto fetcher = std::make_unique<FakeFetcher>();
+    fetcher->impl = [](const std::string& url, const std::string&) {
+        if (url == "https://news.example/") {
+            return one_page(
+                "<html><body>"
+                "<header><img src=\"/logo.png\" alt=\"logo\"></header>"
+                "<article><time datetime=\"2026-08-13T10:00:00Z\"></time>"
+                "<h2><a href=\"/news/1\">Заголовок первой новости достаточно длинный</a></h2></article>"
+                "<article><time datetime=\"2026-08-13T09:00:00Z\"></time>"
+                "<h2><a href=\"/news/2\">Вторая новость про важное событие сегодня</a></h2></article>"
+                "<article><time datetime=\"2026-08-13T08:00:00Z\"></time>"
+                "<h2><a href=\"/news/3\">Третья свежая новость из раздела происшествий</a></h2></article>"
+                "</body></html>");
+        }
+        if (url.find("/news/") != std::string::npos) {
+            const std::string id = url.substr(url.find("/news/") + 6);
+            return one_page(
+                "<html><head><title>Сайт</title></head><body>"
+                "<h1>Заголовок статьи " + id + "</h1>"
+                "<p>Текст новости номер " + id +
+                ", довольно длинный и содержательный абзац с подробностями.</p>"
+                "<meta property=\"og:image\" content=\"https://news.example/img/" + id + ".jpg\">"
+                "</body></html>");
+        }
+        FetchResult r; r.ok = true; return r;
+    };
+    worker.set_fetcher(std::move(fetcher));
+    TEST_ASSERT_TRUE(worker.start());
+
+    worker.post(Command{CmdType::RunNow});
+    const bool finished = wait_until([&] {
+        WorkerState s = worker.snapshot();
+        return s.running == false && s.last_message.find("обход завершён") != std::string::npos;
+    });
+    TEST_ASSERT_TRUE(finished);
+
+    const WorkerState state = worker.snapshot();
+    TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(3));
+    for (const auto& a : state.articles) {
+        // Ссылка — конкретная статья, а не главная страница.
+        TEST_ASSERT(a.url.find("https://news.example/news/") == 0);
+        // Картинка — своя у статьи (og:image), а не логотип листинга.
+        TEST_ASSERT(a.source_image.find("https://news.example/img/") == 0);
+        // Дата публикации оригинала распознана.
+        TEST_ASSERT(a.published_at > 0);
+    }
+    // Свежие сверху (сортировка по published_at): 10:00 → 08:00.
+    TEST_ASSERT(state.articles[0].published_at >= state.articles[2].published_at);
+
+    worker.stop_and_join();
+}
+
+REGISTER_TEST(test_worker_crawls_listing_uses_article_image_and_url);
+
 // Сбой модели (rate limit) на шаге SEO не должен ронять статью: она
 // публикуется без SEO-мета, но это отражается в итоге обхода («без SEO»).
 static void test_worker_reports_seo_missing() {

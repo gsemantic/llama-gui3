@@ -115,6 +115,18 @@ std::string iso8601_now() {
     return buf;
 }
 
+std::string iso8601_of(std::int64_t sec) {
+    if (sec <= 0) return "";
+    const std::time_t t = static_cast<std::time_t>(sec);
+    std::tm tm_utc{};
+    gmtime_r(&t, &tm_utc);
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+                  tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
+    return buf;
+}
+
 // ============================================================================
 // Разбор времени ленты (RFC 822 / ISO 8601)
 // ============================================================================
@@ -254,12 +266,32 @@ std::string host_of(const std::string& url) {
     return host.empty() ? url : host;
 }
 
+std::string resolve_url(const std::string& url, const std::string& base) {
+    if (url.empty() || base.empty()) return url;
+    if (url.find("://") != std::string::npos) return url;
+    if (url.size() >= 2 && url[0] == '/' && url[1] == '/') {  // //host/path
+        const std::size_t s = base.find("://");
+        if (s == std::string::npos) return url;
+        return base.substr(0, s + 3) + url.substr(2);
+    }
+    const std::size_t s = base.find("://");
+    if (s == std::string::npos) return url;
+    const std::size_t he = base.find('/', s + 3);
+    const std::string origin = he == std::string::npos ? base : base.substr(0, he);
+    if (!url.empty() && url[0] == '/') return origin + url;   // /path
+    const std::size_t ls = base.rfind('/');
+    const std::string dir = ls != std::string::npos ? base.substr(0, ls + 1)
+                                                    : origin + "/";
+    return dir + url;
+}
+
 Json article_to_json(const Article& a) {
     Json j = Json::object();
     j["id"] = a.id;
     j["url"] = a.url;
     j["source"] = a.source;
     j["fetched_at"] = a.fetched_at;
+    if (a.published_at > 0) j["published_at"] = a.published_at;
     j["title_original"] = a.title_original;
     j["body_original"] = a.body_original;
     j["title_rewritten"] = a.title_rewritten;
@@ -267,7 +299,9 @@ Json article_to_json(const Article& a) {
     j["language"] = a.language;
     j["content_hash"] = a.content_hash;
     // Авто-SEO и заглавное изображение (заполняются конвейером, могут быть пусты).
-    if (!a.source_image.empty()) j["source_image"] = a.source_image;
+    // URL картинки резолвим в абсолютный при сохранении (в источнике он часто
+    // относительный), чтобы переиздание и локальный просмотр работали.
+    if (!a.source_image.empty()) j["source_image"] = resolve_url(a.source_image, a.url);
     if (!a.seo_focus_keyword.empty()) j["seo_focus_keyword"] = a.seo_focus_keyword;
     if (!a.seo_meta_description.empty()) j["seo_meta_description"] = a.seo_meta_description;
     if (!a.seo_title.empty()) j["seo_title"] = a.seo_title;

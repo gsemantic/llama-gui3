@@ -102,17 +102,21 @@ bool Storage::save_article_md(const Article& a) {
     md += "# " + title + "\n\n";
 
     // Заглавное изображение из источника (если есть) с alt = ключевое слово
-    // модели (SEO). Пустой alt оставляем только если ключевое слово не задано.
+    // модели (SEO). URL резолвим в абсолютный (в источнике он часто
+    // относительный), иначе ссылка в .md будет битой.
     if (!a.source_image.empty()) {
         const std::string alt = a.seo_focus_keyword.empty()
                                     ? title : a.seo_focus_keyword;
-        md += "![" + alt + "](" + a.source_image + ")\n\n";
+        md += "![" + alt + "](" + resolve_url(a.source_image, a.url) + ")\n\n";
     }
 
     if (!body.empty()) {
         md += body + "\n\n";
     }
     md += "Источник: " + a.url + "\n";
+    if (a.published_at > 0) {
+        md += "Дата оригинала: " + iso8601_of(a.published_at) + "\n";
+    }
     md += "Дата: " + a.fetched_at + "\n";
 
     // SEO-мета (заполняется авто-SEO, если включено).

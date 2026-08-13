@@ -30,7 +30,8 @@ struct Article {
     std::string id;              // sha256(url)
     std::string url;
     std::string source;          // метка источника
-    std::string fetched_at;      // ISO-8601 UTC
+    std::string fetched_at;      // ISO-8601 UTC (когда плагин забрал статью)
+    std::int64_t published_at = 0;  // время публикации оригинала (Unix UTC), 0 = неизвестно
     std::string title_original;
     std::string body_original;
     std::string title_rewritten;
@@ -52,6 +53,9 @@ std::string sha256_hex(const std::string& data);
 // Текущее время UTC в ISO-8601, напр. "2026-08-08T12:00:00Z".
 std::string iso8601_now();
 
+// То же для заданного момента (Unix UTC секунды). 0 → пустая строка.
+std::string iso8601_of(std::int64_t sec);
+
 // Разбор времени публикации ленты: RFC 822 ("Sat, 08 Aug 2026 11:51:47 +0300")
 // или ISO 8601 ("2026-08-08T11:51:47Z"). Возвращает секунды с эпохи (UTC)
 // или 0, если строка не распознана.
@@ -59,6 +63,12 @@ std::int64_t parse_feed_time(const std::string& s);
 
 // Метка источника из URL (хост без схемы и порта).
 std::string host_of(const std::string& url);
+
+// Делает относительный/протокол-относительный URL абсолютным по базе страницы.
+// Если url уже абсолютный (содержит "://") или base пуст — возвращает url как
+// есть. Используется, чтобы заглавное изображение из источника (часто
+// относительное) корректно сохранялось и публиковалось.
+std::string resolve_url(const std::string& url, const std::string& base);
 
 // Сериализация статьи в JSON (общая для Storage и Sink-ов).
 Json article_to_json(const Article& a);

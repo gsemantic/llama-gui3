@@ -86,6 +86,60 @@ static void test_storage_save_json_and_md() {
     TEST_ASSERT(p_src < p_date);
 }
 
+// Относительный URL заглавного изображения резолвится в абсолютный при
+// сохранении .md (и JSON), иначе ссылка на фото в локальном файле битая.
+static void test_storage_resolves_relative_image_url() {
+    TempDir tmp;
+    Storage s;
+    TEST_ASSERT_TRUE(s.init(tmp.path()));
+
+    Article a = make_article("https://test.example/news/1", "Заголовок", "Текст");
+    a.source_image = "/img/hero.jpg";   // относительный путь из источника
+    TEST_ASSERT_TRUE(s.save_article_json(a));
+    TEST_ASSERT_TRUE(s.save_article_md(a));
+
+    std::ifstream in(s.article_md_path(a));
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // В .md — абсолютный URL, а не сырой относительный.
+    TEST_ASSERT(content.find("https://test.example/img/hero.jpg)") != std::string::npos);
+    TEST_ASSERT(content.find("](/img/hero.jpg)") == std::string::npos);
+
+    // И в JSON сохранён абсолютный URL.
+    std::ifstream jin(s.article_json_path(a));
+    std::string jraw((std::istreambuf_iterator<char>(jin)), std::istreambuf_iterator<char>());
+    bool ok = false;
+    Json j = Json::parse(jraw, &ok);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL(std::string(j["source_image"].as_string()),
+                      "https://test.example/img/hero.jpg");
+}
+
+// Дата публикации оригинала попадает в .md («Дата оригинала:») и в JSON,
+// чтобы в выходной статье было видно, когда новость вышла в источнике.
+static void test_storage_includes_original_date() {
+    TempDir tmp;
+    Storage s;
+    TEST_ASSERT_TRUE(s.init(tmp.path()));
+
+    Article a = make_article("https://test.example/news/1", "Заголовок", "Текст");
+    a.published_at = 1755000000;   // 2025-08-12T12:00:00Z
+    TEST_ASSERT_TRUE(s.save_article_json(a));
+    TEST_ASSERT_TRUE(s.save_article_md(a));
+
+    std::ifstream in(s.article_md_path(a));
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    TEST_ASSERT(content.find("Дата оригинала: 2025-08-12T12:00:00Z") !=
+                std::string::npos);
+
+    std::ifstream jin(s.article_json_path(a));
+    std::string jraw((std::istreambuf_iterator<char>(jin)), std::istreambuf_iterator<char>());
+    bool ok = false;
+    Json j = Json::parse(jraw, &ok);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT(!j["published_at"].is_null());
+    TEST_ASSERT_EQUAL(j["published_at"].as_int(), static_cast<std::int64_t>(1755000000));
+}
+
 static void test_storage_index_roundtrip() {
     TempDir tmp;
     Storage s;
@@ -175,6 +229,8 @@ static void test_sink_registry() {
 
 REGISTER_TEST(test_storage_init_and_dirs);
 REGISTER_TEST(test_storage_save_json_and_md);
+REGISTER_TEST(test_storage_resolves_relative_image_url);
+REGISTER_TEST(test_storage_includes_original_date);
 REGISTER_TEST(test_storage_index_roundtrip);
 REGISTER_TEST(test_storage_state_roundtrip);
 REGISTER_TEST(test_storage_duplicate_by_id);

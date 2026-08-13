@@ -689,7 +689,7 @@ bool has_noise_class(const std::string& tag) {
     static const char* kBad[] = {
         "sidebar", "side-bar", "side_bar", "widget", "banner", "promo",
         "advert", "ad-", "-ad", "sponsor", "rightcol", "right-col",
-        "rightcolumn", "rail", "aside", "popular", "most-read",
+        "rightcolumn", "rail", "popular", "most-read",
         "recommended", "related", "teaser",
         // Баннеры согласия на cookies / приватность / подписка / модалки:
         // часто единственный «связный» кусок текста на странице, который иначе
@@ -698,9 +698,19 @@ bool has_noise_class(const std::string& tag) {
         "policy", "terms", "subscribe", "newsletter", "modal", "overlay",
         "dialog", "popup"
     };
+    // Контейнеры основного контента никогда не считаем шумом, даже если в
+    // составном class случайно встречается слово из kBad (пример:
+    // «content__main_with-aside» содержит «aside», но это главная колонка с
+    // новостями, а не сайдбар). Без этой защиты полностью вырезается лента.
+    static const char* kKeep[] = {
+        "content", "article", "post", "news", "entry", "story"
+    };
     const std::string cls = get_attr(tag, "class") + " " + get_attr(tag, "id") +
                             " " + get_attr(tag, "role");
     if (cls.empty()) return false;
+    for (const char* k : kKeep) {
+        if (cls.find(k) != std::string::npos) return false;
+    }
     for (const char* b : kBad) {
         if (cls.find(b) != std::string::npos) return true;
     }
@@ -845,6 +855,36 @@ ExtractedArticle extract_from_description(const std::string& desc) {
     result.image = extract_image_url(desc);
     return result;
 }
+
+std::string first_content_image(const std::string& html) {
+    // Декоративные/служебные картинки, которые не являются фото статьи.
+    static const char* kSkip[] = {
+        "logo", "icon", "og-images", "og_image", "preview", "social",
+        "teaser", "watermark", "wm_", "spacer", "sprite", "placeholder",
+        "banner", "advert", "pixel", "blank", "1x1", "tracking", "avatar"
+    };
+    std::size_t pos = 0;
+    while ((pos = html.find("<img", pos)) != std::string::npos) {
+        const std::size_t gt = html.find('>', pos);
+        if (gt == std::string::npos) break;
+        const std::string tag = html.substr(pos, gt - pos + 1);
+        std::string src = get_attr(tag, "src");
+        if (src.empty()) src = get_attr(tag, "data-src");
+        if (src.empty()) src = get_attr(tag, "data-lazy-src");
+        if (!src.empty() && src.find("data:") != 0) {
+            bool skip = false;
+            const std::string l = src;
+            for (const char* k : kSkip) {
+                if (l.find(k) != std::string::npos) { skip = true; break; }
+            }
+            if (!skip) return src;
+        }
+        pos = gt + 1;
+    }
+    return "";
+}
+
+
 
 namespace {
 
@@ -1066,7 +1106,13 @@ ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg)
     // План B: эвристика.
     result.title = extract_title(html);
     result.body = extract_body(html);
-    result.image = extract_image_url(html);
+    // Картинка: приоритет — первое содержательное фото из тела статьи
+    // (без логотипа сайта и наложения заголовка, которые обычно несёт
+    // og:image). og:image / twitter:image берём только как запасной вариант.
+    const std::string cleaned = strip_non_article_regions(html);
+    std::string img = first_content_image(cleaned);
+    if (img.empty()) img = extract_image_url(html);
+    result.image = img;
     return result;
 }
 

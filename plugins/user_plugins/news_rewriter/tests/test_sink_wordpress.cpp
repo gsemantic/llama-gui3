@@ -230,6 +230,51 @@ static void test_wp_sink_pages_skips_taxonomy() {
 REGISTER_TEST(test_wp_sink_custom_post_type);
 REGISTER_TEST(test_wp_sink_pages_skips_taxonomy);
 
+// Тело опубликованного поста содержит hero-картинку (встроенную <img>) и ссылку
+// на источник — иначе в выходной статье нет ни фото, ни ссылки (как в .md).
+static void test_wp_sink_includes_image_and_source_link() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    // Абсолютный URL картинки (на локальном сервере, чтобы не лезть в сеть).
+    const std::string img = srv.base_url() + "/img.jpg";
+    a.source_image = img;
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    // last_request накапливает ВСЕ запросы, поэтому тело поста тоже внутри.
+    const std::string req = srv.last_request();
+    // hero-картинка встроена в контент.
+    TEST_ASSERT(req.find("<img") != std::string::npos);
+    TEST_ASSERT(req.find(img) != std::string::npos);
+    // ссылка на источник в конце контента.
+    TEST_ASSERT(req.find("Источник: <a href=") != std::string::npos);
+    TEST_ASSERT(req.find("example.com</a>") != std::string::npos);
+}
+
+// Дата публикации оригинала попадает в тело опубликованного поста.
+static void test_wp_sink_includes_original_date() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.published_at = 1755000000;   // 2025-08-12T12:00:00Z
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("Дата оригинала: 2025-08-12T12:00:00Z") !=
+                std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_includes_image_and_source_link);
+REGISTER_TEST(test_wp_sink_includes_original_date);
+
 // Секрет берётся из .env, а не из params (конвенция проекта: секреты вне
 // settings.ini). Проверяем, что в заголовке — creds из .env, а не из params.
 static void test_wp_sink_credentials_from_env() {

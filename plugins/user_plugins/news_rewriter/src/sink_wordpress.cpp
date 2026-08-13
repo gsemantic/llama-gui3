@@ -247,7 +247,34 @@ public:
 
         const std::string endpoint = site_url_ + "/wp-json/wp/v2/" + post_type_;
         const std::string auth = base64_encode(user + ":" + pass);
-        const std::string html = body_to_html(article.body_rewritten);
+        // Заглавное изображение: ручной URL из параметров sink либо авто —
+        // картинка из источника (Article.source_image). Резолвим в абсолютный,
+        // т.к. в источнике оно часто относительное.
+        std::string image_url =
+            featured_image_.empty()
+                ? resolve_url(article.source_image, article.url)
+                : featured_image_;
+
+        // Тело статьи в HTML. До текста вставляем hero-картинку (как в .md у
+        // local_file), а в конец — ссылку на источник (чтобы в опубликованном
+        // посте были и фото, и ссылка, даже если featured-медиа не загрузилось).
+        std::string html = body_to_html(article.body_rewritten);
+        if (!image_url.empty()) {
+            const std::string alt = article.seo_focus_keyword.empty()
+                                        ? article.title_rewritten
+                                        : article.seo_focus_keyword;
+            html = "<p><img src=\"" + html_escape(image_url) + "\" alt=\"" +
+                   html_escape(alt) + "\"></p>\n" + html;
+        }
+        {
+            const std::string host = host_of(article.url);
+            html += "\n<p>Источник: <a href=\"" + html_escape(article.url) +
+                    "\">" + html_escape(host) + "</a></p>";
+        }
+        if (article.published_at > 0) {
+            html += "<p>Дата оригинала: " +
+                    html_escape(iso8601_of(article.published_at)) + "</p>";
+        }
 
         Json body = Json::object();
         body["title"] = article.title_rewritten;
@@ -328,10 +355,8 @@ public:
                  std::to_string(post_id) + " (HTTP 201) для " + article.url);
         }
 
-        // 7.3 — опциональная загрузка обложки: ручной URL из параметров sink,
-        // либо авто — заглавное изображение из источника (Article.source_image).
-        const std::string image_url =
-            featured_image_.empty() ? article.source_image : featured_image_;
+        // 7.3 — опциональная загрузка обложки (featured-медиа). image_url уже
+        // резолвлен выше (ручной из параметров либо абсолютный из источника).
         if (!image_url.empty() && post_id != 0) {
             // alt для обложки = ключевое слово модели (SEO), иначе заголовок.
             const std::string alt = article.seo_focus_keyword.empty()

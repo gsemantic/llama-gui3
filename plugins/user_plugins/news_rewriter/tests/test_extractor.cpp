@@ -337,4 +337,36 @@ static void test_extract_page_items_parses_textual_date() {
 REGISTER_TEST(test_extract_page_items_parses_time_datetime);
 REGISTER_TEST(test_extract_page_items_parses_textual_date);
 
+// Картинка статьи не должна быть логотипом сайта или og:image-превью с
+// наложением заголовка — берём первое содержательное фото из тела.
+static void test_first_content_image_skips_logo_and_og() {
+    const std::string html =
+        "<html><head><meta property='og:image' content='https://x/og-images/preview.jpg'>"
+        "</head><body>"
+        "<img src='/bitrix/logo.svg'>"
+        "<img src='/upload/iblock/7a4/foto_sezd.jpg'>"
+        "<img src='/upload/medialibrary/9b4/photo_1.jpg'>"
+        "</body></html>";
+    TEST_ASSERT_EQUAL(first_content_image(html), "/upload/iblock/7a4/foto_sezd.jpg");
+}
+REGISTER_TEST(test_first_content_image_skips_logo_and_og);
+
+// Регрессия: составной class вроде «content__main_with-aside» содержит слово
+// «aside», но это главная колонка с новостями, а не сайдбар. Его нельзя
+// вырезать — иначе вся лента теряется и страница обрабатывается как одна статья.
+static void test_strip_keeps_main_content_with_aside() {
+    const std::string html =
+        "<html><body>"
+        "<div class='content__main content__main_with-aside'>"
+        "<a href='/news/a1'>Первая новость про кота во Владимире</a>"
+        "<a href='/news/a2'>Вторая новость про пса во Владимире</a>"
+        "</div>"
+        "<div class='sidebar'><a href='/news/x'>Коротко</a></div>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT(items.size() >= 2u);
+}
+REGISTER_TEST(test_strip_keeps_main_content_with_aside);
+
 } // namespace

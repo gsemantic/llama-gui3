@@ -28,6 +28,12 @@ ExtractedArticle extract_from_description(const std::string& desc);
 // плотности текста (исключая nav/header/footer/aside/form и заголовки h1..h6).
 ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg);
 
+// Первое «содержательное» изображение статьи: пропускает логотипы, иконки,
+// превью для соцсетей (og/social/preview/teaser) и прочий декор, оставляя
+// чистое фото из тела материала. Используется extract_page вместо og:image,
+// который часто содержит наложение заголовка/логотипа сайта.
+std::string first_content_image(const std::string& html);
+
 // HTML-страница (в т.ч. список/категория) → один или несколько блоков статей.
 // Если страница — список (несколько <article> / повторяющихся ссылок на
 // новости), возвращает по одному ExtractedArticle на каждую найденную статью

@@ -16,6 +16,8 @@ kv_cache/
 bench_results/
 /news_rewriter/
 profiles/.env
+nr_wp_env_test/
+**/nr_wp_env_test/
 settings.ini
 conversation.json
 BACKUP_INFO.txt
