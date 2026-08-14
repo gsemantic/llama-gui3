@@ -73,7 +73,7 @@ static void test_extract_page_heuristic() {
         "<footer>Копирайт</footer>"
         "</body></html>";
     const SourceExtract cfg;
-    const ExtractedArticle ex = extract_page(html, cfg);
+    const ExtractedArticle ex = extract_page(html, "", cfg);
     TEST_ASSERT_EQUAL(ex.title, "Заголовок новости");
     TEST_ASSERT(ex.body.find("Первый абзац новости") != std::string::npos ||
                 ex.body.find("Второй абзац") != std::string::npos);
@@ -92,7 +92,7 @@ static void test_extract_page_markers() {
     SourceExtract cfg;
     cfg.title_marker = "<span class=\"title\">";
     cfg.body_marker = "<div class=\"content\">";
-    const ExtractedArticle ex = extract_page(html, cfg);
+    const ExtractedArticle ex = extract_page(html, "", cfg);
     TEST_ASSERT_EQUAL(ex.title, "Маркерный заголовок");
     TEST_ASSERT(ex.body.find("Текст по маркеру") != std::string::npos);
 }
@@ -101,12 +101,12 @@ static void test_extract_page_marker_only_body() {
     const std::string html = "<html><body><div class=\"content\">Только текст тела.</div></body></html>";
     SourceExtract cfg;
     cfg.body_marker = "<div class=\"content\">";
-    const ExtractedArticle ex = extract_page(html, cfg);
+    const ExtractedArticle ex = extract_page(html, "", cfg);
     TEST_ASSERT(ex.body.find("Только текст тела") != std::string::npos);
 }
 
 static void test_extract_page_empty_html() {
-    const ExtractedArticle ex = extract_page("", SourceExtract{});
+    const ExtractedArticle ex = extract_page("", "", SourceExtract{});
     TEST_ASSERT_TRUE(ex.title.empty());
     TEST_ASSERT_TRUE(ex.body.empty());
 }
@@ -125,7 +125,7 @@ static void test_extract_body_skips_nav_footer() {
         "<aside>Реклама и прочая боковая информация, не относящаяся к статье.</aside>"
         "<footer>© 2024 Новости. Все права защищены.</footer>"
         "</body></html>";
-    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
     TEST_ASSERT_EQUAL(ex.title, "Новая разработка в отрасли");
     TEST_ASSERT(ex.body.find("Главная") == std::string::npos);
     TEST_ASSERT(ex.body.find("Политика") == std::string::npos);
@@ -146,7 +146,7 @@ static void test_extract_body_merges_paragraphs() {
         "<p>Второй абзац статьи, тоже длинный и содержательный, продолжает материал дальше.</p>"
         "<p>Третий абзац статьи, не менее длинный, завершает основное содержание.</p>"
         "</body></html>";
-    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
     TEST_ASSERT(ex.body.find("Первый абзац статьи") != std::string::npos);
     TEST_ASSERT(ex.body.find("Второй абзац статьи") != std::string::npos);
     TEST_ASSERT(ex.body.find("Третий абзац статьи") != std::string::npos);
@@ -159,7 +159,7 @@ static void test_extract_body_prefers_dense_text() {
         "<p>12:45 2024 © # %% 13</p>"
         "<p>Основной текст новости, который действительно нужно извлечь, содержит связное предложение.</p>"
         "</body></html>";
-    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
     TEST_ASSERT(ex.body.find("Основной текст новости") != std::string::npos);
     TEST_ASSERT(ex.body.find("12:45") == std::string::npos);
 }
@@ -171,7 +171,7 @@ static void test_extract_body_single_block() {
         "Здесь весь текст статьи умещается в один большой блок без отдельных абзацев, "
         "и extractor должен вернуть его целиком, не потеряв ни одного слова."
         "</div></body></html>";
-    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
     TEST_ASSERT(ex.body.find("весь текст статьи") != std::string::npos);
     TEST_ASSERT(ex.body.find("не потеряв ни одного слова") != std::string::npos);
 }
@@ -192,7 +192,7 @@ static void test_extract_body_excludes_cookie_banner() {
         "чтобы улучшить работу сайта. Продолжая, вы соглашаетесь с политикой конфиденциальности."
         "</div>"
         "</body></html>";
-    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
     TEST_ASSERT_EQUAL(ex.title, "Важная новость дня");
     TEST_ASSERT(ex.body.find("Первый абзац основной новости") != std::string::npos);
     TEST_ASSERT(ex.body.find("Второй абзац") != std::string::npos);
@@ -208,7 +208,7 @@ static void test_extract_body_excludes_title() {
         "<h1>Заголовок статьи</h1>"
         "<p>Единственный абзац основного текста, который должен быть извлечён как тело.</p>"
         "</body></html>";
-    const ExtractedArticle ex = extract_page(html, SourceExtract{});
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
     TEST_ASSERT_EQUAL(ex.title, "Заголовок статьи");
     TEST_ASSERT(ex.body.find("Единственный абзац") != std::string::npos);
     TEST_ASSERT(ex.body.find("Заголовок статьи") == std::string::npos);

@@ -103,6 +103,17 @@ void render_settings(UiDeps& deps, Config& draft) {
         std::snprintf(label, sizeof(label), "##src_en_%zu", i);
         ImGui::Checkbox(label, &s.enabled);
         ImGui::SameLine();
+        // Предпросмотр (разведка) — только для type="page".
+        std::snprintf(label, sizeof(label), "##src_preview_%zu", i);
+        if (ImGui::Checkbox(label, &s.preview)) {
+            if (s.preview && s.type != "page") s.type = "page";
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Предпросмотр (разведка): для страниц — перед "
+                              "рерайтом показать текст/фото и дождаться "
+                              "подтверждения. Только для type=page.");
+        }
+        ImGui::SameLine();
         std::snprintf(label, sizeof(label), "##src_type_%zu", i);
         ImGui::SetNextItemWidth(70.0f);
         combo_type(label, s.type);
@@ -110,7 +121,7 @@ void render_settings(UiDeps& deps, Config& draft) {
         std::snprintf(label, sizeof(label), "##src_url_%zu", i);
         char url[2048];
         std::snprintf(url, sizeof(url), "%s", s.url.c_str());
-        ImGui::SetNextItemWidth(-90.0f);
+        ImGui::SetNextItemWidth(-120.0f);
         if (ImGui::InputText(label, url, sizeof(url))) s.url = url;
         ImGui::SameLine();
         llama_gui::ui::InputTextContextMenu();
@@ -447,6 +458,9 @@ void render_news_rewriter_window(UiDeps& deps) {
         }
     } else {
         if (ImGui::Button("Обойти сейчас")) {
+            // Применяем текущие правки из UI к воркеру (иначе несохранённый
+            // чекбокс «превью» и пр. не подействовали бы до нажатия «Сохранить»).
+            if (deps.on_save) deps.on_save(draft);
             deps.worker->post(Command{CmdType::RunNow});
         }
     }
@@ -493,6 +507,63 @@ void render_news_rewriter_window(UiDeps& deps) {
 
     ImGui::EndChild();
     ImGui::End();
+
+    // Окно предпросмотра (режим разведки): показываем пользователю, что именно
+    // пойдёт в рерайт — ссылку на фото и фрагмент текста — и ждём решения.
+    // Поля — read-only InputText, чтобы текст можно было выделить и скопировать
+    // (Ctrl+C / ПКМ → Copy), в отличие от невыделяемого ImGui::Text.
+    if (state.proposal_active && deps.worker) {
+        ImGui::SetNextWindowSize(ImVec2(560, 460), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Предпросмотр извлечения##preview",
+                         nullptr, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::TextDisabled("Источник: %s", state.proposal.source_url.c_str());
+            ImGui::Text("Вариант %d из %d", state.proposal.candidate_index,
+                        state.proposal.candidate_total);
+            ImGui::Separator();
+
+            ImGui::TextUnformatted("Заголовок (выделите и скопируйте, Ctrl+C):");
+            {
+                char buf[4096];
+                std::snprintf(buf, sizeof(buf), "%s", state.proposal.title.c_str());
+                ImGui::InputText("##pv_title", buf, sizeof(buf),
+                                ImGuiInputTextFlags_ReadOnly);
+                llama_gui::ui::InputTextContextMenu();
+            }
+            ImGui::Separator();
+
+            ImGui::TextUnformatted("Фото (ссылка, выделите и скопируйте, Ctrl+C):");
+            {
+                char buf[8192];
+                std::snprintf(buf, sizeof(buf), "%s", state.proposal.image.c_str());
+                ImGui::InputText("##pv_image", buf, sizeof(buf),
+                                ImGuiInputTextFlags_ReadOnly);
+                llama_gui::ui::InputTextContextMenu();
+            }
+            ImGui::Separator();
+
+            ImGui::TextUnformatted("Текст (первые 600 символов, выделите и скопируйте):");
+            {
+                char buf[8192];
+                std::snprintf(buf, sizeof(buf), "%s", state.proposal.body_preview.c_str());
+                ImGui::InputTextMultiline("##pv_body", buf, sizeof(buf),
+                                          ImVec2(-1.0f, 150),
+                                          ImGuiInputTextFlags_ReadOnly);
+                llama_gui::ui::InputTextContextMenu();
+            }
+            ImGui::Separator();
+
+            if (ImGui::Button("Одобрить##preview_approve")) {
+                deps.worker->proposal_reply(Worker::ProposalResp::Approve);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Пересчитать##preview_reject")) {
+                deps.worker->proposal_reply(Worker::ProposalResp::Reject);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("Пересчитать — следующий вариант извлечения");
+        }
+        ImGui::End();
+    }
 }
 
 } // namespace news_rewriter

@@ -199,6 +199,18 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
         request_body["frequency_penalty"] = params.frequency_penalty;
     }
 
+    // GLM-4.7 и другие рассуждающие модели Zhipu по умолчанию включают режим
+    // thinking и тратят лимит токенов на reasoning_content, из-за чего поле
+    // content приходит пустым (finish_reason:"length"). Для задач рерайта
+    // рассуждения не нужны — отключаем их и гарантируем достаточный бюджет
+    // выходных токенов, чтобы ответ поместился целиком.
+    if (params.model.find("glm") != std::string::npos) {
+        request_body["thinking"] = nlohmann::json::object({{"type", "disabled"}});
+        if (params.max_tokens > 0 && params.max_tokens < 8192) {
+            request_body["max_tokens"] = 8192;
+        }
+    }
+
     request_body["stream"] = params.stream;
 
     return request_body.dump();

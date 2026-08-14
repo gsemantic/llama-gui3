@@ -26,7 +26,9 @@ ExtractedArticle extract_from_description(const std::string& desc);
 // Если в cfg заданы маркеры — берётся текст между ними; иначе эвристика:
 // заголовок из <h1>/<title>, тело — самый длинный связный набор «прозы» по
 // плотности текста (исключая nav/header/footer/aside/form и заголовки h1..h6).
-ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg);
+// base_url нужен, чтобы резолвить относительные ссылки на фото в абсолютные.
+ExtractedArticle extract_page(const std::string& html, const std::string& base_url,
+                              const SourceExtract& cfg);
 
 // Первое «содержательное» изображение статьи: пропускает логотипы, иконки,
 // превью для соцсетей (og/social/preview/teaser) и прочий декор, оставляя
@@ -42,7 +44,28 @@ std::string first_content_image(const std::string& html);
 // ссылок. Вызывающий (worker) для каждого элемента с непустым url подгружает
 // реальную страницу статьи и извлекает полный текст.
 std::vector<ExtractedArticle> extract_page_items(const std::string& html,
-                                                const std::string& base_url,
-                                                const SourceExtract& cfg);
+                                                 const std::string& base_url,
+                                                 const SourceExtract& cfg);
+
+// Один кандидат извлечения для режима разведки (предпросмотра). Отличается от
+// ExtractedArticle тем, что несёт идентификатор стратегии и оценку качества,
+// чтобы UI мог предложить пользователю несколько вариантов «текст + фото» и
+// запомнить, какой из них был одобрен.
+struct ExtractionProposal {
+    ExtractedArticle article;     // title/body/image как в обычном извлечении
+    int strategy = 0;             // id стратегии (0..N)
+    std::string strategy_name;    // человекочитаемое имя (для лога/UI)
+    double score = 0.0;          // оценка «объёма» текста (для сортировки)
+};
+
+// Несколько вариантов извлечения одной страницы (type="page") для режима
+// предпросмотра. Каждый вариант — самостоятельная стратегия (разные источники
+// заголовка/обложки), что даёт пользователю реальный выбор при «разведке»
+// незнакомой вёрстки. Маркеры в cfg (body_marker/title_marker) дают ровно один
+// детерминированный вариант. base_url нужен для резолва относительных ссылок.
+std::vector<ExtractionProposal> extract_page_candidates(
+    const std::string& html,
+    const std::string& base_url,
+    const SourceExtract& cfg);
 
 } // namespace news_rewriter

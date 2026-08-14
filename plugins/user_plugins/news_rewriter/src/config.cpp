@@ -25,6 +25,7 @@ Json source_to_json(const SourceConfig& s) {
     extract["title_marker"] = s.extract.title_marker;
     extract["body_marker"] = s.extract.body_marker;
     j["extract"] = extract;
+    j["preview"] = s.preview;
     return j;
 }
 
@@ -36,6 +37,7 @@ SourceConfig source_from_json(const Json& j) {
     const Json& e = j.get("extract");
     s.extract.title_marker = e.get("title_marker").as_string();
     s.extract.body_marker = e.get("body_marker").as_string();
+    s.preview = j.get("preview").as_bool(false);
     return s;
 }
 
@@ -53,6 +55,7 @@ Json config_to_json(const Config& cfg) {
     rewrite["tone"] = cfg.rewrite.tone;
     rewrite["prompt_template"] = cfg.rewrite.prompt_template;
     rewrite["max_words"] = cfg.rewrite.max_words;
+    rewrite["max_input_chars"] = cfg.rewrite.max_input_chars;
     Json seo = Json::object();
     seo["enabled"] = cfg.rewrite.seo.enabled;
     seo["combine_with_rewrite"] = cfg.rewrite.seo.combine_with_rewrite;
@@ -102,6 +105,8 @@ Config config_from_json(const Json& j) {
             rewrite.get("prompt_template").as_string(cfg.rewrite.prompt_template);
         cfg.rewrite.max_words =
             static_cast<int>(rewrite.get("max_words").as_int(cfg.rewrite.max_words));
+        cfg.rewrite.max_input_chars =
+            static_cast<int>(rewrite.get("max_input_chars").as_int(cfg.rewrite.max_input_chars));
         const Json& seo = rewrite.get("seo");
         if (seo.is_object()) {
             cfg.rewrite.seo.enabled = seo.get("enabled").as_bool(cfg.rewrite.seo.enabled);

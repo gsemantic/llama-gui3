@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <fstream>
 #include <set>
 #include <vector>
 
@@ -55,6 +56,16 @@ void Worker::post(Command cmd) {
         queue_.push(std::move(cmd));
     }
     cv_.notify_all();
+    // Будим ожидание предпросмотра (на случай Stop/отмены во время разведки).
+    proposal_cv_.notify_all();
+}
+
+void Worker::proposal_reply(ProposalResp r) {
+    {
+        std::lock_guard<std::mutex> lock(proposal_mutex_);
+        proposal_response_ = r;
+    }
+    proposal_cv_.notify_all();
 }
 
 void Worker::set_config(const Config& cfg) {
@@ -84,13 +95,21 @@ void Worker::set_fetcher(std::unique_ptr<IFetch> fetcher) {
 
 void Worker::set_llm(LlmFn llm) {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    llm_ = std::move(llm);
+    // Оборачиваем вызов LLM паузой, чтобы не «долбить» облако подряд и не
+    // упираться в лимит частоты провайдера (429) при обходе списка новостей.
+    llm_ = [this, base = std::move(llm)](const std::string& p, std::string& out,
+                                         std::string& err) -> bool {
+        if (llm_call_interval_ > std::chrono::milliseconds(0))
+            std::this_thread::sleep_for(llm_call_interval_);
+        return base(p, out, err);
+    };
 }
 
 void Worker::set_data_dir(const std::string& data_dir) {
     std::lock_guard<std::mutex> lock(data_mutex_);
     data_dir_ = data_dir;
     if (!data_dir.empty()) storage_.init(data_dir);
+    load_learned();
 }
 
 void Worker::set_retry_policy(const RetryPolicy& retry) {
@@ -655,6 +674,21 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
     remove_stale_source_error(src.url);
 
     if (src.type == "page") {
+        // Режим предпросмотра (разведки): вместо авто-извлечения и сразу рерайта
+        // сначала предлагаем пользователю варианты текста/фото и ждём явного
+        // одобрения. Старый (без подтверждения) поток этим не затрагивается.
+        if (src.preview) {
+            const bool ok = recon_and_confirm(cfg, src, res.html);
+            if (!ok && !cancel_.load()) {
+                Article a = make_source_article();
+                a.status = TaskStatus::Error;
+                a.retry_count = retries;
+                a.error = "предпросмотр: варианты не одобрены";
+                set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
+            }
+            return true;  // пользовательское решение — повторять бессмысленно
+        }
+
         // Страница может быть либо одной статьёй, либо списком/категорией.
         // extract_page_items возвращает 1 элемент для одиночной статьи и N —
         // для списка (каждый со своим url/заголовком/картинкой).
@@ -684,7 +718,8 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             const ExtractedArticle& ex = items.front();
             a.title_original = ex.title;
             a.body_original = ex.body;
-            a.source_image = ex.image;
+            // Относительную ссылку на фото резолвим в абсолютную по URL источника.
+            a.source_image = resolve_url(ex.image, src.url);
             a.content_hash =
                 sha256_hex(a.title_original + "\n" + a.body_original);
             if (!export_article(cfg, a)) {
@@ -765,9 +800,11 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             ExtractedArticle ex = item;
             if (!item.url.empty()) {
                 const FetchResult ar = fetcher_->fetch(item.url, "page", cfg.network);
-                if (ar.ok) ex = extract_page(ar.html, src.extract);
+                if (ar.ok) ex = extract_page(ar.html, item.url, src.extract);
                 // иначе оставляем сниппет с листинга
             }
+            // Относительную ссылку на фото резолвим в абсолютную по URL статьи.
+            if (!ex.image.empty()) ex.image = resolve_url(ex.image, item.url);
             a.title_original = ex.title;
             a.body_original = ex.body;
             // Картинка: предпочитаем hero со страницы статьи, иначе с листинга.
@@ -836,6 +873,221 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
     log("источник: " + src.url + " — новостей: " + std::to_string(res.items.size()) +
         (cfg.max_items_per_source > 0 ? " (взято: " + std::to_string(accepted) + ")" : ""));
     return true;
+}
+
+std::string Worker::truncate(const std::string& s, std::size_t n) {
+    if (s.size() <= n) return s;
+    return s.substr(0, n) + "…";
+}
+
+void Worker::load_learned() {
+    learned_strategy_.clear();
+    if (data_dir_.empty()) return;
+    const std::string path = data_dir_ + "/news_rewriter/preview_schemas.json";
+    std::ifstream f(path);
+    if (!f) return;
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    bool ok = false;
+    std::string err;
+    const Json j = Json::parse(content, &ok, &err);
+    if (ok && j.is_object()) {
+        for (const std::string& k : j.keys()) {
+            learned_strategy_[k] = static_cast<int>(j.get(k).as_int(0));
+        }
+    }
+}
+
+void Worker::save_learned() {
+    if (data_dir_.empty()) return;
+    const std::string dir = data_dir_ + "/news_rewriter";
+    Json j = Json::object();
+    for (const auto& kv : learned_strategy_) j[kv.first] = kv.second;
+    std::ofstream f(dir + "/preview_schemas.json");
+    if (f) f << j.dump();
+}
+
+bool Worker::recon_and_confirm(const Config& cfg, const SourceConfig& src,
+                               const std::string& html) {
+    // Вспомогательная лямбда: показывает пользователю один вариант
+    // (заголовок/фото/текст) и ждёт решения. Возвращает ответ или None, если
+    // обход был прерван (тогда вызывающий видит cancel_).
+    auto present = [&](const ExtractedArticle& art, int index, int total,
+                       const std::string& strat) -> ProposalResp {
+        {
+            std::lock_guard<std::mutex> lk(data_mutex_);
+            state_.proposal_active = true;
+            state_.proposal.source_url = src.url;
+            state_.proposal.title = art.title;
+            state_.proposal.image = art.image;
+            state_.proposal.body_preview = truncate(art.body, 600);
+            state_.proposal.candidate_index = index;
+            state_.proposal.candidate_total = total;
+        }
+        log("предпросмотр: вариант " + std::to_string(index) + "/" +
+            std::to_string(total) + " (" + strat + ") — ожидание решения");
+        ProposalResp r;
+        {
+            std::unique_lock<std::mutex> lk(proposal_mutex_);
+            proposal_cv_.wait(
+                lk, [&] { return proposal_response_ != ProposalResp::None ||
+                                   cancel_.load(); });
+            r = proposal_response_;
+            proposal_response_ = ProposalResp::None;
+        }
+        {
+            std::lock_guard<std::mutex> lk(data_mutex_);
+            state_.proposal_active = false;
+        }
+        return r;
+    };
+
+    // Экспорт одобренной статьи (общий для списка и одиночной страницы).
+    auto export_approved = [&](const ExtractedArticle& art,
+                               const std::string& label) -> bool {
+        Article a;
+        a.url = art.url.empty() ? src.url : art.url;
+        a.id = sha256_hex(a.url);
+        a.source = host_of(src.url);
+        a.fetched_at = iso8601_now();
+        a.published_at = art.published_at;
+        a.language = cfg.rewrite.language;
+        a.status = TaskStatus::Extracting;
+        set_status(a, "предпросмотр: одобрено («" +
+                      (art.title.empty() ? a.url : art.title) + "»)");
+        a.title_original = art.title;
+        a.body_original = art.body;
+        a.source_image = art.image;  // ExtractedArticle.image → Article.source_image
+        a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
+        if (!export_article(cfg, a)) {
+            set_status(a, "ошибка обработки: " +
+                          (art.title.empty() ? a.url : art.title) + " — " + a.error);
+            return false;
+        }
+        set_status(a, "статья (предпросмотр): " +
+                      (a.title_original.empty() ? a.url : a.title_original));
+        return true;
+    };
+
+    // --- Режим списка: страница — это категория/лента из нескольких новостей.
+    // Каждая новость обрабатывается ОТДЕЛЬНО (свои заголовок/фото/дата), чтобы
+    // модель не «склеивала» их в один дайджест. ---
+    std::vector<ExtractedArticle> items = extract_page_items(html, src.url, src.extract);
+    std::vector<ExtractedArticle> list_items;
+    for (auto& it : items) {
+        if (!it.url.empty()) list_items.push_back(std::move(it));
+    }
+    // Дедуп по URL (как в обычном обходе).
+    {
+        std::vector<ExtractedArticle> uniq;
+        std::set<std::string> seen;
+        for (auto& it : list_items) {
+            const std::string u = strip_tracking_params(it.url);
+            if (seen.insert(u).second) uniq.push_back(std::move(it));
+        }
+        list_items = std::move(uniq);
+    }
+    // Ограничение числа новостей с источника (если задано).
+    if (cfg.max_items_per_source > 0 &&
+        static_cast<int>(list_items.size()) > cfg.max_items_per_source) {
+        list_items.resize(static_cast<std::size_t>(cfg.max_items_per_source));
+    }
+
+    if (list_items.size() >= 2) {
+        const int total = static_cast<int>(list_items.size());
+        log("предпросмотр: список из " + std::to_string(total) +
+            " новостей — каждая обрабатывается отдельно");
+        for (int i = 0; i < total; ++i) {
+            if (cancel_.load()) {
+                log("предпросмотр прерван пользователем");
+                return false;
+            }
+            ExtractedArticle cand = list_items[i];
+            // Подгружаем реальную страницу новости и извлекаем полный текст +
+            // свою hero-картинку; при сбое — сниппет с листинга.
+            ExtractedArticle full = cand;
+            if (!cand.url.empty()) {
+                const FetchResult ar = fetcher_->fetch(cand.url, "page", cfg.network);
+                if (ar.ok) full = extract_page(ar.html, cand.url, src.extract);
+            }
+            full.url = strip_tracking_params(cand.url);
+            full.image = full.image.empty() ? cand.image : full.image;
+            if (full.title.empty()) full.title = cand.title;
+            full.published_at = cand.published_at;
+
+            const ProposalResp r = present(full, i + 1, total, "новость из списка");
+            if (cancel_.load()) {
+                log("предпросмотр прерван пользователем");
+                return false;
+            }
+            // «Одобрить» — переписываем эту новость и идём к следующей; «Пересчитать»
+            // — пропускаем. Прогон идёт по ВСЕМУ списку за один раз, в конце
+            // завершается. Прервать в любой момент можно кнопкой «Остановить обход».
+            if (r == ProposalResp::Approve) {
+                if (!export_approved(full, "список")) return false;  // ошибка экспорта
+            }
+            // Reject (пересчёт) — просто переходим к следующей новости.
+        }
+        log("предпросмотр: список обработан («" + src.url + "»)");
+        return true;  // источник обработан (даже если все новости отклонены)
+    }
+
+    // --- Одиночная страница: несколько вариантов извлечения одной статьи. ---
+    std::vector<ExtractionProposal> cands =
+        extract_page_candidates(html, src.url, src.extract);
+    if (cands.empty()) {
+        Article a;
+        a.url = src.url;
+        a.id = sha256_hex(src.url);
+        a.source = host_of(src.url);
+        a.fetched_at = iso8601_now();
+        a.language = cfg.rewrite.language;
+        a.status = TaskStatus::Error;
+        a.error = "не удалось извлечь текст страницы";
+        set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
+        return false;
+    }
+
+    // Ставим «обученную» для этого хоста стратегию первой — чтобы при
+    // повторном предпросмотре сразу предложить одобренный ранее вариант.
+    const std::string host = host_of(src.url);
+    const auto lit = learned_strategy_.find(host);
+    if (lit != learned_strategy_.end()) {
+        for (std::size_t i = 0; i < cands.size(); ++i) {
+            if (cands[i].strategy == lit->second) {
+                std::swap(cands[0], cands[i]);
+                break;
+            }
+        }
+    }
+
+    const int total = static_cast<int>(cands.size());
+    int idx = 0;
+    while (idx < total) {
+        if (cancel_.load()) {
+            log("предпросмотр прерван пользователем");
+            return false;
+        }
+        const ExtractionProposal& p = cands[idx];
+        const ProposalResp r = present(p.article, idx + 1, total, p.strategy_name);
+        if (cancel_.load()) {
+            log("предпросмотр прерван пользователем");
+            return false;
+        }
+        if (r == ProposalResp::Approve) {
+            learned_strategy_[host] = p.strategy;
+            save_learned();
+            ExtractedArticle art = p.article;
+            art.url = src.url;
+            if (!export_approved(art, "одиночная страница")) return false;
+            return true;
+        }
+        // Reject (пересчёт) — следующий вариант извлечения.
+        ++idx;
+    }
+
+    log("предпросмотр: подходящих вариантов не найдено («" + src.url + "»)");
+    return false;
 }
 
 } // namespace news_rewriter

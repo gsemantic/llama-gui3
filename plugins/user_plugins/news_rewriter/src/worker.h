@@ -1,9 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -62,6 +64,19 @@ struct WorkerState {
     int error_count = 0;          // статей с ошибкой (последний обход)
     int seo_missing = 0;          // опубликовано без SEO-мета (модель не ответила на SEO)
     std::vector<ArticleStatusView> articles;
+
+    // Режим предпросмотра (разведки): воркер ждёт решения пользователя по
+    // извлечённому варианту. UI показывает фото+текст и кнопки «Одобрить» /
+    // «Пересчитать».
+    bool proposal_active = false;
+    struct ProposalView {
+        std::string source_url;     // источник (страница для разведки)
+        std::string title;          // извлечённый заголовок
+        std::string image;          // ссылка на фото (обложка)
+        std::string body_preview;   // первые N символов текста
+        int candidate_index = 0;    // какой вариант из N
+        int candidate_total = 0;
+    } proposal;
 };
 
 // Рабочий поток: очередь команд + конвейер fetch→extract→rewrite→sink.
@@ -70,6 +85,11 @@ struct WorkerState {
 class Worker {
 public:
     using LogFn = std::function<void(const std::string&)>;
+
+    // Решение пользователя по предложенному варианту извлечения (режим
+    // предпросмотра). Approve — использовать этот вариант; Reject — пересчитать
+    // (следующий вариант извлечения).
+    enum class ProposalResp { None, Approve, Reject };
 
     Worker();
     ~Worker();
@@ -91,6 +111,10 @@ public:
     void debug_force_schedule_due();      // тесты: авто-запуск немедленно
     void stop_and_join();
 
+    // Режим предпросмотра: ответ пользователя на предложенный вариант
+    // извлечения (вызывается из main-потока, UI).
+    void proposal_reply(ProposalResp r);
+
 private:
     void loop();
     void process_run(const Config& cfg);
@@ -105,6 +129,20 @@ private:
     void remove_stale_source_error(const std::string& url);
     void log(const std::string& msg);
     void set_status(const Article& a, const std::string& msg);
+
+    // Режим предпросмотра (разведки) для type="page": извлекает несколько
+    // вариантов текста/фото, предлагает их пользователю по одному; при
+    // одобрении — экспортирует выбранный вариант. Возвращает true, если статья
+    // успешно одобрена и обработана (или отменено без ошибки); false — не удалось
+    // извлечь ни одного варианта / пользователь отклонил все.
+    bool recon_and_confirm(const Config& cfg, const SourceConfig& src,
+                           const std::string& html);
+    // Загрузка/сохранение «обученной» стратегии извлечения по хосту (чтобы
+    // повторный предпросмотр для того же сайта сразу предлагал одобренный ранее
+    // вариант). Файл: <data_dir>/news_rewriter/preview_schemas.json.
+    void load_learned();
+    void save_learned();
+    std::string truncate(const std::string& s, std::size_t n);
 
     std::thread thread_;
     mutable std::mutex queue_mutex_;
@@ -121,6 +159,7 @@ private:
     LogFn log_callback_;
     std::unique_ptr<IFetch> fetcher_;
     LlmFn llm_;
+    std::chrono::milliseconds llm_call_interval_{1000};  // пауза между вызовами LLM
     RetryPolicy retry_policy_;            // только backoff-задержки (max_retries — из конфига)
     RetryPolicy llm_retry_policy_;        // ретраи рерайта: 1 + max_retries попыток, backoff
     std::string data_dir_;                // корень Storage (из path_data_dir хоста)
@@ -130,6 +169,17 @@ private:
     // SEO отключён на остаток обхода из-за rate-limit (чтобы не долбить
     // облако повторными SEO-вызовами и не расходовать квоту).
     std::atomic<bool> seo_skipped_{false};
+
+    // Канал ответа на предложенный вариант (режим предпросмотра). Отдельный от
+    // очереди команд, чтобы не конфликтовать с RunNow/Stop/ReloadConfig.
+    std::mutex proposal_mutex_;
+    std::condition_variable proposal_cv_;
+    ProposalResp proposal_response_ = ProposalResp::None;
+
+    // «Обученная» стратегия извлечения по хосту: host → id стратегии, которую
+    // пользователь одобрил в режиме предпросмотра. Позволяет при повторном
+    // предпросмотре того же сайта сразу предлагать правильный вариант.
+    std::map<std::string, int> learned_strategy_;
 };
 
 } // namespace news_rewriter

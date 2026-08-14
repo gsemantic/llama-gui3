@@ -304,7 +304,20 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body,
 
     curl_slist* headers = nullptr;
     headers = append_header_lines(headers, cfg.extra_headers, b.curl_slist_append);
-    headers = b.curl_slist_append(headers, "Content-Type: application/json");
+    // Дефолтный Content-Type только если вызывающий не задал свой. Иначе в
+    // запросе окажется ДВА Content-Type (напр. application/json + image/jpeg при
+    // заливке медиа), и WP отвергнет бинарный файл → картинка не попадёт в
+    // медиатеку и останется ссылкой на исходник.
+    bool has_content_type = false;
+    for (const std::string& h : extra_headers) {
+        if (!h.empty() && h.compare(0, 13, "Content-Type:") == 0) {
+            has_content_type = true;
+            break;
+        }
+    }
+    if (!has_content_type) {
+        headers = b.curl_slist_append(headers, "Content-Type: application/json");
+    }
     for (const std::string& h : extra_headers) {
         if (!h.empty()) headers = b.curl_slist_append(headers, h.c_str());
     }

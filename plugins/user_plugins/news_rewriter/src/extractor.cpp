@@ -1,8 +1,10 @@
 #include "extractor.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstdlib>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -590,6 +592,8 @@ ExtractedArticle item_fields_from_block(const std::string& block,
     it.url = first_anchor_href(block);
     if (!it.url.empty()) it.url = resolve_page_url(it.url, base);
     it.image = first_img_src(block);
+    if (!it.image.empty() && it.image.find("data:") != 0)
+        it.image = resolve_url(it.image, base);
     it.published_at = extract_published_at(block);
     return it;
 }
@@ -677,6 +681,8 @@ std::vector<ExtractedArticle> detect_anchor_items(const std::string& html,
         it.url = anchors[i].href;
         it.body = anchors[i].text;
         it.image = first_img_in_range(html, from, to);
+        if (!it.image.empty() && it.image.find("data:") != 0)
+            it.image = resolve_url(it.image, base);
         it.published_at = extract_published_at(html.substr(from, to - from));
         items.push_back(std::move(it));
     }
@@ -1074,7 +1080,8 @@ std::string extract_body(const std::string& html) {
 
 } // namespace
 
-ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg) {
+ExtractedArticle extract_page(const std::string& html, const std::string& base_url,
+                            const SourceExtract& cfg) {
     ExtractedArticle result;
 
     // План A: заданы маркеры — берём текст между ними.
@@ -1112,6 +1119,7 @@ ExtractedArticle extract_page(const std::string& html, const SourceExtract& cfg)
     const std::string cleaned = strip_non_article_regions(html);
     std::string img = first_content_image(cleaned);
     if (img.empty()) img = extract_image_url(html);
+    if (!img.empty() && img.find("data:") != 0) img = resolve_url(img, base_url);
     result.image = img;
     return result;
 }
@@ -1122,7 +1130,7 @@ std::vector<ExtractedArticle> extract_page_items(const std::string& html,
     // Маркеры заданы — это одна конкретная статья, возвращаем как есть.
     if (!cfg.body_marker.empty() || !cfg.title_marker.empty()) {
         std::vector<ExtractedArticle> v;
-        v.push_back(extract_page(html, cfg));
+        v.push_back(extract_page(html, base_url, cfg));
         return v;
     }
 
@@ -1140,8 +1148,92 @@ std::vector<ExtractedArticle> extract_page_items(const std::string& html,
 
     // Не список — вся страница как одна статья (поведение extract_page).
     std::vector<ExtractedArticle> single;
-    single.push_back(extract_page(cleaned, cfg));
+    single.push_back(extract_page(cleaned, base_url, cfg));
     return single;
+}
+
+std::vector<ExtractionProposal> extract_page_candidates(
+        const std::string& html,
+        const std::string& base_url,
+        const SourceExtract& cfg) {
+    std::vector<ExtractionProposal> out;
+
+    // Маркеры заданы — детерминированное извлечение, ровно один вариант.
+    if (!cfg.body_marker.empty() || !cfg.title_marker.empty()) {
+        ExtractionProposal p;
+        p.article = extract_page(html, base_url, cfg);
+        p.strategy = 0;
+        p.strategy_name = "маркеры";
+        p.score = static_cast<double>(letter_count(p.article.body));
+        out.push_back(std::move(p));
+        return out;
+    }
+
+    const std::string cleaned = strip_non_article_regions(html);
+
+    // Стратегия 0: полный авто (заголовок из h1/<title>, тело по density,
+    // обложка — первое содержательное фото из тела статьи).
+    {
+        ExtractionProposal p;
+        p.article.title = extract_title(html);
+        p.article.body = extract_body(html);
+        p.article.image = first_content_image(cleaned);
+        if (p.article.image.empty()) p.article.image = extract_image_url(html);
+        p.strategy = 0;
+        p.strategy_name = "авто (density + фото из тела)";
+        p.score = static_cast<double>(letter_count(p.article.body));
+        out.push_back(std::move(p));
+    }
+    // Стратегия 1: тот же текст, но обложка — og:image / twitter:image (герой-
+    // картинка сайта, часто несущая наложение заголовка/логотипа, которое
+    // first_content_image намеренно пропускает).
+    {
+        ExtractionProposal p = out.front();
+        p.article.image = extract_image_url(html);
+        p.strategy = 1;
+        p.strategy_name = "авто + обложка og:image";
+        out.push_back(std::move(p));
+    }
+    // Стратегия 2: заголовок из <title> страницы + текст по density. Полезно,
+    // когда h1 на странице — не заголовок статьи, а служебный (хлебные крошки).
+    {
+        ExtractionProposal p = out.front();
+        std::size_t t_open = html.find("<title");
+        if (t_open != std::string::npos) {
+            const std::size_t t_gt = html.find('>', t_open);
+            const std::size_t t_close = html.find("</title", t_gt);
+            if (t_gt != std::string::npos && t_close != std::string::npos) {
+                const std::string t =
+                    html_to_text(html.substr(t_gt + 1, t_close - t_gt - 1));
+                if (!t.empty()) p.article.title = t;
+            }
+        }
+        p.strategy = 2;
+        p.strategy_name = "заголовок <title> + текст (density)";
+        out.push_back(std::move(p));
+    }
+
+    // Относительные ссылки на фото (частый случай: "/upload/...") резолвим в
+    // абсолютные по базе страницы-источника, чтобы не дописывать домен вручную.
+    for (auto& p : out) {
+        if (!p.article.image.empty() && p.article.image.find("data:") != 0)
+            p.article.image = resolve_url(p.article.image, base_url);
+    }
+
+    // Лучшие по «объёму» текста — первыми (чаще всего это и есть статья).
+    std::stable_sort(out.begin(), out.end(),
+                    [](const ExtractionProposal& a, const ExtractionProposal& b) {
+                        return a.score > b.score;
+                    });
+
+    // Дедуп по (заголовок+тело), чтобы не предлагать одинаковые варианты.
+    std::vector<ExtractionProposal> uniq;
+    std::set<std::string> seen;
+    for (auto& p : out) {
+        const std::string key = p.article.title + "\n" + p.article.body;
+        if (seen.insert(key).second) uniq.push_back(std::move(p));
+    }
+    return uniq;
 }
 
 } // namespace news_rewriter

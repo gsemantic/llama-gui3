@@ -4,6 +4,15 @@
 
 namespace news_rewriter {
 
+// Обрезка текста до max байт с учётом многобайтовой (UTF-8) кодировки:
+// не разрываем символ посередине (откатываемся за продолжения 0x80..0xBF).
+std::string truncate_input(const std::string& s, int max) {
+    if (max <= 0 || static_cast<int>(s.size()) <= max) return s;
+    std::size_t cut = static_cast<std::size_t>(max);
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    return s.substr(0, cut);
+}
+
 std::string build_prompt(const Article& src, const RewriteConfig& cfg) {
     std::string prompt = cfg.prompt_template;
     const auto replace = [&prompt](const std::string& from, const std::string& to) {
@@ -14,7 +23,7 @@ std::string build_prompt(const Article& src, const RewriteConfig& cfg) {
         }
     };
     replace("{title}", src.title_original);
-    replace("{body}", src.body_original);
+    replace("{body}", truncate_input(src.body_original, cfg.max_input_chars));
     replace("{language}", cfg.language);
     replace("{tone}", cfg.tone);
     replace("{max_words}", cfg.max_words > 0 ? std::to_string(cfg.max_words) : "");

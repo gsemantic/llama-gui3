@@ -245,6 +245,8 @@ public:
             return false;
         }
 
+        NetworkConfig nc;
+        nc.timeout_seconds = timeout_;
         const std::string endpoint = site_url_ + "/wp-json/wp/v2/" + post_type_;
         const std::string auth = base64_encode(user + ":" + pass);
         // Заглавное изображение: ручной URL из параметров sink либо авто —
@@ -255,16 +257,33 @@ public:
                 ? resolve_url(article.source_image, article.url)
                 : featured_image_;
 
-        // Тело статьи в HTML. До текста вставляем hero-картинку (как в .md у
-        // local_file), а в конец — ссылку на источник (чтобы в опубликованном
-        // посте были и фото, и ссылка, даже если featured-медиа не загрузилось).
-        std::string html = body_to_html(article.body_rewritten);
+        // Заливаем картинку в медиабиблиотеку WP ДО создания поста, чтобы и
+        // обложка, и встроенное в текст фото ссылались на картинку с хостинга
+        // WP, а не на исходник источника. Если заливка не удалась — откатываемся
+        // на прямую ссылку на исходник (чтобы пост всё равно нес фото).
+        const std::string alt = article.seo_focus_keyword.empty()
+                                    ? article.title_rewritten
+                                    : article.seo_focus_keyword;
+        int media_id = 0;
+        std::string media_url;
         if (!image_url.empty()) {
-            const std::string alt = article.seo_focus_keyword.empty()
-                                        ? article.title_rewritten
-                                        : article.seo_focus_keyword;
-            html = "<p><img src=\"" + html_escape(image_url) + "\" alt=\"" +
-                   html_escape(alt) + "\"></p>\n" + html;
+            const auto m = upload_media(image_url, nc, user, pass, alt);
+            media_id = m.first;
+            media_url = m.second;
+        }
+
+        // Тело статьи в HTML. Hero-картинку вставляем в текст ТОЛЬКО если не
+        // удалось залить её в медиатеку WP (media_id == 0): тогда обложка
+        // (featured_media) не задана и пост бы остался без фото. Если заливка
+        // прошла — тема уже показывает изображение через featured_media, и
+        // дублировать его внутри текста (в оригинальном размере) не нужно.
+        std::string html = body_to_html(article.body_rewritten);
+        if (media_id == 0) {
+            const std::string hero_src = media_url.empty() ? image_url : media_url;
+            if (!hero_src.empty()) {
+                html = "<p><img src=\"" + html_escape(hero_src) + "\" alt=\"" +
+                       html_escape(alt) + "\"></p>\n" + html;
+            }
         }
         {
             const std::string host = host_of(article.url);
@@ -284,6 +303,8 @@ public:
         // Стабильный slug от источника (если не задан вручную в params),
         // чтобы дедуп по сайту мог надёжно находить ранее созданный пост.
         body["slug"] = slug_.empty() ? storage_.slug_for(article.url) : slug_;
+        // Обложка поста — id картинки, залитой в медиатеку WP выше.
+        if (media_id != 0) body["featured_media"] = static_cast<int64_t>(media_id);
         // Категории/теги поддерживают не все типы: стандартные «страницы»
         // (pages) их не принимают — WP вернёт 400. Для них не шлём таксономию.
         if (post_type_ != "pages") {
@@ -324,8 +345,6 @@ public:
             body["excerpt"] = article.seo_meta_description;
         }
 
-        NetworkConfig nc;
-        nc.timeout_seconds = timeout_;
         std::vector<std::string> headers = {
             "Content-Type: application/json",
             "Authorization: Basic " + auth};
@@ -355,15 +374,9 @@ public:
                  std::to_string(post_id) + " (HTTP 201) для " + article.url);
         }
 
-        // 7.3 — опциональная загрузка обложки (featured-медиа). image_url уже
-        // резолвлен выше (ручной из параметров либо абсолютный из источника).
-        if (!image_url.empty() && post_id != 0) {
-            // alt для обложки = ключевое слово модели (SEO), иначе заголовок.
-            const std::string alt = article.seo_focus_keyword.empty()
-                                        ? article.title_rewritten
-                                        : article.seo_focus_keyword;
-            upload_featured_media(post_id, image_url, nc, user, pass, alt);
-        }
+        // Обложка (featured_media) уже залита в медиатеку WP выше и привязана к
+        // посту через поле featured_media в теле запроса. Повторная заливка не
+        // нужна.
         return true;
     }
 
@@ -426,16 +439,21 @@ private:
         return 0;
     }
 
-    // Загружает картинку по URL в медиабиблиотеку WP и ставит обложкой поста.
-    // alt — alt-текст обложки (обычно ключевое слово модели из SEO-шага).
-    void upload_featured_media(int post_id, const std::string& image_url,
-                                const NetworkConfig& nc, const std::string& user,
-                                const std::string& pass, const std::string& alt = "") {
+    // Загружает картинку по URL в медиабиблиотеку WP и возвращает
+    // (media_id, source_url). source_url — это уже адрес картинки на хостинге
+    // WP (а не исходник источника), его и нужно вставлять в текст поста и
+    // использовать как обложку. alt — alt-текст обложки (обычно ключевое слово
+    // модели из SEO-шага).
+    std::pair<int, std::string> upload_media(const std::string& image_url,
+                                              const NetworkConfig& nc,
+                                              const std::string& user,
+                                              const std::string& pass,
+                                              const std::string& alt = "") {
+        std::pair<int, std::string> none{0, ""};
         HttpResponse img = client_.get(image_url, nc);
         if (!img.ok || img.body.empty()) {
-            if (log_) log_("WordPressSink: не удалось скачать featured_image " +
-                           image_url);
-            return;
+            if (log_) log_("WordPressSink: не удалось скачать картинку " + image_url);
+            return none;
         }
         const std::string media_ep = site_url_ + "/wp-json/wp/v2/media";
         const std::string mime = mime_from_url(image_url);
@@ -453,13 +471,18 @@ private:
                 log_("WordPressSink: загрузка медиа не удалась (HTTP " +
                      std::to_string(media_resp.status) + ")");
             }
-            return;
+            return none;
         }
         const int media_id = parse_post_id(media_resp.body);
-        if (media_id == 0) return;
+        if (media_id == 0) return none;
+
+        // Адрес картинки на хостинге WP (именно его подставляем в текст/обложку).
+        bool ok = false;
+        Json mj = Json::parse(media_resp.body, &ok);
+        std::string source_url = ok ? mj.get("source_url").as_string() : std::string();
 
         // alt-текст обложки (ключевое слово модели из SEO-шага).
-        if (!alt.empty()) {
+        if (!alt.empty() && !source_url.empty()) {
             Json altpatch = Json::object();
             altpatch["alt_text"] = alt;
             std::vector<std::string> ah = {
@@ -468,19 +491,12 @@ private:
             client_.post(media_ep + "/" + std::to_string(media_id),
                          altpatch.dump(), nc, ah);
         }
-
-        // Привязываем обложку к посту.
-        Json patch = Json::object();
-        patch["featured_media"] = static_cast<int64_t>(media_id);
-        const std::string ep = site_url_ + "/wp-json/wp/v2/" + post_type_ + "/" +
-                               std::to_string(post_id);
-        std::vector<std::string> ph = {
-            "Content-Type: application/json",
-            "Authorization: Basic " + auth};
-        client_.post(ep, patch.dump(), nc, ph);
-        if (log_) log_("WordPressSink: обложка media_id=" +
-                       std::to_string(media_id) + " для post_id=" +
-                       std::to_string(post_id));
+        if (log_) {
+            log_("WordPressSink: медиа загружено media_id=" +
+                 std::to_string(media_id) + " (" + source_url + ") для " +
+                 image_url);
+        }
+        return {media_id, source_url};
     }
 
     HttpClient client_;

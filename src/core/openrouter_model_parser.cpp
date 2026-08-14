@@ -213,6 +213,32 @@ std::vector<OpenRouterModel> OpenRouterModelParser::filter_models(
 // parse_completion_response
 // ============================================================================
 
+// Извлекает текст из поля content, которое у разных провайдеров может быть
+// строкой либо массивом частей вида [{"type":"text","text":"..."}, ...]
+// (Zhipu/GLM возвращают именно массив). Иначе — пусто.
+std::string extract_content_text(const json& content) {
+    if (content.is_string()) return content.get<std::string>();
+    if (content.is_array()) {
+        std::string out;
+        for (const auto& part : content) {
+            if (part.is_string()) {
+                out += part.get<std::string>();
+                continue;
+            }
+            if (part.is_object()) {
+                const std::string t = part.value("text", "");
+                if (!t.empty()) {
+                    out += t;
+                } else if (part.contains("content") && part["content"].is_string()) {
+                    out += part["content"].get<std::string>();
+                }
+            }
+        }
+        return out;
+    }
+    return "";
+}
+
 OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(const std::string& json_str) const {
     OpenRouterCompletionResponse response;
 
@@ -336,14 +362,23 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
 
         if (data.contains("choices") && data["choices"].is_array() && !data["choices"].empty()) {
             const auto& choice = data["choices"][0];
+            // Контент может быть строкой, массивом частей (Zhipu/GLM:
+            // [{"type":"text","text":"..."}]) либо лежать в delta, если
+            // провайдер вернул стриминг-формат даже для нестримингового
+            // запроса. Собираем текст из любого варианта.
+            std::string text;
             if (choice.contains("message") && choice["message"].contains("content")) {
-                const auto& content = choice["message"]["content"];
-                // Zhipu/GLM могут возвращать content массивом частей — берём только строку
-                if (content.is_string()) {
-                    response.content = sanitize_response_text(content.get<std::string>());
-                }
+                text = extract_content_text(choice["message"]["content"]);
+            } else if (choice.contains("delta") && choice["delta"].contains("content")) {
+                text = extract_content_text(choice["delta"]["content"]);
             }
+            response.content = sanitize_response_text(text);
             response.finish_reason = choice.value("finish_reason", "");
+        }
+
+        if (response.content.empty() && !data.contains("error")) {
+            LOG_WARNING("[CloudParser] content пуст при успешном парсинге; head: " +
+                        (json_str.size() > 400 ? json_str.substr(0, 400) : json_str));
         }
 
         if (data.contains("usage")) {
