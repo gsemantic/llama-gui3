@@ -15,6 +15,7 @@
 #include <string>
 
 #include "config.h"
+#include "profile.h"
 #include "sink.h"
 #include "ui.h"
 #include "worker.h"
@@ -31,32 +32,56 @@ static std::unique_ptr<Worker> g_worker;
 static UiDeps g_ui_deps;
 static Config g_config;
 
+// Каталог данных (data_dir) для автономных профилей настроек и Storage.
+static std::string g_profiles_data_dir;
+// Имя активного профиля настроек плагина.
+static std::string g_active_profile;
+
 // ============================================================================
-// Конфигурация (persist через settings_*, только main-поток)
+// Конфигурация (persist в профилях плагина, автономно от профилей хоста)
 // ============================================================================
 
 static Config load_config() {
     Config cfg = default_config();
-    if (!g_api || !g_host) return cfg;
-    char* raw = g_api->settings_get(g_host, kConfigKey);
-    if (!raw) return cfg;
-    bool ok = false;
-    std::string error;
-    Json j = Json::parse(raw, &ok, &error);
-    g_api->free_string(g_host, raw);
-    if (ok) {
-        cfg = config_from_json(j);
-    } else if (g_api->log) {
-        const std::string msg = "news_rewriter: ошибка парсинга конфига: " + error;
-        g_api->log(g_host, LLAMA_LOG_WARNING, msg.c_str());
+    if (g_profiles_data_dir.empty()) return cfg;
+    std::string active = active_profile_name(g_profiles_data_dir);
+    if (active.empty()) {
+        // Миграция со старого хранилища в настройках хоста (если есть).
+        if (g_api && g_host) {
+            char* raw = g_api->settings_get(g_host, kConfigKey);
+            if (raw) {
+                bool ok = false;
+                std::string error;
+                Json j = Json::parse(raw, &ok, &error);
+                g_api->free_string(g_host, raw);
+                if (ok) {
+                    cfg = config_from_json(j);
+                } else if (g_api->log) {
+                    const std::string msg =
+                        "news_rewriter: ошибка парсинга старого конфига: " + error;
+                    g_api->log(g_host, LLAMA_LOG_WARNING, msg.c_str());
+                }
+                save_profile(g_profiles_data_dir, "default", cfg);
+                active = "default";
+            }
+        }
     }
-    return cfg;
+    if (active.empty()) {
+        // Первый запуск без профилей — создаём дефолтный.
+        save_profile(g_profiles_data_dir, "default", cfg);
+        active = "default";
+    }
+    g_active_profile = active;
+    return load_profile(g_profiles_data_dir, active);
 }
 
 static void save_config(const Config& cfg) {
-    if (!g_api || !g_host) return;
-    const std::string json = config_to_json(cfg).dump();
-    g_api->settings_set(g_host, kConfigKey, json.c_str());
+    if (g_profiles_data_dir.empty()) return;
+    if (g_active_profile.empty()) {
+        g_active_profile = active_profile_name(g_profiles_data_dir);
+    }
+    if (g_active_profile.empty()) g_active_profile = "default";
+    save_profile(g_profiles_data_dir, g_active_profile, cfg);
 }
 
 // ============================================================================
@@ -116,7 +141,15 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         g_api->log(g_host, LLAMA_LOG_INFO, msg.c_str());
     }
 
-    // Конфигурация (persist в settings.ini)
+    // Каталог данных (для Storage/Sink и автономных профилей настроек).
+    if (g_api->path_data_dir) {
+        const char* data_dir = g_api->path_data_dir(g_host);
+        if (data_dir) {
+            g_profiles_data_dir = data_dir;
+        }
+    }
+
+    // Конфигурация (persist в профилях плагина, автономно от профилей хоста).
     g_config = load_config();
     if (g_api->log) {
         g_api->log(g_host, LLAMA_LOG_DEBUG,
@@ -188,6 +221,31 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         if (g_api && g_host && g_window) {
             g_api->window_set_visible(g_host, g_window, 0);
         }
+    };
+
+    // Профили настроек плагина (автономны от профилей основного приложения).
+    g_ui_deps.active_profile = g_active_profile;
+    g_ui_deps.list_profiles = []() {
+        return list_profiles(g_profiles_data_dir);
+    };
+    g_ui_deps.profile_load = [](const std::string& name) -> Config {
+        g_active_profile = name;
+        set_active_profile(g_profiles_data_dir, name);
+        return load_profile(g_profiles_data_dir, name);
+    };
+    g_ui_deps.profile_save = [](const std::string& name, const Config& cfg) {
+        g_active_profile = name;
+        save_profile(g_profiles_data_dir, name, cfg);
+    };
+    g_ui_deps.profile_delete = [](const std::string& name) {
+        delete_profile(g_profiles_data_dir, name);
+        if (name == g_active_profile) {
+            const std::vector<std::string> list = list_profiles(g_profiles_data_dir);
+            g_active_profile = list.empty() ? "" : list[0];
+        }
+    };
+    g_ui_deps.profile_active = []() {
+        return g_active_profile;
     };
 
     // Команды

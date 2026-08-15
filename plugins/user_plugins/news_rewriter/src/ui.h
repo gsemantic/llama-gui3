@@ -21,6 +21,14 @@ struct UiDeps {
     // Колбэк закрытия окна (main-поток): скрывает окно плагина в хосте
     // (window_set_visible). Вызывается, когда пользователь нажимает крестик.
     std::function<void()> on_close = nullptr;
+
+    // Профили настроек плагина (автономные файлы в data_dir/news_rewriter/profiles).
+    std::string active_profile;                                       // имя активного профиля
+    std::function<std::vector<std::string>()> list_profiles;          // список имён профилей
+    std::function<Config(const std::string&)> profile_load;            // выбрать профиль → конфиг + активировать
+    std::function<void(const std::string&, const Config&)> profile_save;  // создать/перезаписать + активировать
+    std::function<void(const std::string&)> profile_delete;           // удалить профиль
+    std::function<std::string()> profile_active;                      // имя активного профиля (текущее)
 };
 
 // Отрисовка окна "News Rewriter" (Dear ImGui). Вызывать из ll_plugin_render,

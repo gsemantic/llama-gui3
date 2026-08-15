@@ -94,6 +94,63 @@ Json csv_to_int_list(const std::string& csv) {
 
 // Раздел настроек. draft — редактируемая копия конфигурации.
 void render_settings(UiDeps& deps, Config& draft) {
+    // ---- Профили настроек (автономны от профилей основного приложения) ----
+    ImGui::TextUnformatted("Профиль настроек:");
+    {
+        const std::vector<std::string> profiles = deps.list_profiles();
+        if (ImGui::BeginCombo("##profile_combo", deps.active_profile.c_str())) {
+            for (const auto& p : profiles) {
+                const bool selected = (p == deps.active_profile);
+                if (ImGui::Selectable(p.c_str(), selected)) {
+                    // Выбор профиля: загружаем его конфиг в черновик и активируем.
+                    draft = deps.profile_load(p);
+                    deps.active_profile = p;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Новый профиль")) {
+            ImGui::OpenPopup("Новый профиль настроек");
+        }
+        if (ImGui::BeginPopupModal("Новый профиль настроек", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char new_name[256] = "";
+            ImGui::InputText("Имя профиля", new_name, sizeof(new_name));
+            ImGui::TextDisabled("Будет сохранён как копия текущих настроек");
+            if (ImGui::Button("Создать")) {
+                std::string nm = new_name;
+                const std::size_t a = nm.find_first_not_of(" \t");
+                const std::size_t b = nm.find_last_not_of(" \t");
+                if (a != std::string::npos) nm = nm.substr(a, b - a + 1);
+                if (!nm.empty()) {
+                    deps.profile_save(nm, draft);
+                    deps.active_profile = nm;
+                    new_name[0] = '\0';
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Отмена")) {
+                new_name[0] = '\0';
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (profiles.size() > 1) {
+            if (ImGui::Button("Удалить профиль")) {
+                deps.profile_delete(deps.active_profile);
+                deps.active_profile = deps.profile_active();
+                draft = deps.profile_load(deps.active_profile);
+            }
+        } else {
+            ImGui::TextDisabled("удалить нельзя: единственный");
+        }
+    }
+
+    ImGui::Separator();
+
     // ---- Источники (сайты для обхода) -------------------------------------
     ImGui::TextUnformatted("Источники (сайты для обхода):");
     int remove_index = -1;

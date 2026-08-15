@@ -30,6 +30,7 @@ set(NEWS_REWRITER_CORE_SOURCES
     src/common.cpp
     src/json.cpp
     src/config.cpp
+    src/profile.cpp
     src/http.cpp
     src/xml.cpp
     src/fetcher.cpp
@@ -80,6 +81,7 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_json.cpp
         tests/test_common.cpp
         tests/test_config.cpp
+        tests/test_profile.cpp
         tests/test_worker.cpp
         tests/test_http.cpp
         tests/test_xml.cpp
