@@ -76,6 +76,9 @@ Json config_to_json(const Config& cfg) {
     network["user_agent"] = cfg.network.user_agent;
     network["proxy"] = cfg.network.proxy;
     network["extra_headers"] = cfg.network.extra_headers;
+    network["headless_enabled"] = cfg.network.headless_enabled;
+    network["browser_path"] = cfg.network.browser_path;
+    network["headless_timeout_ms"] = cfg.network.headless_timeout_ms;
     j["network"] = network;
 
     j["max_items_per_source"] = cfg.max_items_per_source;
@@ -142,6 +145,12 @@ Config config_from_json(const Json& j) {
             (ua == "news_rewriter/1.0") ? std::string(kDefaultUserAgent) : ua;
         cfg.network.proxy = network.get("proxy").as_string();
         cfg.network.extra_headers = network.get("extra_headers").as_string();
+        cfg.network.headless_enabled =
+            network.get("headless_enabled").as_bool(cfg.network.headless_enabled);
+        cfg.network.browser_path =
+            network.get("browser_path").as_string(cfg.network.browser_path);
+        cfg.network.headless_timeout_ms = static_cast<int>(
+            network.get("headless_timeout_ms").as_int(cfg.network.headless_timeout_ms));
     }
 
     cfg.max_items_per_source =

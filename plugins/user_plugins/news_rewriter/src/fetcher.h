@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "config.h"
+#include "headless.h"
 #include "http.h"
 
 namespace news_rewriter {
@@ -48,6 +49,7 @@ public:
 
 private:
     HttpClient http_;
+    HeadlessRenderer headless_;
 };
 
 } // namespace news_rewriter

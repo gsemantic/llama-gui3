@@ -93,6 +93,14 @@ struct NetworkConfig {
     std::string user_agent = kDefaultUserAgent;
     std::string proxy;           // пусто = системный прокси
     std::string extra_headers;   // "Header: value\n..." (для авторизации и пр.)
+
+    // Рендеринг страниц через headless-браузер (Chromium). Нужен для сайтов,
+    // отдающих контент через JS (SPA, напр. VK.ru): обычный HTTP-фетч получает
+    // пустую «оболочку», и статью невозможно извлечь. headless-браузер
+    // исполняет JS и возвращает уже отрендеренный DOM.
+    bool headless_enabled = false;       // принудительно рендерить ВСЕ page-страницы
+    std::string browser_path = "chromium";  // исполняемый файл (путь или имя в PATH)
+    int headless_timeout_ms = 30000;     // предельное время рендера (wall-clock)
 };
 
 struct Config {

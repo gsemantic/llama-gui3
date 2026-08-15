@@ -405,6 +405,15 @@ void render_settings(UiDeps& deps, Config& draft) {
                          draft.network.extra_headers, 60.0f);
 
     ImGui::Separator();
+    ImGui::TextUnformatted("Headless-браузер (сайты с JS-рендерингом, напр. VK.ru):");
+    ImGui::Checkbox("Рендерить ВСЕ страницы через браузер",
+                    &draft.network.headless_enabled);
+    input_text("Путь к браузеру (chromium)", draft.network.browser_path);
+    input_int_min0("Таймаут рендера, мс", draft.network.headless_timeout_ms);
+    ImGui::TextDisabled("Если браузер доступен, пустые JS-оболочки автоматически "
+                        "дорендериваются даже без этого флага.");
+
+    ImGui::Separator();
 
     // ---- Действия ------------------------------------------------------------
     static double saved_at = 0.0;   // время последнего нажатия «Сохранить»
