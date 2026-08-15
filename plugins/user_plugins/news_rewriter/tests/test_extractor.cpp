@@ -224,12 +224,70 @@ REGISTER_TEST(test_extract_page_heuristic);
 REGISTER_TEST(test_extract_page_markers);
 REGISTER_TEST(test_extract_page_marker_only_body);
 REGISTER_TEST(test_extract_page_empty_html);
+// Заголовок статьи берётся из ТОГО ЖЕ региона, что и тело: если в начале
+// страницы (в <header>) есть чужой <h1>, он не должен «разъезжаться» с телом.
+// Регрессия: раньше extract_title брал первый <h1> страницы, и в режиме
+// разведки показывался заголовок, не соответствующий телу новости.
+static void test_extract_title_matches_body_region() {
+    std::string filler;
+    for (int i = 0; i < 200; ++i) {
+        filler += "Пункт " + std::to_string(i) + " ::: %%% 12 34\n";
+    }
+    const std::string html =
+        "<html><body>"
+        "<header><h1>Совсем не та новость про случайную тему</h1></header>"
+        + filler +
+        "<div class=\"content\">"
+        "<h1>Важная новость дня о событии</h1>"
+        "<p>Первый абзац основной новости, в котором рассказывается о произошедшем событии подробно и обстоятельно.</p>"
+        "<p>Второй абзац продолжает материал и раскрывает важные детали и обстоятельства происшествия.</p>"
+        "<p>Третий абзац завершает текст и подводит итог произошедшему событию в городе.</p>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.title, "Важная новость дня о событии");
+    TEST_ASSERT(ex.body.find("Первый абзац основной новости") != std::string::npos);
+    TEST_ASSERT(ex.body.find("Совсем не та новость") == std::string::npos);
+}
+
 REGISTER_TEST(test_extract_body_skips_nav_footer);
 REGISTER_TEST(test_extract_body_merges_paragraphs);
 REGISTER_TEST(test_extract_body_prefers_dense_text);
 REGISTER_TEST(test_extract_body_single_block);
 REGISTER_TEST(test_extract_body_excludes_cookie_banner);
 REGISTER_TEST(test_extract_body_excludes_title);
+REGISTER_TEST(test_extract_title_matches_body_region);
+
+// Блок-каталог новостей (news-catalog) внутри страницы статьи не должен
+// попадать в тело как дайджест: extract_page вырезает ленты и берёт только
+// саму статью. Регрессия: раньше плотный список новостей «побеждал» статью.
+static void test_extract_page_excludes_news_catalog() {
+    std::string catalog;
+    for (int i = 0; i < 5; ++i) {
+        catalog += "<div class=\"news__content\"><a href=\"/n" +
+                   std::to_string(i) + "\">Каталожная новость номер " +
+                   std::to_string(i) + "</a>"
+                   "<p>Короткий анонс каталожной новости номер " +
+                   std::to_string(i) + " про совсем другое событие.</p></div>";
+    }
+    const std::string html =
+        "<html><body>"
+        "<div class=\"news-catalog\">" + catalog + "</div>"
+        "<div class=\"text\">"
+        "<h1>Единственная настоящая статья про событие дня</h1>"
+        "<p>Первый абзац единственной настоящей статьи, в котором рассказывается о произошедшем событии подробно и обстоятельно.</p>"
+        "<p>Второй абзац настоящей статьи продолжает материал и раскрывает важные детали происшествия.</p>"
+        "<p>Третий абзац настоящей статьи завершает текст и подводит итог произошедшему.</p>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.title, "Единственная настоящая статья про событие дня");
+    TEST_ASSERT(ex.body.find("Первый абзац единственной настоящей статьи") !=
+                std::string::npos);
+    TEST_ASSERT(ex.body.find("Каталожная новость") == std::string::npos);
+}
+
+REGISTER_TEST(test_extract_page_excludes_news_catalog);
 
 static void test_extract_page_items_listing_splits_articles() {
     const std::string html =
@@ -263,7 +321,30 @@ static void test_extract_page_items_single_article_stays_one() {
     TEST_ASSERT(items[0].body.find("Единственный абзац") != std::string::npos);
 }
 
+// Главная/категория, где новости лежат внутри news-catalog: страница должна
+// распознаваться как СПИСОК статей, а не как одна статья (иначе вместо новостей
+// тянется логотип/шапка сайта). Регрессия после добавления вырезки каталогов:
+// она не должна применяться при поиске списка статей.
+static void test_extract_page_items_homepage_catalog_is_list() {
+    const std::string html =
+        "<html><body>"
+        "<div class=\"news-catalog\">"
+        "<div class=\"news-catalog__item\"><a href=\"/novosti/a1\">Первая важная новость дня</a><img src=\"http://x/1.jpg\"></div>"
+        "<div class=\"news-catalog__item\"><a href=\"/novosti/a2\">Вторая срочная новость города</a><img src=\"http://x/2.jpg\"></div>"
+        "<div class=\"news-catalog__item\"><a href=\"/novosti/a3\">Третья свежая новость региона</a><img src=\"http://x/3.jpg\"></div>"
+        "</div>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "http://zebra-tv.ru", SourceExtract{});
+    TEST_ASSERT(items.size() >= 2);
+    for (const auto& it : items) {
+        TEST_ASSERT(!it.url.empty());
+        TEST_ASSERT(!it.title.empty());
+    }
+}
+
 REGISTER_TEST(test_extract_page_items_listing_splits_articles);
+REGISTER_TEST(test_extract_page_items_homepage_catalog_is_list);
 REGISTER_TEST(test_extract_page_items_single_article_stays_one);
 
 static void test_extract_page_items_skips_sidebar_widget() {

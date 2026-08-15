@@ -723,6 +723,27 @@ bool has_noise_class(const std::string& tag) {
     return false;
 }
 
+// Подстроки в class/id/role, по которым контейнер считается «лентой/каталогом
+// новостей» (не основной статьёй). Такие блоки содержат много коротких новостей
+// и по плотности текста часто «побеждают» саму статью, превращаясь в дайджест.
+// Проверка отдельная (не зависит от has_noise_class/kKeep): классы вроде
+// «news-catalog» содержат подстроку «news» и иначе защищаются как контент.
+bool is_listing_class(const std::string& tag) {
+    static const char* kListing[] = {
+        "catalog", "news-catalog", "additional-news", "news-list",
+        "news-feed", "newsfeed", "more-news", "other-news", "related-news",
+        "latest-news", "top-news", "popular-news", "feed", "listing",
+        "tab-news", "archive-list", "news-archive"
+    };
+    const std::string cls = get_attr(tag, "class") + " " + get_attr(tag, "id") +
+                            " " + get_attr(tag, "role");
+    if (cls.empty()) return false;
+    for (const char* k : kListing) {
+        if (cls.find(k) != std::string::npos) return true;
+    }
+    return false;
+}
+
 // Находит открывающий тег <tag с учётом границы имени (за <tag идёт пробел,
 // '>', '/' или перевод строки), начиная с pos. Возвращает позицию '<' или npos.
 std::size_t find_tag_open(const std::string& html, std::size_t pos,
@@ -781,6 +802,29 @@ std::string strip_non_article_regions(const std::string& html) {
             if (gt == std::string::npos) break;
             const std::string tag = out.substr(p, gt - p + 1);
             if (has_noise_class(tag)) {
+                p = erase_tag_subtree(out, p, t);
+            } else {
+                p = gt + 1;
+            }
+        }
+    }
+    return out;
+}
+
+// Вырезает блоки-ленты/каталоги новостей (news-catalog, additional-news и пр.),
+// чтобы их плотный список новостей не «побеждал» саму статью в эвристике
+// плотности (иначе в теле оказывается дайджест). НЕ применяется при поиске
+// списка статей на странице-листинге — там такие блоки как раз содержат сами
+// новости, поэтому strip_non_article_regions их не трогает.
+std::string strip_listing_regions(const std::string& html) {
+    std::string out = html;
+    for (const char* t : {"div", "section", "ul", "li"}) {
+        std::size_t p = 0;
+        while ((p = find_tag_open(out, p, t)) != std::string::npos) {
+            const std::size_t gt = out.find('>', p);
+            if (gt == std::string::npos) break;
+            const std::string tag = out.substr(p, gt - p + 1);
+            if (is_listing_class(tag)) {
                 p = erase_tag_subtree(out, p, t);
             } else {
                 p = gt + 1;
@@ -894,8 +938,40 @@ std::string first_content_image(const std::string& html) {
 
 namespace {
 
-// Заголовок страницы: <h1> (заголовок статьи) или <title> (fallback).
-std::string extract_title(const std::string& html) {
+// Результат извлечения тела: текст и диапазон [start, end) в исходном HTML,
+// соответствующий выбранному региону «прозы». Используется, чтобы брать
+// заголовок из ТОГО ЖЕ региона, что и тело (иначе первый <h1> страницы может
+// принадлежать другому блоку/секции и «разъезжаться» с телом).
+struct BodyResult {
+    std::string text;
+    std::size_t start = 0;   // начало выбранного региона в html
+    std::size_t end = 0;     // конец выбранного региона в html
+};
+
+// Первый заголовок h1..h3 внутри диапазона [from, to) HTML (без вложенных тегов).
+std::string first_heading_in_range(const std::string& html, std::size_t from,
+                                   std::size_t to) {
+    static const char* kH[] = {"h1", "h2", "h3"};
+    for (const char* h : kH) {
+        const std::string open = std::string("<") + h;
+        std::size_t p = html.find(open, from);
+        while (p != std::string::npos && p < to) {
+            const std::size_t gt = html.find('>', p);
+            if (gt == std::string::npos) break;
+            const std::size_t close = html.find("</" + std::string(h), gt);
+            if (close == std::string::npos) break;
+            const std::string t =
+                html_to_text(html.substr(gt + 1, close - (gt + 1)));
+            if (!t.empty()) return t;
+            p = html.find(open, close);
+        }
+    }
+    return "";
+}
+
+// Заголовок страницы: <h1> (заголовок статьи) или <title> (fallback). Без
+// привязки к региону тела — запасной вариант.
+std::string extract_title_legacy(const std::string& html) {
     // <h1>
     const std::size_t h_open = html.find("<h1");
     if (h_open != std::string::npos) {
@@ -919,12 +995,30 @@ std::string extract_title(const std::string& html) {
     return "";
 }
 
+// Заголовок страницы, привязанный к региону тела [region_start, region_end):
+// берём первый заголовок h1..h3 внутри (или чуть выше — <h1> часто прямо перед
+// первым абзацем) выбранного региона «прозы». Если в регионе заголовка нет —
+// запасной вариант extract_title_legacy (первый <h1>/<title> страницы).
+std::string extract_title(const std::string& html, std::size_t region_start,
+                          std::size_t region_end) {
+    if (region_end > region_start) {
+        // h1 статьи обычно сразу перед первым абзацем — ищем с небольшим
+        // запасом выше начала региона тела.
+        const std::size_t from = region_start > 4096 ? region_start - 4096 : 0;
+        const std::string t = first_heading_in_range(html, from, region_end);
+        if (!t.empty()) return t;
+    }
+    return extract_title_legacy(html);
+}
+
 // Тело страницы: эвристика по плотности текста. HTML разбивается на блоки по
 // блочным тегам; блоки внутри nav/header/footer/aside/form и заголовки h1..h6
 // исключаются как заведомо не-статья. Среди оставшихся блоков «прозой»
 // считаются те, что содержат достаточно слов/букв и высокую плотность текста;
 // берётся самый длинный связный набор таких блоков — это и есть текст статьи.
-std::string extract_body(const std::string& html) {
+// Возвращает также диапазон [start, end) в исходном HTML для выбранного региона,
+// чтобы заголовок можно было взять из того же места (см. extract_title).
+BodyResult extract_body(const std::string& html) {
     enum class BlockKind { kEmpty, kCandidate, kOther };
 
     struct Block {
@@ -935,8 +1029,10 @@ std::string extract_body(const std::string& html) {
 
     // -- разбор HTML на блоки по блочным тегам --------------------------------
     std::vector<Block> blocks;
+    std::vector<std::size_t> block_start;  // позиция в html, с которой начат блок
     const std::size_t n = html.size();
     std::size_t i = 0;
+    std::size_t cur_start = 0;
     Block cur;
     std::size_t noise_depth = 0;        // nav/header/footer/aside/form
     std::size_t noise_class_depth = 0;  // div/section с «шумным» классом
@@ -945,8 +1041,10 @@ std::string extract_body(const std::string& html) {
     bool heading_flag = false;
 
     auto flush = [&]() {
+        block_start.push_back(cur_start);
         blocks.push_back(cur);
         cur = Block{};
+        cur_start = i;  // следующий блок начнётся с текущей позиции
     };
 
     while (i < n) {
@@ -1057,13 +1155,15 @@ std::string extract_body(const std::string& html) {
     }
 
     // -- сборка результата ------------------------------------------------------
-    std::string out;
+    BodyResult out;
     if (best_len > 0) {
         for (std::size_t b = best_start; b < best_end; ++b) {
             if (scored[b].kind != BlockKind::kCandidate) continue;
-            if (!out.empty()) out += '\n';
-            out += scored[b].text;
+            if (!out.text.empty()) out.text += '\n';
+            out.text += scored[b].text;
         }
+        out.start = block_start[best_start];
+        out.end = (best_end < block_start.size()) ? block_start[best_end] : n;
         return out;
     }
 
@@ -1075,7 +1175,12 @@ std::string extract_body(const std::string& html) {
             best_i = b;
         }
     }
-    return best_l > 0 ? scored[best_i].text : std::string();
+    if (best_l > 0) {
+        out.text = scored[best_i].text;
+        out.start = block_start[best_i];
+        out.end = (best_i + 1 < block_start.size()) ? block_start[best_i + 1] : n;
+    }
+    return out;
 }
 
 } // namespace
@@ -1110,13 +1215,17 @@ ExtractedArticle extract_page(const std::string& html, const std::string& base_u
         return result;
     }
 
-    // План B: эвристика.
-    result.title = extract_title(html);
-    result.body = extract_body(html);
+    // План B: эвристика. Тело/заголовок извлекаем из очищенного HTML (без
+    // сайдбаров/виджетов И блоков-каталогов новостей), иначе плотный блок
+    // «списка новостей» выигрывает у самой статьи и попадает в тело как дайджест.
+    const std::string cleaned =
+        strip_listing_regions(strip_non_article_regions(html));
+    const BodyResult body_res = extract_body(cleaned);
+    result.body = body_res.text;
+    result.title = extract_title(cleaned, body_res.start, body_res.end);
     // Картинка: приоритет — первое содержательное фото из тела статьи
     // (без логотипа сайта и наложения заголовка, которые обычно несёт
     // og:image). og:image / twitter:image берём только как запасной вариант.
-    const std::string cleaned = strip_non_article_regions(html);
     std::string img = first_content_image(cleaned);
     if (img.empty()) img = extract_image_url(html);
     if (!img.empty() && img.find("data:") != 0) img = resolve_url(img, base_url);
@@ -1169,14 +1278,16 @@ std::vector<ExtractionProposal> extract_page_candidates(
         return out;
     }
 
-    const std::string cleaned = strip_non_article_regions(html);
+    const std::string cleaned =
+        strip_listing_regions(strip_non_article_regions(html));
 
     // Стратегия 0: полный авто (заголовок из h1/<title>, тело по density,
     // обложка — первое содержательное фото из тела статьи).
     {
         ExtractionProposal p;
-        p.article.title = extract_title(html);
-        p.article.body = extract_body(html);
+        const BodyResult body_res0 = extract_body(cleaned);
+        p.article.body = body_res0.text;
+        p.article.title = extract_title(cleaned, body_res0.start, body_res0.end);
         p.article.image = first_content_image(cleaned);
         if (p.article.image.empty()) p.article.image = extract_image_url(html);
         p.strategy = 0;

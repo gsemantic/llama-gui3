@@ -635,6 +635,8 @@ void ChatInterface::send_message_via_openrouter() {
     // 0 = не ограничено: поле max_tokens не отправляется, и провайдер/модель
     // использует свой максимум (важно для thinking-моделей вроде GLM).
     params.max_tokens = cp.max_output_tokens;
+    params.reasoning_enabled = cp.reasoning_enabled;
+    params.reasoning_budget = cp.reasoning_budget;
     params.temperature = settings_.chat().temperature;
     params.top_p = settings_.chat().top_p;
     params.stream = false;

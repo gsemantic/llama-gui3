@@ -230,9 +230,10 @@ static void test_wp_sink_pages_skips_taxonomy() {
 REGISTER_TEST(test_wp_sink_custom_post_type);
 REGISTER_TEST(test_wp_sink_pages_skips_taxonomy);
 
-// Тело опубликованного поста содержит hero-картинку (встроенную <img>) и ссылку
-// на источник — иначе в выходной статье нет ни фото, ни ссылки (как в .md).
-static void test_wp_sink_includes_image_and_source_link() {
+// При успешной заливке картинки в медиабиблиотеку WP она отдаётся через поле
+// featured_media, а в текст НЕ дублируется инлайн-<img>. В теле поста при этом
+// обязана быть ссылка на источник.
+static void test_wp_sink_success_uses_featured_media_and_source_link() {
     MiniHttpServer srv;
     TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
 
@@ -247,9 +248,34 @@ static void test_wp_sink_includes_image_and_source_link() {
 
     // last_request накапливает ВСЕ запросы, поэтому тело поста тоже внутри.
     const std::string req = srv.last_request();
-    // hero-картинка встроена в контент.
+    // картинка отдаётся через featured_media, а не инлайн-<img>.
+    TEST_ASSERT(req.find("\"featured_media\"") != std::string::npos);
+    TEST_ASSERT(req.find("<img") == std::string::npos);
+    // ссылка на источник в конце контента.
+    TEST_ASSERT(req.find("Источник: <a href=") != std::string::npos);
+    TEST_ASSERT(req.find("example.com</a>") != std::string::npos);
+}
+
+// При сбое заливки картинки в медиатеку (исходник недоступен) плагин
+// откатывается на инлайн-<img> в теле поста, чтобы пост не остался без фото.
+// Ссылка на источник при этом тоже присутствует.
+static void test_wp_sink_fallback_inline_image_on_upload_failure() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    // Исходник картинки недоступен — заливка в медиатеку WP упадёт, ожидаем
+    // инлайн-вставку в теле поста.
+    a.source_image = "http://127.0.0.1:1/unreachable.jpg";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    // hero-картинка встроена в контент как запасной вариант.
     TEST_ASSERT(req.find("<img") != std::string::npos);
-    TEST_ASSERT(req.find(img) != std::string::npos);
+    TEST_ASSERT(req.find("unreachable.jpg") != std::string::npos);
     // ссылка на источник в конце контента.
     TEST_ASSERT(req.find("Источник: <a href=") != std::string::npos);
     TEST_ASSERT(req.find("example.com</a>") != std::string::npos);
@@ -272,7 +298,8 @@ static void test_wp_sink_includes_original_date() {
                 std::string::npos);
 }
 
-REGISTER_TEST(test_wp_sink_includes_image_and_source_link);
+REGISTER_TEST(test_wp_sink_success_uses_featured_media_and_source_link);
+REGISTER_TEST(test_wp_sink_fallback_inline_image_on_upload_failure);
 REGISTER_TEST(test_wp_sink_includes_original_date);
 
 // Секрет берётся из .env, а не из params (конвенция проекта: секреты вне

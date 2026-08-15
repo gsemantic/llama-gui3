@@ -130,8 +130,8 @@ void EnvManager::remove_key(const std::string& key_name,
 
 std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_name,
                                                     const std::string& endpoint_url) {
-    // Keyless providers (OpenCode Zen) map to a dedicated empty key slot so
-    // that a provider that needs no key never reuses/overwrites the generic key.
+    // OpenCode Zen maps to a dedicated key slot so its key never reuses or
+    // overwrites the generic cloud provider key.
     const std::string provider_lower = provider_name;
     const std::string url_lower = endpoint_url;
     bool is_opencode_zen =

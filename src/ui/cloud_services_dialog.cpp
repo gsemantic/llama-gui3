@@ -88,7 +88,7 @@ void CloudServicesDialog::load_from_settings() {
     model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
 
     // Read API key from .env (provider-specific slot so switching providers
-    // never mixes up keys; keyless providers like OpenCode Zen get their own slot)
+    // never mixes up keys; OpenCode Zen gets its own dedicated slot)
     std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(cp.provider_name, cp.endpoint_url);
     std::string key = llama_gui::core::EnvManager::read_key(key_name, settings_.get_profiles_directory());
     std::strncpy(api_key_buf_, key.c_str(), sizeof(api_key_buf_) - 1);
@@ -96,6 +96,8 @@ void CloudServicesDialog::load_from_settings() {
 
     timeout_ms_ = cp.timeout_ms > 0 ? cp.timeout_ms : 60000;
     max_output_tokens_ = cp.max_output_tokens;
+    reasoning_enabled_ = cp.reasoning_enabled;
+    reasoning_budget_ = cp.reasoning_budget;
     saved_model_id_ = cp.model_id;
     settings_modified_ = false;
     show_api_key_ = false;
@@ -108,6 +110,8 @@ void CloudServicesDialog::save_to_settings() {
     cp.model_id = model_id_buf_;
     cp.timeout_ms = timeout_ms_;
     cp.max_output_tokens = max_output_tokens_ < 0 ? 0 : max_output_tokens_;
+    cp.reasoning_enabled = reasoning_enabled_;
+    cp.reasoning_budget = reasoning_budget_ < 0 ? 0 : reasoning_budget_;
 
     // Write API key to .env (never to profile JSON).
     // Key is stored per-provider so switching providers never touches other keys.
@@ -169,7 +173,6 @@ void CloudServicesDialog::fetch_models() {
         std::string response;
         struct curl_slist* headers = nullptr;
         // Send Authorization header only if a key is provided
-        // (keyless providers like OpenCode Zen reject any Bearer token)
         if (!key.empty()) {
             headers = curl_slist_append(headers, ("Authorization: Bearer " + key).c_str());
         }
@@ -430,6 +433,26 @@ void CloudServicesDialog::render() {
             ImGui::SetTooltip("0 = no limit (the model/provider decides its own maximum)");
         }
 
+        // Reasoning / thinking mode (для поддерживающих моделей: GLM, DeepSeek, o-серия)
+        ImGui::Separator();
+        if (ImGui::Checkbox("Enable reasoning / thinking##reasoning_enabled", &reasoning_enabled_)) {
+            settings_modified_ = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Enable chain-of-thought for models that support it (GLM, DeepSeek, OpenAI o-series).\n"
+                              "When off, thinking is disabled (required for GLM-4.7 to return content).");
+        }
+
+        if (ImGui::SliderInt("Reasoning budget##reasoning_budget", &reasoning_budget_, 0, 16384,
+                             reasoning_budget_ == 0 ? "provider default" : "%d")) {
+            if (reasoning_budget_ < 0) reasoning_budget_ = 0;
+            settings_modified_ = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Max tokens spent on reasoning (0 = provider/model default).\n"
+                              "Only used when thinking is enabled.");
+        }
+
         // Model list (if loaded)
         if (models_loaded_ || models_loading_) {
             render_model_list();
@@ -461,10 +484,8 @@ void CloudServicesDialog::render() {
             ImGui::Separator();
         }
 
-        // Status (keyless providers like OpenCode Zen need no API key)
-        std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(provider_name_buf_, endpoint_url_buf_);
-        bool is_keyless = (key_name == "OPENCODE_ZEN_API_KEY");
-        bool has_key = (api_key_buf_[0] != '\0') || is_keyless;
+        // Status (провайдер активен только при наличии ключа и выбранной модели)
+        bool has_key = (api_key_buf_[0] != '\0');
         if (cp.enabled && has_key && model_id_buf_[0] != '\0') {
             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Cloud provider: active (%s)", model_id_buf_);
         } else if (cp.enabled) {

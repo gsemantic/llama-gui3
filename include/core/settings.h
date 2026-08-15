@@ -106,6 +106,8 @@ struct CloudProviderSettings {
     std::string model_id = "";               // Выбранная модель (ID)
     int timeout_ms = 60000;                  // Таймаут запросов (60s default for cloud providers)
     int max_output_tokens = 0;               // Лимит токенов вывода (0 = не ограничено, полагаемся на модель/провайдера)
+    bool reasoning_enabled = false;          // Режим размышлений/thinking (для поддерживающих моделей: GLM, DeepSeek, o-серия)
+    int reasoning_budget = 0;                // Бюджет токенов на reasoning (0 = по умолчанию провайдера/модели)
     bool free_models_only = false;           // Показывать только бесплатные модели
     std::string last_search_query = "";      // Последний поисковый запрос
 

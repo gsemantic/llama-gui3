@@ -44,6 +44,8 @@ private:
     char model_id_buf_[256] = "";
     int timeout_ms_ = 60000;
     int max_output_tokens_ = 0;   // 0 = не ограничено
+    bool reasoning_enabled_ = false;  // Режим размышлений/thinking
+    int reasoning_budget_ = 0;       // Бюджет токенов на reasoning (0 = по умолчанию)
     bool show_api_key_ = false;
 
     // Saved state for change detection

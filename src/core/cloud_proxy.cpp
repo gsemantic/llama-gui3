@@ -396,6 +396,21 @@ void apply_defaults(Settings& settings, nlohmann::json& req) {
         req["frequency_penalty"] = chat.frequency_penalty;
     }
 
+    // Режим размышлений/thinking.
+    if (!req.contains("thinking")) {
+        if (cp.reasoning_enabled) {
+            nlohmann::json thinking = nlohmann::json::object({{"type", "enabled"}});
+            if (cp.reasoning_budget > 0) {
+                thinking["budget_tokens"] = cp.reasoning_budget;
+            }
+            req["thinking"] = thinking;
+        } else if (req.contains("model") && req["model"].is_string() &&
+                   req["model"].get<std::string>().find("glm") != std::string::npos) {
+            // GLM по умолчанию включает thinking и тратит лимит на reasoning_content.
+            req["thinking"] = nlohmann::json::object({{"type", "disabled"}});
+        }
+    }
+
     // Системный промпт приложения — только если клиент не прислал свой
     bool has_system = false;
     if (req.contains("messages") && req["messages"].is_array()) {

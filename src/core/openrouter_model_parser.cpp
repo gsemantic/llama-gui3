@@ -377,6 +377,29 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
         }
 
         if (response.content.empty() && !data.contains("error")) {
+            // Нестандартный/неожиданный ответ: нет контента и нет поля error
+            // в обычном формате. Например, OpenCode Zen при HTTP 403 Forbidden
+            // возвращает просто {"model":"<id>"}. Формируем понятное сообщение
+            // вместо сброса сырого JSON пользователю.
+            if (!data.contains("choices")) {
+                std::string model_hint = data.value("model", "");
+                std::string msg = "Ошибка провайдера: ответ не содержит контент и не является "
+                                  "ошибкой в стандартном формате.\n\n";
+                if (!model_hint.empty()) {
+                    msg += "Модель: " + model_hint + "\n";
+                }
+                msg += "Возможные причины:\n";
+                msg += "- HTTP 403 Forbidden: доступ к модели запрещён (требуется API-ключ, "
+                       "либо модель недоступна для вашего ключа/тарифа)\n";
+                msg += "- Провайдер вернул нестандартный ответ\n\n";
+                msg += "Проверьте API-ключ в настройках облачного провайдера и попробуйте "
+                       "другую модель.";
+                response.success = false;
+                response.error = msg;
+                LOG_ERROR("[CloudParser] Нестандартный ответ без контента: " +
+                          (json_str.size() > 400 ? json_str.substr(0, 400) : json_str));
+                return response;
+            }
             LOG_WARNING("[CloudParser] content пуст при успешном парсинге; head: " +
                         (json_str.size() > 400 ? json_str.substr(0, 400) : json_str));
         }

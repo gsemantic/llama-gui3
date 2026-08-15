@@ -71,9 +71,12 @@
         "last_search_query": "",
         "max_output_tokens": 1500,
         "model_id": "glm-4.7-flash",
-        "provider_name": "OpenRouter",
+        "provider_name": "Zhipu (GLM)",
+        "reasoning_budget": 0,
+        "reasoning_enabled": false,
         "recent_models": [
-            "glm-4.7-flash"
+            "glm-4.7-flash",
+            "hy3-free"
         ],
         "timeout_ms": 120000
     },
@@ -82,7 +85,7 @@
     "control_vectors": [],
     "custom": {
         "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
-        "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_input_chars\":12000,\"max_words\":0,\"prompt_template\":\"Тебе дана РОВНО ОДНА новость (один материал). Перепиши её своими словами, сохранив все факты. НЕ делай обзор, сводку или дайджест и НЕ объединяй с другими материалами. Язык: {language}. Тон: {tone}.\\n\\nПравила:\\n- На входе — одна статья, на выходе — тоже РОВНО ОДНА переписанная статья (число рерайтов всегда равно числу оригиналов).\\n- Сохрани относящиеся к ЭТОЙ новости заголовок, дату и фото: они передаются отдельно и не входят в текст.\\n- Формат ответа: первая строка — переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"seo\":{\"combine_with_rewrite\":true,\"enabled\":true,\"prompt_template\":\"Ты — SEO-редактор. По переписанной новости верни ТОЛЬКО валидный JSON без пояснений и без markdown-разметки, в точности такого вида:\\n{\\\"focus_keyword\\\":\\\"...\\\",\\\"meta_description\\\":\\\"...\\\",\\\"seo_title\\\":\\\"...\\\"}\\nПравила:\\n- focus_keyword — ключевая фраза из текста, 2-4 слова, строго в нижнем регистре, на языке статьи;\\n- meta_description — одно предложение, 150-160 символов, без кавычек по краям, описывает суть новости;\\n- seo_title — до 60 символов, привлекательный, с ключевым словом в начале (может совпадать с заголовком).\\nОтвет строго JSON.\\n\\nЯзык: {language}\\nЗаголовок: {title}\\nТекст: {body}\"},\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/Alex/Desktop/rerait/\",\"params\":{\"api_key\":\"\",\"app_password\":\"\",\"author\":0,\"categories\":[1],\"excerpt\":\"\",\"featured_image\":\"\",\"max_retries\":5,\"post_type\":\"posts\",\"retry_delay_ms\":1000,\"site_url\":\"https://gsemantic.ru/\",\"slug\":\"\",\"status\":\"draft\",\"tags\":[],\"timeout_seconds\":20,\"url\":\"\",\"username\":\"\",\"verify_site_state\":true},\"type\":\"wordpress\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"preview\":false,\"type\":\"page\",\"url\":\"https://zebra-tv.ru/\"}]}"
+        "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_input_chars\":12000,\"max_words\":0,\"prompt_template\":\"Тебе дана РОВНО ОДНА новость (один материал). Перепиши её своими словами, сохранив все факты. НЕ делай обзор, сводку или дайджест и НЕ объединяй с другими материалами. Язык: {language}. Тон: {tone}.\\n\\nПравила:\\n- На входе — одна статья, на выходе — тоже РОВНО ОДНА переписанная статья (число рерайтов всегда равно числу оригиналов).\\n- Сохрани относящиеся к ЭТОЙ новости заголовок, дату и фото: они передаются отдельно и не входят в текст.\\n- Формат ответа: первая строка — переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"seo\":{\"combine_with_rewrite\":true,\"enabled\":true,\"prompt_template\":\"Ты — SEO-редактор. По переписанной новости верни ТОЛЬКО валидный JSON без пояснений и без markdown-разметки, в точности такого вида:\\n{\\\"focus_keyword\\\":\\\"...\\\",\\\"meta_description\\\":\\\"...\\\",\\\"seo_title\\\":\\\"...\\\"}\\nПравила:\\n- focus_keyword — ключевая фраза из текста, 2-4 слова, строго в нижнем регистре, на языке статьи;\\n- meta_description — одно предложение, 150-160 символов, без кавычек по краям, описывает суть новости;\\n- seo_title — до 60 символов, привлекательный, с ключевым словом в начале (может совпадать с заголовком).\\nОтвет строго JSON.\\n\\nЯзык: {language}\\nЗаголовок: {title}\\nТекст: {body}\"},\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/Alex/Desktop/rerait/\",\"params\":{\"api_key\":\"\",\"app_password\":\"\",\"author\":0,\"categories\":[1],\"excerpt\":\"\",\"featured_image\":\"\",\"max_retries\":5,\"post_type\":\"posts\",\"retry_delay_ms\":1000,\"site_url\":\"https://gsemantic.ru/\",\"slug\":\"\",\"status\":\"draft\",\"tags\":[],\"timeout_seconds\":20,\"url\":\"\",\"username\":\"\",\"verify_site_state\":true},\"type\":\"wordpress\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"preview\":true,\"type\":\"page\",\"url\":\"https://zebra-tv.ru/\"}]}"
     },
     "display": {
         "auto_resize": true,
@@ -168,16 +171,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 5541,
-            "avg_response_time_ms": 2368.75,
-            "avg_tokens_generated": 273,
-            "avg_tokens_per_second": 104.7,
-            "first_used": "Sat Aug 15 00:29:42 2026",
-            "last_used": "Sat Aug 15 00:29:42 2026",
+            "avg_context_used": 1227,
+            "avg_response_time_ms": 890.68,
+            "avg_tokens_generated": 114,
+            "avg_tokens_per_second": 53.93,
+            "first_used": "Sat Aug 15 15:15:12 2026",
+            "last_used": "Sat Aug 15 15:15:12 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 17
+            "total_generations": 32
         }
     },
     "output": {

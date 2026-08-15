@@ -89,6 +89,10 @@ struct OpenRouterRequestParams {
     float presence_penalty = 0.0f;
     float frequency_penalty = 0.0f;
 
+    // Режим размышлений/thinking для поддерживающих моделей (GLM, DeepSeek, o-серия)
+    bool reasoning_enabled = false;
+    int reasoning_budget = 0;  // Бюджет токенов на reasoning (0 = по умолчанию провайдера)
+
     // Системный промпт
     std::string system_prompt;
     
