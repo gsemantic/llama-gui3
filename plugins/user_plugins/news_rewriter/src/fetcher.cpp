@@ -2,6 +2,7 @@
 
 #include <cctype>
 
+#include "common.h"
 #include "xml.h"
 
 namespace news_rewriter {
@@ -283,14 +284,18 @@ FetchResult Fetcher::fetch(const std::string& url, const std::string& type,
         return result;
     }
 
+    // Перекодируем тело в UTF-8 (сайты вроде VK отдают windows-1251), иначе
+    // кириллица ломает последующий разбор JSON и показывается «кракозябрами».
+    const std::string body = to_utf8(resp.body, resp.content_type);
+
     if (type == "page") {
         result.ok = true;
-        result.html = resp.body;
+        result.html = body;
         return result;
     }
 
     if (type == "rss" || type == "atom") {
-        if (parse_feed_body(resp.body, result.items)) {
+        if (parse_feed_body(body, result.items)) {
             result.ok = true;
             return result;
         }
@@ -298,7 +303,7 @@ FetchResult Fetcher::fetch(const std::string& url, const std::string& type,
         // Тело не XML. Возможно, пользователь указал HTML-страницу, а не ленту.
         // 1) Ищем в странице ссылку на RSS/Atom.
         const std::string base = resp.final_url.empty() ? url : resp.final_url;
-        const std::string feed_href = discover_feed_link(resp.body, base);
+        const std::string feed_href = discover_feed_link(body, base);
 
         // 2) Распространённое соглашение: лента по пути "<страница>/rss/".
         const std::string sibling = feed_href.empty() ? sibling_feed_candidate(base) : "";
@@ -306,12 +311,15 @@ FetchResult Fetcher::fetch(const std::string& url, const std::string& type,
         for (const std::string& candidate : {feed_href, sibling}) {
             if (candidate.empty()) continue;
             const HttpResponse feed_resp = http_.get(candidate, cfg);
-            if (feed_resp.ok && feed_resp.status < 400 &&
-                parse_feed_body(feed_resp.body, result.items)) {
-                result.http_status = feed_resp.status;
-                result.final_url = feed_resp.final_url;
-                result.ok = true;
-                return result;
+            if (feed_resp.ok && feed_resp.status < 400) {
+                const std::string feed_body =
+                    to_utf8(feed_resp.body, feed_resp.content_type);
+                if (parse_feed_body(feed_body, result.items)) {
+                    result.http_status = feed_resp.status;
+                    result.final_url = feed_resp.final_url;
+                    result.ok = true;
+                    return result;
+                }
             }
         }
 

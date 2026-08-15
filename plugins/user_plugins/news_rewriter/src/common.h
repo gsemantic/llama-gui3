@@ -73,4 +73,13 @@ std::string resolve_url(const std::string& url, const std::string& base);
 // Сериализация статьи в JSON (общая для Storage и Sink-ов).
 Json article_to_json(const Article& a);
 
+// Перекодировка тела HTTP-ответа в UTF-8 по декларируемой кодировке.
+// content_type — значение заголовка Content-Type (напр.
+// "text/html; charset=windows-1251"). Поддерживаются windows-1251/cp1251 и
+// iso-8859-5 (наиболее распространённые для русскоязычных сайтов, напр. VK).
+// Для UTF-8/пустого заголовка текст возвращается как есть. Без этой
+// перекодировки CP1251-кириллица (байты 0x80–0xFF) ломает последующий разбор
+// JSON (облако отдаёт invalid UTF-8) и отображается «кракозябрами».
+std::string to_utf8(const std::string& text, const std::string& content_type);
+
 } // namespace news_rewriter

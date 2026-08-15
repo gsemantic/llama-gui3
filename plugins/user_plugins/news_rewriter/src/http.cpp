@@ -38,6 +38,7 @@ const CURLoption kOptPostFieldSize = 60;      // CURLOPT_POSTFIELDSIZE
 // CURLINFO_* (код = тип-маска | номер)
 const CURLINFO kInfoResponseCode = 0x200000 + 2;  // CURLINFO_RESPONSE_CODE
 const CURLINFO kInfoEffectiveUrl = 0x100000 + 1;  // CURLINFO_EFFECTIVE_URL
+const CURLINFO kInfoContentType = 0x100000 + 18;  // CURLINFO_CONTENT_TYPE
 
 struct CurlBind {
     void* handle = nullptr;
@@ -198,6 +199,10 @@ HttpResponse HttpClient::get(const std::string& url, const NetworkConfig& cfg,
         if (b.curl_easy_getinfo(easy, kInfoEffectiveUrl, &eff) == 0 && eff) {
             resp.final_url = eff;
         }
+        char* ct = nullptr;
+        if (b.curl_easy_getinfo(easy, kInfoContentType, &ct) == 0 && ct) {
+            resp.content_type = ct;
+        }
     }
 
     if (headers) b.curl_slist_free_all(headers);
@@ -257,6 +262,10 @@ HttpResponse HttpClient::get(const std::string& url, const NetworkConfig& cfg,
         char* eff = nullptr;
         if (b.curl_easy_getinfo(easy, kInfoEffectiveUrl, &eff) == 0 && eff) {
             resp.final_url = eff;
+        }
+        char* ct = nullptr;
+        if (b.curl_easy_getinfo(easy, kInfoContentType, &ct) == 0 && ct) {
+            resp.content_type = ct;
         }
     }
 

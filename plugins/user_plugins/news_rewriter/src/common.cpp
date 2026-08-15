@@ -308,4 +308,105 @@ Json article_to_json(const Article& a) {
     return j;
 }
 
+// ============================================================================
+// Перекодировка HTTP-ответов в UTF-8 (сайты вроде VK отдают windows-1251)
+// ============================================================================
+
+namespace {
+
+void append_utf8(std::string& out, unsigned cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+}
+
+// Windows-1251 → Unicode для байт 0x80–0xBF (буквы 0xC0–0xFF считаются
+// механически: 0xC0–0xDF → А–Я, 0xE0–0xFF → а–я).
+const unsigned short kCp1251[64] = {
+    0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
+    0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x2122, 0x0459, 0x203A, 0x045A, 0x045C, 0x045B, 0x045F, 0x00A0,
+    0x00A0, 0x040E, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7,
+    0x0401, 0x00A9, 0x0404, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x0407,
+    0x00B0, 0x00B1, 0x0406, 0x0456, 0x0451, 0x0454, 0x00B6, 0x00B7,
+    0x0457, 0x0491, 0x00BA, 0x00BB, 0x0458, 0x0405, 0x0455, 0x2116,
+};
+
+std::string cp1251_to_utf8(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        unsigned cp;
+        if (c < 0x80) cp = c;
+        else if (c < 0xC0) cp = kCp1251[c - 0x80];
+        else if (c < 0xE0) cp = 0x0410 + (c - 0xC0);
+        else cp = 0x0430 + (c - 0xE0);
+        append_utf8(out, cp);
+    }
+    return out;
+}
+
+std::string iso8859_5_to_utf8(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        unsigned cp;
+        if (c < 0x80) cp = c;
+        else if (c == 0xA0) cp = 0x00A0;
+        else if (c >= 0xA1 && c <= 0xAF) cp = 0x0401 + (c - 0xA1);
+        else if (c >= 0xB0) cp = 0x0410 + (c - 0xB0);  // 0xB0–0xFF: А–џ
+        else cp = c;  // неопределённый диапазон 0x80–0x9F
+        append_utf8(out, cp);
+    }
+    return out;
+}
+
+std::string to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::string charset_from_content_type(const std::string& ct) {
+    const std::size_t pos = ct.find("charset=");
+    if (pos == std::string::npos) return "";
+    std::string cs = ct.substr(pos + 8);
+    const std::size_t end = cs.find_first_of(" ;\t\"'");
+    if (end != std::string::npos) cs = cs.substr(0, end);
+    return to_lower(cs);
+}
+
+std::string charset_from_meta(const std::string& html) {
+    const std::string head = html.substr(0, std::min<std::size_t>(html.size(), 8192));
+    const std::string low = to_lower(head);
+    const std::size_t pos = low.find("charset=");
+    if (pos == std::string::npos) return "";
+    std::size_t start = pos + 8;
+    while (start < low.size() &&
+           (low[start] == '"' || low[start] == '\'' || low[start] == ' ')) {
+        start++;
+    }
+    const std::size_t end = low.find_first_of(" \"'/>\t", start);
+    return low.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+} // namespace
+
+std::string to_utf8(const std::string& text, const std::string& content_type) {
+    std::string enc = charset_from_content_type(content_type);
+    if (enc.empty()) enc = charset_from_meta(text);
+    if (enc == "utf-8" || enc == "utf8" || enc.empty()) return text;
+    if (enc == "windows-1251" || enc == "cp1251") return cp1251_to_utf8(text);
+    if (enc == "iso-8859-5" || enc == "iso8859-5") return iso8859_5_to_utf8(text);
+    // Неизвестная/неподдерживаемая кодировка — считаем UTF-8 (как есть).
+    return text;
+}
+
 } // namespace news_rewriter

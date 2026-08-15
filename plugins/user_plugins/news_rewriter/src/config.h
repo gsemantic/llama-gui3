@@ -78,9 +78,19 @@ struct SinkConfig {
     std::string data_dir;            // каталог данных приложения (runtime, для .env)
 };
 
+// Дефолтный User-Agent — реальный браузер (Яндекс.Браузер на движке Chromium),
+// чтобы сайты не блокировали плагин как бота. Например, VK и ряд других
+// отдают 302/челлендж для нестандартных UA вроде "news_rewriter/1.0"
+// (см. config.cpp: миграция старого бот-UA).
+constexpr const char* kDefaultUserAgent =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 YaBrowser/24.7.0.0 "
+    "Yowser/2.5 Safari/537.36";
+
 struct NetworkConfig {
     int timeout_seconds = 20;
-    std::string user_agent = "news_rewriter/1.0";
+    // Дефолтный User-Agent (см. kDefaultUserAgent выше).
+    std::string user_agent = kDefaultUserAgent;
     std::string proxy;           // пусто = системный прокси
     std::string extra_headers;   // "Header: value\n..." (для авторизации и пр.)
 };

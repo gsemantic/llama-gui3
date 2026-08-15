@@ -132,8 +132,14 @@ Config config_from_json(const Json& j) {
     if (network.is_object()) {
         cfg.network.timeout_seconds = static_cast<int>(
             network.get("timeout_seconds").as_int(cfg.network.timeout_seconds));
-        cfg.network.user_agent =
+        // Дефолтный User-Agent — браузерный (Яндекс/Chromium), чтобы сайты не
+        // блокировали плагин как бота. Старый бот-UA "news_rewriter/1.0"
+        // (блокируется VK и др. 302-редиректом) при загрузке автоматически
+        // заменяется на дефолт; пользовательский UA сохраняется как есть.
+        const std::string ua =
             network.get("user_agent").as_string(cfg.network.user_agent);
+        cfg.network.user_agent =
+            (ua == "news_rewriter/1.0") ? std::string(kDefaultUserAgent) : ua;
         cfg.network.proxy = network.get("proxy").as_string();
         cfg.network.extra_headers = network.get("extra_headers").as_string();
     }

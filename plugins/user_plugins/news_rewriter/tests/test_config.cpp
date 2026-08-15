@@ -65,9 +65,31 @@ static void test_config_network_roundtrip() {
     TEST_ASSERT_EQUAL(back.network.extra_headers, "Authorization: Bearer abc\nX-Custom: 1");
 }
 
+static void test_config_migrates_bot_user_agent() {
+    // Старый бот-UA "news_rewriter/1.0" блокируется сайтами (VK отдаёт 302 на
+    // страницу-челлендж). При загрузке он заменяется на браузерный по умолчанию.
+    Json j = Json::object();
+    Json network = Json::object();
+    network["user_agent"] = "news_rewriter/1.0";
+    j["network"] = network;
+    const Config cfg = config_from_json(j);
+    TEST_ASSERT_EQUAL(cfg.network.user_agent, kDefaultUserAgent);
+}
+
+static void test_config_keeps_custom_user_agent() {
+    Json j = Json::object();
+    Json network = Json::object();
+    network["user_agent"] = "my-custom-agent/9.9";
+    j["network"] = network;
+    const Config cfg = config_from_json(j);
+    TEST_ASSERT_EQUAL(cfg.network.user_agent, "my-custom-agent/9.9");
+}
+
 REGISTER_TEST(test_config_roundtrip_new_fields);
 REGISTER_TEST(test_config_from_json_defaults);
 REGISTER_TEST(test_config_source_roundtrip);
 REGISTER_TEST(test_config_network_roundtrip);
+REGISTER_TEST(test_config_migrates_bot_user_agent);
+REGISTER_TEST(test_config_keeps_custom_user_agent);
 
 } // namespace

@@ -15,6 +15,7 @@ struct HttpResponse {
     int status = 0;           // HTTP-код (200, 404, ...)
     std::string body;
     std::string final_url;    // после редиректов
+    std::string content_type; // заголовок Content-Type (вкл. charset)
     std::string error;
 };
 
