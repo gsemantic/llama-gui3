@@ -462,6 +462,48 @@ static void test_first_content_image_skips_hero_class() {
 }
 REGISTER_TEST(test_first_content_image_skips_hero_class);
 
+// Регрессия: иллюстрация глубоко в теле статьи (не в начале) должна
+// находиться, если перед ней нет других подходящих картинок.
+static void test_extract_page_finds_deep_body_image() {
+    const std::string html =
+        "<html><head><title>Статья о событии</title></head><body>"
+        "<div class='article'>"
+        "<h1>Заголовок статьи о важном событии дня</h1>"
+        "<p>Первый абзац статьи с подробным описанием события и его предыстории, "
+        "достаточно длинный чтобы быть основным текстом для эвристики плотности.</p>"
+        "<p>Второй абзац продолжает материал и содержит важные детали происходящего "
+        "и комментарии участников, а также анализ ситуации в целом и прогнозы.</p>"
+        "<p>Третий абзац завершает повествование и подводит итог произошедшего "
+        "события, делая выводы о его значении и последствиях для отрасли.</p>"
+        "<figure class='article-image'>"
+        "<img src='https://cdn.example.com/deep-illustration.jpg' alt='иллюстрация'></figure>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT(ex.image.find("deep-illustration.jpg") != std::string::npos);
+}
+REGISTER_TEST(test_extract_page_finds_deep_body_image);
+
+// Регрессия: обложка с BEM-классом через подчёркивание (block__element--mod),
+// напр. "...image-cover__image", должна пропускаться, а главное фото —
+// браться из глубины текста. Раньше token_contains считал '_' частью токена,
+// поэтому "cover" за '_' не распознавался и возвращалась обложка вместо
+// настоящей иллюстрации статьи.
+static void test_first_content_image_skips_cover_with_underscore() {
+    const std::string html =
+        "<article>"
+        "<img class='media__cover-image hero_cover' "
+        "src='https://cdn.example.com/cover.jpg'>"
+        "<h1>Заголовок</h1>"
+        "<p>Текст новости довольно длинный и содержательный абзац статьи.</p>"
+        "<img class='article__image content-image' "
+        "src='https://cdn.example.com/real-photo.jpg'>"
+        "</article>";
+    TEST_ASSERT_EQUAL(first_content_image(html),
+                      "https://cdn.example.com/real-photo.jpg");
+}
+REGISTER_TEST(test_first_content_image_skips_cover_with_underscore);
+
 // Регрессия: составной class вроде «content__main_with-aside» содержит слово
 // «aside», но это главная колонка с новостями, а не сайдбар. Его нельзя
 // вырезать — иначе вся лента теряется и страница обрабатывается как одна статья.

@@ -945,9 +945,12 @@ ExtractedArticle extract_from_description(const std::string& desc) {
 
 // Проверка на целое слово-токен (а не подстроку): keyword должен быть
 // отделён от соседей границами (начало/конец строки либо символ, не являющийся
-// буквой/цифрой/подчёркиванием). Иначе, например, "thumb" совпадал бы с
-// "post-thumbnail", а "cover" — с "discover", и настоящие фото статьи
-// отбрасывались бы как «обложка».
+// буквой/цифрой). CSS-классы используют и дефис '-', и подчёркивание '_' как
+// разделители токенов (BEM: block__element--modifier), поэтому оба считаем
+// границами. Иначе, например, "cover" в "...image-cover__image" не
+// распознавался бы как обложка (за ним стоит '_'), и в качестве главного фото
+// статьи возвращалась бы обложка, а настоящая иллюстрация из глубины текста —
+// терялась. "discover" по-прежнему не совпадает с "cover" (буква 's' слева).
 bool token_contains(const std::string& haystack, const char* keyword) {
     const std::size_t n = haystack.size();
     std::size_t k = 0;
@@ -955,12 +958,10 @@ bool token_contains(const std::string& haystack, const char* keyword) {
     if (k == 0 || n < k) return false;
     for (std::size_t i = 0; (i = haystack.find(keyword, i)) != std::string::npos; ) {
         const bool prev_ok = (i == 0) ||
-            !(std::isalnum(static_cast<unsigned char>(haystack[i - 1])) ||
-              haystack[i - 1] == '_');
+            !std::isalnum(static_cast<unsigned char>(haystack[i - 1]));
         const std::size_t after = i + k;
         const bool next_ok = (after >= n) ||
-            !(std::isalnum(static_cast<unsigned char>(haystack[after])) ||
-              haystack[after] == '_');
+            !std::isalnum(static_cast<unsigned char>(haystack[after]));
         if (prev_ok && next_ok) return true;
         i += k;  // продолжаем поиск после найденного вхождения
     }
