@@ -11,6 +11,7 @@ struct ExtractedArticle {
     std::string title;
     std::string body;
     std::string image;   // URL заглавного изображения (og:image / twitter:image / первый <img>)
+    std::string author;  // автор оригинала (мета author / подпись «作者：…» / «Автор: …»)
     std::string url;     // ссылка на статью (для страниц-списков: заполняется краулером)
     std::int64_t published_at = 0;  // время публикации (Unix UTC), 0 = неизвестно
 };

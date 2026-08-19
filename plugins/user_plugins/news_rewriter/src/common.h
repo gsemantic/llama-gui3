@@ -38,6 +38,7 @@ struct Article {
     std::string body_rewritten;
     std::string language;
     std::string source_image;       // URL заглавного изображения из источника (если есть)
+    std::string author_original;     // автор оригинала (из ленты или страницы)
     std::string seo_focus_keyword;  // ключевое слово (модель, SEO-шаг)
     std::string seo_meta_description;// meta-описание (модель, SEO-шаг)
     std::string seo_title;          // SEO-заголовок (модель, SEO-шаг)

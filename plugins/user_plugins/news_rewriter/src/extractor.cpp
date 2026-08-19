@@ -14,8 +14,78 @@ namespace news_rewriter {
 
 namespace {
 
+// Используется extract_author (объявлен ниже); определён позже в этом файле.
+std::string get_attr(const std::string& tag, const std::string& attr);
+
+// Автор оригинала: мета-тег <meta name="author"/property="…author…"> либо
+// явная подпись в тексте («作者：Имя», «Автор: Имя», «By Имя»). Возвращает
+// пустую строку, если не найдено. Используется, чтобы выводить автора
+// оригинала в переписанной статье.
+std::string extract_author(const std::string& html) {
+    // 1) Мета-тег author.
+    std::size_t p = 0;
+    while ((p = html.find("<meta", p)) != std::string::npos) {
+        const std::size_t gt = html.find('>', p);
+        if (gt == std::string::npos) break;
+        const std::string tag = html.substr(p, gt - p + 1);
+        std::string low = tag;
+        for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (low.find("author") != std::string::npos) {
+            const std::string c = get_attr(tag, "content");
+            if (!c.empty()) return c;
+        }
+        p = gt + 1;
+    }
+    // 2) Подпись в тексте: маркер (作者 / автор / Автор / by) + разделитель + имя.
+    // Ищем маркер напрямую в html, БЕЗ приведения к регистру: корректная свёртка
+    // регистра для кириллицы/китайского требует локали, которой в рантайме нет
+    // (std::tolower в C-локали не трогает не-ASCII), поэтому перебираем
+    // распространённые написания маркера для ASCII (автор/Автор, by/By/BY).
+    static const char* kMarkers[] = {
+        "作者", "автор", "Автор", "АВТОР", "by ", "By ", "BY "
+    };
+    for (const char* m : kMarkers) {
+        const std::size_t mlen = std::string(m).size();
+        std::size_t pos = 0;
+        while ((pos = html.find(m, pos)) != std::string::npos) {
+            // Граница слова: начало текста, пробел, табуляция или '>'.
+            if (pos > 0) {
+                const char pc = html[pos - 1];
+                if (!(pc == ' ' || pc == '\t' || pc == '>' || pc == '\n' || pc == '\r'))
+                    { pos += mlen; continue; }
+            }
+            std::size_t i = pos + mlen;
+            while (i < html.size()) {
+                const unsigned char c0 = static_cast<unsigned char>(html[i]);
+                if (c0 == ' ' || c0 == '\t' || c0 == ':' ||
+                    c0 == '\n' || c0 == '\r') { ++i; continue; }
+                // полноширинное двоеточие «：» (UTF-8, 3 байта)
+                if (html.compare(i, 3, "：") == 0) { i += 3; continue; }
+                break;
+            }
+            std::size_t j = i;
+            while (j < html.size() && html[j] != '<' && html[j] != '\n' &&
+                    html[j] != '\r' && html[j] != '\t') {
+                // Стоп по «来源»/«source» или паре пробелов (конец подписи).
+                if (html[j] == ' ' &&
+                    (j + 1 >= html.size() || html[j + 1] == ' ')) break;
+                ++j;
+            }
+            std::string name = html.substr(i, j - i);
+            const std::size_t src = name.find("来源");
+            if (src != std::string::npos) name = name.substr(0, src);
+            const std::size_t b = name.find_first_not_of(" \t");
+            const std::size_t e = name.find_last_not_of(" \t");
+            if (b != std::string::npos) name = name.substr(b, e - b + 1);
+            if (!name.empty() && name.find("来源") == std::string::npos) return name;
+            pos = i;
+        }
+    }
+    return "";
+}
+
 // ---------------------------------------------------------------------------
-// HTML → текст (лексический токенизатор, без внешних зависимостей)
+// Извлечение заголовка/тела страницы
 // ---------------------------------------------------------------------------
 
 // Блочные теги: после них текст начинается с новой строки.
@@ -1407,6 +1477,7 @@ ExtractedArticle extract_page(const std::string& html, const std::string& base_u
     if (img.empty()) img = extract_image_url(html);
     if (!img.empty() && img.find("data:") != 0) img = resolve_url(img, base_url);
     result.image = img;
+    result.author = extract_author(html);
     return result;
 }
 

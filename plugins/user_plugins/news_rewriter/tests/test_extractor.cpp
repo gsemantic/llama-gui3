@@ -620,4 +620,66 @@ static void test_strip_keeps_main_content_with_aside() {
 }
 REGISTER_TEST(test_strip_keeps_main_content_with_aside);
 
+// Автор оригинала извлекается из текстовой подписи «作者：Имя 来源：…»
+// (типично для китайских источников, напр. scienenet), даже когда в теле
+// китайский текст без пробелов.
+static void test_extract_page_author_from_cjk_signature() {
+    const std::string html =
+        "<html><head><title>Новость про кукурузу</title></head><body>"
+        "<div class='logo'><img src='/images/logo.png' width='120' height='40'></div>"
+        "<div id='content'>"
+        "<h1>Новость про кукурузу</h1>"
+        "<p>饲料蛋白原料对外依存度高，是制约我国种养业稳定发展的突出短板。</p>"
+        "<p>长期以来，国内饲料生产依赖进口大豆补足供需缺口，年进口量超1亿吨。</p>"
+        "<p>中单126从实验室走向黑土地，成为高蛋白玉米的重要品种。</p>"
+        "<div class='author-line'>作者：赵广立 来源：中国科学报</div>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.author, "赵广立");
+}
+
+// Автор оригинала из мета-тега <meta name="author" content="Имя">.
+static void test_extract_page_author_from_meta() {
+    const std::string html =
+        "<html><head><title>Статья</title>"
+        "<meta name=\"author\" content=\"Иван Петров\">"
+        "</head><body>"
+        "<h1>Заголовок статьи про событие дня</h1>"
+        "<p>Первый абзац основной статьи, в котором рассказывается о произошедшем событии подробно.</p>"
+        "<p>Второй абзац продолжает материал и раскрывает важные детали происшествия.</p>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.author, "Иван Петров");
+}
+
+// Автор оригинала из подписи «Автор: Имя» (русскоязычные сайты).
+static void test_extract_page_author_from_russian_signature() {
+    const std::string html =
+        "<html><body>"
+        "<h1>Заголовок статьи</h1>"
+        "<p>Первый абзац основной статьи с достаточно длинным и содержательным текстом для эвристики плотности.</p>"
+        "<p>Второй абзац продолжает материал и содержит важные детали события.</p>"
+        "<p>Автор: Анна Смирнова</p>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.author, "Анна Смирнова");
+}
+
+// Если автора нет — возвращается пустая строка (не мусор).
+static void test_extract_page_author_absent_is_empty() {
+    const std::string html =
+        "<html><body>"
+        "<h1>Заголовок статьи</h1>"
+        "<p>Первый абзац основной статьи с достаточно длинным и содержательным текстом для эвристики плотности.</p>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT_TRUE(ex.author.empty());
+}
+
+REGISTER_TEST(test_extract_page_author_from_cjk_signature);
+REGISTER_TEST(test_extract_page_author_from_meta);
+REGISTER_TEST(test_extract_page_author_from_russian_signature);
+REGISTER_TEST(test_extract_page_author_absent_is_empty);
+
 } // namespace

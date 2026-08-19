@@ -71,6 +71,10 @@ std::vector<FeedItem> extract_rss(const XmlNode& root) {
         f.description = rss_body(*item);
         f.pub_date = child_text(*item, "pubDate");
         f.image = rss_image(*item, f.description);
+        // Автор оригинала: dc:creator (парсер сворачивает префикс → "creator")
+        // либо стандартный author.
+        f.author = child_text(*item, "creator");
+        if (f.author.empty()) f.author = child_text(*item, "author");
         if (!f.title.empty() || !f.link.empty()) {
             items.push_back(std::move(f));
         }
@@ -120,6 +124,8 @@ std::vector<FeedItem> extract_atom(const XmlNode& root) {
         if (f.description.empty()) f.description = child_text(*entry, "content");
         f.pub_date = child_text(*entry, "updated");
         if (f.pub_date.empty()) f.pub_date = child_text(*entry, "published");
+        // Atom: <author><name>Имя</name></author> → child_text берёт вложенный текст.
+        f.author = child_text(*entry, "author");
         // <link href="..." rel="alternate">
         for (const XmlNode* link : find_children(*entry, "link")) {
             const std::string rel = link->attrs.count("rel") ? link->attrs.at("rel") : "alternate";

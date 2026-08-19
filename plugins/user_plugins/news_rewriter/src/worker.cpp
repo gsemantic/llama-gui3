@@ -926,6 +926,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         a.title_original = html_to_text(item.title);
         a.body_original = ex.body;
         a.source_image = item.image;   // заглавное изображение из ленты (media:content/enclosure/itunes)
+        a.author_original = item.author;  // автор из ленты (если есть; scienenet не даёт)
         // Лента часто не даёт картинку (enclosure пуст) и полный текст. Чтобы в
         // выходной статье появилась реальная иллюстрация и полный текст,
         // подгружаем страницу материала и извлекаем её (как в режиме page-листа).
@@ -942,6 +943,10 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
                     a.body_original = fx.body;
                 }
                 if (!fx.image.empty()) a.source_image = fx.image;
+                // Автор из страницы материала (надёжнее для лент без автора,
+                // напр. scienenet: «作者：Имя 来源：…»). Если страница не дала —
+                // остаётся автор из ленты (выше).
+                if (!fx.author.empty()) a.author_original = fx.author;
             }
         }
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
