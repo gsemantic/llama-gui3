@@ -397,15 +397,39 @@ std::string charset_from_meta(const std::string& html) {
     return low.substr(start, end == std::string::npos ? std::string::npos : end - start);
 }
 
+// Корректен ли текст как UTF-8 (без surrogатов/overlong; достаточно, чтобы
+// отличать объявленный UTF-8 от windows-1251 без объявления charset).
+bool is_valid_utf8(const std::string& s) {
+    std::size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) { i++; continue; }
+        int len;
+        if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        else return false;
+        if (i + static_cast<std::size_t>(len) > n) return false;
+        for (int k = 1; k < len; k++) {
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+        }
+        i += static_cast<std::size_t>(len);
+    }
+    return true;
+}
+
 } // namespace
 
 std::string to_utf8(const std::string& text, const std::string& content_type) {
     std::string enc = charset_from_content_type(content_type);
     if (enc.empty()) enc = charset_from_meta(text);
-    if (enc == "utf-8" || enc == "utf8" || enc.empty()) return text;
+    if (enc == "utf-8" || enc == "utf8") return text;
     if (enc == "windows-1251" || enc == "cp1251") return cp1251_to_utf8(text);
     if (enc == "iso-8859-5" || enc == "iso8859-5") return iso8859_5_to_utf8(text);
-    // Неизвестная/неподдерживаемая кодировка — считаем UTF-8 (как есть).
+    // Кодировка не объявлена/неизвестна: многие русские сайты отдают windows-1251
+    // без charset. Если текст уже валидный UTF-8 — оставляем как есть, иначе
+    // перекодируем из windows-1251, чтобы кириллица не превращалась в «кракозябры».
+    if (!is_valid_utf8(text)) return cp1251_to_utf8(text);
     return text;
 }
 

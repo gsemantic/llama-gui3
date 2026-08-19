@@ -93,8 +93,11 @@ Json csv_to_int_list(const std::string& csv) {
 }
 
 // Раздел настроек. draft — редактируемая копия конфигурации.
-void render_settings(UiDeps& deps, Config& draft) {
-    // ---- Профили настроек (автономны от профилей основного приложения) ----
+// Содержимое разбито на вкладки; профиль и кнопки действий вынесены в
+// постоянные шапку/подвал (render_settings_profile / render_settings_actions).
+
+// Шапка: выбор/создание/удаление профиля настроек (сквозной для всех вкладок).
+void render_settings_profile(UiDeps& deps, Config& draft) {
     ImGui::TextUnformatted("Профиль настроек:");
     {
         const std::vector<std::string> profiles = deps.list_profiles();
@@ -148,10 +151,10 @@ void render_settings(UiDeps& deps, Config& draft) {
             ImGui::TextDisabled("удалить нельзя: единственный");
         }
     }
+}
 
-    ImGui::Separator();
-
-    // ---- Источники (сайты для обхода) -------------------------------------
+// Вкладка «Источники»: сайты для обхода + параметры сбора.
+void render_settings_sources([[maybe_unused]] UiDeps& deps, Config& draft) {
     ImGui::TextUnformatted("Источники (сайты для обхода):");
     int remove_index = -1;
     for (std::size_t i = 0; i < draft.sources.size(); i++) {
@@ -210,7 +213,6 @@ void render_settings(UiDeps& deps, Config& draft) {
 
     ImGui::Separator();
 
-    // ---- Сбор --------------------------------------------------------------
     ImGui::TextUnformatted("Сбор:");
     input_int_min0("Интервал автозапуска, мин (0 = только вручную)",
                    draft.schedule_minutes);
@@ -218,10 +220,10 @@ void render_settings(UiDeps& deps, Config& draft) {
                    draft.max_items_per_source);
     input_int_min0("Свежесть, часов (0 = без ограничения)",
                    draft.max_age_hours);
+}
 
-    ImGui::Separator();
-
-    // ---- Рерайт -------------------------------------------------------------
+// Вкладка «Рерайт»: параметры переписывания и SEO.
+void render_settings_rewrite([[maybe_unused]] UiDeps& deps, Config& draft) {
     ImGui::TextUnformatted("Рерайт:");
     input_text("Язык", draft.rewrite.language);
     input_text("Тон", draft.rewrite.tone);
@@ -240,10 +242,10 @@ void render_settings(UiDeps& deps, Config& draft) {
     }
     ImGui::TextDisabled("Ключевое слово используется как alt для обложки и "
                         "пишется в meta плагинов (Yoast/RankMath).");
+}
 
-    ImGui::Separator();
-
-    // ---- Выход --------------------------------------------------------------
+// Вкладка «Выход»: тип приёмника и его параметры (local_file/http/wordpress).
+void render_settings_output(UiDeps& deps, Config& draft) {
     ImGui::TextUnformatted("Выход:");
     if (ImGui::BeginCombo("Тип вывода", draft.sink.type.c_str())) {
         for (const char* t : {"local_file", "http", "wordpress"}) {
@@ -393,10 +395,10 @@ void render_settings(UiDeps& deps, Config& draft) {
         draft.sink.params["username"] = "";
         draft.sink.params["app_password"] = "";
     }
+}
 
-    ImGui::Separator();
-
-    // ---- Сеть ----------------------------------------------------------------
+// Вкладка «Сеть»: загрузка, прокси, заголовки и headless-браузер.
+void render_settings_network([[maybe_unused]] UiDeps& deps, Config& draft) {
     ImGui::TextUnformatted("Сеть:");
     input_int_min0("Таймаут загрузки, с", draft.network.timeout_seconds);
     input_text("User-Agent", draft.network.user_agent);
@@ -412,10 +414,10 @@ void render_settings(UiDeps& deps, Config& draft) {
     input_int_min0("Таймаут рендера, мс", draft.network.headless_timeout_ms);
     ImGui::TextDisabled("Если браузер доступен, пустые JS-оболочки автоматически "
                         "дорендериваются даже без этого флага.");
+}
 
-    ImGui::Separator();
-
-    // ---- Действия ------------------------------------------------------------
+// Подвал: сохранение/сброс черновика настроек (всегда виден под вкладками).
+void render_settings_actions(UiDeps& deps, Config& draft) {
     static double saved_at = 0.0;   // время последнего нажатия «Сохранить»
     if (ImGui::Button("Сохранить")) {
         if (deps.on_save) deps.on_save(draft);
@@ -436,6 +438,39 @@ void render_settings(UiDeps& deps, Config& draft) {
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Настройки сохраняются по кнопке «Сохранить» или при закрытии окна");
+}
+
+void render_settings(UiDeps& deps, Config& draft) {
+    // Шапка (сквозной профиль) — всегда видна над вкладками.
+    render_settings_profile(deps, draft);
+
+    ImGui::Separator();
+
+    // Вкладки по логическим областям настроек.
+    if (ImGui::BeginTabBar("##nr_settings_tabs")) {
+        if (ImGui::BeginTabItem("Источники")) {
+            render_settings_sources(deps, draft);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Рерайт")) {
+            render_settings_rewrite(deps, draft);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Выход")) {
+            render_settings_output(deps, draft);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Сеть")) {
+            render_settings_network(deps, draft);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    ImGui::Separator();
+
+    // Подвал (сохранить/сбросить) — всегда виден под вкладками.
+    render_settings_actions(deps, draft);
 }
 
 const ImVec4 status_color_task(TaskStatus s) {
