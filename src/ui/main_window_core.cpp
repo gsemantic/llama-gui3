@@ -148,6 +148,29 @@ void MainWindow::load_fonts_with_cyrillic() {
         io.Fonts->AddFontFromFileTTF(fontawesome_path.c_str(), font_size, &icons_config, icon_ranges);
     }
 
+    // Merge a CJK fallback font so that Chinese/Japanese/Korean text (e.g. news
+    // titles fetched from foreign RSS feeds) renders instead of '?'. The glyph
+    // ranges are limited to common simplified Chinese to keep atlas size sane.
+    const char* cjk_fonts[] = {
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        nullptr
+    };
+    for (const char* cjk_path : cjk_fonts) {
+        if (cjk_path && access(cjk_path, F_OK) == 0) {
+            ImFontConfig cjk_config;
+            cjk_config.MergeMode = true;
+            cjk_config.OversampleH = 1;
+            cjk_config.OversampleV = 1;
+            // wqy-microhei / Noto CJK are font collections (TTC): pick first face.
+            cjk_config.FontNo = 0;
+            io.Fonts->AddFontFromFileTTF(cjk_path, font_size, &cjk_config,
+                                        io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+            break;
+        }
+    }
+
     last_font_size_ = font_size;
 }
 
