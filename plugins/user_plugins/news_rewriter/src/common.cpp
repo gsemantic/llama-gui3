@@ -434,4 +434,9 @@ std::string to_utf8(const std::string& text, const std::string& content_type) {
     return text;
 }
 
+std::string ensure_utf8(const std::string& text) {
+    if (is_valid_utf8(text)) return text;
+    return cp1251_to_utf8(text);
+}
+
 } // namespace news_rewriter

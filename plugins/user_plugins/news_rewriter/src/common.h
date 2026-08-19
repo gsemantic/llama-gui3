@@ -82,4 +82,10 @@ Json article_to_json(const Article& a);
 // JSON (облако отдаёт invalid UTF-8) и отображается «кракозябрами».
 std::string to_utf8(const std::string& text, const std::string& content_type);
 
+// Гарантирует валидный UTF-8: если строка уже корректный UTF-8 — возвращает
+// как есть, иначе перекодирует из windows-1251. Используется как страховка на
+// границе вывода, чтобы невалидные байты (отображаемые ImGui как «?») не
+// попадали в интерфейс ни по какому пути.
+std::string ensure_utf8(const std::string& text);
+
 } // namespace news_rewriter

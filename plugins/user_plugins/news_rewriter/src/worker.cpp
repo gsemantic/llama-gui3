@@ -130,7 +130,7 @@ void Worker::debug_force_schedule_due() {
 
 void Worker::log(const std::string& msg) {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    state_.last_message = msg;
+    state_.last_message = ensure_utf8(msg);
     if (log_callback_) log_callback_(msg);
 }
 
@@ -941,9 +941,9 @@ bool Worker::recon_and_confirm(const Config& cfg, const SourceConfig& src,
             std::lock_guard<std::mutex> lk(data_mutex_);
             state_.proposal_active = true;
             state_.proposal.source_url = src.url;
-            state_.proposal.title = art.title;
-            state_.proposal.image = art.image;
-            state_.proposal.body_preview = truncate(art.body, 600);
+            state_.proposal.title = ensure_utf8(art.title);
+            state_.proposal.image = ensure_utf8(art.image);
+            state_.proposal.body_preview = ensure_utf8(truncate(art.body, 600));
             state_.proposal.candidate_index = index;
             state_.proposal.candidate_total = total;
         }
