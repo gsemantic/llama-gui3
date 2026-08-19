@@ -423,12 +423,13 @@ bool is_valid_utf8(const std::string& s) {
 std::string to_utf8(const std::string& text, const std::string& content_type) {
     std::string enc = charset_from_content_type(content_type);
     if (enc.empty()) enc = charset_from_meta(text);
-    if (enc == "utf-8" || enc == "utf8") return text;
     if (enc == "windows-1251" || enc == "cp1251") return cp1251_to_utf8(text);
     if (enc == "iso-8859-5" || enc == "iso8859-5") return iso8859_5_to_utf8(text);
-    // Кодировка не объявлена/неизвестна: многие русские сайты отдают windows-1251
-    // без charset. Если текст уже валидный UTF-8 — оставляем как есть, иначе
-    // перекодируем из windows-1251, чтобы кириллица не превращалась в «кракозябры».
+    // Объявлен UTF-8 или кодировка неизвестна. Русские сайты нередко отдают
+    // windows-1251 либо вовсе без charset, либо с неверным charset=UTF-8.
+    // Невалидные UTF-8-байты ImGui отрисует «?» (трактует как U+FFFD), поэтому
+    // перекодируем из windows-1251, когда текст не является корректным UTF-8.
+    // Подлинно-UTF-8 страницы проходят без изменений.
     if (!is_valid_utf8(text)) return cp1251_to_utf8(text);
     return text;
 }
