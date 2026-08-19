@@ -926,6 +926,24 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         a.title_original = html_to_text(item.title);
         a.body_original = ex.body;
         a.source_image = item.image;   // заглавное изображение из ленты (media:content/enclosure/itunes)
+        // Лента часто не даёт картинку (enclosure пуст) и полный текст. Чтобы в
+        // выходной статье появилась реальная иллюстрация и полный текст,
+        // подгружаем страницу материала и извлекаем её (как в режиме page-листа).
+        // При сбое загрузки/извлечения — откатываемся на данные из ленты.
+        if (!item.link.empty()) {
+            const FetchResult ar = fetcher_->fetch(item.link, "page", cfg.network);
+            if (ar.ok) {
+                const ExtractedArticle fx = extract_page(ar.html, item.link, src.extract);
+                // Подменяем текст из ленты только если страница дала не пустой
+                // и не короче исходного (не ухудшаем полный текст ленты
+                // возможным неудачным извлечением со страницы).
+                if (!fx.body.empty() &&
+                    fx.body.size() >= a.body_original.size()) {
+                    a.body_original = fx.body;
+                }
+                if (!fx.image.empty()) a.source_image = fx.image;
+            }
+        }
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
         if (!export_article(cfg, a)) {
             set_status(a, "ошибка обработки: " + a.title_original + " — " + a.error);

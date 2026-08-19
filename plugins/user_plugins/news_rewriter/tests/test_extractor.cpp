@@ -504,6 +504,104 @@ static void test_first_content_image_skips_cover_with_underscore() {
 }
 REGISTER_TEST(test_first_content_image_skips_cover_with_underscore);
 
+// Регрессия: логотип/баннер сайта в шапке (явные маленькие размеры +
+// class="logo") не должен попадать в главное фото статьи, даже если он
+// расположен раньше настоящей иллюстрации в теле. Пример: news.sciencenet.cn,
+// где <img src="/images/news.jpg" width="231" height="84"> — общий логотип в
+// самом верху, а настоящая иллюстрация (крупная, без размеров) — перед абзацами.
+static void test_first_content_image_skips_small_header_logo() {
+    const std::string html =
+        "<html><head><title>Новость</title></head><body>"
+        "<div class='logo'><a href='/'><img src='/images/news.jpg' "
+        "width='231' height='84' alt='логотип'></a></div>"
+        "<h1>Заголовок статьи</h1>"
+        "<p>Первый абзац статьи с подробным описанием события и его "
+        "предыстории, достаточно длинный для эвристики плотности текста.</p>"
+        "<p>Второй абзац продолжает материал и содержит важные детали "
+        "происходящего и комментарии участников события в целом.</p>"
+        "<img src='https://cdn.example.com/lead-illustration.jpg'>"
+        "</body></html>";
+    TEST_ASSERT_EQUAL(first_content_image(html),
+                      "https://cdn.example.com/lead-illustration.jpg");
+}
+REGISTER_TEST(test_first_content_image_skips_small_header_logo);
+
+// То же, что выше, но через extract_page: главное фото статьи должно быть
+// иллюстрацией из тела, а не шапочным логотипом сайта.
+static void test_extract_page_skips_header_logo_for_image() {
+    const std::string html =
+        "<html><head><title>Новость дня</title></head><body>"
+        "<div class='logo'><img src='/images/news.jpg' "
+        "width='231' height='84' alt='логотип'></div>"
+        "<h1>Заголовок статьи о важном событии дня</h1>"
+        "<p>Первый абзац статьи с подробным описанием события и его "
+        "предыстории, достаточно длинный для эвристики плотности текста.</p>"
+        "<p>Второй абзац продолжает материал и содержит важные детали "
+        "происходящего и комментарии участников события в целом.</p>"
+        "<img src='https://cdn.example.com/lead-illustration.jpg'>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT(ex.image.find("lead-illustration.jpg") != std::string::npos);
+    TEST_ASSERT(ex.image.find("news.jpg") == std::string::npos);
+}
+REGISTER_TEST(test_extract_page_skips_header_logo_for_image);
+
+// Регрессия: в статье может не быть иллюстрации вовсе — тогда не должно
+// подставляться «мусорное» фото (шапочный логотип, иконка комментариев,
+// превью списка похожих материалов, og:image-логотип сайта). extract_page
+// должен вернуть пустую картинку, а не заглушку. Пример: news.sciencenet.cn,
+// где в теле есть только /images/newcomm.gif (иконка комментариев) и мелкие
+// превью, а og:image — это logo100.jpg.
+static void test_extract_page_no_illustration_returns_empty() {
+    const std::string html =
+        "<html><head>"
+        "<meta property='og:image' content='https://news.example.com/images/logo100.jpg'>"
+        "</head><body>"
+        "<div class='logo'><img src='/images/news.jpg' "
+        "width='231' height='84' alt='логотип'></div>"
+        "<h1>Заголовок статьи без иллюстрации</h1>"
+        "<p>Первый абзац статьи с подробным описанием события и его "
+        "предыстории, достаточно длинный для эвристики плотности текста.</p>"
+        "<p>Второй абзац продолжает материал и содержит важные детали "
+        "происходящего и комментарии участников события в целом.</p>"
+        "<div class='comments'><img src='/images/newcomm.gif'></div>"
+        "<div class='related'>"
+        "<img src='/upload/thumb1.jpg' width='118' height='65'>"
+        "<img src='/upload/thumb2.jpg' width='118' height='65'>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://news.example.com/", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.image, "");
+}
+REGISTER_TEST(test_extract_page_no_illustration_returns_empty);
+
+// Регрессия: для языков без пробелов (китайский/японский/корейский) абзацы
+// состоят из одного «слова» (word_count == 1), и раньше отбрасывались как шум,
+// из-за чего телом вместо статьи становился список похожих материалов (латиница
+// с пробелами). Проверяем, что китайская проза извлекается, а список «ещё» — нет.
+static void test_extract_page_finds_cjk_body_not_related_list() {
+    const std::string html =
+        "<html><head><title>Китайская новость</title></head><body>"
+        "<div class='logo'><img src='/images/logo.png' width='120' height='40'></div>"
+        "<div id='content'>"
+        "<h1>Заголовок статьи</h1>"
+        "<p>饲料蛋白原料对外依存度高，是制约我国种养业稳定发展的突出短板。</p>"
+        "<p>长期以来，国内饲料生产依赖进口大豆补足供需缺口，年进口量超1亿吨。</p>"
+        "<p>中单126从实验室走向黑土地，成为高蛋白玉米的重要品种。</p>"
+        "</div>"
+        "<div class='related'>"
+        "<a href='/a'>ENG.Energy 中石大黄毅超、清华大学魏永革：金属卟啉效应</a>"
+        "<a href='/b'>AELM | 东南大学崔铁军、刘彻，北京大学李廉林：深度学习方法</a>"
+        "<a href='/c'>AOM | 华南理工赵祖金教授团队：基于新型红光材料的高效OLED</a>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "http://example.com/", SourceExtract{});
+    TEST_ASSERT(ex.body.find("饲料蛋白原料") != std::string::npos);
+    TEST_ASSERT(ex.body.find("中单126从实验室走向黑土地") != std::string::npos);
+    TEST_ASSERT(ex.body.find("ENG.Energy") == std::string::npos);
+}
+REGISTER_TEST(test_extract_page_finds_cjk_body_not_related_list);
+
 // Регрессия: составной class вроде «content__main_with-aside» содержит слово
 // «aside», но это главная колонка с новостями, а не сайдбар. Его нельзя
 // вырезать — иначе вся лента теряется и страница обрабатывается как одна статья.

@@ -303,7 +303,7 @@ std::string get_attr(const std::string& tag, const std::string& attr) {
 // URL из <meta property="..."> / <meta name="..."> с content="...".
 std::string meta_image_url(const std::string& html, const std::string& prop) {
     std::size_t pos = 0;
-    while ((pos = html.find("<meta", pos)) != std::string::npos) {
+    while ((pos = html.find("<img", pos)) != std::string::npos) {
         const std::size_t gt = html.find('>', pos);
         if (gt == std::string::npos) break;
         const std::string tag = html.substr(pos, gt - pos + 1);
@@ -339,10 +339,55 @@ std::string first_img_src(const std::string& html) {
 }
 
 // Заглавное изображение: og:image → twitter:image → первый <img>.
+// Истинно для заведомо «не фото статьи» картинок: логотипы, иконки, превью,
+// анимация. Используется и в first_content_image, и в extract_image_url, чтобы
+// вместо отсутствующей иллюстрации не подставлялась «заглушка» (сайт-логотип
+// из og:image / шапочный баннер). Пример: news.sciencenet.cn, где og:image —
+// это logo100.jpg, а настоящей иллюстрации в статье нет.
+static bool is_junk_image(const std::string& src, const std::string& tag) {
+    if (src.empty() || src.find("data:") == 0) return true;
+    std::string low = src;
+    for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::size_t q = low.find_first_of("?#");
+    std::string path = (q == std::string::npos) ? low : low.substr(0, q);
+    if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".gif") == 0) return true;
+    static const char* kBad[] = {
+        "logo", "icon", "placeholder", "blank", "1x1", "pixel", "spacer",
+        "sprite", "banner", "advert", "watermark", "wm_", "preview",
+        "social", "teaser", "tracking", "default", "og-images"
+    };
+    for (const char* k : kBad) {
+        if (low.find(k) != std::string::npos) return true;
+    }
+    if (!tag.empty()) {
+        const long w = std::strtol(get_attr(tag, "width").c_str(), nullptr, 10);
+        const long h = std::strtol(get_attr(tag, "height").c_str(), nullptr, 10);
+        if (w > 0 && h > 0 && w <= 300 && h <= 300) return true;
+    }
+    return false;
+}
+
 std::string extract_image_url(const std::string& html) {
     std::string u = meta_image_url(html, "og:image");
-    if (u.empty()) u = meta_image_url(html, "twitter:image");
-    if (u.empty()) u = first_img_src(html);
+    if (is_junk_image(u, "")) u = "";
+    if (u.empty()) {
+        u = meta_image_url(html, "twitter:image");
+        if (is_junk_image(u, "")) u = "";
+    }
+    if (u.empty()) {
+        // Первый <img> в документе, не являющийся логотипом/иконкой/превью.
+        std::size_t pos = 0;
+        while ((pos = html.find("<img", pos)) != std::string::npos) {
+            const std::size_t gt = html.find('>', pos);
+            if (gt == std::string::npos) break;
+            const std::string tag = html.substr(pos, gt - pos + 1);
+            std::string src = get_attr(tag, "src");
+            if (src.empty()) src = get_attr(tag, "data-src");
+            if (src.empty()) src = get_attr(tag, "data-lazy-src");
+            if (!is_junk_image(src, tag)) { u = src; break; }
+            pos = gt + 1;
+        }
+    }
     return u;
 }
 
@@ -991,30 +1036,64 @@ bool is_cover_like_image_tag(const std::string& tag) {
     return false;
 }
 
-std::string first_content_image(const std::string& html) {
+// Первое содержательное фото в HTML (в диапазоне [from, to), по умолчанию —
+// весь html). Пропускает обложки/hero (is_cover_like_image_tag), логотипы и
+// служебные картинки (kSkip, проверяются по всему тегу <img>, включая class/
+// alt), а также картинки с явно заданными маленькими размерами (логотипы/
+// иконки/превью), предпочитая src → data-src → data-lazy-src.
+std::string first_content_image(const std::string& html,
+                                std::size_t from,
+                                std::size_t to) {
     // Декоративные/служебные картинки, которые не являются фото статьи.
     static const char* kSkip[] = {
         "logo", "icon", "og-images", "og_image", "preview", "social",
         "teaser", "watermark", "wm_", "spacer", "sprite", "placeholder",
         "banner", "advert", "pixel", "blank", "1x1", "tracking"
     };
-    std::size_t pos = 0;
-    while ((pos = html.find("<img", pos)) != std::string::npos) {
+    std::size_t pos = from;
+    while ((pos = html.find("<img", pos)) != std::string::npos && pos < to) {
         const std::size_t gt = html.find('>', pos);
-        if (gt == std::string::npos) break;
+        if (gt == std::string::npos || gt >= to) break;
         const std::string tag = html.substr(pos, gt - pos + 1);
         // Обложка/hero/постер — не фото статьи, берём следующее изображение.
         // Иначе на Дзене в качестве главного фото попадает обложка с надписями
         // поверх изображения, а не настоящее фото из текста.
         if (is_cover_like_image_tag(tag)) { pos = gt + 1; continue; }
+        // Явно маленькие картинки (логотипы/иконки/превью, напр. ширина≤300 и
+        // высота≤300) — не фото статьи. Пример: news.sciencenet.cn, где
+        // <img src="/images/news.jpg" width="231" height="84"> — общий логотип
+        // в шапке, а настоящая иллюстрация — крупная картинка в теле статьи.
+        const std::string w = get_attr(tag, "width");
+        const std::string h = get_attr(tag, "height");
+        if (!w.empty() && !h.empty()) {
+            bool okw = false, okh = false;
+            const long wi = std::strtol(w.c_str(), nullptr, 10);
+            const long hi = std::strtol(h.c_str(), nullptr, 10);
+            if (wi > 0) okw = true;
+            if (hi > 0) okh = true;
+            if (okw && okh && wi <= 300 && hi <= 300) { pos = gt + 1; continue; }
+        }
         std::string src = get_attr(tag, "src");
         if (src.empty()) src = get_attr(tag, "data-src");
         if (src.empty()) src = get_attr(tag, "data-lazy-src");
         if (!src.empty() && src.find("data:") != 0) {
+            // GIF почти всегда — анимированная картинка или UI-иконка
+            // (комментарии, спиннеры, «палочки»), а не фото статьи. Пропускаем,
+            // чтобы вместо отсутствующей иллюстрации не подставлялась
+            // «заглушка» (пример: news.sciencenet.cn, где /images/newcomm.gif —
+            // иконка комментариев, хотя в статье иллюстрации нет вообще).
+            const std::size_t q = src.find_first_of("?#");
+            std::string path = (q == std::string::npos) ? src : src.substr(0, q);
+            for (char& c : path) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".gif") == 0) {
+                pos = gt + 1;
+                continue;
+            }
+            std::string low = tag;
+            for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             bool skip = false;
-            const std::string l = src;
             for (const char* k : kSkip) {
-                if (l.find(k) != std::string::npos) { skip = true; break; }
+                if (low.find(k) != std::string::npos) { skip = true; break; }
             }
             if (!skip) return src;
         }
@@ -1211,8 +1290,13 @@ BodyResult extract_body(const std::string& html) {
             s.kind = BlockKind::kOther;      // заведомо не-статья
         } else if (s.text.empty()) {
             s.kind = BlockKind::kEmpty;      // пустышка не рвёт связку абзацев
-        } else if (s.words >= 2 && s.letters >= 15 && s.density >= 0.5) {
+        } else if (s.letters >= 15 && s.density >= 0.5 &&
+                   (s.words >= 2 || has_nospace_script(s.text))) {
             s.kind = BlockKind::kCandidate;  // «проза» — кандидат в статью
+            // Для языков без пробелов (китайский/японский/корейский/тайский)
+            // word_count всегда равен 1, поэтому требование «несколько слов»
+            // отключаем — иначе китайские абзацы отбрасывались бы как «шум»,
+            // и в теле вместо статьи оказывался список похожих материалов.
         } else {
             s.kind = BlockKind::kOther;      // навигация/мусор — рвёт связку
         }
@@ -1312,10 +1396,14 @@ ExtractedArticle extract_page(const std::string& html, const std::string& base_u
     const BodyResult body_res = extract_body(cleaned);
     result.body = body_res.text;
     result.title = extract_title(cleaned, body_res.start, body_res.end);
-    // Картинка: приоритет — первое содержательное фото из тела статьи
-    // (без логотипа сайта и наложения заголовка, которые обычно несёт
-    // og:image). og:image / twitter:image берём только как запасной вариант.
-    std::string img = first_content_image(cleaned);
+    // Картинка: ищем первое содержательное фото в теле статьи. Окно поиска
+    // начинаем чуть раньше прозы (body_res.start - запас), чтобы захватить
+    // лид-картинку перед первым абзацем, но НЕ захватываем шапку сайта
+    // (логотип/баннер в самом верху документа). og:image / twitter:image и
+    // поиск по всему документу — только запасные варианты.
+    const std::size_t img_from = body_res.start > 8192 ? body_res.start - 8192 : 0;
+    std::string img = first_content_image(cleaned, img_from);
+    if (img.empty()) img = first_content_image(cleaned);
     if (img.empty()) img = extract_image_url(html);
     if (!img.empty() && img.find("data:") != 0) img = resolve_url(img, base_url);
     result.image = img;
@@ -1377,7 +1465,10 @@ std::vector<ExtractionProposal> extract_page_candidates(
         const BodyResult body_res0 = extract_body(cleaned);
         p.article.body = body_res0.text;
         p.article.title = extract_title(cleaned, body_res0.start, body_res0.end);
-        p.article.image = first_content_image(cleaned);
+        const std::size_t img_from0 =
+            body_res0.start > 8192 ? body_res0.start - 8192 : 0;
+        p.article.image = first_content_image(cleaned, img_from0);
+        if (p.article.image.empty()) p.article.image = first_content_image(cleaned);
         if (p.article.image.empty()) p.article.image = extract_image_url(html);
         p.strategy = 0;
         p.strategy_name = "авто (density + фото из тела)";
