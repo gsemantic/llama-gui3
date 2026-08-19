@@ -65,6 +65,15 @@ struct WorkerState {
     int seo_missing = 0;          // опубликовано без SEO-мета (модель не ответила на SEO)
     std::vector<ArticleStatusView> articles;
 
+    // Метрики расхода LLM (кумулятивно за время работы воркера). Оценка, т.к.
+    // хостовый llm_complete не возвращает usage: токены ≈ размер/4 байт.
+    std::uint64_t llm_total_tokens = 0;        // всего токенов (промпт + ответ)
+    std::uint64_t llm_prompt_tokens = 0;       // токены промптов
+    std::uint64_t llm_completion_tokens = 0;   // токены ответов LLM
+    int llm_calls = 0;                         // число вызовов LLM
+    double llm_seconds = 0.0;                  // суммарное время вызовов (с)
+    double llm_tokens_per_sec = 0.0;           // средняя скорость (ток/с)
+
     // Режим предпросмотра (разведки): воркер ждёт решения пользователя по
     // извлечённому варианту. UI показывает фото+текст и кнопки «Одобрить» /
     // «Пересчитать».
@@ -110,6 +119,7 @@ public:
     void set_llm_retry_policy(const RetryPolicy& retry);  // тесты: ретраи LLM без пауз
     void debug_force_schedule_due();      // тесты: авто-запуск немедленно
     void stop_and_join();
+    void reset_token_metrics();           // сброс метрик расхода LLM (UI)
 
     // Режим предпросмотра: ответ пользователя на предложенный вариант
     // извлечения (вызывается из main-потока, UI).
@@ -169,6 +179,14 @@ private:
     // SEO отключён на остаток обхода из-за rate-limit (чтобы не долбить
     // облако повторными SEO-вызовами и не расходовать квоту).
     std::atomic<bool> seo_skipped_{false};
+
+    // Метрики расхода LLM: накопляются из обёртки llm_ (атомарно, т.к. вызовы
+    // идут из рабочего потока, а чтение — из main при snapshot()).
+    std::atomic<std::uint64_t> llm_total_tokens_{0};
+    std::atomic<std::uint64_t> llm_prompt_tokens_{0};
+    std::atomic<std::uint64_t> llm_completion_tokens_{0};
+    std::atomic<int> llm_calls_{0};
+    std::atomic<std::uint64_t> llm_microseconds_{0};  // суммарное время вызовов (мкс)
 
     // Канал ответа на предложенный вариант (режим предпросмотра). Отдельный от
     // очереди команд, чтобы не конфликтовать с RunNow/Stop/ReloadConfig.

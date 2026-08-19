@@ -555,6 +555,19 @@ void render_news_rewriter_window(UiDeps& deps) {
     }
     ImGui::TextWrapped("Последнее: %s", state.last_message.c_str());
 
+    // Метрики расхода LLM (оценка, т.к. хост не возвращает usage).
+    ImGui::Separator();
+    ImGui::TextUnformatted("Расход LLM (оценка):");
+    ImGui::Text("Всего токенов: %llu  (промпт %llu / ответ %llu)",
+                (unsigned long long)state.llm_total_tokens,
+                (unsigned long long)state.llm_prompt_tokens,
+                (unsigned long long)state.llm_completion_tokens);
+    ImGui::Text("Вызовов: %d   Средняя скорость: %.1f ток/с   (за %.1f с)",
+                state.llm_calls, state.llm_tokens_per_sec, state.llm_seconds);
+    if (ImGui::Button("Сбросить метрики LLM")) {
+        deps.worker->reset_token_metrics();
+    }
+
     if (state.running) {
         if (ImGui::Button("Остановить обход")) {
             deps.worker->post(Command{CmdType::Stop});

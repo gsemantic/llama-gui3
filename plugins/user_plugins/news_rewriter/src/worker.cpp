@@ -11,6 +11,16 @@
 
 namespace news_rewriter {
 
+namespace {
+// Грубая оценка числа токенов в UTF-8 тексте: ~4 байта на токен. Для смешанного
+// RU/EN/CJK это близко к реальности (на кодовую точку приходится 1–3 байта), а
+// точный подсчёт невозможен — хостовый llm_complete не возвращает usage.
+std::uint64_t estimate_tokens(const std::string& s) {
+    if (s.empty()) return 0;
+    return std::max<std::uint64_t>(1, s.size() / 4);
+}
+} // namespace
+
 Worker::Worker() : fetcher_(std::make_unique<Fetcher>()) {
     // Ретраи рерайта по умолчанию как в чате: 1 первичная + 2 повторные (всего
     // 3 попытки), короткий backoff 1с → 2с. Тесты могут переопределить.
@@ -80,7 +90,23 @@ Config Worker::get_config() const {
 
 WorkerState Worker::snapshot() const {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    return state_;
+    WorkerState s = state_;
+    s.llm_prompt_tokens = llm_prompt_tokens_.load(std::memory_order_relaxed);
+    s.llm_completion_tokens = llm_completion_tokens_.load(std::memory_order_relaxed);
+    s.llm_total_tokens = llm_total_tokens_.load(std::memory_order_relaxed);
+    s.llm_calls = llm_calls_.load(std::memory_order_relaxed);
+    const double secs = llm_microseconds_.load(std::memory_order_relaxed) / 1'000'000.0;
+    s.llm_seconds = secs;
+    s.llm_tokens_per_sec = secs > 0.0 ? s.llm_total_tokens / secs : 0.0;
+    return s;
+}
+
+void Worker::reset_token_metrics() {
+    llm_prompt_tokens_.store(0, std::memory_order_relaxed);
+    llm_completion_tokens_.store(0, std::memory_order_relaxed);
+    llm_total_tokens_.store(0, std::memory_order_relaxed);
+    llm_calls_.store(0, std::memory_order_relaxed);
+    llm_microseconds_.store(0, std::memory_order_relaxed);
 }
 
 void Worker::set_log_callback(LogFn cb) {
@@ -101,7 +127,22 @@ void Worker::set_llm(LlmFn llm) {
                                          std::string& err) -> bool {
         if (llm_call_interval_ > std::chrono::milliseconds(0))
             std::this_thread::sleep_for(llm_call_interval_);
-        return base(p, out, err);
+        // Измеряем только время самого вызова LLM (без паузы между вызовами),
+        // чтобы скорость отражала генерацию, а не rate-limit.
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = base(p, out, err);
+        const auto t1 = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(t1 - t0).count();
+
+        const std::uint64_t pt = estimate_tokens(p);
+        const std::uint64_t ct = out.empty() ? 0 : estimate_tokens(out);
+        llm_prompt_tokens_.fetch_add(pt, std::memory_order_relaxed);
+        llm_completion_tokens_.fetch_add(ct, std::memory_order_relaxed);
+        llm_total_tokens_.fetch_add(pt + ct, std::memory_order_relaxed);
+        llm_calls_.fetch_add(1, std::memory_order_relaxed);
+        llm_microseconds_.fetch_add(static_cast<std::uint64_t>(dt * 1'000'000),
+                                    std::memory_order_relaxed);
+        return ok;
     };
 }
 
