@@ -195,6 +195,16 @@ void ChatInterface::send_message() {
         return;
     }
 
+    // Перехват команд агентов (например, /agent web_render_agent render url=...).
+    // Если обработчик задан и команда обработана агентом — не отправляем в LLM.
+    if (agent_command_handler_ && !message_content.empty() &&
+            message_content.front() == '/') {
+        if (agent_command_handler_(message_content)) {
+            input_buffer_[0] = '\0';
+            return;
+        }
+    }
+
     // ПРОВЕРКА: Загружена ли модель?
     if (!server_ready_) {
         std::cout << "MainWindow: Модель не загружена, показываем диалог загрузки" << std::endl;

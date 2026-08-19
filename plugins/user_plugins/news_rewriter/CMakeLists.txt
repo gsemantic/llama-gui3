@@ -25,13 +25,28 @@ set(NEWS_REWRITER_INCLUDES
     ${PROJECT_ROOT}/external/imgui/backends
 )
 
+# В автономной сборке (build.sh) цель headless_browser не определена (она
+# добавляется только из корневого CMakeLists через add_subdirectory). Берём
+# уже собранную статическую библиотеку и публичные include-ы из libs/.
+if(NOT TARGET headless_browser)
+    add_library(headless_browser STATIC IMPORTED)
+    find_library(HEADLESS_BROWSER_LIB NAMES headless_browser
+        PATHS ${PROJECT_ROOT}/build/libs/headless_browser
+              ${PROJECT_ROOT}/libs/headless_browser
+        NO_DEFAULT_PATH)
+    if(HEADLESS_BROWSER_LIB)
+        set_target_properties(headless_browser PROPERTIES
+            IMPORTED_LOCATION ${HEADLESS_BROWSER_LIB}
+            INTERFACE_INCLUDE_DIRECTORIES ${PROJECT_ROOT}/libs/headless_browser/include)
+    endif()
+endif()
+
 # --- Ядро (чистая логика, без хоста/ImGui) -------------------------------
 set(NEWS_REWRITER_CORE_SOURCES
     src/common.cpp
     src/json.cpp
     src/config.cpp
     src/profile.cpp
-    src/headless.cpp
     src/http.cpp
     src/xml.cpp
     src/fetcher.cpp
@@ -51,7 +66,7 @@ add_library(news_rewriter_core STATIC ${NEWS_REWRITER_CORE_SOURCES})
 target_include_directories(news_rewriter_core PUBLIC ${NEWS_REWRITER_INCLUDES})
 set_target_properties(news_rewriter_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 find_package(Threads REQUIRED)
-target_link_libraries(news_rewriter_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(news_rewriter_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS} headless_browser)
 target_compile_options(news_rewriter_core PRIVATE -Wall -Wextra)
 
 # --- Плагин (.so) ----------------------------------------------------------

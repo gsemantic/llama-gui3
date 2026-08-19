@@ -21,6 +21,12 @@ if(BUILD_WEB_SEARCH_AGENT)
     add_subdirectory(web_search_agent)
 endif()
 
+# Web Render Agent (headless-браузер / Chromium)
+option(BUILD_WEB_RENDER_AGENT "Build Web Render (headless browser) agent plugin" ON)
+if(BUILD_WEB_RENDER_AGENT)
+    add_subdirectory(web_render_agent)
+endif()
+
 # Code Agent
 option(BUILD_CODE_AGENT "Build Code agent plugin" ON)
 if(BUILD_CODE_AGENT)

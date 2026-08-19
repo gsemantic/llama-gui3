@@ -87,6 +87,14 @@ public:
     void unfocus_input() { input_focused_ = false; }
     void set_input_text(const std::string& text);
 
+    // Перехват команд агентов из поля ввода (текст, начинающийся с '/').
+    // Если обработчик возвращает true — сообщение считается обработанным
+    // агентом и не отправляется в LLM.
+    using AgentCommandHandler = std::function<bool(const std::string&)>;
+    void set_agent_command_handler(AgentCommandHandler handler) {
+        agent_command_handler_ = std::move(handler);
+    }
+
     // Conversation title generation
     static std::string generate_conversation_title(const std::string& message_content, size_t max_length = 30);
 
@@ -199,6 +207,10 @@ private:
     // Callbacks
     std::function<void()> model_selection_callback_;
     ModelLoadRequestCallback model_load_request_callback_;
+
+    // Перехватчик команд агентов (текст, начинающийся с '/'). Если возвращает
+    // true — сообщение обработано агентом и не отправляется в LLM.
+    AgentCommandHandler agent_command_handler_;
 
     // Pending query during model loading
     std::string pending_query_for_loading_;

@@ -49,7 +49,8 @@
 #ifdef ENABLE_LLAMA_BENCH
 #include "ui/llama_bench_dialog.h"
 #endif
-// #include "agents/agents.h"  // ОТКЛЮЧЕНО: агенты временно отключены
+#include "agents/agents.h"
+#include "ui/agent_chat_integration.h"
 #include "command_manager.h"
 #include "advanced_menu_system.h"
 #include "workspace_manager.h"
@@ -72,6 +73,7 @@ class FileManager;
 class ConversationManager;
 class SettingsDialog;
 class SettingsViewerDialog;
+class HeadlessBrowserPanel;
 
 // Forward declarations
 class CommandManager;
@@ -116,7 +118,10 @@ public:
 
     // Plugin system host (загружает и вызывает плагины приложения)
     void initializePlugins();
-    
+
+    // Подсистема агентов: загрузка agent-плагинов и интеграция с чатом
+    void initialize_agent_system();
+
     // New UI Management System methods
     void initializeNewUISystem();
     void setupCommandCallbacks();
@@ -292,6 +297,7 @@ private:
     std::unique_ptr<SettingsDialog> settings_dialog_;
     std::unique_ptr<CloudServicesDialog> cloud_services_dialog_;
     std::unique_ptr<RagInterface> rag_interface_;
+    std::unique_ptr<HeadlessBrowserPanel> headless_browser_panel_;
     std::unique_ptr<RagSettingsDialog> rag_settings_dialog_;
     std::unique_ptr<SettingsViewerDialog> settings_viewer_dialog_;
     std::unique_ptr<GridSnappingDialog> grid_snapping_dialog_;
@@ -302,10 +308,11 @@ private:
     std::unique_ptr<LlamaBenchDialog> llama_bench_dialog_;
 #endif
 
-    // Agent System - ОТКЛЮЧЕНО: агенты временно отключены
-    // agents::AgentRegistry agent_registry_;
-    // agents::AgentContext agent_context_;
-    // std::unique_ptr<AgentChatIntegration> agent_chat_integration_;
+    // Agent System
+    agents::AgentRegistry agent_registry_;
+    agents::AgentContext agent_context_;
+    agents::PluginLoader agent_plugin_loader_;
+    std::unique_ptr<AgentChatIntegration> agent_chat_integration_;
 
     // Configuration Manager
     llama_gui::core::ConfigManager config_manager_;
@@ -403,6 +410,8 @@ private:
     bool show_conversations_ = false;  // Флаг показа окна бесед
     bool show_files_ = false;  // Флаг показа окна файлов
     bool show_rag_ = false;  // Флаг показа окна RAG
+    bool show_headless_browser_ = false;  // Флаг показа окна headless-браузера
+    bool show_agents_ = false;  // Флаг показа окна Агентов
     bool show_settings_ = false;  // Флаг показа настроек
     bool show_cloud_services_ = false;  // Флаг показа облачных сервисов
     bool show_rag_settings_ = false;  // Флаг показа настроек RAG

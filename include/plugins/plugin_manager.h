@@ -26,6 +26,7 @@ namespace ui {
     class AdvancedMenuSystem;
     class DialogManager;
     class ChatInterface;
+    class WindowCoordinator;
 }
 }
 
@@ -39,6 +40,7 @@ namespace plugin {
 struct PluginSubsystems {
     llama_gui::ui::CommandManager* command_manager = nullptr;
     llama_gui::ui::WindowManager* window_manager = nullptr;
+    llama_gui::ui::WindowCoordinator* window_coordinator = nullptr;
     llama_gui::ui::AdvancedMenuSystem* menu_system = nullptr;
     llama_gui::ui::DialogManager* dialog_manager = nullptr;
     llama_gui::core::StateManager* state_manager = nullptr;

@@ -20,6 +20,6 @@ endif()
 
 # Примеры плагинов (для разработки)
 option(BUILD_PLUGIN_EXAMPLES "Build plugin examples" OFF)
-if(BUILD_PLUGIN_EXAMPLES)
+if(BUILD_PLUGIN_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
     add_subdirectory(examples)
 endif()

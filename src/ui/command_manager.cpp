@@ -399,6 +399,32 @@ void CommandManager::initializeDefaultCommands(
         "",
         nullptr));
 
+    registerCommand("toggle_window_headless_browser", CommandFactory::createFunctionalCommand(
+        "toggle_window_headless_browser",
+        [this]() {
+            if (toggle_window_callback_) {
+                toggle_window_callback_("headless_browser");
+            } else {
+                std::cout << "Toggle window callback not set" << std::endl;
+            }
+        },
+        "Toggle Headless Browser Panel",
+        "",
+        nullptr));
+
+    registerCommand("toggle_window_agents", CommandFactory::createFunctionalCommand(
+        "toggle_window_agents",
+        [this]() {
+            if (toggle_window_callback_) {
+                toggle_window_callback_("agents");
+            } else {
+                std::cout << "Toggle window callback not set" << std::endl;
+            }
+        },
+        "Toggle Agents Panel",
+        "",
+        nullptr));
+
     registerCommand("toggle_window_settings_viewer", CommandFactory::createFunctionalCommand(
         "toggle_window_settings_viewer",
         [this]() {

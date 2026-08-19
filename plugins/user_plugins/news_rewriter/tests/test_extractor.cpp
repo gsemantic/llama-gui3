@@ -432,6 +432,36 @@ static void test_first_content_image_skips_logo_and_og() {
 }
 REGISTER_TEST(test_first_content_image_skips_logo_and_og);
 
+// Регрессия: обложка статьи (Дзен: content--zen-image-cover, hero/постер) с
+// наложением текста поверх изображения не должна попадать в главное фото —
+// берём первое настоящее фото из тела (article-image-item). Обложка и фото
+// лежат на одном CDN, поэтому отличаются только class-ом тега <img>.
+static void test_first_content_image_skips_cover_on_dzen() {
+    const std::string html =
+        "<article>"
+        "<img class='content--zen-image-cover__image-2x' "
+        "src='https://avatars.dzeninfra.ru/get-zen_doc/x/smart_crop_516x290'>"
+        "<h1>Заголовок</h1>"
+        "<p>Текст новости довольно длинный и содержательный абзац статьи.</p>"
+        "<img class='content--article-image-item__image-3_' itemprop='image' "
+        "src='https://avatars.dzeninfra.ru/get-zen_doc/x/scale_1200'>"
+        "</article>";
+    TEST_ASSERT_EQUAL(first_content_image(html),
+                      "https://avatars.dzeninfra.ru/get-zen_doc/x/scale_1200");
+}
+REGISTER_TEST(test_first_content_image_skips_cover_on_dzen);
+
+// Регрессия: hero/постер-картинка (class содержит «hero») пропускается, даже
+// если это единственная картинка перед фото статьи.
+static void test_first_content_image_skips_hero_class() {
+    const std::string html =
+        "<img class='hero-image' src='https://cdn.example.com/hero.jpg'>"
+        "<p>Основной текст новости достаточно длинный для тела статьи.</p>"
+        "<img class='content-image' src='https://cdn.example.com/real.jpg'>";
+    TEST_ASSERT_EQUAL(first_content_image(html), "https://cdn.example.com/real.jpg");
+}
+REGISTER_TEST(test_first_content_image_skips_hero_class);
+
 // Регрессия: составной class вроде «content__main_with-aside» содержит слово
 // «aside», но это главная колонка с новостями, а не сайдбар. Его нельзя
 // вырезать — иначе вся лента теряется и страница обрабатывается как одна статья.

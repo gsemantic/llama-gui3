@@ -120,6 +120,37 @@ std::string decode_entity(const std::string& ent) {
     return "";
 }
 
+// Признак языка без пробелов (китайский/японский/корейский/тайский): в таких
+// языках word_count по пробелам всегда равен 1, поэтому требовать «несколько
+// слов» нельзя — иначе весь текст новости отбрасывается как «шум».
+static bool has_nospace_script(const std::string& s) {
+    std::size_t i = 0;
+    const std::size_t n = s.size();
+    while (i < n) {
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        unsigned int cp = b0;
+        int adv = 1;
+        if ((b0 & 0xE0) == 0xC0) { adv = 2; cp = b0 & 0x1F; }
+        else if ((b0 & 0xF0) == 0xE0) { adv = 3; cp = b0 & 0x0F; }
+        else if ((b0 & 0xF8) == 0xF0) { adv = 4; cp = b0 & 0x07; }
+        if (adv > 1) {
+            cp = 0;
+            for (int k = 1; k < adv; ++k) {
+                const unsigned char bk = static_cast<unsigned char>(s[i + k]);
+                cp = (cp << 6) | (bk & 0x3F);
+            }
+        }
+        if ((cp >= 0x3000 && cp <= 0x30FF) ||   // CJK-символы/пунктуация, кана
+            (cp >= 0x3400 && cp <= 0x4DBF) ||   // CJK Ext A
+            (cp >= 0x4E00 && cp <= 0x9FFF) ||   // CJK Unified Ideographs
+            (cp >= 0xAC00 && cp <= 0xD7AF) ||   // Hangul Syllables
+            (cp >= 0x0E00 && cp <= 0x0E7F))     // Thai
+            return true;
+        i += adv;
+    }
+    return false;
+}
+
 // Число «букв» (ASCII-альфанумерика + все UTF-8 кодпоинты) в строке.
 std::size_t letter_count(const std::string& s) {
     std::size_t count = 0;
@@ -183,8 +214,14 @@ std::string normalize_lines(const std::string& in) {
                 prev_space = false;
             }
         }
-        // отсев шума: слишком короткие однословные строки (меню/подписи)
-        if (letter_count(clean) >= 6 && word_count(clean) >= 2) {
+        // Отсев шума: слишком короткие однословные строки (меню/подписи).
+        // Для языков без пробелов (китайский/японский/корейский/тайский)
+        // word_count всегда равен 1, поэтому требование «несколько слов»
+        // отключаем — иначе весь текст новости отбрасывался бы и рерайтер
+        // получал пустой ввод (и «сочинял» статью вместо переписывания).
+        const bool substantial = letter_count(clean) >= 6;
+        const bool multiword = word_count(clean) >= 2;
+        if (substantial && (multiword || has_nospace_script(clean))) {
             if (!out.empty()) out += '\n';
             out += clean;
         }
@@ -906,18 +943,69 @@ ExtractedArticle extract_from_description(const std::string& desc) {
     return result;
 }
 
+// Проверка на целое слово-токен (а не подстроку): keyword должен быть
+// отделён от соседей границами (начало/конец строки либо символ, не являющийся
+// буквой/цифрой/подчёркиванием). Иначе, например, "thumb" совпадал бы с
+// "post-thumbnail", а "cover" — с "discover", и настоящие фото статьи
+// отбрасывались бы как «обложка».
+bool token_contains(const std::string& haystack, const char* keyword) {
+    const std::size_t n = haystack.size();
+    std::size_t k = 0;
+    while (keyword[k]) ++k;
+    if (k == 0 || n < k) return false;
+    for (std::size_t i = 0; (i = haystack.find(keyword, i)) != std::string::npos; ) {
+        const bool prev_ok = (i == 0) ||
+            !(std::isalnum(static_cast<unsigned char>(haystack[i - 1])) ||
+              haystack[i - 1] == '_');
+        const std::size_t after = i + k;
+        const bool next_ok = (after >= n) ||
+            !(std::isalnum(static_cast<unsigned char>(haystack[after])) ||
+              haystack[after] == '_');
+        if (prev_ok && next_ok) return true;
+        i += k;  // продолжаем поиск после найденного вхождения
+    }
+    return false;
+}
+
+// Признаки «обложки»/декоративной картинки по class/id/role тега <img>:
+// обложка статьи с наложением заголовка (Дзен: content--zen-image-cover),
+// постер, hero, lead-картинка, баннер, лого и т.п. Такие изображения не
+// являются фото материала и не должны попадать в тело/превью статьи как её
+// главное фото. Проверка — по class/id/role (а не по URL), потому что обложка
+// и реальное фото на одном сайте часто лежат на одном и том же CDN и
+// отличаются только обёрткой (напр. zen-image-cover vs article-image-item).
+bool is_cover_like_image_tag(const std::string& tag) {
+    static const char* kCover[] = {
+        "cover", "poster", "hero", "head-img", "head_image",
+        "lead-image", "lead_image", "banner", "teaser", "preview",
+        "watermark", "logo", "icon", "sprite", "avatar", "placeholder",
+        "spacer", "thumb", "thumbnail", "overlay"
+    };
+    const std::string cls = get_attr(tag, "class") + " " + get_attr(tag, "id") +
+                            " " + get_attr(tag, "role");
+    if (cls.empty()) return false;
+    for (const char* k : kCover) {
+        if (token_contains(cls, k)) return true;
+    }
+    return false;
+}
+
 std::string first_content_image(const std::string& html) {
     // Декоративные/служебные картинки, которые не являются фото статьи.
     static const char* kSkip[] = {
         "logo", "icon", "og-images", "og_image", "preview", "social",
         "teaser", "watermark", "wm_", "spacer", "sprite", "placeholder",
-        "banner", "advert", "pixel", "blank", "1x1", "tracking", "avatar"
+        "banner", "advert", "pixel", "blank", "1x1", "tracking"
     };
     std::size_t pos = 0;
     while ((pos = html.find("<img", pos)) != std::string::npos) {
         const std::size_t gt = html.find('>', pos);
         if (gt == std::string::npos) break;
         const std::string tag = html.substr(pos, gt - pos + 1);
+        // Обложка/hero/постер — не фото статьи, берём следующее изображение.
+        // Иначе на Дзене в качестве главного фото попадает обложка с надписями
+        // поверх изображения, а не настоящее фото из текста.
+        if (is_cover_like_image_tag(tag)) { pos = gt + 1; continue; }
         std::string src = get_attr(tag, "src");
         if (src.empty()) src = get_attr(tag, "data-src");
         if (src.empty()) src = get_attr(tag, "data-lazy-src");

@@ -285,6 +285,14 @@ std::chrono::seconds rate_limit_backoff(int attempt) {
 bool Worker::rewrite(Article& a, const Config& cfg) {
     if (!llm_) return true;   // рерайт не настроен — экспортируем оригинал
 
+    // Не отправляем пустой/нераспознанный материал в LLM: перегруженная модель
+    // на пустом входе «сочиняет» канонический текст, который иначе ушёл бы в
+    // публикацию. Лучше пропустить статью, чем выложить сгенерированный мусор.
+    if (a.body_original.empty()) {
+        a.error = "пустое тело статьи — рерайт невозможен, пропускаем";
+        return false;
+    }
+
     a.status = TaskStatus::Rewriting;
     set_status(a, "рерайт: " + a.title_original);
 
@@ -329,26 +337,41 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
             if (cr.ok && !cr.title.empty() && !cr.body.empty()) {
                 a.title_rewritten = cr.title;
                 a.body_rewritten = cr.body;
+                if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 apply_seo(cr.seo);
                 return true;
             }
-            // Комбинированный вызов не дал валидного рерайта — откатываемся к
-            // двум отдельным вызовам в рамках этой же попытки.
-            if (is_rate_limit_error(cr.error)) seo_skipped_.store(true);
-            rr = rewrite_article(a, cfg.rewrite, llm_);
-            if (rr.ok) {
-                a.title_rewritten = rr.title;
-                a.body_rewritten = rr.body;
-                apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
-                return true;
+            // Комбинированный вызов не дал валидного рерайта.
+            if (is_rate_limit_error(cr.error)) {
+                // Rate-limit: НЕ раздуваем в 2 отдельных вызова — это лишь
+                // усугубляет перегруз модели (код 1305 = «модель перегружена»).
+                // Отключаем SEO на остаток обхода и выходим из ветки; внешний
+                // цикл сделает длинную паузу (30/60/120с) и повторит ТОТ ЖЕ
+                // комбинированный запрос, который дешевле двух отдельных.
+                seo_skipped_.store(true);
+                a.error = cr.error;
+            } else {
+                // Не rate-limit (напр. модель не выдала корректный JSON): пробуем
+                // два отдельных, более простых вызова (рерайт, затем SEO).
+                rr = rewrite_article(a, cfg.rewrite, llm_);
+                if (rr.ok) {
+                    a.title_rewritten = rr.title;
+                    a.body_rewritten = rr.body;
+                    if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
+                    if (seo_enabled && !seo_skipped_.load()) {
+                        apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
+                    }
+                    return true;
+                }
+                a.error = cr.error.empty() ? rr.error : cr.error;
             }
-            a.error = cr.error.empty() ? rr.error : cr.error;
         } else {
             // Обычный путь: рерайт (1 вызов) + при необходимости SEO (2-й вызов).
             rr = rewrite_article(a, cfg.rewrite, llm_);
             if (rr.ok) {
                 a.title_rewritten = rr.title;
                 a.body_rewritten = rr.body;
+                if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 if (seo_enabled && !seo_skipped_.load()) {
                     apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
                 }

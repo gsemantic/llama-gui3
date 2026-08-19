@@ -110,8 +110,11 @@ static void headless_signal_handler(int sig) {
 }
 
 static void print_headless_help() {
-    std::cout << "Режим безголового сервера (headless):" << std::endl;
+    std::cout << "Серверный режим (без GUI) приложения llama-gui:" << std::endl;
     std::cout << "  --headless | -s             Запустить llama-server без GUI (endpoint для внешних клиентов)" << std::endl;
+    std::cout << "                              (Это режим САМОГО приложения, НЕ headless-браузер!)" << std::endl;
+    std::cout << "                              Для рендеринга веб-страниц через Chromium используйте" << std::endl;
+    std::cout << "                              панель «Headless-браузер» в основном окне или агента web_render_agent." << std::endl;
     std::cout << "  --cloud                     Облачный прокси: endpoint пересылает запросы в облачного" << std::endl;
     std::cout << "                              провайдера (OpenRouter и пр.) с настройками профиля + RAG" << std::endl;
     std::cout << "  --proxy                     (GUI-режим) поднять облачный прокси в фоне на порту из" << std::endl;

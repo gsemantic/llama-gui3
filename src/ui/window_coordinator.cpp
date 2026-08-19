@@ -206,7 +206,17 @@ bool WindowCoordinator::renderDockMenuStatic(const std::string& window_name, Win
     bool acted = false;
     bool is_docked = wm->isWindowDocked(window_name);
 
-    if (ImGui::BeginPopupContextItem(("##dock_ctx_" + window_name).c_str())) {
+    // Для окон с интерактивным содержимым (поля ввода/вывода текста) не
+    // перехватываем ПКМ на дочерних виджетах — иначе не работает встроенное
+    // меню InputText (Copy/Select All). Док-меню открываем только на фоне окна.
+    const bool free_content_rclick =
+        (window_name == "headless_browser" || window_name == "agents");
+    const std::string dock_popup_id = "##dock_ctx_" + window_name;
+    bool dock_popup_opened = free_content_rclick
+        ? ImGui::BeginPopupContextWindow(dock_popup_id.c_str())
+        : ImGui::BeginPopupContextItem(dock_popup_id.c_str());
+
+    if (dock_popup_opened) {
         if (is_docked) {
             if (ImGui::MenuItem("Undock")) {
                 wm->undockWindow(window_name);

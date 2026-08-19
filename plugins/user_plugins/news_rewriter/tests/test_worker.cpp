@@ -979,9 +979,9 @@ static void test_worker_reports_seo_missing() {
         r.ok = true;
         r.http_status = 200;
         FeedItem item;
-        item.title = "Новость";
+        item.title = "Заголовок тестовой новости";
         item.link = "https://a.example/news/1";
-        item.description = "Текст";
+        item.description = "Полный текст тестовой новости для рерайта.";
         r.items.push_back(item);
         return r;
     };

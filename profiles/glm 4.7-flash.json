@@ -171,16 +171,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 1227,
-            "avg_response_time_ms": 890.68,
-            "avg_tokens_generated": 114,
-            "avg_tokens_per_second": 53.93,
-            "first_used": "Sat Aug 15 15:15:12 2026",
-            "last_used": "Sat Aug 15 15:15:12 2026",
+            "avg_context_used": 747,
+            "avg_response_time_ms": 473.34,
+            "avg_tokens_generated": 103,
+            "avg_tokens_per_second": 28.66,
+            "first_used": "Tue Aug 18 17:26:35 2026",
+            "last_used": "Tue Aug 18 17:26:35 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 32
+            "total_generations": 38
         }
     },
     "output": {

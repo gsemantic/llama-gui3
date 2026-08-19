@@ -69,10 +69,12 @@ public:
      */
     AgentCommands* get_agent_commands();
 
-    /**
-     * @brief Проверка доступности агентов
-     */
     bool is_available() const;
+
+    /**
+     * @brief Форматирование результата для вывода в чат
+     */
+    std::string format_for_chat(const ChatAgentResult& result) const;
 
     /**
      * @brief Получение количества активных агентов
@@ -91,11 +93,6 @@ public:
     void clear_active_agent();
 
 private:
-    /**
-     * @brief Форматирование результата для чата
-     */
-    std::string format_for_chat(const ChatAgentResult& result) const;
-
     /**
      * @brief Преобразование AgentCommandResult в ChatAgentResult
      */

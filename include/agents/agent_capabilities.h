@@ -54,6 +54,9 @@ enum class AgentCapability : uint32_t {
     // Специальные возможности
     LONG_RUNNING      = (1 << 22),  ///< Долгие операции (>30 сек)
     LARGE_OUTPUT      = (1 << 23),  ///< Большой вывод (>1MB)
+
+    // Рендеринг веб-страниц через headless-браузер (Chromium)
+    WEB_RENDER        = (1 << 24),  ///< Рендеринг DOM/скриншот через headless-браузер
     
     // Маски для группировки
     FILE_ALL          = FILE_READ | FILE_WRITE | FILE_DELETE | DIRECTORY_LIST,
@@ -106,6 +109,7 @@ inline const char* capability_to_string(AgentCapability cap) {
         case AgentCapability::HTTP_POST: return "HTTP_POST";
         case AgentCapability::RAG_SEARCH: return "RAG_SEARCH";
         case AgentCapability::WEB_SEARCH: return "WEB_SEARCH";
+        case AgentCapability::WEB_RENDER: return "WEB_RENDER";
         case AgentCapability::CODE_GENERATION: return "CODE_GENERATION";
         case AgentCapability::TERMINAL_EXEC: return "TERMINAL_EXEC";
         case AgentCapability::TEXT_SUMMARY: return "TEXT_SUMMARY";

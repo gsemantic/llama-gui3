@@ -30,6 +30,15 @@ std::string build_prompt(const Article& src, const RewriteConfig& cfg);
 // Один длинный абзац без разделения считается телом новости (заголовок пуст).
 RewriteResult parse_response(const std::string& response);
 
+// Проверка, что ответ LLM не «деградировал» (отказ/системное сообщение модели,
+// выдача не на заданном языке и т.п.). Возвращает false и заполняет error, если
+// ответ похож на мусорный выхлоп перегруженной модели — чтобы воркер не
+// опубликовал сгенерированный от балды текст (см. деградацию после rate-limit).
+// expected_lang — целевой язык рерайта (cfg.rewrite.language), по нему
+// проверяется письменность выдачи (ru→кириллица, en→латиница, zh→иероглифы).
+bool validate_rewrite(const std::string& title, const std::string& body,
+                      const std::string& expected_lang, std::string& error);
+
 // Полный рерайт: промпт → llm → разбор ответа. Ошибки LLM не бросают
 // исключений — возвращаются в RewriteResult.
 RewriteResult rewrite_article(const Article& src, const RewriteConfig& cfg,

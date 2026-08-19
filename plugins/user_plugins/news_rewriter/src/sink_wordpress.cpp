@@ -172,6 +172,46 @@ std::string filename_from_url(const std::string& url) {
     return name;
 }
 
+// Распознаёт тип картинки по «магическим» байтам (сигнатурам формата), чтобы
+// WordPress получал корректный Content-Type и расширение даже для CDN-URL БЕЗ
+// расширения. Напр. Дзен/Яндекс отдают картинки по opaque-ссылкам
+// (avatars.mds.yandex.net/...), и mime_from_url() выдаёт
+// application/octet-stream — WP REST /media такое отвергает с HTTP 500, из-за
+// чего картинка не попадает в медиатеку и остаётся ссылкой на исходник.
+std::string detect_image_mime(const std::string& data) {
+    const std::size_t n = data.size();
+    if (n >= 3 &&
+        static_cast<unsigned char>(data[0]) == 0xFF &&
+        static_cast<unsigned char>(data[1]) == 0xD8 &&
+        static_cast<unsigned char>(data[2]) == 0xFF) {
+        return "image/jpeg";
+    }
+    if (n >= 8 && data[0] == '\x89' && data[1] == 'P' && data[2] == 'N' &&
+        data[3] == 'G' && data[4] == '\r' && data[5] == '\n' &&
+        data[6] == '\x1A' && data[7] == '\n') {
+        return "image/png";
+    }
+    if (n >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F' &&
+        data[3] == '8' && (data[4] == '7' || data[4] == '9') && data[5] == 'a') {
+        return "image/gif";
+    }
+    if (n >= 12 && data.compare(0, 4, "RIFF") == 0 &&
+        data.compare(8, 4, "WEBP") == 0) {
+        return "image/webp";
+    }
+    if (n >= 2 && data[0] == 'B' && data[1] == 'M') return "image/bmp";
+    return "";
+}
+
+std::string ext_for_mime(const std::string& mime) {
+    if (mime == "image/jpeg") return "jpg";
+    if (mime == "image/png") return "png";
+    if (mime == "image/gif") return "gif";
+    if (mime == "image/webp") return "webp";
+    if (mime == "image/bmp") return "bmp";
+    return "";
+}
+
 // --- WordPressSink ----------------------------------------------------------
 
 class WordPressSink : public Sink {
@@ -267,7 +307,8 @@ public:
         int media_id = 0;
         std::string media_url;
         if (!image_url.empty()) {
-            const auto m = upload_media(image_url, nc, user, pass, alt);
+            const auto m = upload_media(image_url, nc, user, pass, alt,
+                                        article.url);
             media_id = m.first;
             media_url = m.second;
         }
@@ -448,16 +489,30 @@ private:
                                               const NetworkConfig& nc,
                                               const std::string& user,
                                               const std::string& pass,
-                                              const std::string& alt = "") {
+                                              const std::string& alt = "",
+                                              const std::string& referer = "") {
         std::pair<int, std::string> none{0, ""};
-        HttpResponse img = client_.get(image_url, nc);
+        // CDN (Дзен/Яндекс) нередко требуют Referer, иначе отдают заглушку
+        // вместо картинки — заливка такого «файла» в WP падает с 500.
+        std::vector<std::string> dl_headers;
+        if (!referer.empty()) dl_headers.push_back("Referer: " + referer);
+        HttpResponse img = client_.get(image_url, nc, dl_headers);
         if (!img.ok || img.body.empty()) {
             if (log_) log_("WordPressSink: не удалось скачать картинку " + image_url);
             return none;
         }
+        // Тип берём по РЕАЛЬНЫМ байтам файла, а не по расширению в URL (CDN
+        // часто без расширения → application/octet-stream → WP отвергает → 500).
+        std::string mime = detect_image_mime(img.body);
+        if (mime.empty()) mime = mime_from_url(image_url);
+        std::string fname = filename_from_url(image_url);
+        const std::string ext = ext_for_mime(mime);
+        if (!ext.empty()) {
+            const std::size_t dot = fname.find_last_of('.');
+            if (dot == std::string::npos) fname += "." + ext;
+            else fname = fname.substr(0, dot + 1) + ext;
+        }
         const std::string media_ep = site_url_ + "/wp-json/wp/v2/media";
-        const std::string mime = mime_from_url(image_url);
-        const std::string fname = filename_from_url(image_url);
         const std::string auth = base64_encode(user + ":" + pass);
 
         std::vector<std::string> headers = {
@@ -468,8 +523,11 @@ private:
         HttpResponse media_resp = client_.post(media_ep, img.body, nc, headers);
         if (!media_resp.ok || media_resp.status != 201) {
             if (log_) {
+                std::string detail = media_resp.body;
+                if (detail.size() > 300) detail = detail.substr(0, 300) + "…";
                 log_("WordPressSink: загрузка медиа не удалась (HTTP " +
-                     std::to_string(media_resp.status) + ")");
+                     std::to_string(media_resp.status) + ")" +
+                     (detail.empty() ? std::string("") : ": " + detail));
             }
             return none;
         }

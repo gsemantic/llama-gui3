@@ -2,6 +2,7 @@
 #include "../../include/core/logger.h"
 #include <algorithm>
 #include <iostream>
+#include <string>
 
 using json = nlohmann::json;
 
@@ -239,6 +240,33 @@ std::string extract_content_text(const json& content) {
     return "";
 }
 
+// Безопасное извлечение целого: поле может быть числом ИЛИ строкой с числом.
+// Некоторые провайдеры (напр. OpenCode Zen) отдают usage.prompt_tokens как
+// СТРОКУ — nlohmann::json при value(..., 0) бросает type_error.302
+// («type must be number, but is string»), из-за чего роняется весь ответ.
+int safe_int(const json& node, const char* key, int def) {
+    if (!node.contains(key)) return def;
+    const auto& v = node[key];
+    if (v.is_number_integer()) return v.get<int>();
+    if (v.is_number_float()) return static_cast<int>(v.get<double>());
+    if (v.is_string()) {
+        try { return std::stoi(v.get<std::string>()); }
+        catch (...) { return def; }
+    }
+    return def;
+}
+
+double safe_double(const json& node, const char* key, double def) {
+    if (!node.contains(key)) return def;
+    const auto& v = node[key];
+    if (v.is_number()) return v.get<double>();
+    if (v.is_string()) {
+        try { return std::stod(v.get<std::string>()); }
+        catch (...) { return def; }
+    }
+    return def;
+}
+
 OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(const std::string& json_str) const {
     OpenRouterCompletionResponse response;
 
@@ -372,8 +400,45 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
             } else if (choice.contains("delta") && choice["delta"].contains("content")) {
                 text = extract_content_text(choice["delta"]["content"]);
             }
-            response.content = sanitize_response_text(text);
+            // GLM/OpenCode-Zen и пр. reasoning-модели кладут ответ в
+            // reasoning_content, оставляя content пустым. Используем его как
+            // запасной вариант, иначе ответ кажется пустым.
+            if (text.empty()) {
+                auto try_reasoning = [&](const json& msg) -> std::string {
+                    if (msg.contains("reasoning_content") &&
+                        msg["reasoning_content"].is_string()) {
+                        return msg["reasoning_content"].get<std::string>();
+                    }
+                    return "";
+                };
+                if (choice.contains("message")) {
+                    text = try_reasoning(choice["message"]);
+                } else if (choice.contains("delta")) {
+                    text = try_reasoning(choice["delta"]);
+                }
+            }
             response.finish_reason = choice.value("finish_reason", "");
+            // GLM/OpenCode-Zen и пр. reasoning-модели кладут ответ в
+            // reasoning_content, оставляя content пустым. Используем его как
+            // запасной вариант — НО только если ответ завершён: при
+            // finish_reason="length" content пуст из-за нехватки токенов, а
+            // reasoning_content в этом случае — обрезанные рассуждения, а не
+            // ответ (подставлять их нельзя).
+            if (text.empty() && response.finish_reason != "length") {
+                auto try_reasoning = [&](const json& msg) -> std::string {
+                    if (msg.contains("reasoning_content") &&
+                        msg["reasoning_content"].is_string()) {
+                        return msg["reasoning_content"].get<std::string>();
+                    }
+                    return "";
+                };
+                if (choice.contains("message")) {
+                    text = try_reasoning(choice["message"]);
+                } else if (choice.contains("delta")) {
+                    text = try_reasoning(choice["delta"]);
+                }
+            }
+            response.content = sanitize_response_text(text);
         }
 
         if (response.content.empty() && !data.contains("error")) {
@@ -406,13 +471,13 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
 
         if (data.contains("usage")) {
             const auto& usage = data["usage"];
-            response.prompt_tokens = usage.value("prompt_tokens", 0);
-            response.completion_tokens = usage.value("completion_tokens", 0);
-            response.total_tokens = usage.value("total_tokens", 0);
+            response.prompt_tokens = safe_int(usage, "prompt_tokens", 0);
+            response.completion_tokens = safe_int(usage, "completion_tokens", 0);
+            response.total_tokens = safe_int(usage, "total_tokens", 0);
         }
 
         if (data.contains("cost")) {
-            response.cost_usd = data.value("cost", 0.0);
+            response.cost_usd = safe_double(data, "cost", 0.0);
         }
 
         response.success = true;

@@ -213,7 +213,12 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
             thinking["budget_tokens"] = params.reasoning_budget;
         }
         request_body["thinking"] = thinking;
-    } else if (params.model.find("glm") != std::string::npos) {
+    } else if (params.model.find("glm") != std::string::npos ||
+               params.model.find("hy3") != std::string::npos) {
+        // GLM-4.7 и OpenCode hy3-free по умолчанию включают thinking и тратят
+        // лимит на reasoning_content, оставляя content пустым (finish_reason:
+        // "length"). Явно отключаем размышления и гарантируем достаточный
+        // бюджет выходных токенов, чтобы ответ поместился целиком в content.
         request_body["thinking"] = nlohmann::json::object({{"type", "disabled"}});
         if (params.max_tokens > 0 && params.max_tokens < 8192) {
             request_body["max_tokens"] = 8192;

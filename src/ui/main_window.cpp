@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "headless_browser_panel.h"
 #include "advanced_menu_system.h"
 #include "command.h"
 #include "settings_dialog.h"
@@ -14,6 +15,8 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <filesystem>
+#include <unistd.h>
 #include <SDL2/SDL.h>
 
 #include "../external/imgui/backends/imgui_impl_sdl2.h"
@@ -394,6 +397,16 @@ bool MainWindow::initialize(int width, int height) {
 
     // Pass WindowManager to ChatInterface for dock support
     chat_interface_->set_window_manager(&window_manager_);
+
+    // Панель headless-браузера (Chromium): рендеринг страниц, отправка в чат.
+    // Не путать с «серверным режимом (без GUI)» приложения (флаг --headless).
+    headless_browser_panel_ = std::make_unique<HeadlessBrowserPanel>();
+    headless_browser_panel_->set_chat_interface(chat_interface_.get());
+
+    // Подсистема агентов: загрузка agent-плагинов (в т.ч. web_render_agent —
+    // headless-браузер/Chromium) и интеграция с чатом. Не путать с
+    // «серверным режимом (без GUI)» приложения (флаг --headless).
+    initialize_agent_system();
 
     // Set up model progress callback
     // TODO: Implement set_model_progress_callback in ModelManager
@@ -806,6 +819,8 @@ void MainWindow::initializeNewUISystem() {
     window_manager_.addWindow("conversations", show_conversations_, ImVec2(10, 100), ImVec2(250, 500));
     window_manager_.addWindow("files", show_files_, ImVec2(870, 100), ImVec2(300, 500));
     window_manager_.addWindow("rag", show_rag_, ImVec2(270, 100), ImVec2(400, 500));
+    window_manager_.addWindow("headless_browser", show_headless_browser_, ImVec2(540, 100), ImVec2(700, 600));
+    window_manager_.addWindow("agents", show_agents_, ImVec2(400, 100), ImVec2(520, 520));
 
     // Регистрация диалоговых окон (начально скрыты)
     window_manager_.addWindow("settings", show_settings_, ImVec2(200, 100), ImVec2(400, 600));
@@ -822,6 +837,8 @@ void MainWindow::initializeNewUISystem() {
     window_manager_.setImGuiName("conversations", TR("conversations.title"));
     window_manager_.setImGuiName("files", TR("files.title"));
     window_manager_.setImGuiName("rag", "RAG");
+    window_manager_.setImGuiName("headless_browser", "Headless-браузер");
+    window_manager_.setImGuiName("agents", "Агенты");
     window_manager_.setImGuiName("profile_manager", "Управление профилями");
     window_manager_.setImGuiName("backup_manager", "Резервные копии");
     window_manager_.setImGuiName("cloud_services", "Cloud Services / Облачные сервисы");
@@ -858,6 +875,14 @@ void MainWindow::initializeNewUISystem() {
     window_coordinator_.registerWindow("rag", [this]() {
         if (rag_interface_) rag_interface_->render_ui(&show_rag_);
     }, false, "RAG", &show_rag_);
+    window_coordinator_.registerWindow("headless_browser", [this]() {
+        if (headless_browser_panel_) headless_browser_panel_->render(&show_headless_browser_);
+    }, false, "Headless-браузер", &show_headless_browser_);
+    window_coordinator_.registerWindow("agents", [this]() {
+        if (agent_chat_integration_) {
+            agent_chat_integration_->get_agent_panel()->render(&show_agents_);
+        }
+    }, false, "Агенты", &show_agents_);
     window_coordinator_.registerWindow("settings", [this]() {
         if (settings_dialog_) settings_dialog_->render();
     }, true);
@@ -961,6 +986,8 @@ void MainWindow::syncWindowFlagsFromManager() {
     show_backup_manager_ = window_manager_.isWindowVisible("backup_manager");
     show_grid_snapping_ = window_manager_.isWindowVisible("grid_snapping");
     show_status_bar_ = window_manager_.isWindowVisible("status_bar");
+    show_headless_browser_ = window_manager_.isWindowVisible("headless_browser");
+    show_agents_ = window_manager_.isWindowVisible("agents");
 }
 
 void MainWindow::refreshLocalizedWindowNames() {
@@ -1428,6 +1455,7 @@ void MainWindow::initializePlugins() {
     llama_gui::plugin::PluginSubsystems subsystems;
     subsystems.command_manager = command_manager_.get();
     subsystems.window_manager = &window_manager_;
+    subsystems.window_coordinator = &window_coordinator_;
     subsystems.menu_system = &advanced_menu_system_;
     subsystems.dialog_manager = &dialog_manager_;
     subsystems.state_manager = &state_manager_;
@@ -1440,6 +1468,66 @@ void MainWindow::initializePlugins() {
     subsystems.plugins_dir = "plugins";
 
     plugin_manager_->initialize(subsystems);
+}
+
+namespace {
+// Каталог исполняемого файла (для поиска плагинов агентов рядом с бинарником).
+std::string agent_executable_dir() {
+#ifdef __linux__
+    char buf[4096];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        std::string path(buf);
+        const auto pos = path.find_last_of('/');
+        if (pos != std::string::npos) return path.substr(0, pos);
+    }
+#endif
+    return ".";
+}
+}  // namespace
+
+void MainWindow::initialize_agent_system() {
+    agent_registry_.set_context(&agent_context_);
+
+    // Загрузка agent-плагинов (в т.ч. web_render_agent — headless-браузер/Chromium)
+    // из каталогов, зеркальных поиску LLaMA-плагинов: cwd/plugins/agents и
+    // <каталог exe>/plugins/agents.
+    const std::vector<std::string> candidate_dirs = {
+        "plugins/agents",
+        agent_executable_dir() + "/plugins/agents",
+    };
+
+    int loaded = 0;
+    for (const auto& dir : candidate_dirs) {
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) continue;
+        loaded += agent_plugin_loader_.load_plugins_from_directory(dir, &agent_registry_);
+    }
+
+    // Инициализация всех загруженных агентов контекстом выполнения.
+    agent_registry_.initialize_all(&agent_context_);
+
+    // Интеграция с чатом: команды вида /agent <name> <action> [params].
+    agent_chat_integration_ = std::make_unique<AgentChatIntegration>();
+    if (agent_chat_integration_->initialize(&agent_registry_, &agent_context_)) {
+        chat_interface_->set_agent_command_handler(
+            [this](const std::string& command) {
+                if (!agent_chat_integration_ || !agent_chat_integration_->is_available()) {
+                    return false;
+                }
+                return agent_chat_integration_->handle_chat_command(
+                    command,
+                    [this](const ChatAgentResult& result) {
+                        chat_interface_->add_assistant_message(
+                            agent_chat_integration_->format_for_chat(result));
+                    });
+            });
+    }
+
+    std::cout << "[MainWindow] Agent system: loaded " << loaded
+              << " agent plugin(s), registry has "
+              << agent_registry_.list_agents().size() << " agent(s)" << std::endl;
 }
 
 void MainWindow::cleanup_opengl() {

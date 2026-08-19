@@ -477,7 +477,9 @@ void render_news_rewriter_window(UiDeps& deps) {
         draft_loaded = true;
     }
 
-    ImGui::SetNextWindowSize(ImVec2(560, 520), ImGuiCond_FirstUseEver);
+    // Размер/позиция окна управляются хостом через WindowCoordinator и
+    // сохраняются в workspace (как у chat/RAG). Свой SetNextWindowSize здесь
+    // конфликтовал бы с восстановлением из workspace, поэтому убран.
     const bool visible = ImGui::Begin("News Rewriter", &s_window_open);
     if (!s_window_open) {
         // Крестик нажат — применяем черновик настроек (автосейв) и скрываем окно.

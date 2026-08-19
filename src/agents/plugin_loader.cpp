@@ -289,10 +289,23 @@ int PluginLoader::load_plugins_from_directory(const std::string& dir,
     int loaded = 0;
 
     for (const auto& file : files) {
+        // load_plugin() регистрирует плагин под его реальным именем
+        // (plugin_get_exports()->get_name()), которое может не совпадать
+        // с именем файла (например "libweb_render_agent_plugin.so" ->
+        // "web_render_agent"). Находим только что загруженный плагин по
+        // пути и используем его реальное имя.
         if (load_plugin(file)) {
-            // Извлекаем имя плагина из пути
-            std::string name = std::filesystem::path(file).stem().string();
-            
+            std::string name;
+            for (const auto& p : list_plugins()) {
+                if (p.path == file) {
+                    name = p.name;
+                    break;
+                }
+            }
+            if (name.empty()) {
+                name = std::filesystem::path(file).stem().string();
+            }
+
             // Регистрируем агента
             if (create_agent_from_plugin(name, registry)) {
                 loaded++;

@@ -6,6 +6,7 @@
 #include "ui/advanced_menu_system.h"
 #include "ui/dialog_manager.h"
 #include "ui/chat_interface.h"
+#include "ui/window_coordinator.h"
 #include "core/state_manager.h"
 #include "core/settings.h"
 #include "core/llama_interface.h"
@@ -82,6 +83,11 @@ struct LoadedPlugin {
     int (*init_fn)(LlamaPluginHost*, const LlamaHostApi*) = nullptr;
     void (*render_fn)() = nullptr;
     void (*shutdown_fn)() = nullptr;
+
+    // Окна плагина отрисовываются через WindowCoordinator хоста (см. ниже).
+    // Если true — render_plugins() НЕ вызывает render_fn (во избежание
+    // двойной отрисовки), т.к. координатор уже это делает.
+    bool rendered_by_coordinator = false;
 
     PluginHostData* host_data = nullptr;
 
@@ -260,9 +266,31 @@ LlamaPluginWindow* host_window_register(LlamaPluginHost* host,
     if (!wm) return nullptr;
 
     const std::string wname = wm_name;
-    wm->addWindow(wname, false);
+    // Дефолтная позиция/размер — применяются координатором на первом кадре
+    // (аналогично chat/RAG), если workspace ещё не сохранял этой позиции.
+    wm->addWindow(wname, false, ImVec2(120, 120), ImVec2(560, 520));
     if (imgui_title && *imgui_title) {
         wm->setImGuiName(wname, imgui_title);
+    }
+
+    // Регистрируем команду переключения окна, чтобы пункт в меню Window
+    // (автоматически создаваемый из WindowManager) не был неактивным (серым).
+    auto* cm = pd->manager->subsystems.command_manager;
+    const std::string toggle_cmd = "toggle_window_" + wname;
+    if (cm && !cm->isCommandRegistered(toggle_cmd)) {
+        auto command = std::make_unique<ui::FunctionalCommand>(
+            toggle_cmd,
+            [wm, wname]() {
+                if (wm) wm->setWindowVisible(wname, !wm->isWindowVisible(wname));
+            },
+            "Toggle " + wname + " window",
+            "");
+        cm->registerCommand(toggle_cmd, std::move(command));
+        if (pd->plugin) {
+            auto ch = std::make_unique<PluginHandle>();
+            ch->name = toggle_cmd;
+            pd->plugin->command_handles.push_back(std::move(ch));
+        }
     }
 
     auto handle = std::make_unique<PluginHandle>();
@@ -912,6 +940,26 @@ bool PluginManager::load_plugin_file(const std::string& path) {
 
     const std::string plugin_name = plugin->info.name;
     const std::string plugin_version = plugin->info.version;
+
+    // Регистрируем окна плагина в WindowCoordinator, чтобы их позиция/размер
+    // сохранялись и восстанавливались через workspace так же, как у chat/RAG.
+    // Рендер окон плагина (render_fn) теперь идёт через координатор, поэтому в
+    // render_plugins() ниже render_fn больше не вызывается — иначе двойной рендер.
+    if (impl_->subsystems.window_coordinator && plugin->render_fn) {
+        const std::string wm_name = plugin->info.name;
+        const std::string imgui_name =
+            impl_->subsystems.window_manager
+                ? impl_->subsystems.window_manager->getImGuiName(wm_name)
+                : std::string();
+        impl_->subsystems.window_coordinator->registerWindow(
+            wm_name,
+            [p = plugin.get()]() {
+                if (p && p->render_fn) p->render_fn();
+            },
+            false, imgui_name, nullptr);
+        plugin->rendered_by_coordinator = true;
+    }
+
     impl_->plugins.push_back(std::move(plugin));
     std::cout << "[PluginManager] Loaded plugin: " << plugin_name
               << " v" << plugin_version << " from " << path << std::endl;
@@ -972,7 +1020,12 @@ void PluginManager::render_plugins() {
             }
         }
 
-        p->render_fn();
+        // Окна плагинов, зарегистрированные в WindowCoordinator, уже
+        // отрисованы им (см. load_plugin_file) — двойной рендер недопустим.
+        // Прочие плагины (без окон) рисуем здесь как раньше.
+        if (!p->rendered_by_coordinator) {
+            p->render_fn();
+        }
     }
 }
 

@@ -26,4 +26,4 @@ if(SDL2_FOUND)
 endif()
 
 # Зависимости от core (OpenRouterClient, Settings и т.д.)
-target_link_libraries(ui PRIVATE core)
+target_link_libraries(ui PRIVATE core headless_browser agent_core)

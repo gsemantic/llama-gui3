@@ -404,10 +404,19 @@ void apply_defaults(Settings& settings, nlohmann::json& req) {
                 thinking["budget_tokens"] = cp.reasoning_budget;
             }
             req["thinking"] = thinking;
-        } else if (req.contains("model") && req["model"].is_string() &&
-                   req["model"].get<std::string>().find("glm") != std::string::npos) {
-            // GLM по умолчанию включает thinking и тратит лимит на reasoning_content.
-            req["thinking"] = nlohmann::json::object({{"type", "disabled"}});
+        } else if (req.contains("model") && req["model"].is_string()) {
+            const std::string m = req["model"].get<std::string>();
+            // Модели, которые по умолчанию включают thinking и тратят лимит на
+            // reasoning_content, оставляя content пустым (GLM, OpenCode hy3-free и
+            // т.п. через zen-endpoint). Для них явно отключаем размышления, чтобы
+            // ответ попадал в content, а не в reasoning_content.
+            const bool thinking_by_default =
+                m.find("glm") != std::string::npos ||
+                m.find("hy3") != std::string::npos ||
+                cp.endpoint_url.find("opencode.ai") != std::string::npos;
+            if (thinking_by_default) {
+                req["thinking"] = nlohmann::json::object({{"type", "disabled"}});
+            }
         }
     }
 

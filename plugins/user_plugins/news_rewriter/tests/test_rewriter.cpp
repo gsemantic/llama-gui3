@@ -52,9 +52,21 @@ static void test_parse_response_long_single_line_is_body() {
     TEST_ASSERT_EQUAL(r.body, long_line);
 }
 
+// Регрессия: длинная ПЕРВАЯ строка (целый абзац) + ещё строки. Заголовком она
+// быть не должна — иначе в заголовок попадает половина текста статьи (см. баг
+// «Технофашисты XXI века» после rate-limit). Заголовок пуст, тело = все строки.
+static void test_parse_response_long_first_line_with_more_is_body() {
+    const std::string long_line(400, 'x');
+    const RewriteResult r = parse_response(long_line + "\nвторая строка\nтретья");
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_TRUE(r.title.empty());
+    TEST_ASSERT_EQUAL(r.body, long_line + "\nвторая строка\nтретья");
+}
+
 static void test_rewrite_single_long_paragraph() {
     const Article a = make_article("Старый заголовок", "Старый текст");
     RewriteConfig cfg;
+    cfg.language = "";  // без проверки языка — тест проверяет только разбор
     const std::string text(200, 'a');
     LlmFn llm = [&](const std::string&, std::string& response, std::string&) -> bool {
         response = text;
@@ -136,10 +148,46 @@ static void test_build_prompt_max_words_placeholder() {
     TEST_ASSERT(prompt.find("Напиши 75 слов.") != std::string::npos);
 }
 
+// Регрессия: перегруженная модель вернула 200 с латиницей вместо русского
+// рерайта — такой «деградировавший» ответ не должен публиковаться.
+static void test_validate_rewrite_wrong_script_rejected() {
+    std::string err;
+    const bool ok = validate_rewrite("Title", "Some English body text.",
+                                     "ru", err);
+    TEST_ASSERT_FALSE(ok);
+    TEST_ASSERT_FALSE(err.empty());
+}
+
+static void test_validate_rewrite_refusal_rejected() {
+    std::string err;
+    const bool ok = validate_rewrite("Извините", "как языковая модель, я не могу",
+                                     "ru", err);
+    TEST_ASSERT_FALSE(ok);
+}
+
+static void test_validate_rewrite_valid_cyrillic_ok() {
+    std::string err;
+    const bool ok = validate_rewrite("Переписанный заголовок",
+                                     "Переписанный текст новости на русском.",
+                                     "ru", err);
+    TEST_ASSERT_TRUE(ok);
+}
+
+static void test_validate_rewrite_unknown_lang_skips_script_check() {
+    std::string err;
+    const bool ok = validate_rewrite("Title", "English body", "", err);
+    TEST_ASSERT_TRUE(ok);
+}
+
 REGISTER_TEST(test_build_prompt_substitutions);
+REGISTER_TEST(test_validate_rewrite_wrong_script_rejected);
+REGISTER_TEST(test_validate_rewrite_refusal_rejected);
+REGISTER_TEST(test_validate_rewrite_valid_cyrillic_ok);
+REGISTER_TEST(test_validate_rewrite_unknown_lang_skips_script_check);
 REGISTER_TEST(test_parse_response_title_and_body);
 REGISTER_TEST(test_parse_response_single_line);
 REGISTER_TEST(test_parse_response_long_single_line_is_body);
+REGISTER_TEST(test_parse_response_long_first_line_with_more_is_body);
 REGISTER_TEST(test_rewrite_single_long_paragraph);
 REGISTER_TEST(test_parse_response_empty);
 REGISTER_TEST(test_parse_response_whitespace_only);

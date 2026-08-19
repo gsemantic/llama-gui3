@@ -7,6 +7,19 @@ namespace ui {
 
 void WindowManager::addWindow(const std::string& name, bool visible,
                              const ImVec2& position, const ImVec2& size) {
+    // Если окно уже зарегистрировано (например, его состояние уже загружено
+    // из workspace ДО инициализации плагина), НЕ перезаписываем сохранённую
+    // видимость/позицию/размер — иначе восстановление workspace не работает
+    // для окон плагинов (host_window_register вызывает addWindow позже и
+    // затирал бы загруженное состояние).
+    auto it = windows_.find(name);
+    if (it != windows_.end()) {
+        it->second.snapped_to_grid = grid_snapping_.isEnabled();
+        if (imgui_names_.find(name) == imgui_names_.end()) {
+            imgui_names_[name] = name;
+        }
+        return;
+    }
     WindowState state;
     state.name = name;
     state.visible = visible;

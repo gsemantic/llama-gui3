@@ -367,7 +367,7 @@ set(AGENT_HEADERS
 # Создаём статическую библиотеку ядра агентов
 add_library(agent_core STATIC ${AGENT_SOURCES} ${AGENT_HEADERS})
 target_include_directories(agent_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(agent_core PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(agent_core PRIVATE nlohmann_json::nlohmann_json headless_browser)
 
 # Добавляем dl для динамической загрузки на Linux
 if(UNIX AND NOT APPLE)
@@ -377,6 +377,12 @@ endif()
 # ============================================================================
 # Create the main executable with all sources
 # Add subdirectories for modular libraries
+
+# Общая библиотека headless-браузера (Chromium). Объявляется ДО модулей и
+# плагинов, чтобы цель headless_browser была видна везде (основное приложение,
+# agent_core и плагин news_rewriter линкуются к ней).
+add_subdirectory(libs/headless_browser)
+
 add_subdirectory(src/core)
 add_subdirectory(src/ui)
 add_subdirectory(src/managers)
@@ -391,6 +397,7 @@ target_link_libraries(llama-gui-core PRIVATE
     managers
     plugin_core
     agent_core
+    headless_browser
     imgui_lib
     CURL::libcurl
 )

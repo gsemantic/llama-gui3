@@ -292,13 +292,18 @@ FetchResult Fetcher::fetch(const std::string& url, const std::string& type,
         std::string html = body;
         // Headless-рендер: принудительно (headless_enabled) либо авто-фолбэк,
         // когда обычный HTTP-фетч вернул пустую JS-оболочку (SPA, напр. VK.ru).
+        // Рендеринг делегируется общей библиотеке headless_browser.
+        headless_browser::RenderOptions opts;
+        opts.browser_path = cfg.browser_path;
+        opts.user_agent = cfg.user_agent;
+        opts.timeout_ms = cfg.headless_timeout_ms;
         bool use_headless = cfg.headless_enabled;
-        if (!use_headless && resp.ok && headless_.is_thin_content(html)) {
-            use_headless = headless_.available(cfg);
+        if (!use_headless && resp.ok && headless_browser::is_thin_content(html)) {
+            use_headless = headless_browser::available(opts);
         }
         if (use_headless) {
             std::string err;
-            const std::string dom = headless_.render(url, cfg, &err);
+            const std::string dom = headless_browser::render_dom(url, opts, &err);
             if (!dom.empty()) {
                 html = dom;  // Chromium сериализует DOM уже в UTF-8
             }
