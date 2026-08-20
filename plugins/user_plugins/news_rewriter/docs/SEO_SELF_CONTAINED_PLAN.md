@@ -353,15 +353,31 @@ add_action('wp_head', function () {
 
 ## 9. Чеклист для новой сессии
 
-- [ ] Прочитать этот файл целиком.
-- [ ] Подтвердить у заказчика выбор Стратегии 1 или 2 (§1, §8).
-- [ ] Phase 0: замер текущих метрик + проверка подзаголовков/`body_to_html`/транслита.
-- [ ] Реализовать `SeoAnalyzer` (Phase 1) + юнит-тесты.
-- [ ] Реализовать `SeoReformer` (Phase 2) + юнит-тесты.
-- [ ] Расширить `SeoConfig` (§4) и сериализацию (`common.cpp`, `config.cpp`).
-- [ ] Внедрить Analyzer→Reformer в `worker.cpp` (`apply_seo`/combine).
-- [ ] Phase 4: жёсткие проверки длины мета + `seo_slug` + транслит.
-- [ ] Phase 5: `nr_seo_*` ключи в `sink_wordpress.cpp`; MU-плагин `nr-seo.php`.
-- [ ] Phase 6: UI-скоркард в `ui.cpp`.
-- [ ] Phase 7: тесты; проверка на gsemantic.ru, что `<head>` реально заполнен.
-- [ ] Не коммитить/пушить без явной просьбы заказчика.
+Статус на 2026-08-20 (коммит `165cd25`, запушен в origin/main):
+
+- [x] Прочитать этот файл целиком.
+- [x] Подтвердить у заказчика выбор Стратегии 1 (MU-плагин `nr-seo.php`, §1, §8).
+- [x] Phase 0: замер текущих метрик (базовая линия SEO ~48/100) + проверка
+      подзаголовков (`body_to_html` → `<h2>`), `alt`=focus_keyword, транслита (не было).
+- [x] Реализовать `SeoAnalyzer` (Phase 1) + юнит-тесты (10 шт., проходят).
+- [x] Phase 4: жёсткие проверки длины мета (`seo_title` ≤60, `meta_description`
+      ≤160, `focus_keyword` 2–4 слова) + `seo_slug` + модуль `translit` (RU→EN + slug).
+- [x] Phase 5: ключи `yoast_wpseo_*`/`rank_math_*` → `nr_seo_*` в `sink_wordpress.cpp`;
+      slug из `seo_slug`; MU-плагин `mu-plugins/nr-seo.php` (регистрирует `nr_seo_*` для
+      REST + выводит `<title>`/description/OG/Twitter/canonical). Деплой `.so` + `nr-seo.php`
+      выполнен, проверено на живом посте gsemantic.ru — `<head>` реально заполнен.
+- [x] Тесты: +19 (seo_analyzer 10, translit 5, seo_meta 4), все проходят.
+- [x] Закоммитить и запушить (коммит `165cd25`, main → origin/main).
+
+ОСТАЛОСЬ (следующая сессия):
+
+- [ ] Phase 2: реализовать `SeoReformer` (`src/seo_reformer.{h,cpp}`) — механическое
+      дробление длинных абзацев/предложений, опционально переходные слова + юнит-тесты.
+- [ ] Внедрить Analyzer→Reformer в `worker.cpp` (`apply_seo`/combine) после Phase 2.
+- [ ] Phase 3: LLM-доводка (второй проход по «фидбек-скоркарду», rate-limit-aware).
+- [ ] Расширить `SeoConfig` (§4): структуры `Writing`/`Delivery` + сериализация в
+      `config.cpp` (сейчас ключи `nr_seo_*` и slug захардкожены, настраиваемость опциональна).
+- [ ] Phase 6: UI-скоркард в `ui.cpp` — светофор по метрикам `SeoAnalyzer` + счётчик `seo_issues`.
+- [ ] Phase 7 (докомплектация): интеграционный тест (mock LLM — уходят `nr_seo_*` + оптимальный
+      slug); живой пост на gsemantic.ru уже проверен (§5/Phase 5).
+- [ ] При желании: убрать суффикс сайта из `<title>` в `nr-seo.php` (`$parts['site'] = '';`).
