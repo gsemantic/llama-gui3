@@ -169,6 +169,12 @@ private:
     LogFn log_callback_;
     std::unique_ptr<IFetch> fetcher_;
     LlmFn llm_;
+    // Роли (системные промпты) — собираются ОДИН раз в начале обхода
+    // (process_run) и переиспользуются для всех статей, чтобы не пересобирать
+    // и не переотправлять модели идентичные инструкции (промпт-роль).
+    std::string role_rewrite_;
+    std::string role_seo_;
+    std::string role_combined_;
     std::chrono::milliseconds llm_call_interval_{1000};  // пауза между вызовами LLM
     RetryPolicy retry_policy_;            // только backoff-задержки (max_retries — из конфига)
     RetryPolicy llm_retry_policy_;        // ретраи рерайта: 1 + max_retries попыток, backoff

@@ -123,18 +123,25 @@ void Worker::set_llm(LlmFn llm) {
     std::lock_guard<std::mutex> lock(data_mutex_);
     // Оборачиваем вызов LLM паузой, чтобы не «долбить» облако подряд и не
     // упираться в лимит частоты провайдера (429) при обходе списка новостей.
-    llm_ = [this, base = std::move(llm)](const std::string& p, std::string& out,
-                                         std::string& err) -> bool {
+    llm_ = [this, base = std::move(llm)](const std::string& system,
+                                          const std::string& user,
+                                          std::string& out,
+                                          std::string& err) -> bool {
         if (llm_call_interval_ > std::chrono::milliseconds(0))
             std::this_thread::sleep_for(llm_call_interval_);
         // Измеряем только время самого вызова LLM (без паузы между вызовами),
         // чтобы скорость отражала генерацию, а не rate-limit.
         const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = base(p, out, err);
+        const bool ok = base(system, user, out, err);
         const auto t1 = std::chrono::steady_clock::now();
         const double dt = std::chrono::duration<double>(t1 - t0).count();
 
-        const std::uint64_t pt = estimate_tokens(p);
+        // Роль (system) уже учтена один раз на весь обход в process_run
+        // (промпт-роль шлётся модели единожды, переиспользуется для каждой
+        // статьи). Здесь считаем только токены контента статьи (user), чтобы
+        // роль не дублировалась в метрике N раз. prompt-токены всего обхода =
+        // role (раз) + Σ user (на статью).
+        const std::uint64_t pt = estimate_tokens(user);
         const std::uint64_t ct = out.empty() ? 0 : estimate_tokens(out);
         llm_prompt_tokens_.fetch_add(pt, std::memory_order_relaxed);
         llm_completion_tokens_.fetch_add(ct, std::memory_order_relaxed);
@@ -373,8 +380,10 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
         RewriteResult rr;
 
         if (combine) {
-            // ОДИН вызов: рерайт + SEO сразу.
-            const RewriteSeoResult cr = rewrite_and_seo(a, cfg.rewrite, llm_);
+            // ОДИН вызов: рерайт + SEO сразу. Роль (role_combined_) собрана
+            // один раз на обход — не пересобираем идентичные инструкции.
+            const RewriteSeoResult cr =
+                rewrite_and_seo(a, cfg.rewrite, role_combined_, llm_);
             if (cr.ok && !cr.title.empty() && !cr.body.empty()) {
                 a.title_rewritten = cr.title;
                 a.body_rewritten = cr.body;
@@ -394,13 +403,13 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
             } else {
                 // Не rate-limit (напр. модель не выдала корректный JSON): пробуем
                 // два отдельных, более простых вызова (рерайт, затем SEO).
-                rr = rewrite_article(a, cfg.rewrite, llm_);
+                rr = rewrite_article(a, cfg.rewrite, role_rewrite_, llm_);
                 if (rr.ok) {
                     a.title_rewritten = rr.title;
                     a.body_rewritten = rr.body;
                     if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                     if (seo_enabled && !seo_skipped_.load()) {
-                        apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
+                        apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
                     }
                     return true;
                 }
@@ -408,13 +417,13 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
             }
         } else {
             // Обычный путь: рерайт (1 вызов) + при необходимости SEO (2-й вызов).
-            rr = rewrite_article(a, cfg.rewrite, llm_);
+            rr = rewrite_article(a, cfg.rewrite, role_rewrite_, llm_);
             if (rr.ok) {
                 a.title_rewritten = rr.title;
                 a.body_rewritten = rr.body;
                 if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 if (seo_enabled && !seo_skipped_.load()) {
-                    apply_seo(generate_seo(a, cfg.rewrite.seo, llm_));
+                    apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
                 }
                 return true;
             }
@@ -609,6 +618,31 @@ void Worker::process_run(const Config& cfg) {
     }
     cancel_.store(false);
     scheduler_.note_run_started();   // любой запуск сдвигает авто-расписание
+
+    // Промпт-роль: собираем роли (системные промпты) ОДИН раз на весь обход и
+    // переиспользуем для каждой статьи — модель не получает одинаковые
+    // инструкции повторно (экономия токенов/квоты, меньше перегрузка).
+    role_rewrite_ = build_role_prompt(cfg.rewrite);
+    role_seo_ = build_seo_role_prompt(cfg.rewrite.seo, cfg.rewrite.language);
+    role_combined_ = build_combined_role_prompt(cfg.rewrite);
+
+    // Промпт-роль: системные инструкции шлются модели ОДИН раз на весь обход,
+    // поэтому их токены учитываем единожды (а не на каждую статью, как это
+    // делал старый подсчёт в set_llm). Учитываем ровно те роли, что реально
+    // пойдут в запросы: рерайт-роль — всегда; SEO-роль — при включённом SEO;
+    // комбинированная роль — при combine (иначе вместо неё пойдут рерайт+SEO).
+    {
+        std::uint64_t role_tokens = estimate_tokens(role_rewrite_);
+        const bool seo_enabled = cfg.rewrite.seo.enabled && llm_;
+        const bool combine = seo_enabled && cfg.rewrite.seo.combine_with_rewrite;
+        if (combine) {
+            role_tokens += estimate_tokens(role_combined_);
+        } else if (seo_enabled) {
+            role_tokens += estimate_tokens(role_seo_);
+        }
+        llm_prompt_tokens_.fetch_add(role_tokens, std::memory_order_relaxed);
+        llm_total_tokens_.fetch_add(role_tokens, std::memory_order_relaxed);
+    }
 
     // Выходная папка: пользовательская (cfg.sink.output_dir) или дефолтная.
     // Инициализируем Storage перед обходом — каталог данных мог измениться

@@ -72,7 +72,10 @@ check_build() {
         print_colored $RED "❌ Исполняемый файл не найден: $GUI_BINARY"
         echo ""
         print_colored $YELLOW "🔧 Запускаю пересборку проекта..."
-        ./build.sh
+        if ! "$SCRIPT_DIR/build.sh"; then
+            print_colored $RED "❌ Сборка не удалась. Проверьте ошибки выше."
+            exit 1
+        fi
         echo ""
         if [ ! -f "$GUI_BINARY" ]; then
             print_colored $RED "❌ Сборка не удалась. Проверьте ошибки выше."
@@ -149,7 +152,10 @@ kill_servers() {
 # Функция пересборки
 rebuild_project() {
     print_colored $YELLOW "🔧 Пересборка проекта..."
-    ./build.sh
+    if ! "$SCRIPT_DIR/build.sh"; then
+        print_colored $RED "❌ Сборка не удалась. Проверьте ошибки выше."
+        exit 1
+    fi
     echo ""
     check_build
 }

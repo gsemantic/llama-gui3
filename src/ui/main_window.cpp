@@ -467,7 +467,14 @@ bool MainWindow::initialize(int width, int height) {
         });
         command_manager_->initializeDefaultCommands(
             [this]() { open_conversation_file(); },
-            [this]() { shutdown(); },
+            // Только запрашиваем выход из цикла. Нельзя вызывать shutdown()
+            // прямо здесь: команда исполняется ВНУТРИ кадра рендер-цикла run(),
+            // и shutdown() (через cleanup_sdl2 -> SDL_Quit + ImGui::DestroyContext)
+            // уничтожил бы SDL/ImGui-бэкенд, тогда как цикл продолжил бы
+            // рисовать текущий кадр -> SIGSEGV в IsItemHovered (см. imgui-error
+            // "Forgot to shutdown Platform/Renderer backend?"). Реальную выгрузку
+            // выполняет ~MainWindow (вызывает shutdown()) после выхода из цикла.
+            [this]() { is_running_ = false; },
             [this]() { open_settings(); },
             [this]() {
                 file_dialog_manager_->pick_file(

@@ -66,17 +66,17 @@
     },
     "cloud_provider": {
         "enabled": true,
-        "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
+        "endpoint_url": "https://opencode.ai/zen/v1",
         "free_models_only": false,
         "last_search_query": "",
-        "max_output_tokens": 1500,
-        "model_id": "glm-4.7-flash",
-        "provider_name": "Zhipu (GLM)",
+        "max_output_tokens": 8000,
+        "model_id": "hy3-free",
+        "provider_name": "OpenCode Zen",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
-            "glm-4.7-flash",
-            "hy3-free"
+            "hy3-free",
+            "glm-4.7-flash"
         ],
         "timeout_ms": 120000
     },
@@ -175,8 +175,8 @@
             "avg_response_time_ms": 473.34,
             "avg_tokens_generated": 103,
             "avg_tokens_per_second": 28.66,
-            "first_used": "Tue Aug 18 17:26:35 2026",
-            "last_used": "Tue Aug 18 17:26:35 2026",
+            "first_used": "Wed Aug 19 17:05:34 2026",
+            "last_used": "Wed Aug 19 17:05:34 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,

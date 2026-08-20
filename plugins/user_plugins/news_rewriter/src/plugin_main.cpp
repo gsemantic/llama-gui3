@@ -180,8 +180,8 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
             g_api->log(g_host, LLAMA_LOG_INFO, msg.c_str());
         }
     });
-    g_worker->set_llm([](const std::string& prompt,
-                         std::string& response, std::string& error) -> bool {
+    g_worker->set_llm([](const std::string& system, const std::string& user,
+                          std::string& response, std::string& error) -> bool {
         if (!g_api || !g_host) {
             error = "хост недоступен";
             return false;
@@ -191,7 +191,12 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
             return false;
         }
         char* out = nullptr;
-        const int rc = g_api->llm_complete(g_host, prompt.c_str(), &out);
+        // Промпт-роль: шлём роль (system) и контент статьи (user) раздельно,
+        // если хост поддерживает llm_complete_ex. Иначе (старый хост) —
+        // объединяем в один промпт для обратной совместимости.
+        const int rc = (g_api->llm_complete_ex != nullptr)
+            ? g_api->llm_complete_ex(g_host, system.c_str(), user.c_str(), &out)
+            : g_api->llm_complete(g_host, (system + "\n\n" + user).c_str(), &out);
         if (rc != 1 || !out) {
             // Хост может вернуть текст ошибки облака в out_response даже при
             // неудаче (rc=0): используем его, чтобы распознать rate-limit.

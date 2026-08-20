@@ -309,9 +309,19 @@ private:
 #endif
 
     // Agent System
-    agents::AgentRegistry agent_registry_;
+    //
+    // ВАЖНО: порядок объявления определяет порядок разрушения (обратный
+    // порядку объявления). Агенты (IAgent) создаются и регистрируются из
+    // загружаемых .so (web_render_agent и т.п.), поэтому их код и vtable
+    // живут внутри этих библиотек. Если agent_plugin_loader_ разрушится
+    // первым, он вызовет dlclose() и выгрузит .so ДО того, как
+    // AgentRegistry вызовет shutdown()/деструкторы агентов — это приведёт
+    // к SIGSEGV (обращение в выгруженную память). Поэтому agent_registry_
+    // объявлен ПОСЛЕДНИМ среди тройки и разрушается ПЕРВЫМ, пока .so ещё
+    // загружен; agent_plugin_loader_ (dlclose) разрушается после него.
     agents::AgentContext agent_context_;
     agents::PluginLoader agent_plugin_loader_;
+    agents::AgentRegistry agent_registry_;
     std::unique_ptr<AgentChatIntegration> agent_chat_integration_;
 
     // Configuration Manager

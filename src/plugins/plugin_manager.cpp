@@ -446,7 +446,11 @@ int host_llm_is_connected(LlamaPluginHost* host) {
 namespace {
 
 // Если локальный сервер недоступен — пробуем облачного провайдера.
+// system_prompt — явная роль/инструкции (промпт-роль). Передаётся как системное
+// сообщение РОВНО ОДИН раз; плагин шлёт его один раз на обход, а не дублирует в
+// каждом item-запросе. Пустой system_prompt == старое поведение (llm_complete).
 int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
+                                     const std::string& system_prompt,
                                      const char* prompt, char** out_response) {
     auto* li = pd->manager->subsystems.llama_interface;
 
@@ -454,6 +458,8 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
         try {
             core::ChatCompletionRequest req;
             req.model = "local";
+            if (!system_prompt.empty())
+                req.messages.emplace_back(core::MessageRole::System, system_prompt);
             req.messages.emplace_back(core::MessageRole::User, prompt);
             req.stream = false;
             auto future = li->create_chat_completion_async(req);
@@ -494,7 +500,15 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
     params.top_p = settings->chat().top_p;
     params.stream = false;
 
-    if (!settings->chat().default_system_prompt.empty()) {
+    if (!system_prompt.empty()) {
+        // Явная роль от плагина (промпт-роль) — приоритет над системным
+        // промптом чата хоста, чтобы не дублировать два системных сообщения.
+        core::OpenRouterRequestParams::Message sys;
+        sys.role = "system";
+        sys.content = system_prompt;
+        params.messages.push_back(std::move(sys));
+    } else if (!settings->chat().default_system_prompt.empty()) {
+        // Совместимость: старое поведение llm_complete без явной роли.
         core::OpenRouterRequestParams::Message sys;
         sys.role = "system";
         sys.content = settings->chat().default_system_prompt;
@@ -532,7 +546,16 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
 int host_llm_complete(LlamaPluginHost* host, const char* prompt, char** out_response) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !prompt || !out_response) return 0;
-    return host_llm_complete_local_or_cloud(host, pd, prompt, out_response);
+    return host_llm_complete_local_or_cloud(host, pd, std::string(), prompt, out_response);
+}
+
+int host_llm_complete_ex(LlamaPluginHost* host, const char* system_prompt,
+                         const char* user_prompt, char** out_response) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !user_prompt || !out_response) return 0;
+    return host_llm_complete_local_or_cloud(
+        host, pd, system_prompt ? std::string(system_prompt) : std::string(),
+        user_prompt, out_response);
 }
 
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
@@ -667,6 +690,7 @@ const LlamaHostApi& host_api_table() {
         a.chat_add_message = host_chat_add_message;
         a.llm_is_connected = host_llm_is_connected;
         a.llm_complete = host_llm_complete;
+        a.llm_complete_ex = host_llm_complete_ex;
 
         a.rag_search = host_rag_search;
         a.rag_process_document = host_rag_process_document;

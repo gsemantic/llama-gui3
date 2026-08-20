@@ -140,6 +140,17 @@ struct LlamaHostApi {
     /* --- Освобождение памяти хоста --- */
     void (*free_string)(LlamaPluginHost* host, char* str);
     void (*free_float_array)(LlamaPluginHost* host, float* arr);
+
+    /* llm_complete_ex — как llm_complete, но с явным системным промптом (ролью).
+       Позволяет плагину отправлять статичные инструкции/роль РОВНО ОДИН раз, а
+       затем для каждого элемента данных слать лишь пользовательское сообщение.
+       Это не перегружает модель одинаковыми инструкциями при обходе списка
+       (облако кэширует префикс системного промпта, локальный сервер — KV-префикс).
+       system_prompt может быть nullptr/пустым — тогда поведение == llm_complete.
+       Поле добавлено в КОНЕЦ структуры, чтобы не смещать существующие указатели
+       (обратная совместимость по offsetof при старом хосте). */
+    int (*llm_complete_ex)(LlamaPluginHost* host, const char* system_prompt,
+                           const char* user_prompt, char** out_response);
 };
 
 /* Информация о плагине (возвращается ll_plugin_info, статична) */

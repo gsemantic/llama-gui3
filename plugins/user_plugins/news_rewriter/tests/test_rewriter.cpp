@@ -68,7 +68,8 @@ static void test_rewrite_single_long_paragraph() {
     RewriteConfig cfg;
     cfg.language = "";  // без проверки языка — тест проверяет только разбор
     const std::string text(200, 'a');
-    LlmFn llm = [&](const std::string&, std::string& response, std::string&) -> bool {
+    LlmFn llm = [&](const std::string& system, const std::string& user,
+                   std::string& response, std::string&) -> bool {
         response = text;
         return true;
     };
@@ -92,7 +93,8 @@ static void test_parse_response_whitespace_only() {
 static void test_rewrite_ok() {
     const Article a = make_article("Старый заголовок", "Старый текст");
     RewriteConfig cfg;
-    LlmFn llm = [](const std::string&, std::string& response, std::string&) -> bool {
+    LlmFn llm = [](const std::string& system, const std::string& user,
+                   std::string& response, std::string&) -> bool {
         response = "Переписанный заголовок\n\nПереписанный текст новости";
         return true;
     };
@@ -105,7 +107,8 @@ static void test_rewrite_ok() {
 static void test_rewrite_llm_error() {
     const Article a = make_article("Заголовок", "Текст");
     RewriteConfig cfg;
-    LlmFn llm = [](const std::string&, std::string&, std::string& error) -> bool {
+    LlmFn llm = [](const std::string& system, const std::string& user,
+                   std::string&, std::string& error) -> bool {
         error = "сервер недоступен";
         return false;
     };

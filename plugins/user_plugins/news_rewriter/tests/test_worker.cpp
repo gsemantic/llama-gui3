@@ -257,9 +257,15 @@ static void test_worker_llm_rewrites_articles() {
     worker.set_fetcher(std::move(fetcher));
 
     std::atomic<int> llm_calls{0};
-    worker.set_llm([&](const std::string& prompt, std::string& response, std::string&) -> bool {
+    worker.set_llm([&](const std::string& system, const std::string& user,
+                      std::string& response, std::string&) -> bool {
         llm_calls++;
-        TEST_ASSERT(prompt.find("{title}") == std::string::npos);  // подстановки применены
+        // Подстановки применены: в роли и в контенте статьи не осталось
+        // сырых маркеров {title}/{body}.
+        TEST_ASSERT(system.find("{title}") == std::string::npos);
+        TEST_ASSERT(system.find("{body}") == std::string::npos);
+        TEST_ASSERT(user.find("{title}") == std::string::npos);
+        TEST_ASSERT(user.find("{body}") == std::string::npos);
         response = "Новый заголовок\n\nНовый текст";
         return true;
     });
@@ -291,7 +297,8 @@ static void test_worker_llm_error_marks_article() {
     worker.set_fetcher(std::move(fetcher));
 
     std::atomic<int> llm_calls{0};
-    worker.set_llm([&](const std::string&, std::string&, std::string& error) -> bool {
+    worker.set_llm([&](const std::string&, const std::string&,
+                      std::string&, std::string& error) -> bool {
         llm_calls++;
         error = "LLM не подключён";
         return false;
@@ -335,7 +342,8 @@ static void test_worker_llm_retries_then_succeeds() {
     worker.set_fetcher(std::move(fetcher));
 
     std::atomic<int> llm_calls{0};
-    worker.set_llm([&](const std::string&, std::string& response, std::string& error) -> bool {
+    worker.set_llm([&](const std::string&, const std::string&,
+                      std::string& response, std::string& error) -> bool {
         if (llm_calls.fetch_add(1) < 2) {   // 2 сбоя, затем успех
             error = "модель не ответила";
             return false;
@@ -379,7 +387,8 @@ static void test_worker_llm_retries_exhausted_reports_error() {
     worker.set_fetcher(std::move(fetcher));
 
     std::atomic<int> llm_calls{0};
-    worker.set_llm([&](const std::string&, std::string&, std::string& error) -> bool {
+    worker.set_llm([&](const std::string&, const std::string&,
+                      std::string&, std::string& error) -> bool {
         llm_calls++;
         error = "таймаут облачной модели";
         return false;
@@ -986,13 +995,14 @@ static void test_worker_reports_seo_missing() {
         return r;
     };
     worker.set_fetcher(std::move(fetcher));
-    // Рерайт успешен; SEO-запрос (промпт с «SEO-редактор») падает по rate limit.
-    worker.set_llm([&](const std::string& prompt, std::string& response,
-                       std::string& error) -> bool {
-        if (prompt.find("SEO-редактор") != std::string::npos) {
+    // Рерайт успешен; SEO-запрос (роль с «SEO-редактор») падает по rate limit.
+    worker.set_llm([&](const std::string& system, const std::string& user,
+                       std::string& response, std::string& error) -> bool {
+        if (system.find("SEO-редактор") != std::string::npos) {
             error = "Превышен лимит запросов (Rate Limit)";
             return false;
         }
+        (void)user;
         response = "Переписанный заголовок\n\nПереписанный текст новости.";
         return true;
     });

@@ -13,24 +13,84 @@ std::string truncate_input(const std::string& s, int max) {
     return s.substr(0, cut);
 }
 
-std::string build_prompt(const Article& src, const RewriteConfig& cfg) {
-    std::string prompt = cfg.prompt_template;
-    const auto replace = [&prompt](const std::string& from, const std::string& to) {
-        std::size_t pos = 0;
-        while ((pos = prompt.find(from, pos)) != std::string::npos) {
-            prompt.replace(pos, from.size(), to);
-            pos += to.size();
-        }
-    };
-    replace("{title}", src.title_original);
-    replace("{body}", truncate_input(src.body_original, cfg.max_input_chars));
-    replace("{language}", cfg.language);
-    replace("{tone}", cfg.tone);
-    replace("{max_words}", cfg.max_words > 0 ? std::to_string(cfg.max_words) : "");
-    if (cfg.max_words > 0) {
-        prompt += "\n\nОбъём: примерно " + std::to_string(cfg.max_words) + " слов.";
+namespace {
+
+void replace_all(std::string& s, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    std::size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
     }
-    return prompt;
+}
+
+// Обрезка завершающих пробелов/переводов строк.
+std::string trim_right(const std::string& s) {
+    const std::size_t e = s.find_last_not_of(" \t\r\n");
+    return e == std::string::npos ? std::string() : s.substr(0, e + 1);
+}
+
+// Схлопывание трёх и более подряд идущих '\n' в два (убираем «дыры» от
+// вырезанных маркеров статьи в роли).
+std::string collapse_blank_lines(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    int blank = 0;
+    for (char c : s) {
+        if (c == '\n') {
+            ++blank;
+            if (blank <= 2) out += c;
+        } else {
+            blank = 0;
+            out += c;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+// Построение РОЛИ (системного промпта) из шаблона: заполняются статичные
+// подстановки ({language}, {tone}, {max_words}), а маркеры статьи ({title},
+// {body}) вместе с привычными подписями «Заголовок:»/«Текст:» ВЫРЕЗАЮТСЯ — они
+// приходят в пользовательском сообщении (build_user_prompt). Так роль остаётся
+// идентичной для всех новостей обхода и шлётся модели РОВНО ОДИН раз.
+// with_max_words — добавлять ли инструкцию об объёме (для чистого рерайта;
+// для SEO/комбинированного — false, т.к. объём задаётся иначе).
+std::string build_role_from_template(const std::string& tpl,
+                                     const RewriteConfig& cfg,
+                                     bool with_max_words) {
+    const bool had_max_words_ph = tpl.find("{max_words}") != std::string::npos;
+    std::string role = tpl;
+    replace_all(role, "{language}", cfg.language);
+    replace_all(role, "{tone}", cfg.tone);
+    replace_all(role, "{max_words}",
+                cfg.max_words > 0 ? std::to_string(cfg.max_words) : "");
+    // Вырезаем маркеры статьи (и их подписи), чтобы в системном промпте не
+    // висел пустой «Заголовок: ».
+    replace_all(role, "Заголовок: {title}", "");
+    replace_all(role, "Текст: {body}", "");
+    replace_all(role, "{title}", "");
+    replace_all(role, "{body}", "");
+    role = trim_right(collapse_blank_lines(role));
+    if (with_max_words && cfg.max_words > 0 && !had_max_words_ph) {
+        role += "\n\nОбъём: примерно " + std::to_string(cfg.max_words) + " слов.";
+    }
+    return role;
+}
+
+std::string build_role_prompt(const RewriteConfig& cfg) {
+    return build_role_from_template(cfg.prompt_template, cfg, /*with_max_words=*/true);
+}
+
+std::string build_user_prompt(const Article& src, const RewriteConfig& cfg) {
+    return "Заголовок: " + src.title_original + "\nТекст: " +
+           truncate_input(src.body_original, cfg.max_input_chars);
+}
+
+std::string build_prompt(const Article& src, const RewriteConfig& cfg) {
+    // Для совместимости/тестов — полный промпт как раньше (роль + контент).
+    return build_role_prompt(cfg) + "\n\n" + build_user_prompt(src, cfg);
 }
 
 namespace {
@@ -230,42 +290,55 @@ RewriteResult parse_response(const std::string& response) {
 }
 
 RewriteResult rewrite_article(const Article& src, const RewriteConfig& cfg,
-                              const LlmFn& llm) {
+                              const std::string& role_prompt, const LlmFn& llm) {
     RewriteResult result;
     if (!llm) {
         result.error = "LLM не настроен";
         return result;
     }
 
-    const std::string prompt = build_prompt(src, cfg);
+    const std::string user = build_user_prompt(src, cfg);
     std::string response;
     std::string llm_error;
-    if (!llm(prompt, response, llm_error)) {
+    if (!llm(role_prompt, user, response, llm_error)) {
         result.error = llm_error.empty() ? "LLM недоступен" : llm_error;
         return result;
     }
 
     result = parse_response(response);
     if (result.ok && !validate_rewrite(result.title, result.body,
-                                       cfg.language, result.error)) {
+                                        cfg.language, result.error)) {
         result.ok = false;
     }
     return result;
 }
 
+RewriteResult rewrite_article(const Article& src, const RewriteConfig& cfg,
+                              const LlmFn& llm) {
+    return rewrite_article(src, cfg, build_role_prompt(cfg), llm);
+}
+
+std::string build_seo_role_prompt(const SeoConfig& cfg, const std::string& language) {
+    std::string role = cfg.prompt_template;
+    replace_all(role, "{language}", language);
+    // Маркеры статьи вырезаются — контент приходит в user-сообщении.
+    replace_all(role, "Заголовок: {title}", "");
+    replace_all(role, "Текст: {body}", "");
+    replace_all(role, "{title}", "");
+    replace_all(role, "{body}", "");
+    return trim_right(collapse_blank_lines(role));
+}
+
+std::string build_seo_user_prompt(const Article& src, const SeoConfig& cfg) {
+    (void)cfg;
+    return "Язык: " + src.language + "\nЗаголовок: " + src.title_rewritten +
+           "\nТекст: " + src.body_rewritten;
+}
+
 std::string build_seo_prompt(const Article& src, const SeoConfig& cfg) {
-    std::string prompt = cfg.prompt_template;
-    const auto replace = [&prompt](const std::string& from, const std::string& to) {
-        std::size_t pos = 0;
-        while ((pos = prompt.find(from, pos)) != std::string::npos) {
-            prompt.replace(pos, from.size(), to);
-            pos += to.size();
-        }
-    };
-    replace("{title}", src.title_rewritten);
-    replace("{body}", src.body_rewritten);
-    replace("{language}", src.language);
-    return prompt;
+    // Для совместимости/тестов — роль + контент.
+    return build_seo_role_prompt(cfg, src.language) + "\n\n" +
+           build_seo_user_prompt(src, cfg);
 }
 
 SeoResult parse_seo_response(const std::string& response) {
@@ -300,7 +373,7 @@ SeoResult parse_seo_response(const std::string& response) {
 }
 
 SeoResult generate_seo(const Article& src, const SeoConfig& cfg,
-                        const LlmFn& llm) {
+                        const std::string& role_prompt, const LlmFn& llm) {
     SeoResult result;
     if (!llm) {
         result.error = "LLM не настроен";
@@ -311,37 +384,28 @@ SeoResult generate_seo(const Article& src, const SeoConfig& cfg,
         return result;
     }
 
-    const std::string prompt = build_seo_prompt(src, cfg);
+    const std::string user = build_seo_user_prompt(src, cfg);
     std::string response;
     std::string llm_error;
-    if (!llm(prompt, response, llm_error)) {
+    if (!llm(role_prompt, user, response, llm_error)) {
         result.error = llm_error.empty() ? "LLM недоступен" : llm_error;
         return result;
     }
     return parse_seo_response(response);
 }
 
-std::string build_combined_prompt(const Article& src, const RewriteConfig& cfg) {
-    // Базовый рерайт-промпт (те же подстановки, что в build_prompt), но выход
-    // переопределяется на строгий JSON (см. ниже).
-    std::string prompt = cfg.prompt_template;
-    const auto replace = [&prompt](const std::string& from, const std::string& to) {
-        std::size_t pos = 0;
-        while ((pos = prompt.find(from, pos)) != std::string::npos) {
-            prompt.replace(pos, from.size(), to);
-            pos += to.size();
-        }
-    };
-    replace("{title}", src.title_original);
-    replace("{body}", src.body_original);
-    replace("{language}", cfg.language);
-    replace("{tone}", cfg.tone);
-    replace("{max_words}", cfg.max_words > 0 ? std::to_string(cfg.max_words) : "");
-    if (cfg.max_words > 0) {
-        prompt += "\n\nОбъём: примерно " + std::to_string(cfg.max_words) + " слов.";
-    }
+SeoResult generate_seo(const Article& src, const SeoConfig& cfg,
+                        const LlmFn& llm) {
+    return generate_seo(src, cfg, build_seo_role_prompt(cfg, src.language), llm);
+}
 
-    prompt +=
+std::string build_combined_role_prompt(const RewriteConfig& cfg) {
+    // Роль = инструкции рерайта (те же подстановки, что в build_role_prompt,
+    // БЕЗ маркеров статьи) + СТРОГИЙ JSON-формат выхода. Всё это статично для
+    // обхода и шлётся модели РОВНО ОДИН раз.
+    std::string role = build_role_from_template(cfg.prompt_template, cfg,
+                                                 /*with_max_words=*/false);
+    role +=
         "\n\nОтветь СТРОГО одним JSON-объектом, без какого-либо текста до или после "
         "него и без markdown-разметки (никаких ```json). Только ключи ниже:\n"
         "{\n"
@@ -354,7 +418,17 @@ std::string build_combined_prompt(const Article& src, const RewriteConfig& cfg) 
         "Поля focus_keyword/meta_description/seo_title — SEO-метаданные; если не "
         "уверены, оставьте пустую строку. Поле body должно содержать ТОЛЬКО текст "
         "рерайта.";
-    return prompt;
+    return role;
+}
+
+std::string build_combined_user_prompt(const Article& src, const RewriteConfig& cfg) {
+    return build_user_prompt(src, cfg);
+}
+
+std::string build_combined_prompt(const Article& src, const RewriteConfig& cfg) {
+    // Для совместимости/тестов — роль + контент.
+    return build_combined_role_prompt(cfg) + "\n\n" +
+           build_combined_user_prompt(src, cfg);
 }
 
 RewriteSeoResult parse_rewrite_seo_response(const std::string& response) {
@@ -400,26 +474,31 @@ RewriteSeoResult parse_rewrite_seo_response(const std::string& response) {
 }
 
 RewriteSeoResult rewrite_and_seo(const Article& src, const RewriteConfig& cfg,
-                                 const LlmFn& llm) {
+                                  const std::string& role_prompt, const LlmFn& llm) {
     RewriteSeoResult result;
     if (!llm) {
         result.error = "LLM не настроен";
         return result;
     }
 
-    const std::string prompt = build_combined_prompt(src, cfg);
+    const std::string user = build_combined_user_prompt(src, cfg);
     std::string response;
     std::string llm_error;
-    if (!llm(prompt, response, llm_error)) {
+    if (!llm(role_prompt, user, response, llm_error)) {
         result.error = llm_error.empty() ? "LLM недоступен" : llm_error;
         return result;
     }
     result = parse_rewrite_seo_response(response);
     if (result.ok && !validate_rewrite(result.title, result.body,
-                                       cfg.language, result.error)) {
+                                        cfg.language, result.error)) {
         result.ok = false;
     }
     return result;
+}
+
+RewriteSeoResult rewrite_and_seo(const Article& src, const RewriteConfig& cfg,
+                                  const LlmFn& llm) {
+    return rewrite_and_seo(src, cfg, build_combined_role_prompt(cfg), llm);
 }
 
 } // namespace news_rewriter
