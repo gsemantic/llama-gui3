@@ -60,6 +60,8 @@ set(NEWS_REWRITER_CORE_SOURCES
     src/sink_http.cpp
     src/sink_wordpress.cpp
     src/worker.cpp
+    src/seo_analyzer.cpp
+    src/translit.cpp
 )
 
 add_library(news_rewriter_core STATIC ${NEWS_REWRITER_CORE_SOURCES})
@@ -110,6 +112,9 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_storage.cpp
         tests/test_sink_http.cpp
         tests/test_sink_wordpress.cpp
+        tests/test_seo_analyzer.cpp
+        tests/test_translit.cpp
+        tests/test_seo_meta.cpp
     )
     target_include_directories(news_rewriter_tests PRIVATE ${NEWS_REWRITER_INCLUDES})
     target_link_libraries(news_rewriter_tests PRIVATE news_rewriter_core)

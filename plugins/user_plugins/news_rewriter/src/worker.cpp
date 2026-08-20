@@ -364,6 +364,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
             a.seo_focus_keyword = sr.focus_keyword;
             a.seo_meta_description = sr.meta_description;
             a.seo_title = sr.seo_title;
+            a.seo_slug = sr.seo_slug;
         } else {
             // SEO — best-effort: не роняем статью. При rate-limit отключаем SEO
             // на остаток обхода, чтобы не долбить облако и не тратить квоту.

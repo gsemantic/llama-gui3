@@ -347,7 +347,15 @@ public:
         if (!excerpt_.empty()) body["excerpt"] = excerpt_;
         // Стабильный slug от источника (если не задан вручную в params),
         // чтобы дедуп по сайту мог надёжно находить ранее созданный пост.
-        body["slug"] = slug_.empty() ? storage_.slug_for(article.url) : slug_;
+        // Стабильный slug от источника (если не задан вручную в params),
+        // либо оптимизированный SEO-slug из focus_keyword, когда доступен.
+        if (!slug_.empty()) {
+            body["slug"] = slug_;
+        } else if (!article.seo_slug.empty()) {
+            body["slug"] = article.seo_slug;
+        } else {
+            body["slug"] = storage_.slug_for(article.url);
+        }
         // Обложка поста — id картинки, залитой в медиатеку WP выше.
         if (media_id != 0) body["featured_media"] = static_cast<int64_t>(media_id);
         // Категории/теги поддерживают не все типы: стандартные «страницы»
@@ -366,22 +374,18 @@ public:
         }
         if (author_ != 0) body["author"] = static_cast<int64_t>(author_);
 
-        // Авто-SEO: прокидываем мета-поля плагинов (Yoast и RankMath). Поля
+        // Авто-SEO: прокидываем наши собственные мета-ключи nr_seo_*. Читаются
+        // тонким MU-плагином nr-seo.php (см. mu-plugins/nr-seo.php) и выводятся
+        // в <head> — замена тяжёлым SEO-плагинам вроде Yoast/RankMath. Поля
         // заполняются рерайтером только если в конфиге включен seo.enabled.
         {
             Json meta = Json::object();
-            if (!article.seo_focus_keyword.empty()) {
-                meta["yoast_wpseo_focuskw"] = article.seo_focus_keyword;
-                meta["rank_math_focus_keyword"] = article.seo_focus_keyword;
-            }
-            if (!article.seo_meta_description.empty()) {
-                meta["yoast_wpseo_metadesc"] = article.seo_meta_description;
-                meta["rank_math_description"] = article.seo_meta_description;
-            }
-            if (!article.seo_title.empty()) {
-                meta["yoast_wpseo_title"] = article.seo_title;
-                meta["rank_math_title"] = article.seo_title;
-            }
+            if (!article.seo_focus_keyword.empty())
+                meta["nr_seo_keyword"] = article.seo_focus_keyword;
+            if (!article.seo_meta_description.empty())
+                meta["nr_seo_description"] = article.seo_meta_description;
+            if (!article.seo_title.empty())
+                meta["nr_seo_title"] = article.seo_title;
             if (!meta.empty()) body["meta"] = meta;
         }
 

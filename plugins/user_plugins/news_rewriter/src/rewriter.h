@@ -71,6 +71,7 @@ struct SeoResult {
     std::string focus_keyword;
     std::string meta_description;
     std::string seo_title;
+    std::string seo_slug;       // slug из focus_keyword (транслит) — Phase 4
 };
 
 // Роль для SEO (системный промпт): статичные SEO-инструкции, маркеры статьи

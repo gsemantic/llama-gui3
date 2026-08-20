@@ -305,6 +305,7 @@ Json article_to_json(const Article& a) {
     if (!a.seo_focus_keyword.empty()) j["seo_focus_keyword"] = a.seo_focus_keyword;
     if (!a.seo_meta_description.empty()) j["seo_meta_description"] = a.seo_meta_description;
     if (!a.seo_title.empty()) j["seo_title"] = a.seo_title;
+    if (!a.seo_slug.empty()) j["seo_slug"] = a.seo_slug;
     return j;
 }
 

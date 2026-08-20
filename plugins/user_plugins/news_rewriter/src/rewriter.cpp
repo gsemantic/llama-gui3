@@ -1,6 +1,9 @@
 #include "rewriter.h"
 
+#include "translit.h"
+
 #include <cctype>
+#include <vector>
 
 namespace news_rewriter {
 
@@ -117,6 +120,100 @@ std::string trim_collapse(const std::string& s) {
 }
 
 } // namespace
+
+// Обрезка строки ДО max_chars СИМВОЛОВ (code points, корректно с UTF-8), а не
+// байт. Если режем посреди слова — откатываемся к последнему пробелу; при
+// необходимости добавляем суффикс (напр. "…"). Пустой/короткий — без изменений.
+std::string truncate_chars(const std::string& s, std::size_t max_chars,
+                           bool add_ellipsis) {
+    // Индексы начала каждого code point.
+    std::vector<std::size_t> off;
+    off.reserve(s.size());
+    std::size_t i = 0;
+    while (i < s.size()) {
+        off.push_back(i);
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        int adv = 1;
+        if (b0 >= 0x80) {
+            if ((b0 & 0xE0) == 0xC0) adv = 2;
+            else if ((b0 & 0xF0) == 0xE0) adv = 3;
+            else if ((b0 & 0xF8) == 0xF0) adv = 4;
+        }
+        i += adv;
+    }
+    if (off.size() <= max_chars) return s;
+
+    std::size_t cut = max_chars;            // индекс в off
+    while (cut > 0) {                       // откат к границе слова
+        const std::size_t st = off[cut - 1];
+        const char c = s[st];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') break;
+        --cut;
+    }
+    if (cut == 0) cut = max_chars;         // пробела нет — жёсткая обрезка
+    std::string out = s.substr(0, off[cut]);
+    if (add_ellipsis) out += "…";
+    return out;
+}
+
+// Нижний регистр с учётом кириллицы (std::tolower только для ASCII).
+std::string lower_utf8_str(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        unsigned int cp = 0;
+        int adv = 1;
+        if (b0 < 0x80) { cp = b0; adv = 1; }
+        else if ((b0 & 0xE0) == 0xC0) {
+            cp = b0 & 0x1F; adv = 2;
+            if (i + 1 < s.size()) cp = (cp << 6) | (s[i + 1] & 0x3F);
+        } else if ((b0 & 0xF0) == 0xE0) {
+            cp = b0 & 0x0F; adv = 3;
+            if (i + 1 < s.size()) cp = (cp << 6) | (s[i + 1] & 0x3F);
+            if (i + 2 < s.size()) cp = (cp << 6) | (s[i + 2] & 0x3F);
+        } else if ((b0 & 0xF8) == 0xF0) {
+            cp = b0 & 0x07; adv = 4;
+            if (i + 1 < s.size()) cp = (cp << 6) | (s[i + 1] & 0x3F);
+            if (i + 2 < s.size()) cp = (cp << 6) | (s[i + 2] & 0x3F);
+            if (i + 3 < s.size()) cp = (cp << 6) | (s[i + 3] & 0x3F);
+        } else { cp = b0; adv = 1; }
+        if (cp >= 0x410 && cp <= 0x42F) cp += 0x20;  // заглавная кириллица
+        if (cp < 0x80) out += static_cast<char>(cp);
+        else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        i += adv;
+    }
+    return out;
+}
+
+// Приведение ключевой фразы к норме: нижний регистр + не более 4 слов.
+std::string normalize_keyword(const std::string& kw) {
+    std::string low = lower_utf8_str(kw);
+    std::string token, out;
+    int words = 0;
+    auto flush = [&]() {
+        if (token.empty()) return;
+        if (words >= 4) { token.clear(); return; }  // ограничение длины фразы
+        if (words > 0) out += ' ';
+        out += token;
+        ++words;
+        token.clear();
+    };
+    for (char c : low) {
+        if (std::isspace(static_cast<unsigned char>(c))) flush();
+        else token += c;
+    }
+    flush();
+    return out;
+}
 
 // --- Эвристики «деградации» ответа LLM --------------------------------------
 // Перегруженная модель (после rate-limit, код 1305) может вернуть 200 с
@@ -360,14 +457,25 @@ SeoResult parse_seo_response(const std::string& response) {
         result.error = "не удалось разобрать JSON SEO";
         return result;
     }
-    result.focus_keyword = trim_collapse(j.get("focus_keyword").as_string());
+    result.focus_keyword = normalize_keyword(j.get("focus_keyword").as_string());
     result.meta_description = trim_collapse(j.get("meta_description").as_string());
     result.seo_title = trim_collapse(j.get("seo_title").as_string());
+    // Жёсткие ограничения длины (нормы Yoast как отправная точка):
+    //   - seo_title   ≤ 60 символов (обрезка по границе слова + "…");
+    //   - description ≤ 160 символов (обрезка по границе слова + "…");
+    //   - keyword уже приведён к 2-4 словам и нижнему регистру.
+    if (result.seo_title.size() > 60)
+        result.seo_title = truncate_chars(result.seo_title, 60, true);
+    if (result.meta_description.size() > 160)
+        result.meta_description = truncate_chars(result.meta_description, 160, true);
     if (result.focus_keyword.empty() && result.meta_description.empty() &&
         result.seo_title.empty()) {
         result.error = "SEO-JSON пуст";
         return result;
     }
+    // Оптимальный slug из ключевой фразы (транслит RU→EN + вырезка стоп-слов).
+    if (!result.focus_keyword.empty())
+        result.seo_slug = make_slug(result.focus_keyword);
     result.ok = true;
     return result;
 }
