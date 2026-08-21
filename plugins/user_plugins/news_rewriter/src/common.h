@@ -43,6 +43,8 @@ struct Article {
     std::string seo_meta_description;// meta-описание (модель, SEO-шаг)
     std::string seo_title;          // SEO-заголовок (модель, SEO-шаг)
     std::string seo_slug;           // slug из focus_keyword (транслит, SEO-шаг)
+    int seo_score = -1;             // итог SEO-скоркарда (0..100), -1 = не считалось
+    std::string seo_issues_text;    // перечень POOR-метрик (человекочитаемо, из summary())
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;

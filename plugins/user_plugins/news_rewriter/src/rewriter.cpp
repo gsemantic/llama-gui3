@@ -605,8 +605,141 @@ RewriteSeoResult rewrite_and_seo(const Article& src, const RewriteConfig& cfg,
 }
 
 RewriteSeoResult rewrite_and_seo(const Article& src, const RewriteConfig& cfg,
-                                  const LlmFn& llm) {
+                                   const LlmFn& llm) {
     return rewrite_and_seo(src, cfg, build_combined_role_prompt(cfg), llm);
+}
+
+// ============================================================================
+// Phase 3 — LLM-доводка (фидбек-скоркард)
+// ============================================================================
+
+std::string seo_feedback_text(const SeoReport& rep) {
+    std::string out;
+    for (const auto& m : rep.metrics) {
+        if (m.status == SeoStatus::Poor) {
+            if (!out.empty()) out += "\n";
+            out += "- " + m.label + ": сейчас " + m.text + ".";
+        }
+    }
+    return out;
+}
+
+std::string build_seo_refine_role_prompt(const SeoConfig& cfg,
+                                         const std::string& language) {
+    (void)cfg;
+    (void)language;
+    return "Ты — опытный SEO-редактор. Тебе дана уже переписанная новость и список "
+           "проблем по SEO-копирайту. Перепиши ТОЛЬКО проблемные места, сохранив все "
+           "факты, смысл и стиль исходного текста. Обязательно сохраняй структуру с "
+           "подзаголовками (строки, начинающиеся с '## '). Не выдумывай и не убирай "
+           "факты. Верни ТОЛЬКО исправленный текст статьи в markdown, без пояснений и "
+           "без обёртки в код (никаких ```).";
+}
+
+std::string build_seo_refine_user_prompt(const Article& src,
+                                         const std::string& feedback,
+                                         const SeoConfig& cfg) {
+    (void)cfg;
+    std::string out = "Язык: " + src.language + "\n";
+    if (!src.seo_focus_keyword.empty())
+        out += "Ключевая фраза: " + src.seo_focus_keyword + "\n";
+    out += "\nПроблемы (устрани их, не трогая остальной текст):\n";
+    out += feedback.empty()
+               ? "(проблем не выявлено — верни текст без изменений)"
+               : feedback;
+    out += "\n\nТекст статьи:\n" + src.body_rewritten;
+    return out;
+}
+
+namespace {
+// Обрезка ТОЛЬКО краёв (без схлопывания внутренних пробелов/переводов строк) —
+// чтобы сохранить структуру markdown-тела (подзаголовки, абзацы).
+std::string trim_only(const std::string& s) {
+    const std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const std::size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// Снимает возможную обёртку ```markdown … ``` / ``` … ``` с ответа модели,
+// сохраняя внутреннюю разбивку на абзацы/подзаголовки.
+std::string strip_fence(const std::string& s) {
+    std::string t = trim_only(s);
+    if (t.rfind("```", 0) == 0) {
+        std::size_t end = t.rfind("```");
+        if (end > 3) {
+            std::size_t start = 3;
+            // пропускаем имя языка после открывающих ```
+            while (start < t.size() && t[start] != '\n') ++start;
+            if (start < t.size()) ++start;  // съедаем '\n'
+            t = t.substr(start, end - start);
+            t = trim_only(t);
+        }
+    }
+    return t;
+}
+} // namespace
+
+SeoRefineResult parse_seo_refine_response(const std::string& response,
+                                          const std::string& expected_lang) {
+    SeoRefineResult r;
+    if (response.empty()) {
+        r.error = "пустой ответ LLM";
+        return r;
+    }
+    std::string body = strip_fence(response);
+    if (looks_like_refusal(body)) {
+        r.error = "ответ LLM похож на отказ/системное сообщение";
+        return r;
+    }
+    std::string verr;
+    if (!validate_rewrite("", body, expected_lang, verr)) {
+        r.error = verr;
+        return r;
+    }
+    r.body = body;
+    r.ok = true;
+    return r;
+}
+
+SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
+                           const std::string& feedback,
+                           const std::string& role_prompt, const LlmFn& llm) {
+    SeoRefineResult r;
+    if (!llm) {
+        r.error = "LLM не настроен";
+        return r;
+    }
+    if (src.body_rewritten.empty()) {
+        r.error = "нет текста для доводки";
+        return r;
+    }
+    const std::string user = build_seo_refine_user_prompt(src, feedback, cfg);
+    std::string response, llm_error;
+    if (!llm(role_prompt, user, response, llm_error)) {
+        r.error = llm_error.empty() ? "LLM недоступен" : llm_error;
+        return r;
+    }
+    SeoRefineResult parsed = parse_seo_refine_response(response, src.language);
+    if (!parsed.ok) return parsed;
+    // Защита от усечения/галлюцинации: доводка не должна радикально менять объём.
+    const double ratio = static_cast<double>(parsed.body.size()) /
+                         std::max<std::size_t>(src.body_rewritten.size(), 1);
+    if (ratio < 0.5 || ratio > 1.8) {
+        r.error = "LLM-доводка сильно изменила объём текста (×" +
+                  std::to_string(static_cast<int>(ratio * 100) / 100.0) +
+                  "), отклоняем";
+        return r;
+    }
+    r.body = parsed.body;
+    r.ok = true;
+    return r;
+}
+
+SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
+                           const std::string& feedback, const LlmFn& llm) {
+    return seo_refine(src, cfg, feedback,
+                      build_seo_refine_role_prompt(cfg, src.language), llm);
 }
 
 } // namespace news_rewriter

@@ -13,11 +13,51 @@
 > Phase 1 (`SeoAnalyzer`) — сделан + тесты; Flesch для RU переделан в ASL-индекс
 > (классика давала всегда POOR). Phase 4 (ужесточение мета) — сделан
 > (`parse_seo_response`: title ≤60, desc ≤160, keyword 2-4 слова + slug из
-> focus_keyword через новый `translit`). Phase 5 (доставка) — сделан: ключи
+> `focus_keyword` через новый `translit`). Phase 5 (доставка) — сделан: ключи
 > `yoast_wpseo_*`/`rank_math_*` заменены на `nr_seo_*`, slug берётся из
 > `seo_slug`, создан `mu-plugins/nr-seo.php`. Тесты: 19 проходят (10 analyzer +
-> 5 translit + 4 seo-meta). ОСТАЛОСЬ: Phase 2 (`SeoReformer`), Phase 3 (LLM-доводка),
-> Phase 6 (UI-скоркард), проверка на gsemantic.ru после деплоя MU-плагина.
+> 5 translit + 4 seo-meta).
+>
+> **ПРОГРЕСС (2026-08-21):** Phase 2 (`SeoReformer`) — реализован
+> (`src/seo_reformer.{h,cpp}`): механическое дробление длинных абзацев
+> (по границам предложений) и длинных предложений (запятая ближе к середине →
+> точка + капитализация), опциональная вставка переходных слов (`autofix_*
+> = false` по умолчанию). Завязан на `SeoAnalyzer` (токенизация/transition-word
+> detection). +7 юнит-тестов (`test_seo_reformer.cpp`, все проходят).
+>
+> **ПРОГРЕСС (2026-08-21, продолжение):** Расширена `SeoConfig` (§4) — добавлены
+> структуры `SeoWritingConfig` (копирайт-нормы + флаги `autofix_*`/`llm_refine`)
+> и `SeoDeliveryConfig` (префикс `nr_seo_*`, `set_wp_title`, `optimize_slug`,
+> OG/Twitter/canonical) с сериализацией в `config.cpp` (обратно совместимо:
+> нет ключей → дефолты). `SeoReformer::reform` завязан в `worker.cpp`
+> (`apply_reform` вызывается после рерайта во ВСЕХ ветках: combine / фолбэк /
+> обычный путь) при `seo.enabled`, нормы берутся из `cfg.rewrite.seo.writing`,
+> что сделано логируется в `log("SEO-реформер: …")`.
+>
+> **ИЗВЕСТНО:** 4 теста `test_worker.cpp` падают независимо от SEO-правок
+> (assert на `calls==2/3` и `source_image` URL) — предсуществующие, не связаны
+> с `SeoReformer`/`SeoRefine` (добавлены только новые файлы). Полный прогон:
+> 204 passed, 4 failed (предсуществующие).
+>
+> **ПРОГРЕСС (2026-08-21, завершение):** Phase 3 (`SeoRefine`, LLM-доводка по
+> «фидбек-скоркарду») — реализована в `rewriter.{h,cpp}`: `seo_analyze→feedback
+> →seo_refine` (второй LLM-проход, best-effort, защита от усечения/галлюцинации
+> по объёму ×[0.5,1.8], отказ модели отвергается). Завязана в `worker.cpp`
+> (`finalize`) при `seo.writing.llm_refine`, поверх неё повторно прогоняется
+> `SeoReformer`. Phase 6 (UI-скоркард + `seo_issues`) — `worker.cpp` считает
+> `SeoAnalyzer::analyze` по финальному телу, кладёт `a.seo_score`/`a.seo_issues_text`
+> и растит счётчик `run_seo_issues_` (ниже порога `kSeoScoreThreshold=70`);
+> в `ui.cpp` — светофор по баллу у каждой задачи + чекбокс `llm_refine`,
+> в сводку обхода добавлена «SEO-проблем: N». Phase 7 — добавлены тесты:
+> `test_seo_refine_*` (happy/reject-refusal/reject-truncation),
+> `test_seo_feedback_text_*`, `test_wp_sink_seo_meta_nr_keys_and_slug`
+> (уходят `nr_seo_*` + оптимальный `slug`). Всего +6 тестов, прогон
+> 204 passed / 4 failed (предсуществующие).
+>
+> ОСТАЛОСЬ (опционально): убрать суффикс сайта из `<title>` в `nr-seo.php`
+> (`$parts['site'] = ''`); подхватить `delivery.meta_prefix`/`optimize_slug`/
+> `set_wp_title` из `SeoConfig` в `sink_wordpress.cpp` вместо захардкоженных
+> значений; финальная живая проверка на gsemantic.ru с включённым `llm_refine`.
 
 ---
 
@@ -371,13 +411,19 @@ add_action('wp_head', function () {
 
 ОСТАЛОСЬ (следующая сессия):
 
-- [ ] Phase 2: реализовать `SeoReformer` (`src/seo_reformer.{h,cpp}`) — механическое
-      дробление длинных абзацев/предложений, опционально переходные слова + юнит-тесты.
-- [ ] Внедрить Analyzer→Reformer в `worker.cpp` (`apply_seo`/combine) после Phase 2.
-- [ ] Phase 3: LLM-доводка (второй проход по «фидбек-скоркарду», rate-limit-aware).
-- [ ] Расширить `SeoConfig` (§4): структуры `Writing`/`Delivery` + сериализация в
-      `config.cpp` (сейчас ключи `nr_seo_*` и slug захардкожены, настраиваемость опциональна).
-- [ ] Phase 6: UI-скоркард в `ui.cpp` — светофор по метрикам `SeoAnalyzer` + счётчик `seo_issues`.
-- [ ] Phase 7 (докомплектация): интеграционный тест (mock LLM — уходят `nr_seo_*` + оптимальный
-      slug); живой пост на gsemantic.ru уже проверен (§5/Phase 5).
+- [x] Phase 2: реализовать `SeoReformer` (`src/seo_reformer.{h,cpp}`) — механическое
+      дробление длинных абзацев/предложений, опционально переходные слова + юнит-тесты
+      (7 шт., проходят; 2026-08-21).
+- [x] Расширить `SeoConfig` (§4): структуры `Writing`/`Delivery` + сериализация в
+      `config.cpp` (обратно совместимо; 2026-08-21).
+- [x] Внедрить Analyzer→Reformer в `worker.cpp`: `apply_reform` вызывается после
+      рерайта во всех ветках (combine / фолбэк / обычный путь) при `seo.enabled`,
+      нормы из `cfg.rewrite.seo.writing` (2026-08-21).
+- [x] Phase 3: LLM-доводка (второй проход по «фидбек-скоркарду», rate-limit-aware) — `rewriter.cpp` + `worker.cpp`.
+- [x] Phase 6: UI-скоркард в `ui.cpp` — светофор по баллу `SeoAnalyzer` + счётчик `seo_issues` (воркер + сводка).
+- [x] Phase 7 (докомплектация): интеграционные тесты — `test_seo_refine_*`, `test_seo_feedback_text_*`,
+      `test_wp_sink_seo_meta_nr_keys_and_slug` (mock LLM / mock WP — уходят `nr_seo_*` + оптимальный slug).
 - [ ] При желании: убрать суффикс сайта из `<title>` в `nr-seo.php` (`$parts['site'] = '';`).
+- [ ] Опционально: подхватить `delivery.meta_prefix` / `optimize_slug` / `set_wp_title` из
+      `SeoConfig` в `sink_wordpress.cpp` вместо захардкоженных значений.
+- [ ] Финальная живая проверка на gsemantic.ru с включённым `llm_refine`.

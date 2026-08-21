@@ -182,11 +182,82 @@ static void test_validate_rewrite_unknown_lang_skips_script_check() {
     TEST_ASSERT_TRUE(ok);
 }
 
+// ---- Phase 3: LLM-доводка (фидбек-скоркард) --------------------------------
+
+static void test_seo_feedback_text_nonempty_for_poor() {
+    SeoReport rep;
+    rep.metrics.push_back({"words_total", "Объём статьи (слов)", 10, "10 сл.",
+                           SeoStatus::Poor});
+    rep.metrics.push_back({"flesch", "Удобочитаемость", 80, "80", SeoStatus::Good});
+    const std::string fb = seo_feedback_text(rep);
+    TEST_ASSERT_FALSE(fb.empty());
+    TEST_ASSERT(fb.find("Объём статьи") != std::string::npos);
+}
+
+static void test_seo_feedback_text_empty_when_good() {
+    SeoReport rep;
+    rep.metrics.push_back({"flesch", "Удобочитаемость", 80, "80", SeoStatus::Good});
+    TEST_ASSERT_TRUE(seo_feedback_text(rep).empty());
+}
+
+static void test_seo_refine_happy_path() {
+    Article a = make_article("Заголовок", "Тело");
+    a.body_rewritten =
+        "Ключевая фраза. Исходный текст новости на русском языке с несколькими "
+        "предложениями для проверки доводки по фидбек-скоркарду.";
+    a.seo_focus_keyword = "ключевая фраза";
+    SeoConfig cfg;
+    const std::string refined =
+        "## Подзаголовок\n\nКлючевая фраза. Переписанный текст новости на русском "
+        "языке с улучшенными формулировками и переходными словами.";
+    LlmFn llm = [&](const std::string&, const std::string&, std::string& response,
+                    std::string&) -> bool {
+        response = refined;
+        return true;
+    };
+    const SeoRefineResult r = seo_refine(a, cfg, "проблемы", llm);
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_EQUAL(r.body, refined);
+}
+
+static void test_seo_refine_rejects_refusal() {
+    Article a = make_article("Заголовок", "Тело");
+    a.body_rewritten = "Исходный текст новости на русском языке.";
+    SeoConfig cfg;
+    LlmFn llm = [](const std::string&, const std::string&, std::string& response,
+                   std::string&) -> bool {
+        response = "Извините, как языковая модель, я не могу это сделать.";
+        return true;
+    };
+    const SeoRefineResult r = seo_refine(a, cfg, "проблемы", llm);
+    TEST_ASSERT_FALSE(r.ok);
+}
+
+static void test_seo_refine_rejects_truncation() {
+    Article a = make_article("Заголовок", "Тело");
+    std::string big;
+    for (int i = 0; i < 200; ++i) big += "исходное слово ";  // крупный RU-текст
+    a.body_rewritten = big;
+    SeoConfig cfg;
+    LlmFn llm = [](const std::string&, const std::string&, std::string& response,
+                   std::string&) -> bool {
+        response = "Коротко.";  // ~в сотни раз меньше — усечение/галлюцинация
+        return true;
+    };
+    const SeoRefineResult r = seo_refine(a, cfg, "проблемы", llm);
+    TEST_ASSERT_FALSE(r.ok);
+}
+
 REGISTER_TEST(test_build_prompt_substitutions);
 REGISTER_TEST(test_validate_rewrite_wrong_script_rejected);
 REGISTER_TEST(test_validate_rewrite_refusal_rejected);
 REGISTER_TEST(test_validate_rewrite_valid_cyrillic_ok);
 REGISTER_TEST(test_validate_rewrite_unknown_lang_skips_script_check);
+REGISTER_TEST(test_seo_feedback_text_nonempty_for_poor);
+REGISTER_TEST(test_seo_feedback_text_empty_when_good);
+REGISTER_TEST(test_seo_refine_happy_path);
+REGISTER_TEST(test_seo_refine_rejects_refusal);
+REGISTER_TEST(test_seo_refine_rejects_truncation);
 REGISTER_TEST(test_parse_response_title_and_body);
 REGISTER_TEST(test_parse_response_single_line);
 REGISTER_TEST(test_parse_response_long_single_line_is_body);

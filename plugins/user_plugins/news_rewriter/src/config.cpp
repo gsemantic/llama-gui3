@@ -60,6 +60,45 @@ Json config_to_json(const Config& cfg) {
     seo["enabled"] = cfg.rewrite.seo.enabled;
     seo["combine_with_rewrite"] = cfg.rewrite.seo.combine_with_rewrite;
     seo["prompt_template"] = cfg.rewrite.seo.prompt_template;
+
+    Json writing = Json::object();
+    writing["max_sentence_words"] = cfg.rewrite.seo.writing.max_sentence_words;
+    writing["max_paragraph_words"] = cfg.rewrite.seo.writing.max_paragraph_words;
+    writing["min_transition_ratio"] = cfg.rewrite.seo.writing.min_transition_ratio;
+    writing["max_passive_ratio"] = cfg.rewrite.seo.writing.max_passive_ratio;
+    writing["require_keyphrase_title"] = cfg.rewrite.seo.writing.require_keyphrase_title;
+    writing["require_keyphrase_first_paragraph"] =
+        cfg.rewrite.seo.writing.require_keyphrase_first_paragraph;
+    writing["require_keyphrase_one_heading"] =
+        cfg.rewrite.seo.writing.require_keyphrase_one_heading;
+    writing["max_words_before_first_heading"] =
+        cfg.rewrite.seo.writing.max_words_before_first_heading;
+    writing["min_words"] = cfg.rewrite.seo.writing.min_words;
+    Json fb = Json::array();
+    fb.push(Json(cfg.rewrite.seo.writing.target_flesch_band.first));
+    fb.push(Json(cfg.rewrite.seo.writing.target_flesch_band.second));
+    writing["target_flesch_band"] = fb;
+    Json db = Json::array();
+    db.push(Json(cfg.rewrite.seo.writing.keyphrase_density_band.first));
+    db.push(Json(cfg.rewrite.seo.writing.keyphrase_density_band.second));
+    writing["keyphrase_density_band"] = db;
+    writing["max_consecutive_same_start"] =
+        cfg.rewrite.seo.writing.max_consecutive_same_start;
+    writing["autofix_paragraphs"] = cfg.rewrite.seo.writing.autofix_paragraphs;
+    writing["autofix_sentences"] = cfg.rewrite.seo.writing.autofix_sentences;
+    writing["autofix_transitions"] = cfg.rewrite.seo.writing.autofix_transitions;
+    writing["llm_refine"] = cfg.rewrite.seo.writing.llm_refine;
+    seo["writing"] = writing;
+
+    Json delivery = Json::object();
+    delivery["meta_prefix"] = cfg.rewrite.seo.delivery.meta_prefix;
+    delivery["set_wp_title"] = cfg.rewrite.seo.delivery.set_wp_title;
+    delivery["optimize_slug"] = cfg.rewrite.seo.delivery.optimize_slug;
+    delivery["og_tags"] = cfg.rewrite.seo.delivery.og_tags;
+    delivery["twitter_tags"] = cfg.rewrite.seo.delivery.twitter_tags;
+    delivery["canonical"] = cfg.rewrite.seo.delivery.canonical;
+    seo["delivery"] = delivery;
+
     rewrite["seo"] = seo;
     j["rewrite"] = rewrite;
 
@@ -117,6 +156,63 @@ Config config_from_json(const Json& j) {
                 .as_bool(cfg.rewrite.seo.combine_with_rewrite);
             cfg.rewrite.seo.prompt_template =
                 seo.get("prompt_template").as_string(cfg.rewrite.seo.prompt_template);
+
+            const Json& w = seo.get("writing");
+            if (w.is_object()) {
+                auto& wc = cfg.rewrite.seo.writing;
+                wc.max_sentence_words = static_cast<int>(
+                    w.get("max_sentence_words").as_int(wc.max_sentence_words));
+                wc.max_paragraph_words = static_cast<int>(
+                    w.get("max_paragraph_words").as_int(wc.max_paragraph_words));
+                wc.min_transition_ratio =
+                    w.get("min_transition_ratio").as_double(wc.min_transition_ratio);
+                wc.max_passive_ratio =
+                    w.get("max_passive_ratio").as_double(wc.max_passive_ratio);
+                wc.require_keyphrase_title =
+                    w.get("require_keyphrase_title").as_bool(wc.require_keyphrase_title);
+                wc.require_keyphrase_first_paragraph = w.get("require_keyphrase_first_paragraph")
+                    .as_bool(wc.require_keyphrase_first_paragraph);
+                wc.require_keyphrase_one_heading = w.get("require_keyphrase_one_heading")
+                    .as_bool(wc.require_keyphrase_one_heading);
+                wc.max_words_before_first_heading = static_cast<int>(
+                    w.get("max_words_before_first_heading")
+                        .as_int(wc.max_words_before_first_heading));
+                wc.min_words = static_cast<int>(
+                    w.get("min_words").as_int(wc.min_words));
+                const Json& fb = w.get("target_flesch_band");
+                if (fb.is_array() && fb.size() >= 2) {
+                    wc.target_flesch_band = {
+                        static_cast<int>(fb[0].as_int(wc.target_flesch_band.first)),
+                        static_cast<int>(fb[1].as_int(wc.target_flesch_band.second))};
+                }
+                const Json& db = w.get("keyphrase_density_band");
+                if (db.is_array() && db.size() >= 2) {
+                    wc.keyphrase_density_band = {
+                        db[0].as_double(wc.keyphrase_density_band.first),
+                        db[1].as_double(wc.keyphrase_density_band.second)};
+                }
+                wc.max_consecutive_same_start = static_cast<int>(
+                    w.get("max_consecutive_same_start")
+                        .as_int(wc.max_consecutive_same_start));
+                wc.autofix_paragraphs =
+                    w.get("autofix_paragraphs").as_bool(wc.autofix_paragraphs);
+                wc.autofix_sentences =
+                    w.get("autofix_sentences").as_bool(wc.autofix_sentences);
+                wc.autofix_transitions =
+                    w.get("autofix_transitions").as_bool(wc.autofix_transitions);
+                wc.llm_refine = w.get("llm_refine").as_bool(wc.llm_refine);
+            }
+
+            const Json& d = seo.get("delivery");
+            if (d.is_object()) {
+                auto& dc = cfg.rewrite.seo.delivery;
+                dc.meta_prefix = d.get("meta_prefix").as_string(dc.meta_prefix);
+                dc.set_wp_title = d.get("set_wp_title").as_bool(dc.set_wp_title);
+                dc.optimize_slug = d.get("optimize_slug").as_bool(dc.optimize_slug);
+                dc.og_tags = d.get("og_tags").as_bool(dc.og_tags);
+                dc.twitter_tags = d.get("twitter_tags").as_bool(dc.twitter_tags);
+                dc.canonical = d.get("canonical").as_bool(dc.canonical);
+            }
         }
     }
 

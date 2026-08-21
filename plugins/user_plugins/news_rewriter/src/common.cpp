@@ -306,6 +306,8 @@ Json article_to_json(const Article& a) {
     if (!a.seo_meta_description.empty()) j["seo_meta_description"] = a.seo_meta_description;
     if (!a.seo_title.empty()) j["seo_title"] = a.seo_title;
     if (!a.seo_slug.empty()) j["seo_slug"] = a.seo_slug;
+    if (a.seo_score >= 0) j["seo_score"] = a.seo_score;
+    if (!a.seo_issues_text.empty()) j["seo_issues_text"] = a.seo_issues_text;
     return j;
 }
 

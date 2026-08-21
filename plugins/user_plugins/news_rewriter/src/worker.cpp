@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "extractor.h"
+#include "seo_reformer.h"
 
 namespace news_rewriter {
 
@@ -18,6 +19,30 @@ namespace {
 std::uint64_t estimate_tokens(const std::string& s) {
     if (s.empty()) return 0;
     return std::max<std::uint64_t>(1, s.size() / 4);
+}
+
+// Порог «SEO-скоркард ниже нормы» (по итоговому баллу 0..100).
+constexpr int kSeoScoreThreshold = 70;
+
+// Маппинг конфигурационных копирайт-норм (SeoWritingConfig) в критерии
+// SeoAnalyzer (используются и для скоркарда, и для фидбек-скоркарда Phase 3).
+SeoCriteria seo_criteria_from_writing(const SeoWritingConfig& w) {
+    SeoCriteria c;
+    c.max_sentence_words = w.max_sentence_words;
+    c.max_paragraph_words = w.max_paragraph_words;
+    c.min_transition_ratio = w.min_transition_ratio;
+    c.max_passive_ratio = w.max_passive_ratio;
+    c.require_keyphrase_title = w.require_keyphrase_title;
+    c.require_keyphrase_first_paragraph = w.require_keyphrase_first_paragraph;
+    c.require_keyphrase_one_heading = w.require_keyphrase_one_heading;
+    c.max_words_before_first_heading = w.max_words_before_first_heading;
+    c.min_words = w.min_words;
+    c.keyphrase_density_min = w.keyphrase_density_band.first;
+    c.keyphrase_density_max = w.keyphrase_density_band.second;
+    c.max_consecutive_same_start = w.max_consecutive_same_start;
+    c.flesch_min = w.target_flesch_band.first;
+    c.flesch_max = w.target_flesch_band.second;
+    return c;
 }
 } // namespace
 
@@ -194,6 +219,8 @@ ArticleStatusView view_of(const Article& a) {
     v.status = a.status;
     v.error = a.error;
     v.retry_count = a.retry_count;
+    v.seo_score = a.seo_score;
+    v.seo_issues_text = a.seo_issues_text;
     return v;
 }
 
@@ -376,6 +403,66 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
         }
     };
 
+    // Механическое приведение текста к SEO-копирайт-нормам (Phase 2) БЕЗ LLM:
+    // дробление длинных абзацев/предложений по границам предложений. Дешёвое
+    // детерминированное преобразование, поэтому запускается локально при любом
+    // включённом SEO (даже если мета-генерация упала по rate-limit).
+    auto apply_reform = [&]() {
+        if (!seo_enabled) return;
+        if (a.body_rewritten.empty()) return;
+        SeoReformConfig rc;
+        const auto& w = cfg.rewrite.seo.writing;
+        rc.max_paragraph_words = w.max_paragraph_words;
+        rc.max_sentence_words  = w.max_sentence_words;
+        rc.autofix_paragraphs  = w.autofix_paragraphs;
+        rc.autofix_sentences   = w.autofix_sentences;
+        rc.autofix_transitions = w.autofix_transitions;
+        rc.lang = cfg.rewrite.language;
+        SeoReformResult rr = SeoReformer::reform(a.body_rewritten, rc);
+        if (rr.reformed_body != a.body_rewritten) {
+            a.body_rewritten = rr.reformed_body;
+            for (const auto& n : rr.notes)
+                log("SEO-реформер: " + n);
+        }
+    };
+
+    // Итоговый скоркард (Phase 6) + опциональная LLM-доводка (Phase 3).
+    // Вызывается в каждой ветке успешного рерайта. Считает SeoAnalyzer-отчёт по
+    // финальному телу, при llm_refine — просит модель доработать проблемные
+    // места по фидбек-скоркарду (best-effort), и кладёт балл/текст в статью и
+    // счётчик seo_issues (статей с баллом ниже порога).
+    auto finalize = [&]() -> bool {
+        if (!seo_enabled) return true;
+        SeoCriteria crit = seo_criteria_from_writing(cfg.rewrite.seo.writing);
+        SeoReport rep = SeoAnalyzer::analyze(a.body_rewritten, a.title_rewritten,
+                                              a.seo_focus_keyword, cfg.rewrite.language,
+                                              crit);
+
+        // Phase 3: LLM-доводка по «фидбек-скоркарду» (только если есть POOR).
+        if (cfg.rewrite.seo.writing.llm_refine && !seo_skipped_.load() && llm_) {
+            std::string feedback = seo_feedback_text(rep);
+            if (!feedback.empty()) {
+                SeoRefineResult rr = seo_refine(a, cfg.rewrite.seo, feedback,
+                                                role_seo_refine_, llm_);
+                if (rr.ok && !rr.body.empty()) {
+                    a.body_rewritten = rr.body;
+                    log("SEO-доводка (LLM): текст доработан по фидбек-скоркарду.");
+                    apply_reform();  // повторно привести к нормам после доводки
+                    rep = SeoAnalyzer::analyze(a.body_rewritten, a.title_rewritten,
+                                               a.seo_focus_keyword, cfg.rewrite.language,
+                                               crit);
+                } else {
+                    log("SEO-доводка (LLM) пропущена: " + rr.error);
+                }
+            }
+        }
+
+        a.seo_score = rep.score;
+        a.seo_issues_text = rep.summary();
+        if (rep.score < kSeoScoreThreshold) run_seo_issues_.fetch_add(1);
+        return true;
+    };
+
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
         a.retry_count = static_cast<uint32_t>(attempt);
         RewriteResult rr;
@@ -390,7 +477,8 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                 a.body_rewritten = cr.body;
                 if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 apply_seo(cr.seo);
-                return true;
+                apply_reform();
+                return finalize();
             }
             // Комбинированный вызов не дал валидного рерайта.
             if (is_rate_limit_error(cr.error)) {
@@ -412,7 +500,8 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                     if (seo_enabled && !seo_skipped_.load()) {
                         apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
                     }
-                    return true;
+                    apply_reform();
+                    return finalize();
                 }
                 a.error = cr.error.empty() ? rr.error : cr.error;
             }
@@ -426,6 +515,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                 if (seo_enabled && !seo_skipped_.load()) {
                     apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
                 }
+                apply_reform();
                 return true;
             }
             a.error = rr.error;
@@ -612,6 +702,8 @@ void Worker::process_run(const Config& cfg) {
         state_.pending_tasks = 0;
         state_.seo_missing = 0;
         run_seo_missing_.store(0);
+        state_.seo_issues = 0;
+        run_seo_issues_.store(0);
         seo_skipped_.store(false);
         state_.last_run_unix = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::seconds>(
@@ -625,6 +717,7 @@ void Worker::process_run(const Config& cfg) {
     // инструкции повторно (экономия токенов/квоты, меньше перегрузка).
     role_rewrite_ = build_role_prompt(cfg.rewrite);
     role_seo_ = build_seo_role_prompt(cfg.rewrite.seo, cfg.rewrite.language);
+    role_seo_refine_ = build_seo_refine_role_prompt(cfg.rewrite.seo, cfg.rewrite.language);
     role_combined_ = build_combined_role_prompt(cfg.rewrite);
 
     // Промпт-роль: системные инструкции шлются модели ОДИН раз на весь обход,
@@ -641,6 +734,8 @@ void Worker::process_run(const Config& cfg) {
         } else if (seo_enabled) {
             role_tokens += estimate_tokens(role_seo_);
         }
+        if (seo_enabled && cfg.rewrite.seo.writing.llm_refine)
+            role_tokens += estimate_tokens(role_seo_refine_);
         llm_prompt_tokens_.fetch_add(role_tokens, std::memory_order_relaxed);
         llm_total_tokens_.fetch_add(role_tokens, std::memory_order_relaxed);
     }
@@ -719,10 +814,13 @@ void Worker::process_run(const Config& cfg) {
 
         const int seo_missing = run_seo_missing_.load();
         state_.seo_missing = seo_missing;
+        const int seo_issues = run_seo_issues_.load();
+        state_.seo_issues = seo_issues;
         const std::string summary =
             "источников: " + std::to_string(processed) +
             ", статей: " + std::to_string(done) + ", ошибок: " + std::to_string(errors) +
-            (seo_missing > 0 ? ", без SEO: " + std::to_string(seo_missing) : "");
+            (seo_missing > 0 ? ", без SEO: " + std::to_string(seo_missing) : "") +
+            (seo_issues > 0 ? ", SEO-проблем: " + std::to_string(seo_issues) : "");
         if (cancel_.load()) {
             state_.last_message = "обход прерван пользователем (" + summary + ")";
         } else if (errors > 0) {
@@ -1213,3 +1311,4 @@ bool Worker::recon_and_confirm(const Config& cfg, const SourceConfig& src,
 }
 
 } // namespace news_rewriter
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    

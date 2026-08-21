@@ -61,6 +61,7 @@ set(NEWS_REWRITER_CORE_SOURCES
     src/sink_wordpress.cpp
     src/worker.cpp
     src/seo_analyzer.cpp
+    src/seo_reformer.cpp
     src/translit.cpp
 )
 
@@ -113,6 +114,7 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_sink_http.cpp
         tests/test_sink_wordpress.cpp
         tests/test_seo_analyzer.cpp
+        tests/test_seo_reformer.cpp
         tests/test_translit.cpp
         tests/test_seo_meta.cpp
     )

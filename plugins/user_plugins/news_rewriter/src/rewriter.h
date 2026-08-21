@@ -5,6 +5,7 @@
 
 #include "common.h"
 #include "config.h"
+#include "seo_analyzer.h"  // SeoReport (для фидбек-скоркарда Phase 3)
 
 namespace news_rewriter {
 
@@ -129,6 +130,48 @@ RewriteSeoResult rewrite_and_seo(const Article& src, const RewriteConfig& cfg,
 
 // Перегрузка: роль собирается из cfg внутри (для тестов/совместимости).
 RewriteSeoResult rewrite_and_seo(const Article& src, const RewriteConfig& cfg,
-                                  const LlmFn& llm);
+                                 const LlmFn& llm);
+
+// ============================================================================
+// Phase 3 — LLM-доводка (второй проход по «фидбек-скоркарду»).
+//
+// После механического SeoReformer (Phase 2) модель получает ПОНИМАЮЩИЙ список
+// проблем (что именно плохо согласно SeoAnalyzer) и переписывает ТОЛЬКО
+// проблемные места. Best-effort: при сбое/rate-limit возвращаем ok=false, тело
+// остаётся как есть (воркер не роняет статью, счётчик seo_issues растёт).
+// ============================================================================
+
+// Текстовый «фидбек-скоркард» из отчёта SeoAnalyzer: перечисление POOR-метрик
+// (для вставки в промпт доводки). Пустая строка, если проблем нет.
+std::string seo_feedback_text(const SeoReport& rep);
+
+// Результат LLM-доводки (Phase 3).
+struct SeoRefineResult {
+    bool ok = false;
+    std::string body;      // доработанный текст (как есть, если !ok)
+    std::string error;
+};
+
+// Роль (системный промпт) для LLM-доводки — статична на обход.
+std::string build_seo_refine_role_prompt(const SeoConfig& cfg,
+                                         const std::string& language);
+
+// Пользовательское сообщение для доводки: переписанная статья + список проблем.
+std::string build_seo_refine_user_prompt(const Article& src,
+                                         const std::string& feedback,
+                                         const SeoConfig& cfg);
+
+// Разбор ответа LLM-доводки: ожидается чистый markdown-текст статьи.
+SeoRefineResult parse_seo_refine_response(const std::string& response,
+                                          const std::string& expected_lang);
+
+// LLM-доводка: роль + контент (фидбек) → llm → разбор. best-effort.
+SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
+                           const std::string& feedback,
+                           const std::string& role_prompt, const LlmFn& llm);
+
+// Перегрузка: роль собирается из cfg внутри.
+SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
+                           const std::string& feedback, const LlmFn& llm);
 
 } // namespace news_rewriter

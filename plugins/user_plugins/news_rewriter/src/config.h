@@ -28,7 +28,40 @@ struct SourceConfig {
     bool preview = false;
 };
 
-// Автоматическая SEO-оптимизация (см. rewriter.cpp).
+// Копирайт-нормы для механического приведения (SeoReformer, Phase 2) и
+// LLM-доводки (Phase 3). Пороги — в конфиге, не хардкод (принцип плана:
+// нормы Yoast — отправная точка, не догма, легко переопределяются).
+struct SeoWritingConfig {
+    int  max_sentence_words        = 25;   // длина предложения
+    int  max_paragraph_words       = 120;  // длина абзаца
+    double min_transition_ratio    = 0.30; // доля предл. с переходными словами
+    double max_passive_ratio       = 0.10; // доля пассивных предложений
+    bool require_keyphrase_title           = true;  // ключ. фраза в заголовке
+    bool require_keyphrase_first_paragraph = true;  // … в 1-м абзаце
+    bool require_keyphrase_one_heading     = true;  // … в подзаголовке
+    int  max_words_before_first_heading    = 300;  // текст до 1-го подзаголовка
+    int  min_words                  = 300;  // мин. объём статьи
+    std::pair<int,int> target_flesch_band   = {60, 70};  // Flesch (EN) band
+    std::pair<double,double> keyphrase_density_band = {0.005, 0.03};
+    int  max_consecutive_same_start = 3;   // повтор стартового слова
+    // Механическое приведение (SeoReformer, Phase 2) — детерминировано, без LLM.
+    bool autofix_paragraphs  = true;  // дробить длинные абзацы
+    bool autofix_sentences   = true;  // дробить длинные предложения
+    bool autofix_transitions = false; // вставлять переходные слова (рискованно)
+    bool llm_refine          = false; // Phase 3: второй LLM-проход
+};
+
+// Доставка SEO-меты в WordPress (Phase 5) — через namespace-ключи nr_seo_*.
+struct SeoDeliveryConfig {
+    std::string meta_prefix = "nr_seo"; // nr_seo_title / nr_seo_description / ...
+    bool set_wp_title = false;   // true => title==seo_title (H1 и <title> совпадут)
+    bool optimize_slug = true;   // slug из focus_keyword (транслит)
+    bool og_tags = true;         // OG-теги (mu-plugins/nr-seo.php)
+    bool twitter_tags = true;    // Twitter-теги
+    bool canonical = true;        // canonical-ссылка
+};
+
+// Автоматическая SEO-оптимизация (см. rewriter.cpp, seo_reformer.cpp).
 struct SeoConfig {
     bool enabled = false;            // выключено = обратно совместимо (старое поведение)
     // Генерировать SEO в ОДНОМ запросе с рерайтом (общий JSON-ответ) вместо
@@ -49,6 +82,9 @@ struct SeoConfig {
         "(может совпадать с заголовком).\n"
         "Ответ строго JSON.\n\n"
         "Язык: {language}\nЗаголовок: {title}\nТекст: {body}";
+
+    SeoWritingConfig writing;    // копирайт-нормы (Phase 2/3)
+    SeoDeliveryConfig delivery;  // доставка мета (Phase 5)
 };
 
 struct RewriteConfig {

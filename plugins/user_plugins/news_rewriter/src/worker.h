@@ -49,6 +49,8 @@ struct ArticleStatusView {
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;
+    int seo_score = -1;             // итог SEO-скоркарда (0..100), -1 = не считалось
+    std::string seo_issues_text;    // перечень POOR-метрик (из SeoReport::summary)
 };
 
 // Снимок состояния воркера, читаемый UI каждый кадр.
@@ -63,6 +65,7 @@ struct WorkerState {
     int done_count = 0;           // статей обработано успешно (последний обход)
     int error_count = 0;          // статей с ошибкой (последний обход)
     int seo_missing = 0;          // опубликовано без SEO-мета (модель не ответила на SEO)
+    int seo_issues = 0;            // статей, чей SEO-скоркард ниже порога (последний обход)
     std::vector<ArticleStatusView> articles;
 
     // Метрики расхода LLM (кумулятивно за время работы воркера). Оценка, т.к.
@@ -174,6 +177,7 @@ private:
     // и не переотправлять модели идентичные инструкции (промпт-роль).
     std::string role_rewrite_;
     std::string role_seo_;
+    std::string role_seo_refine_;  // Phase 3: LLM-доводка (фидбек-скоркард)
     std::string role_combined_;
     std::chrono::milliseconds llm_call_interval_{1000};  // пауза между вызовами LLM
     RetryPolicy retry_policy_;            // только backoff-задержки (max_retries — из конфига)
@@ -182,6 +186,8 @@ private:
     Storage storage_;
     Scheduler scheduler_;                 // только worker-поток
     std::atomic<int> run_seo_missing_{0}; // статей без SEO в текущем обходе
+    // SEO-скоркард ниже порога (аналог seo_missing для Phase 6).
+    std::atomic<int> run_seo_issues_{0};
     // SEO отключён на остаток обхода из-за rate-limit (чтобы не долбить
     // облако повторными SEO-вызовами и не расходовать квоту).
     std::atomic<bool> seo_skipped_{false};

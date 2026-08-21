@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ============================================================================
 set(VERSION_MAJOR 0)
 set(VERSION_MINOR 1)
-set(VERSION_PATCH 76)
+set(VERSION_PATCH 77)
 set(VERSION_SUFFIX "alpha.2")
 set(VERSION_CODENAME "Archimedes")
 

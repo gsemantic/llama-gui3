@@ -239,6 +239,11 @@ void render_settings_rewrite([[maybe_unused]] UiDeps& deps, Config& draft) {
                         &draft.rewrite.seo.combine_with_rewrite);
         ImGui::TextDisabled("Рерайт и SEO в одном ответе LLM. При сбое разбора "
                             "плагин откатывается к двум отдельным вызовам.");
+        ImGui::Checkbox("LLM-доводка по скоркарду (второй проход; медленнее, "
+                        "rate-limit-aware)", &draft.rewrite.seo.writing.llm_refine);
+        ImGui::TextDisabled("После рерайта модель получает список проблем "
+                            "SEO-копирайта и правит только их. Best-effort: при "
+                            "сбое статья уходит с механическим приведением.");
     }
     ImGui::TextDisabled("Ключевое слово используется как alt для обложки и "
                         "пишется в meta плагинов (Yoast/RankMath).");
@@ -617,6 +622,18 @@ void render_news_rewriter_window(UiDeps& deps) {
             ImGui::TextDisabled("%s", a.url.c_str());
             if (!a.error.empty()) {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "  %s", a.error.c_str());
+            }
+            if (a.seo_score >= 0) {
+                // Светофор по итоговому SEO-баллу (0..100).
+                const float r = a.seo_score >= 80 ? 0.3f : (a.seo_score >= 70 ? 1.0f : 1.0f);
+                const float g = a.seo_score >= 80 ? 1.0f : (a.seo_score >= 70 ? 0.85f : 0.3f);
+                const float b = a.seo_score >= 70 ? 0.3f : 0.3f;
+                ImGui::TextColored(ImVec4(r, g, b, 1.0f),
+                                   "  SEO %d/100", a.seo_score);
+                if (!a.seo_issues_text.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", a.seo_issues_text.c_str());
+                }
             }
         }
     }

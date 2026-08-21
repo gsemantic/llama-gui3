@@ -330,6 +330,35 @@ static void test_wp_sink_credentials_from_env() {
 
 REGISTER_TEST(test_wp_sink_credentials_from_env);
 
+// Phase 5/7: при наличии SEO-полей плагин шлёт namespace-ключи nr_seo_* и
+// оптимизированный slug в WordPress (без зависимости от Yoast/RankMath).
+static void test_wp_sink_seo_meta_nr_keys_and_slug() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+
+    Article a = make_article();
+    a.seo_focus_keyword = "ключевая фраза";
+    a.seo_meta_description = "Мета-описание статьи про ключевую фразу.";
+    a.seo_title = "SEO заголовок про ключевую фразу";
+    a.seo_slug = "klyuchevaya-fraza";
+
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("\"nr_seo_keyword\":\"ключевая фраза\"") != std::string::npos);
+    TEST_ASSERT(req.find("\"nr_seo_description\":\"Мета-описание статьи про ключевую фразу.\"")
+                != std::string::npos);
+    TEST_ASSERT(req.find("\"nr_seo_title\":\"SEO заголовок про ключевую фразу\"")
+                != std::string::npos);
+    TEST_ASSERT(req.find("\"slug\":\"klyuchevaya-fraza\"") != std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_seo_meta_nr_keys_and_slug);
+
 // Проверка подключения: 200 + имя пользователя.
 static void test_wp_check_connection_ok() {
     MiniHttpServer srv;
