@@ -115,6 +115,42 @@ bool ci_contains(const std::string& haystack, const std::string& needle) {
     return to_lower_utf8(haystack).find(to_lower_utf8(needle)) != std::string::npos;
 }
 
+// Ключевая фраза считается присутствующей, если ЕЁ СЛОВА идут в тексте в том же
+// порядке (подряд либо через другие слова) — то есть как подпоследовательность
+// слов. Точное совпадение целой подстрокой слишком строгое: модель при рерайте
+// часто перефразирует фразу («решение … нейроинтерфейсов» вместо «решение
+// нейроинтерфейсов»), и иначе скоркард краснеет на корректном по теме тексте.
+static bool keyphrase_in_order(const std::string& text,
+                               const std::string& keyphrase) {
+    std::vector<std::string> kw =
+        news_rewriter::SeoAnalyzer::split_words(to_lower_utf8(keyphrase));
+    if (kw.empty()) return true;
+    std::vector<std::string> txt =
+        news_rewriter::SeoAnalyzer::split_words(to_lower_utf8(text));
+    std::size_t j = 0;
+    for (const auto& w : txt) {
+        if (w == kw[j] && ++j == kw.size()) return true;
+    }
+    return false;
+}
+
+// Число вхождений ключевой фразы как подпоследовательности слов (жадно,
+// непересекающиеся вхождения) — для оценки плотности.
+static int count_keyphrase_in_order(const std::string& text,
+                                    const std::string& keyphrase) {
+    std::vector<std::string> kw =
+        news_rewriter::SeoAnalyzer::split_words(to_lower_utf8(keyphrase));
+    if (kw.empty()) return 0;
+    std::vector<std::string> txt =
+        news_rewriter::SeoAnalyzer::split_words(to_lower_utf8(text));
+    int count = 0;
+    std::size_t j = 0;
+    for (const auto& w : txt) {
+        if (w == kw[j] && ++j == kw.size()) { ++count; j = 0; }
+    }
+    return count;
+}
+
 bool ends_with(const std::string& s, const std::string& suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
@@ -452,21 +488,15 @@ SeoReport SeoAnalyzer::analyze(const std::string& body,
 
     // Ключевая фраза.
     std::string kp = to_lower_utf8(trim(focus_keyword));
-    bool in_title = kp.empty() ? true : ci_contains(title, kp);
+    bool in_title = kp.empty() ? true : keyphrase_in_order(title, kp);
     bool in_first_par = kp.empty() ? true :
-        (!paragraphs.empty() && ci_contains(paragraphs.front(), kp));
+        (!paragraphs.empty() && keyphrase_in_order(paragraphs.front(), kp));
     bool in_heading = kp.empty() ? true :
         std::any_of(headings.begin(), headings.end(),
-                    [&](const std::string& h) { return ci_contains(h, kp); });
+                    [&](const std::string& h) { return keyphrase_in_order(h, kp); });
     double density = 0.0;
     if (!kp.empty() && total_words > 0) {
-        std::string low = to_lower_utf8(body);
-        std::string needle = kp;
-        std::size_t pos = 0, occ = 0;
-        while ((pos = low.find(needle, pos)) != std::string::npos) {
-            ++occ;
-            pos += needle.size();
-        }
+        const int occ = count_keyphrase_in_order(body, kp);
         density = static_cast<double>(occ) / total_words;
     }
 

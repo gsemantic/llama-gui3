@@ -52,6 +52,12 @@ add_action('wp_head', function () {
         echo '<meta property="og:description" content="' . esc_attr($desc) . '">' . "\n";
         echo '<meta name="twitter:description" content="' . esc_attr($desc) . '">' . "\n";
     }
+    // og:title / twitter:title — из nr_seo_title, иначе из заголовка записи.
+    $og_title = !empty($t) ? $t : get_the_title($id);
+    if (!empty($og_title)) {
+        echo '<meta property="og:title" content="' . esc_attr($og_title) . '">' . "\n";
+        echo '<meta name="twitter:title" content="' . esc_attr($og_title) . '">' . "\n";
+    }
     if (!empty($kw)) {
         echo '<meta name="keywords" content="' . esc_attr($kw) . '">' . "\n";
     }
