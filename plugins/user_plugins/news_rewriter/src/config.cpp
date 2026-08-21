@@ -88,6 +88,8 @@ Json config_to_json(const Config& cfg) {
     writing["autofix_sentences"] = cfg.rewrite.seo.writing.autofix_sentences;
     writing["autofix_transitions"] = cfg.rewrite.seo.writing.autofix_transitions;
     writing["llm_refine"] = cfg.rewrite.seo.writing.llm_refine;
+    writing["read_ease_good"] = cfg.rewrite.seo.writing.read_ease_good;
+    writing["read_ease_ok"] = cfg.rewrite.seo.writing.read_ease_ok;
     seo["writing"] = writing;
 
     Json delivery = Json::object();
@@ -201,6 +203,9 @@ Config config_from_json(const Json& j) {
                 wc.autofix_transitions =
                     w.get("autofix_transitions").as_bool(wc.autofix_transitions);
                 wc.llm_refine = w.get("llm_refine").as_bool(wc.llm_refine);
+                wc.read_ease_good =
+                    w.get("read_ease_good").as_double(wc.read_ease_good);
+                wc.read_ease_ok = w.get("read_ease_ok").as_double(wc.read_ease_ok);
             }
 
             const Json& d = seo.get("delivery");

@@ -34,13 +34,18 @@ struct SourceConfig {
 struct SeoWritingConfig {
     int  max_sentence_words        = 25;   // длина предложения
     int  max_paragraph_words       = 120;  // длина абзаца
-    double min_transition_ratio    = 0.30; // доля предл. с переходными словами
+    double min_transition_ratio    = 0.20; // доля предл. с переходными словами
     double max_passive_ratio       = 0.10; // доля пассивных предложений
     bool require_keyphrase_title           = true;  // ключ. фраза в заголовке
     bool require_keyphrase_first_paragraph = true;  // … в 1-м абзаце
     bool require_keyphrase_one_heading     = true;  // … в подзаголовке
     int  max_words_before_first_heading    = 300;  // текст до 1-го подзаголовка
     int  min_words                  = 300;  // мин. объём статьи
+    // Пороги удобочитаемости (RU-индекс 130−4.5·ASL, 0..100): ниже ok_good —
+    // Good, ниже ok — Ok, иначе Poor. Ослаблены, т.к. переводные новости часто
+    // имеют ~18-словные предложения (см. обсуждение красного SEO-скоркарда).
+    double read_ease_good = 70;   // >= -> Good
+    double read_ease_ok   = 45;   // >= -> Ok, иначе Poor
     std::pair<int,int> target_flesch_band   = {60, 70};  // Flesch (EN) band
     std::pair<double,double> keyphrase_density_band = {0.005, 0.03};
     int  max_consecutive_same_start = 3;   // повтор стартового слова
@@ -48,7 +53,7 @@ struct SeoWritingConfig {
     bool autofix_paragraphs  = true;  // дробить длинные абзацы
     bool autofix_sentences   = true;  // дробить длинные предложения
     bool autofix_transitions = false; // вставлять переходные слова (рискованно)
-    bool llm_refine          = false; // Phase 3: второй LLM-проход
+    bool llm_refine          = true; // Phase 3: второй LLM-проход (по умолч. вкл)
 };
 
 // Доставка SEO-меты в WordPress (Phase 5) — через namespace-ключи nr_seo_*.

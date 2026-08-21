@@ -42,6 +42,8 @@ SeoCriteria seo_criteria_from_writing(const SeoWritingConfig& w) {
     c.max_consecutive_same_start = w.max_consecutive_same_start;
     c.flesch_min = w.target_flesch_band.first;
     c.flesch_max = w.target_flesch_band.second;
+    c.ru_read_ease_good = w.read_ease_good;
+    c.ru_read_ease_ok = w.read_ease_ok;
     return c;
 }
 } // namespace

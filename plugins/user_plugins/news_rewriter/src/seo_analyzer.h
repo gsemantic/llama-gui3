@@ -35,7 +35,7 @@ struct SeoReport {
 struct SeoCriteria {
     int max_sentence_words = 25;       // длина предложения
     int max_paragraph_words = 120;     // длина абзаца
-    double min_transition_ratio = 0.30;// доля предл. с переходными словами
+    double min_transition_ratio = 0.20;// доля предл. с переходными словами
     double max_passive_ratio = 0.10;   // доля пассивных предложений
     bool require_keyphrase_title = true;
     bool require_keyphrase_first_paragraph = true;
@@ -55,7 +55,7 @@ struct SeoCriteria {
     // классическая формула Flesch для русского даёт отрицательные значения
     // (у RU-слов ~3 слога). Возвращаемый индекс — 0..100, больше = легче.
     double ru_read_ease_good = 70;  // >= -> Good
-    double ru_read_ease_ok = 50;    // >= -> Ok, иначе Poor
+    double ru_read_ease_ok = 45;    // >= -> Ok, иначе Poor
 };
 
 class SeoAnalyzer {
