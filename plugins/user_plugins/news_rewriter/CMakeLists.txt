@@ -108,6 +108,7 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_xml.cpp
         tests/test_fetcher.cpp
         tests/test_extractor.cpp
+        tests/test_material_author.cpp
         tests/test_rewriter.cpp
         tests/test_scheduler.cpp
         tests/test_storage.cpp

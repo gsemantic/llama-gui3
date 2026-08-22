@@ -990,7 +990,318 @@ std::string strip_listing_regions(const std::string& html) {
     return out;
 }
 
+// --- разбор входного материала (plaintext): автор в отдельном абзаце -------
+
+// Трим краёв (без схлопывания внутренних пробелов/переводов строк).
+std::string trim_only(const std::string& s) {
+    const std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const std::size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// Первый code point строки (UTF-8).
+unsigned int first_cp_of(const std::string& s) {
+    if (s.empty()) return 0;
+    const unsigned char b0 = static_cast<unsigned char>(s[0]);
+    if (b0 < 0x80) return b0;
+    unsigned int cp = 0;
+    int adv = 1;
+    if ((b0 & 0xE0) == 0xC0) { adv = 2; cp = b0 & 0x1F; }
+    else if ((b0 & 0xF0) == 0xE0) { adv = 3; cp = b0 & 0x0F; }
+    else if ((b0 & 0xF8) == 0xF0) { adv = 4; cp = b0 & 0x07; }
+    else return b0;
+    for (int k = 1; k < adv; ++k) {
+        const unsigned char bk = static_cast<unsigned char>(s[k]);
+        cp = (cp << 6) | (bk & 0x3F);
+    }
+    return cp;
+}
+
+// Заглавный ли code point (кириллица/латиница/Han/кана/хангыль).
+bool is_title_case_cp(unsigned int cp) {
+    if (cp >= 0x0410 && cp <= 0x042F) return true;   // заглавная кириллица
+    if (cp >= 'A' && cp <= 'Z') return true;          // латиница A–Z
+    if ((cp >= 0x3400 && cp <= 0x4DBF) ||             // CJK Ext A
+        (cp >= 0x4E00 && cp <= 0x9FFF) ||             // CJK Unified
+        (cp >= 0x3040 && cp <= 0x30FF) ||             // кана
+        (cp >= 0xAC00 && cp <= 0xD7AF)) return true;  // хангыль
+    return false;
+}
+
+// Посимвольное (code-point) сравнение с игнором регистра для кириллицы/латиницы.
+bool cp_equal_ci(unsigned int a, unsigned int b) {
+    if (a == b) return true;
+    if (a >= 'A' && a <= 'Z' && b == a + 32) return true;
+    if (b >= 'A' && b <= 'Z' && a == b + 32) return true;
+    if (a >= 0x0410 && a <= 0x042F && b == a + 0x20) return true;
+    if (b >= 0x0410 && b <= 0x042F && a == b + 0x20) return true;
+    return false;
+}
+
+// Строка → вектор code points (UTF-8).
+std::vector<unsigned int> utf8_codepoints(const std::string& s) {
+    std::vector<unsigned int> out;
+    std::size_t i = 0;
+    const std::size_t n = s.size();
+    while (i < n) {
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        unsigned int cp = 0;
+        int adv = 1;
+        if (b0 < 0x80) { cp = b0; adv = 1; }
+        else if ((b0 & 0xE0) == 0xC0) { adv = 2; cp = b0 & 0x1F; }
+        else if ((b0 & 0xF0) == 0xE0) { adv = 3; cp = b0 & 0x0F; }
+        else if ((b0 & 0xF8) == 0xF0) { adv = 4; cp = b0 & 0x07; }
+        else { cp = b0; adv = 1; }
+        for (int k = 1; k < adv; ++k) {
+            const unsigned char bk = static_cast<unsigned char>(s[i + k]);
+            cp = (cp << 6) | (bk & 0x3F);
+        }
+        i += adv;
+        out.push_back(cp);
+    }
+    return out;
+}
+
+// Байтовая длина первых `n` code points строки (для сдвига позиции).
+std::size_t byte_len_of_cps(const std::string& s, std::size_t n) {
+    std::size_t i = 0, count = 0;
+    const std::size_t len = s.size();
+    while (i < len && count < n) {
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        int adv = 1;
+        if (b0 < 0x80) adv = 1;
+        else if ((b0 & 0xE0) == 0xC0) adv = 2;
+        else if ((b0 & 0xF0) == 0xE0) adv = 3;
+        else if ((b0 & 0xF8) == 0xF0) adv = 4;
+        i += adv;
+        ++count;
+    }
+    return i;
+}
+
+// 0 — не маркер; 1 — маркер + имя (name заполнено); 2 — только маркер
+// (имя в следующем абзаце). p — уже схлопнутый/отримленный текст абзаца.
+int classify_author_marker(const std::string& p, std::string& name) {
+    name.clear();
+    const std::string s = trim_only(p);
+    if (s.empty()) return 0;
+    const std::vector<unsigned int> cps = utf8_codepoints(s);
+
+    // Маркеры отсортированы по убыванию длины (сначала составные).
+    static const char* kMarkers[] = {
+        "автор оригинала", "автор статьи", "автор", "by", "author", "作者"
+    };
+    for (const char* m : kMarkers) {
+        const std::vector<unsigned int> mk = utf8_codepoints(m);
+        if (cps.size() < mk.size()) continue;
+        bool ok = true;
+        for (std::size_t i = 0; i < mk.size(); ++i) {
+            if (!cp_equal_ci(cps[i], mk[i])) { ok = false; break; }
+        }
+        if (!ok) continue;
+        // Граница после маркера: конец, ':', полноширинное '：', пробел/таб.
+        if (cps.size() > mk.size()) {
+            const unsigned int nx = cps[mk.size()];
+            if (!(nx == ':' || nx == 0xFF1A || nx == ' ' || nx == '\t' ||
+                  nx == '\n' || nx == '\r'))
+                continue;
+        }
+        // Сдвиг за маркер (по байтам) и пропуск разделителей.
+        std::size_t pos = byte_len_of_cps(s, mk.size());
+        while (pos < s.size()) {
+            const unsigned char c = static_cast<unsigned char>(s[pos]);
+            if (c == ' ' || c == '\t' || c == ':' || c == '\n' || c == '\r') {
+                ++pos;
+                continue;
+            }
+            if (s.compare(pos, 3, "：") == 0) { pos += 3; continue; }
+            break;
+        }
+        std::string nm = trim_only(s.substr(pos));
+        const std::size_t src = nm.find("来源");  // кит. «источник» в склейке
+        if (src != std::string::npos) nm = trim_only(nm.substr(0, src));
+        if (!nm.empty()) { name = nm; return 1; }
+        return 2;  // маркер без имени — имя в следующем абзаце
+    }
+    return 0;
+}
+
+// Походит ли абзац (без маркера) на строку-имя автора: 1–3 слова, каждое с
+// заглавной буквы (ФИО/инициалы), последний символ — не пунктуация предложения.
+bool looks_like_name_paragraph(const std::string& p, std::string& name) {
+    name.clear();
+    const std::string s = trim_only(p);
+    const std::size_t len = s.size();
+    if (len < 2 || len > 60) return false;
+
+    // Токенизация по пробелам.
+    std::vector<std::string> toks;
+    std::string cur;
+    for (char c : s) {
+        if (c == ' ' || c == '\t') {
+            if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) toks.push_back(cur);
+    if (toks.empty() || toks.size() > 3) return false;
+
+    // Последний символ не должен быть знаком конца предложения.
+    const unsigned char last = static_cast<unsigned char>(s.back());
+    if (last == '.' || last == '!' || last == '?' || last == ';' ||
+        last == ':' || last == ',' || last == 0xE2)  // 0xE2 — начало '…'
+        return false;
+
+    bool has_long = false;
+    for (const std::string& t : toks) {
+        if (t.size() >= 2) has_long = true;
+        if (t.find_first_of("0123456789") != std::string::npos) return false;
+        // каждое слово должно начинаться с заглавной буквы (иначе это обычное
+        // предложение, где заглавная только первая буква).
+        if (!is_title_case_cp(first_cp_of(t))) return false;
+    }
+    if (!has_long) return false;
+    name = s;
+    return true;
+}
+
+// Сборка тела: выбрасываем строки с индексами из drop, склеиваем переводами
+// строк и схлопываем 3+ пустых строки в 2.
+std::string rebuild_body_skipping(const std::vector<std::string>& lines,
+                                  const std::vector<char>& drop) {
+    std::string out;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (drop[i]) continue;
+        out += lines[i];
+        out += '\n';
+    }
+    std::string col;
+    col.reserve(out.size());
+    int blank = 0;
+    for (char c : out) {
+        if (c == '\n') {
+            ++blank;
+            if (blank <= 2) col += c;
+        } else {
+            blank = 0;
+            col += c;
+        }
+    }
+    // трим краевых переводов
+    const std::size_t b = col.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const std::size_t e = col.find_last_not_of(" \t\r\n");
+    return col.substr(b, e - b + 1);
+}
+
 } // namespace
+
+bool extract_author_from_text(const std::string& text, std::string& author,
+                              std::string& body) {
+    author.clear();
+    body = text;
+
+    // Нормализация переводов строк (\r\n / \r → \n).
+    std::string norm;
+    norm.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '\r') {
+            if (i + 1 < text.size() && text[i + 1] == '\n') continue;  // \r съедаем
+            norm += '\n';
+        } else {
+            norm += c;
+        }
+    }
+
+    // Разбивка на строки.
+    std::vector<std::string> lines;
+    {
+        std::string cur;
+        for (char c : norm) {
+            if (c == '\n') { lines.push_back(cur); cur.clear(); }
+            else cur += c;
+        }
+        lines.push_back(cur);
+    }
+
+    // Группировка в абзацы: непустые строки подряд → один абзац (схлопывание
+    // внутренних пробелов внутри строки уже есть в trim_only).
+    struct Para { std::size_t first; std::size_t last; std::string text; int nlines; };
+    std::vector<Para> paras;
+    {
+        std::size_t i = 0;
+        const std::size_t n = lines.size();
+        while (i < n) {
+            while (i < n && trim_only(lines[i]).empty()) ++i;
+            if (i >= n) break;
+            const std::size_t first = i;
+            int nlines = 0;
+            std::string joined;
+            while (i < n && !trim_only(lines[i]).empty()) {
+                if (!joined.empty()) joined += ' ';
+                joined += trim_only(lines[i]);
+                ++i;
+                ++nlines;
+            }
+            Para p;
+            p.first = first;
+            p.last = i - 1;
+            p.text = joined;
+            p.nlines = nlines;
+            paras.push_back(p);
+        }
+    }
+
+    if (paras.empty()) return false;
+
+    // 1) Маркер в любом абзаце (требование: автор в отдельном абзаце).
+    for (std::size_t k = 0; k < paras.size(); ++k) {
+        std::string nm;
+        const int r = classify_author_marker(paras[k].text, nm);
+        if (r == 1) {
+            author = nm;
+            std::vector<char> drop(lines.size(), 0);
+            for (std::size_t li = paras[k].first; li <= paras[k].last; ++li)
+                drop[li] = 1;
+            body = rebuild_body_skipping(lines, drop);
+            return true;
+        }
+        if (r == 2 && k + 1 < paras.size()) {
+            // Имя — в следующем абзаце.
+            const std::string nm2 = trim_only(paras[k + 1].text);
+            if (!nm2.empty()) {
+                author = nm2;
+                std::vector<char> drop(lines.size(), 0);
+                for (std::size_t li = paras[k].first; li <= paras[k].last; ++li)
+                    drop[li] = 1;
+                for (std::size_t li = paras[k + 1].first;
+                     li <= paras[k + 1].last; ++li)
+                    drop[li] = 1;
+                body = rebuild_body_skipping(lines, drop);
+                return true;
+            }
+        }
+    }
+
+    // 2) Без маркера: последний абзац, состоящий из одной строки, похож на имя.
+    const Para& last = paras.back();
+    if (last.nlines == 1) {
+        std::string nm;
+        if (looks_like_name_paragraph(last.text, nm)) {
+            author = nm;
+            std::vector<char> drop(lines.size(), 0);
+            for (std::size_t li = last.first; li <= last.last; ++li)
+                drop[li] = 1;
+            body = rebuild_body_skipping(lines, drop);
+            return true;
+        }
+    }
+
+    return false;
+}
 
 std::string html_to_text(const std::string& html) {
     std::string out;
