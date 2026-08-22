@@ -82,4 +82,13 @@ if [ -n "$DEPLOY_DIR" ]; then
     echo "Скопировано в: $DEPLOY_DIR"
 fi
 
+# Авто-деплой в папку плагинов GUI (рядом с корневым build/), если она есть.
+# Путь: plugins/user_plugins/news_rewriter -> ../../../build/plugins
+GUI_PLUGINS="$SCRIPT_DIR/../../../build/plugins"
+if [ -d "$GUI_PLUGINS" ]; then
+    cp "$BUILD_DIR/plugins/libnews_rewriter.so" "$GUI_PLUGINS/"
+    cp "$BUILD_DIR/plugins/news_rewriter.json" "$GUI_PLUGINS/"
+    echo "Авто-деплой в GUI-плагины: $GUI_PLUGINS"
+fi
+
 echo "Сборка завершена."

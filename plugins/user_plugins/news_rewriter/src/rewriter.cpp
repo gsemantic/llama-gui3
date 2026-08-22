@@ -79,19 +79,21 @@ std::string build_role_from_template(const std::string& tpl,
     if (with_max_words && cfg.max_words > 0 && !had_max_words_ph) {
         role += "\n\nОбъём: примерно " + std::to_string(cfg.max_words) + " слов.";
     }
-    // SEO: статья начинается с краткого вступления-пересказа, а ключевая фраза
-    // темы (focus_keyword) уходит именно туда, а НЕ в заголовок — иначе
-    // анализатор засчитывает плотность 0% и штрафует скоркард. На этапе рерайта
-    // сама фраза ещё не известна (её выдаёт отдельный SEO-шаг), поэтому просим
-    // модель использовать ключевую мысль из заголовка.
+    // SEO: статья начинается с детального вступления-пересказа (жирный лид),
+    // а ключевая фраза темы (focus_keyword) уходит именно туда, а НЕ в заголовок.
     role +=
         "\n\nНачни рерайт с небольшого вступления — краткого пересказа сути новости "
-        "(1–2 предложения) в самом первом абзаце. Для SEO-оптимизации органично "
+        "(3–4 предложения) в самом первом абзаце. Оформи вступление жирным шрифтом "
+        "(markdown **…**), не делай из него заголовок. Для SEO-оптимизации органично "
         "используй ключевую фразу по теме статьи (например, главную мысль из "
         "заголовка) обязательно в этом вступительном первом абзаце и желательно в "
         "одном из подзаголовков (строки '## '), с умеренной плотностью (около 1%). "
-        "Ключевую фразу НЕ ставь в заголовок статьи — она должна быть во вступлении. "
-        "Не допускай злоупотребления повторами и не искажай факты.";
+        "Ключевую фразу НЕ ставь ни в заголовок статьи, ни в seo_title — она должна "
+        "быть только во вступлении. Не допускай злоупотребления повторами и не искажай факты."
+        "\n\nЕсли в исходных данных указан «Автор оригинала», добавь в самом конце "
+        "текста строку-подпись: «Автор оригинала: <оригинальное имя> (<кириллическая "
+        "транслитерация>)». Если имя уже на кириллице — пиши «Автор оригинала: <имя>». "
+        "Если автор не указан — подпись не добавляй.";
     return role;
 }
 
@@ -100,8 +102,11 @@ std::string build_role_prompt(const RewriteConfig& cfg) {
 }
 
 std::string build_user_prompt(const Article& src, const RewriteConfig& cfg) {
-    return "Заголовок: " + src.title_original + "\nТекст: " +
+    std::string p = "Заголовок: " + src.title_original + "\nТекст: " +
            truncate_input(src.body_original, cfg.max_input_chars);
+    if (!src.author_original.empty())
+        p += "\nАвтор оригинала: " + src.author_original;
+    return p;
 }
 
 std::string build_prompt(const Article& src, const RewriteConfig& cfg) {
@@ -451,6 +456,36 @@ std::string build_seo_prompt(const Article& src, const SeoConfig& cfg) {
            build_seo_user_prompt(src, cfg);
 }
 
+// Вырезать ключевую фразу из заголовка (case-insensitive), чтобы модель не
+// включала её в seo_title/заголовок (ключ должен быть во вступлении, а не в
+// заголовке). Убирает также «висячие» разделители, оставшиеся после удаления.
+static std::string strip_keyphrase_from_title(const std::string& title,
+                                             const std::string& kp) {
+    if (title.empty() || kp.empty()) return title;
+    const std::string low_title = lower_utf8_str(title);
+    const std::string low_kp = lower_utf8_str(kp);
+    std::string out = title;
+    std::string out_low = low_title;
+    std::size_t pos;
+    while ((pos = out_low.find(low_kp)) != std::string::npos) {
+        out.erase(pos, kp.size());
+        out_low.erase(pos, low_kp.size());
+    }
+    // Срезать ведущие пробелы и один разделитель (":", "-", ",", "|") + пробел.
+    std::size_t b = out.find_first_not_of(" \t\r\n");
+    if (b != std::string::npos) out = out.substr(b);
+    if (!out.empty() && (out[0] == ':' || out[0] == '-' || out[0] == ',' ||
+                         out[0] == '|')) {
+        out.erase(0, 1);
+        if (!out.empty() && (out[0] == ' ' || out[0] == '\t')) out.erase(0, 1);
+    }
+    if (out.compare(0, 3, "— ") == 0) out = out.substr(3);  // em-dash + space
+    // Аналогично хвостовые разделители.
+    std::size_t e = out.find_last_not_of(" \t\r\n:-,|");
+    if (e != std::string::npos) out = out.substr(0, e + 1);
+    return trim_collapse(out);
+}
+
 SeoResult parse_seo_response(const std::string& response) {
     SeoResult result;
     if (response.empty()) {
@@ -473,6 +508,7 @@ SeoResult parse_seo_response(const std::string& response) {
     result.focus_keyword = normalize_keyword(j.get("focus_keyword").as_string());
     result.meta_description = trim_collapse(j.get("meta_description").as_string());
     result.seo_title = trim_collapse(j.get("seo_title").as_string());
+    result.seo_title = strip_keyphrase_from_title(result.seo_title, result.focus_keyword);
     // Жёсткие ограничения длины (нормы Yoast как отправная точка):
     //   - seo_title   ≤ 60 символов (обрезка по границе слова + "…");
     //   - description ≤ 160 символов (обрезка по границе слова + "…");
@@ -534,7 +570,7 @@ std::string build_combined_role_prompt(const RewriteConfig& cfg) {
         "  \"body\": \"полный переписанный текст новости (только проза, без JSON)\",\n"
         "  \"focus_keyword\": \"ключевая фраза 2-4 слова, строго нижний регистр, на языке статьи\",\n"
         "  \"meta_description\": \"одно предложение, 150-160 символов, суть новости\",\n"
-        "  \"seo_title\": \"SEO-заголовок до 60 символов: яркий и точный, ключевое слово не обязательно (оно во вступлении)\"\n"
+        "  \"seo_title\": \"SEO-заголовок до 60 символов: яркий и точный, ключевую фразу НЕ включай (она во вступлении)\"\n"
         "}\n"
         "Поля focus_keyword/meta_description/seo_title — SEO-метаданные; если не "
         "уверены, оставьте пустую строку. Поле body должно содержать ТОЛЬКО текст "
@@ -580,6 +616,8 @@ RewriteSeoResult parse_rewrite_seo_response(const std::string& response) {
     result.seo.focus_keyword = trim_collapse(j.get("focus_keyword").as_string());
     result.seo.meta_description = trim_collapse(j.get("meta_description").as_string());
     result.seo.seo_title = trim_collapse(j.get("seo_title").as_string());
+    result.seo.seo_title = strip_keyphrase_from_title(result.seo.seo_title,
+                                                      result.seo.focus_keyword);
     if (!result.seo.focus_keyword.empty() ||
         !result.seo.meta_description.empty() ||
         !result.seo.seo_title.empty()) {

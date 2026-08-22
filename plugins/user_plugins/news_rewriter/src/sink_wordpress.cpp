@@ -331,10 +331,9 @@ public:
             html += "\n<p>Источник: <a href=\"" + html_escape(article.url) +
                     "\">" + html_escape(host) + "</a></p>";
         }
-        if (!article.author_original.empty()) {
-            html += "<p>Автор оригинала: " +
-                    html_escape(article.author_original) + "</p>";
-        }
+        // Примечание: подпись «Автор оригинала» теперь формируется самим LLM в
+        // теле рерайта (с кириллической транслитерацией имени в скобках), поэтому
+        // здесь её не дублируем — иначе будет две разные строки автора.
         if (article.published_at > 0) {
             html += "<p>Дата оригинала: " +
                     html_escape(iso8601_of(article.published_at)) + "</p>";
