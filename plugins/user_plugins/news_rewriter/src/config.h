@@ -36,7 +36,7 @@ struct SeoWritingConfig {
     int  max_paragraph_words       = 120;  // длина абзаца
     double min_transition_ratio    = 0.20; // доля предл. с переходными словами
     double max_passive_ratio       = 0.10; // доля пассивных предложений
-    bool require_keyphrase_title           = true;  // ключ. фраза в заголовке
+    bool require_keyphrase_title           = false; // ключ. фраза в заголовке (выкл: пусть будет во вступлении)
     bool require_keyphrase_first_paragraph = true;  // … в 1-м абзаце
     bool require_keyphrase_one_heading     = true;  // … в подзаголовке
     int  max_words_before_first_heading    = 300;  // текст до 1-го подзаголовка
@@ -83,8 +83,8 @@ struct SeoConfig {
         "регистре, на языке статьи;\n"
         "- meta_description — одно предложение, 150-160 символов, без кавычек по "
         "краям, описывает суть новости;\n"
-        "- seo_title — до 60 символов, привлекательный, с ключевым словом в начале "
-        "(может совпадать с заголовком).\n"
+        "- seo_title — до 60 символов, привлекательный и точный (ключевое слово "
+        "не обязательно, оно уходит во вступление статьи, а не в заголовок).\n"
         "Ответ строго JSON.\n\n"
         "Язык: {language}\nЗаголовок: {title}\nТекст: {body}";
 
