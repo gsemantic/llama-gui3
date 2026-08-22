@@ -371,19 +371,23 @@ std::string get_attr(const std::string& tag, const std::string& attr) {
 }
 
 // URL из <meta property="..."> / <meta name="..."> с content="...".
+// Ищем тег <meta> (og:image/twitter:image задаются именно им, не <img>).
 std::string meta_image_url(const std::string& html, const std::string& prop) {
-    std::size_t pos = 0;
-    while ((pos = html.find("<img", pos)) != std::string::npos) {
-        const std::size_t gt = html.find('>', pos);
-        if (gt == std::string::npos) break;
-        const std::string tag = html.substr(pos, gt - pos + 1);
-        const std::string p = get_attr(tag, "property");
-        const std::string n = get_attr(tag, "name");
-        if (p == prop || n == prop) {
-            const std::string c = get_attr(tag, "content");
-            if (!c.empty()) return c;
+    const char* opens[] = {"<meta", "<META"};
+    for (const char* open : opens) {
+        std::size_t pos = 0;
+        while ((pos = html.find(open, pos)) != std::string::npos) {
+            const std::size_t gt = html.find('>', pos);
+            if (gt == std::string::npos) break;
+            const std::string tag = html.substr(pos, gt - pos + 1);
+            const std::string p = get_attr(tag, "property");
+            const std::string n = get_attr(tag, "name");
+            if (p == prop || n == prop) {
+                const std::string c = get_attr(tag, "content");
+                if (!c.empty()) return c;
+            }
+            pos = gt + 1;
         }
-        pos = gt + 1;
     }
     return "";
 }

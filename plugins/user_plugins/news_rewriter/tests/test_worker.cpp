@@ -126,7 +126,8 @@ static void test_worker_run_completes() {
     TEST_ASSERT_EQUAL(state.pending_tasks, 0);
     TEST_ASSERT_TRUE(state.last_run_unix > 0);
     TEST_ASSERT_TRUE(log_count.load() > 0);
-    TEST_ASSERT_EQUAL(f->calls.load(), 2);
+    // 2 включённых источника × (лента + страница материала) = 4 вызова fetcher.
+    TEST_ASSERT_EQUAL(f->calls.load(), 4);
 
     worker.stop_and_join();
 }
@@ -166,7 +167,8 @@ static void test_worker_does_not_run_disabled_sources() {
     });
     TEST_ASSERT_TRUE(finished);
     TEST_ASSERT_EQUAL(worker.snapshot().articles.size(), std::size_t(2));  // 2 новости
-    TEST_ASSERT_EQUAL(f->calls.load(), 2);  // отключённый источник не грузится
+    // 2 включённых источника × (лента + страница материала); отключённый не грузится.
+    TEST_ASSERT_EQUAL(f->calls.load(), 4);
 
     worker.stop_and_join();
 }
@@ -602,8 +604,9 @@ static void test_worker_retries_failing_source() {
     });
     TEST_ASSERT_TRUE(finished);
 
-    // 2 неудачи + 1 успех = 3 вызова; в снапшоте — только статья (успешная).
-    TEST_ASSERT_EQUAL(f->calls.load(), 3);
+    // 2 неудачи (только лента) + 1 успех (лента + страница материала) = 4 вызова;
+    // в снапшоте — только статья (успешная).
+    TEST_ASSERT_EQUAL(f->calls.load(), 4);
     const WorkerState state = worker.snapshot();
     TEST_ASSERT_EQUAL(state.articles.size(), std::size_t(1));
     TEST_ASSERT_TRUE(state.articles[0].status == TaskStatus::Done);
