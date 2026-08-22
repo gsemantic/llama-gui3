@@ -92,6 +92,14 @@ struct SeoConfig {
     SeoDeliveryConfig delivery;  // доставка мета (Phase 5)
 };
 
+// Автоперевод таксономии (рубрики/теги источника → русские названия) и
+// проставление их в приёмник (WordPress). См. rewriter.cpp (translate_taxonomy)
+// и sink_wordpress.cpp (резолв/создание терминов с соблюдением иерархии).
+struct TaxonomyConfig {
+    bool enabled = false;        // переводить рубрики/теги из источника на русский
+    bool auto_assign = true;     // проставлять в WP (иначе только хранить в article)
+};
+
 struct RewriteConfig {
     std::string language = "ru";
     std::string tone = "нейтральный";
@@ -110,6 +118,7 @@ struct RewriteConfig {
     int max_words = 0;               // 0 = без ограничения (примерный объём статьи)
     int max_input_chars = 12000;     // обрезка текста статьи перед отправкой в LLM
     SeoConfig seo;                   // авто-SEO: ключевое слово / meta-описание (отд. LLM-запрос)
+    TaxonomyConfig taxonomy;         // автоперевод рубрик/тегов источника на русский
 };
 
 struct SinkConfig {

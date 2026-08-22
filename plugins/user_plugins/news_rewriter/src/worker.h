@@ -179,6 +179,7 @@ private:
     std::string role_seo_;
     std::string role_seo_refine_;  // Phase 3: LLM-доводка (фидбек-скоркард)
     std::string role_combined_;
+    std::string role_taxonomy_;    // перевод таксономии (рубрики/теги → русский)
     std::chrono::milliseconds llm_call_interval_{1000};  // пауза между вызовами LLM
     RetryPolicy retry_policy_;            // только backoff-задержки (max_retries — из конфига)
     RetryPolicy llm_retry_policy_;        // ретраи рерайта: 1 + max_retries попыток, backoff

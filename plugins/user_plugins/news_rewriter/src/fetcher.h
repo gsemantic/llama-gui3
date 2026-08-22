@@ -18,6 +18,7 @@ struct FeedItem {
     std::string pub_date;
     std::string image;   // URL заглавного изображения (media:content / enclosure / itunes:image / первый <img>)
     std::string author;  // автор оригинала (dc:creator / author / atom <author><name>)
+    std::vector<std::string> categories;  // рубрики/теги источника (<category>), сырые
 };
 
 // Результат загрузки источника.

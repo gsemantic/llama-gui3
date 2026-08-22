@@ -172,6 +172,43 @@ SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
 
 // Перегрузка: роль собирается из cfg внутри.
 SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
-                           const std::string& feedback, const LlmFn& llm);
+                            const std::string& feedback, const LlmFn& llm);
+
+// ============================================================================
+// Перевод таксономии (рубрики/теги источника → русские названия).
+//
+// Отдельный LLM-запрос: берёт сырые рубрики/теги из источника (RSS <category>,
+// в т.ч. иерархические "Раздел / Подраздел"), переводит на русский, сохраняет
+// иерархию (через разделитель " > ") и формирует плоский список тегов. Затем
+// WordPressSink по именам находит существующие рубрики/теги (сопоставление) или
+// создаёт новые, соблюдая родительско-дочернюю иерархию.
+// ============================================================================
+
+// Результат перевода таксономии.
+struct TaxonomyResult {
+    bool ok = false;
+    std::string error;
+    std::vector<std::string> categories;  // русские пути "РуРаздел > РуПодраздел"
+    std::vector<std::string> tags;        // русские теги (плоский список)
+};
+
+// Роль (системный промпт) — статична на обход.
+std::string build_taxonomy_role_prompt(const std::string& language);
+
+// Пользовательское сообщение: сырые рубрики источника + заголовок/текст статьи.
+std::string build_taxonomy_user_prompt(const Article& src);
+
+// Разбор ответа LLM: ищем первый '{' … последний '}' и парсим JSON
+// {categories:[...], tags:[...]}. Устойчиво к markdown- fences.
+TaxonomyResult parse_taxonomy_response(const std::string& response);
+
+// Перевод таксономии: роль + контент статьи → llm → разбор. Best-effort.
+TaxonomyResult translate_taxonomy(const Article& src, const std::string& role_prompt,
+                                  const LlmFn& llm);
+
+// Перегрузка: роль собирается из language внутри.
+TaxonomyResult translate_taxonomy_with_language(const Article& src,
+                                                const std::string& language,
+                                                const LlmFn& llm);
 
 } // namespace news_rewriter

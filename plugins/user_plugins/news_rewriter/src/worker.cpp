@@ -469,6 +469,28 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
         }
     };
 
+    // Перевод таксономии (рубрики/теги источника → русский) и сопоставление:
+    // один LLM-вызов после рерайта. Результат (categories_ru/tags_ru) позже
+    // резолвится в id рубрик/тегов WordPressSink-ом (создание при необходимости,
+    // соблюдение иерархии). Best-effort: не роняем статью при сбое.
+    auto apply_taxonomy = [&]() {
+        if (!cfg.rewrite.taxonomy.enabled) return;
+        if (a.categories_original.empty()) return;
+        if (!llm_) return;
+        TaxonomyResult tr = translate_taxonomy(a, role_taxonomy_, llm_);
+        if (tr.ok) {
+            a.categories_ru = tr.categories;
+            a.tags_ru = tr.tags;
+            log("Таксономия переведена: рубрик=" +
+                std::to_string(a.categories_ru.size()) +
+                ", тегов=" + std::to_string(a.tags_ru.size()) +
+                " («" + a.title_original + "»)");
+        } else {
+            log("Таксономия не переведена («" + a.title_original +
+                "» — " + tr.error + ")");
+        }
+    };
+
     // Итоговый скоркард (Phase 6) + опциональная LLM-доводка (Phase 3).
     // Вызывается в каждой ветке успешного рерайта. Считает SeoAnalyzer-отчёт по
     // финальному телу, при llm_refine — просит модель доработать проблемные
@@ -522,6 +544,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                 if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 apply_seo(cr.seo);
                 apply_reform();
+                apply_taxonomy();
                 return finalize();
             }
             // Комбинированный вызов не дал валидного рерайта.
@@ -546,6 +569,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                         apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
                     }
                     apply_reform();
+                    apply_taxonomy();
                     return finalize();
                 }
                 a.error = cr.error.empty() ? rr.error : cr.error;
@@ -562,6 +586,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                     apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
                 }
                 apply_reform();
+                apply_taxonomy();
                 return true;
             }
             a.error = rr.error;
@@ -614,6 +639,11 @@ bool Worker::export_article(const Config& cfg, Article& a) {
         std::lock_guard<std::mutex> lock(data_mutex_);
         sink_cfg.data_dir = data_dir_;
     }
+    // Передаём в sink флаг авто-проставления динамической таксономии из
+    // конфига rewrite.taxonomy.auto_assign (worker уже наполнил
+    // article.categories_ru / tags_ru, если taxonomy.enabled).
+    sink_cfg.params["taxonomy_auto_assign"] =
+        cfg.rewrite.taxonomy.auto_assign;
     std::unique_ptr<Sink> sink = SinkRegistry::instance().create(
         sink_cfg, storage_, log_callback_);
     if (!sink) {
@@ -765,6 +795,7 @@ void Worker::process_run(const Config& cfg) {
     role_seo_ = build_seo_role_prompt(cfg.rewrite.seo, cfg.rewrite.language);
     role_seo_refine_ = build_seo_refine_role_prompt(cfg.rewrite.seo, cfg.rewrite.language);
     role_combined_ = build_combined_role_prompt(cfg.rewrite);
+    role_taxonomy_ = build_taxonomy_role_prompt(cfg.rewrite.language);
 
     // Промпт-роль: системные инструкции шлются модели ОДИН раз на весь обход,
     // поэтому их токены учитываем единожды (а не на каждую статью, как это
@@ -1106,6 +1137,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         a.body_original = ex.body;
         a.source_image = item.image;   // заглавное изображение из ленты (media:content/enclosure/itunes)
         a.author_original = item.author;  // автор из ленты (если есть; scienenet не даёт)
+        a.categories_original = item.categories;  // рубрики/теги из RSS <category>
         // Лента часто не даёт картинку (enclosure пуст) и полный текст. Чтобы в
         // выходной статье появилась реальная иллюстрация и полный текст,
         // подгружаем страницу материала и извлекаем её (как в режиме page-листа).
@@ -1357,4 +1389,3 @@ bool Worker::recon_and_confirm(const Config& cfg, const SourceConfig& src,
 }
 
 } // namespace news_rewriter
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    

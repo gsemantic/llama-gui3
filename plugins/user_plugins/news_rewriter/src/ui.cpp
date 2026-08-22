@@ -246,7 +246,19 @@ void render_settings_rewrite([[maybe_unused]] UiDeps& deps, Config& draft) {
                             "сбое статья уходит с механическим приведением.");
     }
     ImGui::TextDisabled("Ключевое слово используется как alt для обложки и "
-                        "пишется в meta плагинов (Yoast/RankMath).");
+                         "пишется в meta плагинов (Yoast/RankMath).");
+
+    ImGui::Separator();
+    ImGui::Checkbox("Авто-таксономия (рубрики/теги из RSS → перевод → WP)",
+                    &draft.rewrite.taxonomy.enabled);
+    if (draft.rewrite.taxonomy.enabled) {
+        ImGui::Checkbox("Проставлять рубрики/теги в WP (иначе только хранить "
+                        "в статье)", &draft.rewrite.taxonomy.auto_assign);
+        ImGui::TextDisabled("Рубрики и теги извлекаются из RSS <category>, "
+                            "переводятся на русский и создаются в WP при "
+                            "необходимости (с соблюдением иерархии). Best-effort: "
+                            "сбой таксономии не роняет статью.");
+    }
 }
 
 // Вкладка «Выход»: тип приёмника и его параметры (local_file/http/wordpress).

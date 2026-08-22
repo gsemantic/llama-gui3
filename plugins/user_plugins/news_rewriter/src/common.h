@@ -45,6 +45,11 @@ struct Article {
     std::string seo_slug;           // slug из focus_keyword (транслит, SEO-шаг)
     int seo_score = -1;             // итог SEO-скоркарда (0..100), -1 = не считалось
     std::string seo_issues_text;    // перечень POOR-метрик (человекочитаемо, из summary())
+    // Таксономия (рубрики/теги): сырьё из источника + перевод на русский.
+    std::vector<std::string> categories_original;  // сырые рубрики из RSS <category>
+                                                    // (иерархия как "A / B" или "A > B")
+    std::vector<std::string> categories_ru;        // переведённые рубрики (пути "РуA > РуB")
+    std::vector<std::string> tags_ru;              // переведённые теги (плоский список)
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;

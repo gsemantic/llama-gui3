@@ -101,6 +101,11 @@ Json config_to_json(const Config& cfg) {
     delivery["canonical"] = cfg.rewrite.seo.delivery.canonical;
     seo["delivery"] = delivery;
 
+    Json tax = Json::object();
+    tax["enabled"] = cfg.rewrite.taxonomy.enabled;
+    tax["auto_assign"] = cfg.rewrite.taxonomy.auto_assign;
+    rewrite["taxonomy"] = tax;
+
     rewrite["seo"] = seo;
     j["rewrite"] = rewrite;
 
@@ -158,7 +163,6 @@ Config config_from_json(const Json& j) {
                 .as_bool(cfg.rewrite.seo.combine_with_rewrite);
             cfg.rewrite.seo.prompt_template =
                 seo.get("prompt_template").as_string(cfg.rewrite.seo.prompt_template);
-
             const Json& w = seo.get("writing");
             if (w.is_object()) {
                 auto& wc = cfg.rewrite.seo.writing;
@@ -218,6 +222,14 @@ Config config_from_json(const Json& j) {
                 dc.twitter_tags = d.get("twitter_tags").as_bool(dc.twitter_tags);
                 dc.canonical = d.get("canonical").as_bool(dc.canonical);
             }
+        }
+
+        const Json& tax = rewrite.get("taxonomy");
+        if (tax.is_object()) {
+            cfg.rewrite.taxonomy.enabled =
+                tax.get("enabled").as_bool(cfg.rewrite.taxonomy.enabled);
+            cfg.rewrite.taxonomy.auto_assign =
+                tax.get("auto_assign").as_bool(cfg.rewrite.taxonomy.auto_assign);
         }
     }
 

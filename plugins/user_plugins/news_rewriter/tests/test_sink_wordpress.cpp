@@ -230,6 +230,53 @@ static void test_wp_sink_pages_skips_taxonomy() {
 REGISTER_TEST(test_wp_sink_custom_post_type);
 REGISTER_TEST(test_wp_sink_pages_skips_taxonomy);
 
+// Динамическая таксономия (categories_ru/tags_ru) из статьи резолвится в WP и
+// проставляется в создаваемом посте. Тестовый сервер не различает GET/POST на
+// одном пути, поэтому поиск и создание оба возвращают {"id":N} — этого
+// достаточно, чтобы эмулировать «термин создан и получил id».
+static void test_wp_sink_assigns_dynamic_taxonomy() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+    srv.add_route("/wp-json/wp/v2/categories", "{\"id\":11}");
+    srv.add_route("/wp-json/wp/v2/tags", "{\"id\":22}");
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.categories_ru = {"Мир > Европа"};
+    a.tags_ru = {"Евросоюз", "саммит"};
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("\"categories\":[11]") != std::string::npos);
+    TEST_ASSERT(req.find("\"tags\":[22]") != std::string::npos);
+}
+
+// При taxonomy_auto_assign=false динамическая таксономия не шлётся в WP.
+static void test_wp_sink_skips_dynamic_taxonomy_when_disabled() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    SinkConfig cfg = make_config(srv.base_url());
+    cfg.params["taxonomy_auto_assign"] = false;
+    Storage storage;
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+    Article a = make_article();
+    a.categories_ru = {"Мир > Европа"};
+    a.tags_ru = {"Евросоюз"};
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    // В теле поста не должно быть проставленной таксономии (в URL-ах поиска
+    // кавычек нет — проверяем именно поле JSON-тела).
+    TEST_ASSERT(req.find("\"categories\":") == std::string::npos);
+    TEST_ASSERT(req.find("\"tags\":") == std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_assigns_dynamic_taxonomy);
+REGISTER_TEST(test_wp_sink_skips_dynamic_taxonomy_when_disabled);
+
 // При успешной заливке картинки в медиабиблиотеку WP она отдаётся через поле
 // featured_media, а в текст НЕ дублируется инлайн-<img>. В теле поста при этом
 // обязана быть ссылка на источник.

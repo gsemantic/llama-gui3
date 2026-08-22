@@ -248,6 +248,46 @@ static void test_seo_refine_rejects_truncation() {
     TEST_ASSERT_FALSE(r.ok);
 }
 
+// ---- Перевод таксономии ----------------------------------------------------
+
+static void test_parse_taxonomy_valid() {
+    const TaxonomyResult r = parse_taxonomy_response(
+        "{\"categories\":[\"Мир > Европа\"],\"tags\":[\"Евросоюз\",\"саммит\"]}");
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_EQUAL(r.categories.size(), 1u);
+    TEST_ASSERT_EQUAL(r.categories[0], "Мир > Европа");
+    TEST_ASSERT_EQUAL(r.tags.size(), 2u);
+    TEST_ASSERT_EQUAL(r.tags[0], "Евросоюз");
+    TEST_ASSERT_EQUAL(r.tags[1], "саммит");
+}
+
+static void test_parse_taxonomy_handles_fences_and_text() {
+    const TaxonomyResult r = parse_taxonomy_response(
+        "Вот таксономия:\n```json\n{\"categories\":[\"Спорт\"],\"tags\":[\"футбол\"]}\n```");
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_EQUAL(r.categories.size(), 1u);
+    TEST_ASSERT_EQUAL(r.categories[0], "Спорт");
+    TEST_ASSERT_EQUAL(r.tags.size(), 1u);
+}
+
+static void test_parse_taxonomy_empty_is_error() {
+    const TaxonomyResult r = parse_taxonomy_response("{\"categories\":[],\"tags\":[]}");
+    TEST_ASSERT_FALSE(r.ok);
+}
+
+static void test_parse_taxonomy_no_json_is_error() {
+    const TaxonomyResult r = parse_taxonomy_response("рубрики: Мир");
+    TEST_ASSERT_FALSE(r.ok);
+}
+
+static void test_parse_taxonomy_trims_entries() {
+    const TaxonomyResult r = parse_taxonomy_response(
+        "{\"categories\":[\"  Мир   >   Европа  \"],\"tags\":[\"  футбол  \"]}");
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_EQUAL(r.categories[0], "Мир > Европа");
+    TEST_ASSERT_EQUAL(r.tags[0], "футбол");
+}
+
 REGISTER_TEST(test_build_prompt_substitutions);
 REGISTER_TEST(test_validate_rewrite_wrong_script_rejected);
 REGISTER_TEST(test_validate_rewrite_refusal_rejected);
@@ -271,5 +311,10 @@ REGISTER_TEST(test_rewrite_no_llm);
 REGISTER_TEST(test_build_prompt_max_words_appends_instruction);
 REGISTER_TEST(test_build_prompt_max_words_zero_no_instruction);
 REGISTER_TEST(test_build_prompt_max_words_placeholder);
+REGISTER_TEST(test_parse_taxonomy_valid);
+REGISTER_TEST(test_parse_taxonomy_handles_fences_and_text);
+REGISTER_TEST(test_parse_taxonomy_empty_is_error);
+REGISTER_TEST(test_parse_taxonomy_no_json_is_error);
+REGISTER_TEST(test_parse_taxonomy_trims_entries);
 
 } // namespace

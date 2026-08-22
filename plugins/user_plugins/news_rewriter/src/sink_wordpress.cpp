@@ -239,6 +239,101 @@ std::string ext_for_mime(const std::string& mime) {
     return "";
 }
 
+// Процентное URL-кодирование (для параметра ?search= в WP REST).
+std::string url_encode(const std::string& in) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size() * 3);
+    for (unsigned char c : in) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+            c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[(c >> 4) & 0x0F];
+            out += hex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+// Регистронезависимое сравнение строк (ASCII; кириллица сравнивается как есть —
+// WP отдаёт имена в точном регистре, поэтому для кириллицы важно совпадение).
+bool ci_equal(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + ('a' - 'A'));
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+// Трим краёв (без схлопывания внутренних пробелов).
+std::string trim_edge(const std::string& s) {
+    const std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const std::size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// Разбивает путь рубрики на уровни иерархии по разделителям
+// " > ", ">", "/", "|", "»", "→". Возвращает нетронутый список, если разделителей
+// нет (одноуровневая рубрика).
+//
+// Разделители "»" (0xC2 0xBB) и "→" (0xE2 0x86 0x92) — многобайтовые в UTF-8,
+// поэтому сравниваем их как последовательности байт, а не как char-литералы.
+std::vector<std::string> split_taxonomy_path(const std::string& path) {
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&]() {
+        std::string t = trim_edge(cur);
+        if (!t.empty()) out.push_back(t);
+        cur.clear();
+    };
+    const std::size_t n = path.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        unsigned char c = static_cast<unsigned char>(path[i]);
+        bool sep = false;
+        std::size_t adv = 1;
+        if (c == '>' || c == '/' || c == '|') {
+            sep = true;
+        } else if (c == 0xC2 && i + 1 < n &&
+                   static_cast<unsigned char>(path[i + 1]) == 0xBB) {
+            // "»"
+            sep = true;
+            adv = 2;
+        } else if (c == 0xE2 && i + 2 < n &&
+                   static_cast<unsigned char>(path[i + 1]) == 0x86 &&
+                   static_cast<unsigned char>(path[i + 2]) == 0x92) {
+            // "→"
+            sep = true;
+            adv = 3;
+        }
+        if (sep) {
+            flush();
+            i += adv - 1;
+        } else {
+            cur += static_cast<char>(c);
+        }
+    }
+    flush();
+    return out;
+}
+
+// Удаляет дубликаты из списка int, сохраняя порядок первого появления.
+std::vector<int> dedupe_ints(std::vector<int> v) {
+    std::vector<int> out;
+    for (int x : v) {
+        bool found = false;
+        for (int y : out) if (y == x) { found = true; break; }
+        if (!found) out.push_back(x);
+    }
+    return out;
+}
+
 // --- WordPressSink ----------------------------------------------------------
 
 class WordPressSink : public Sink {
@@ -265,6 +360,8 @@ public:
               cfg.params.get("max_retries").as_int(0))),
           retry_delay_ms_(static_cast<int>(
               cfg.params.get("retry_delay_ms").as_int(1000))),
+          taxonomy_auto_assign_(
+              cfg.params.get("taxonomy_auto_assign").as_bool(true)),
           log_(log) {
         // Опциональные числовые id-массивы/скаляры.
         const Json& cats = cfg.params.get("categories");
@@ -387,14 +484,27 @@ public:
         // Категории/теги поддерживают не все типы: стандартные «страницы»
         // (pages) их не принимают — WP вернёт 400. Для них не шлём таксономию.
         if (post_type_ != "pages") {
-            if (!categories_.empty()) {
+            std::vector<int> cat_ids = categories_;
+            std::vector<int> tag_ids = tags_;
+            // Динамическая таксономия из статьи (переведённые рубрики/теги).
+            if (taxonomy_auto_assign_) {
+                const std::vector<int> dyn_cats =
+                    resolve_categories(article, nc, auth);
+                const std::vector<int> dyn_tags =
+                    resolve_tags(article, nc, auth);
+                cat_ids.insert(cat_ids.end(), dyn_cats.begin(), dyn_cats.end());
+                tag_ids.insert(tag_ids.end(), dyn_tags.begin(), dyn_tags.end());
+            }
+            cat_ids = dedupe_ints(cat_ids);
+            tag_ids = dedupe_ints(tag_ids);
+            if (!cat_ids.empty()) {
                 Json arr = Json::array();
-                for (int id : categories_) arr.push(static_cast<int64_t>(id));
+                for (int id : cat_ids) arr.push(static_cast<int64_t>(id));
                 body["categories"] = arr;
             }
-            if (!tags_.empty()) {
+            if (!tag_ids.empty()) {
                 Json arr = Json::array();
-                for (int id : tags_) arr.push(static_cast<int64_t>(id));
+                for (int id : tag_ids) arr.push(static_cast<int64_t>(id));
                 body["tags"] = arr;
             }
         }
@@ -591,6 +701,108 @@ private:
         return {media_id, source_url};
     }
 
+    // Резолвит термин таксономии (categories/tags) по имени: ищет существующий
+    // (с точным совпадением, с учётом parent для categories), иначе создаёт
+    // через WP REST API. Возвращает id (0 при неудаче, best-effort — пост не
+    // должен падать из-за таксономии). Для tags parent игнорируется (теги
+    // плоские).
+    int resolve_term(const std::string& taxonomy, const std::string& raw_name,
+                     int parent_id, const NetworkConfig& nc,
+                     const std::string& auth) {
+        std::string name = trim_edge(raw_name);
+        if (name.empty()) return 0;
+        if (taxonomy != "categories" && taxonomy != "tags") return 0;
+
+        // 1) Ищем существующий термин.
+        const std::string search_ep =
+            site_url_ + "/wp-json/wp/v2/" + taxonomy + "?search=" +
+            url_encode(name) +
+            (taxonomy == "categories"
+                 ? "&parent=" + std::to_string(parent_id)
+                 : "");
+        HttpResponse sr = client_.get(
+            search_ep, nc,
+            std::vector<std::string>{"Authorization: Basic " + auth});
+        if (sr.ok && sr.status == 200) {
+            bool ok = false;
+            Json arr = Json::parse(sr.body, &ok);
+            if (ok && arr.is_array()) {
+                for (std::size_t i = 0; i < arr.size(); ++i) {
+                    const Json& item = arr[i];
+                    if (!item.is_object()) continue;
+                    if (ci_equal(item.get("name").as_string(), name)) {
+                        const Json& idj = item.get("id");
+                        if (idj.is_number())
+                            return static_cast<int>(idj.as_int(0));
+                    }
+                }
+            }
+        }
+
+        // 2) Не нашли — создаём.
+        Json payload = Json::object();
+        payload["name"] = name;
+        if (taxonomy == "categories" && parent_id != 0)
+            payload["parent"] = static_cast<int64_t>(parent_id);
+        const std::string ep = site_url_ + "/wp-json/wp/v2/" + taxonomy;
+        std::vector<std::string> headers = {
+            "Content-Type: application/json",
+            "Authorization: Basic " + auth};
+        HttpResponse cr = client_.post(ep, payload.dump(), nc, headers);
+        if (cr.ok && (cr.status == 201 || cr.status == 200)) {
+            bool ok = false;
+            Json j = Json::parse(cr.body, &ok);
+            if (ok && j.is_object()) {
+                const Json& idj = j.get("id");
+                if (idj.is_number()) {
+                    const int id = static_cast<int>(idj.as_int(0));
+                    if (log_) {
+                        log_("WordPressSink: термин «" + name + "» (" +
+                             taxonomy + ") создан id=" + std::to_string(id));
+                    }
+                    return id;
+                }
+            }
+        }
+        if (log_) {
+            std::string detail = cr.body;
+            if (detail.size() > 200) detail = detail.substr(0, 200) + "…";
+            log_("WordPressSink: не удалось резолвить термин «" + name +
+                 "» (" + taxonomy + "): HTTP " + std::to_string(cr.status) +
+                 (detail.empty() ? std::string("") : " " + detail));
+        }
+        return 0;
+    }
+
+    // Резолвит динамические рубрики статьи (иерархические пути "РуA > РуB")
+    // в список id, соблюдая родительско-дочернюю структуру.
+    std::vector<int> resolve_categories(const Article& a, const NetworkConfig& nc,
+                                        const std::string& auth) {
+        std::vector<int> ids;
+        for (const std::string& path : a.categories_ru) {
+            std::vector<std::string> levels = split_taxonomy_path(path);
+            int parent = 0;
+            for (const std::string& lvl : levels) {
+                const int id = resolve_term("categories", lvl, parent, nc, auth);
+                if (id == 0) break;  // уровень не создался — глубже нет смысла
+                ids.push_back(id);
+                parent = id;
+            }
+        }
+        return ids;
+    }
+
+    // Резолвит динамические теги статьи (плоский список) в список id.
+    std::vector<int> resolve_tags(const Article& a, const NetworkConfig& nc,
+                                  const std::string& auth) {
+        std::vector<int> ids;
+        for (const std::string& t : a.tags_ru) {
+            const int id = resolve_term("tags", t, 0, nc, auth);
+            if (id != 0) ids.push_back(id);
+        }
+        return ids;
+    }
+
     HttpClient client_;
     std::string env_path_;      // <data_dir>/news_rewriter/.env (секреты)
     Storage& storage_;         // для стабильного slug-а (сверка с сайтом)
@@ -606,6 +818,7 @@ private:
     std::vector<int> categories_;
     std::vector<int> tags_;
     int author_ = 0;
+    bool taxonomy_auto_assign_ = true;  // проставлять динамическую таксономию в WP
     int timeout_ = 20;
     int max_retries_ = 0;
     int retry_delay_ms_ = 1000;

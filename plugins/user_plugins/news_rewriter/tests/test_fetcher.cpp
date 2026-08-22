@@ -185,6 +185,49 @@ static void test_fetcher_sibling_feed_fallback() {
     TEST_ASSERT_EQUAL(res.items[0].title, "Новость 1");
 }
 
+// RSS <category> должен попадать в item.categories (плоский список).
+static void test_fetcher_rss_categories() {
+    MiniHttpServer srv;
+    const char* rss =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        "<rss version=\"2.0\"><channel><title>T</title>"
+        "<item><title>Новость</title><link>http://x/1</link>"
+        "<category>World</category>"
+        "<category>Politics</category>"
+        "</item></channel></rss>";
+    TEST_ASSERT_TRUE(srv.start(200, rss, "application/rss+xml"));
+    Fetcher f;
+    TEST_ASSERT_TRUE(f.init());
+    NetworkConfig cfg;
+    const FetchResult res = f.fetch(srv.base_url() + "/feed", "rss", cfg);
+    TEST_ASSERT_TRUE(res.ok);
+    TEST_ASSERT_EQUAL(res.items.size(), std::size_t(1));
+    TEST_ASSERT_EQUAL(res.items[0].categories.size(), std::size_t(2));
+    TEST_ASSERT_EQUAL(res.items[0].categories[0], "World");
+    TEST_ASSERT_EQUAL(res.items[0].categories[1], "Politics");
+}
+
+// Atom <category term="..."> должен попадать в item.categories.
+static void test_fetcher_atom_categories() {
+    MiniHttpServer srv;
+    const char* atom =
+        "<feed xmlns=\"http://www.w3.org/2005/Atom\">"
+        "<entry><title>A</title><link href=\"http://x/a\" rel=\"alternate\"/>"
+        "<category term=\"Технологии\"/>"
+        "<category term=\"Наука\"/>"
+        "</entry></feed>";
+    TEST_ASSERT_TRUE(srv.start(200, atom, "application/atom+xml"));
+    Fetcher f;
+    TEST_ASSERT_TRUE(f.init());
+    NetworkConfig cfg;
+    const FetchResult res = f.fetch(srv.base_url() + "/atom", "atom", cfg);
+    TEST_ASSERT_TRUE(res.ok);
+    TEST_ASSERT_EQUAL(res.items.size(), std::size_t(1));
+    TEST_ASSERT_EQUAL(res.items[0].categories.size(), std::size_t(2));
+    TEST_ASSERT_EQUAL(res.items[0].categories[0], "Технологии");
+    TEST_ASSERT_EQUAL(res.items[0].categories[1], "Наука");
+}
+
 REGISTER_TEST(test_fetcher_rss);
 REGISTER_TEST(test_fetcher_atom);
 REGISTER_TEST(test_fetcher_page);
@@ -195,3 +238,5 @@ REGISTER_TEST(test_fetcher_rss_full_text);
 REGISTER_TEST(test_fetcher_discovers_feed_link);
 REGISTER_TEST(test_fetcher_discovers_relative_feed_link);
 REGISTER_TEST(test_fetcher_sibling_feed_fallback);
+REGISTER_TEST(test_fetcher_rss_categories);
+REGISTER_TEST(test_fetcher_atom_categories);

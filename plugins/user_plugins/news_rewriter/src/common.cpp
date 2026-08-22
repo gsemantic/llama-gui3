@@ -308,6 +308,22 @@ Json article_to_json(const Article& a) {
     if (!a.seo_slug.empty()) j["seo_slug"] = a.seo_slug;
     if (a.seo_score >= 0) j["seo_score"] = a.seo_score;
     if (!a.seo_issues_text.empty()) j["seo_issues_text"] = a.seo_issues_text;
+    // Таксономия (сырьё и перевод) — для отладки/повторного использования.
+    if (!a.categories_original.empty()) {
+        Json arr = Json::array();
+        for (const auto& c : a.categories_original) arr.push(c);
+        j["categories_original"] = arr;
+    }
+    if (!a.categories_ru.empty()) {
+        Json arr = Json::array();
+        for (const auto& c : a.categories_ru) arr.push(c);
+        j["categories_ru"] = arr;
+    }
+    if (!a.tags_ru.empty()) {
+        Json arr = Json::array();
+        for (const auto& t : a.tags_ru) arr.push(t);
+        j["tags_ru"] = arr;
+    }
     return j;
 }
 

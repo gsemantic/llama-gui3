@@ -75,6 +75,18 @@ std::vector<FeedItem> extract_rss(const XmlNode& root) {
         // либо стандартный author.
         f.author = child_text(*item, "creator");
         if (f.author.empty()) f.author = child_text(*item, "author");
+        // Рубрики/теги: все <category> элемента (RSS 2.0, могут повторяться).
+        // Иерархия внутри одного тега (если источник кодирует её через
+        // разделители " / ", " > ", "»", "|") сохраняется как есть — перевод и
+        // разбор на уровни делает LLM-шаг translate_taxonomy.
+        for (const XmlNode* c : find_children(*item, "category")) {
+            std::string t = c->text;
+            const std::size_t b = t.find_first_not_of(" \t\r\n");
+            if (b == std::string::npos) continue;
+            const std::size_t e = t.find_last_not_of(" \t\r\n");
+            t = t.substr(b, e - b + 1);
+            if (!t.empty()) f.categories.push_back(t);
+        }
         if (!f.title.empty() || !f.link.empty()) {
             items.push_back(std::move(f));
         }
@@ -126,6 +138,12 @@ std::vector<FeedItem> extract_atom(const XmlNode& root) {
         if (f.pub_date.empty()) f.pub_date = child_text(*entry, "published");
         // Atom: <author><name>Имя</name></author> → child_text берёт вложенный текст.
         f.author = child_text(*entry, "author");
+        // Atom: <category term="Politics" scheme="..."/> → атрибут term.
+        for (const XmlNode* c : find_children(*entry, "category")) {
+            const std::string term = c->attrs.count("term")
+                                          ? c->attrs.at("term") : "";
+            if (!term.empty()) f.categories.push_back(term);
+        }
         // <link href="..." rel="alternate">
         for (const XmlNode* link : find_children(*entry, "link")) {
             const std::string rel = link->attrs.count("rel") ? link->attrs.at("rel") : "alternate";

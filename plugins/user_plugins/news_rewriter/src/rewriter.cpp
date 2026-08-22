@@ -798,9 +798,144 @@ SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
 }
 
 SeoRefineResult seo_refine(const Article& src, const SeoConfig& cfg,
-                           const std::string& feedback, const LlmFn& llm) {
+                            const std::string& feedback, const LlmFn& llm) {
     return seo_refine(src, cfg, feedback,
                       build_seo_refine_role_prompt(cfg, src.language), llm);
+}
+
+// ============================================================================
+// Перевод таксономии (рубрики/теги → русские названия)
+// ============================================================================
+
+std::string build_taxonomy_role_prompt(const std::string& language) {
+    (void)language;
+    return
+        "Ты — редактор таксономии новостного сайта. Тебе даны исходные рубрики и "
+        "теги статьи (как правило, на английском или языке источника) и сама "
+        "статья. Переведи рубрики и теги на русский язык.\n"
+        "Правила:\n"
+        "- Сохраняй иерархию рубрик: если исходник задаёт вложенность "
+        "(через «/», «>», «»» или «|»), запиши её в виде «Родитель > Ребёнок > "
+        "Внук», разделяя уровни русским « > ».\n"
+        "- Поле «categories» — массив строк, каждая строка — ОДИН путь рубрики "
+        "(уровни через « > »). Это иерархические разделы сайта.\n"
+        "- Поле «tags» — плоский массив строк: более конкретные ключевые слова "
+        "(персоны, организации, понятия), производные от рубрик и содержания "
+        "статьи. Не дублируй в тегах целые пути рубрик.\n"
+        "- Используй устоявшиеся русские названия разделов (напр. World → Мир, "
+        "Politics → Политика, Technology → Технологии, Sports → Спорт).\n"
+        "- Не добавляй лишних рубрик/тегов, которых нет в исходнике или в "
+        "тексте; переводи максимально близко к исходному набору.\n"
+        "Ответь СТРОГО одним JSON-объектом без пояснений и без markdown-разметки "
+        "(никаких ```):\n"
+        "{\"categories\":[\"Мир > Европа\"],\"tags\":[\"Евросоюз\",\"саммит\"]}";
+}
+
+std::string build_taxonomy_user_prompt(const Article& src) {
+    std::string p = "Язык статьи: " + src.language + "\n";
+    p += "Заголовок: " + src.title_original + "\n";
+    p += "Текст: " + truncate_input(src.body_original, 4000) + "\n\n";
+    if (!src.categories_original.empty()) {
+        p += "Исходные рубрики/теги источника:\n";
+        for (const auto& c : src.categories_original) {
+            p += "- " + c + "\n";
+        }
+    } else {
+        p += "Исходные рубрики/теги источника отсутствуют — выведи рубрики и "
+              "теги на русском, исходя из содержания статьи.\n";
+    }
+    p += "\nВерни JSON {categories:[...], tags:[...]}.";
+    return p;
+}
+
+namespace {
+// Схлопывание/трим одной строки таксономии (как trim_collapse выше).
+std::string trim_tax(const std::string& s) {
+    const std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const std::size_t e = s.find_last_not_of(" \t\r\n");
+    std::string line = s.substr(b, e - b + 1);
+    std::string out;
+    out.reserve(line.size());
+    bool prev = false;
+    for (char c : line) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            prev = true;
+        } else {
+            if (prev && !out.empty()) out += ' ';
+            out += c;
+            prev = false;
+        }
+    }
+    return out;
+}
+} // namespace
+
+TaxonomyResult parse_taxonomy_response(const std::string& response) {
+    TaxonomyResult result;
+    if (response.empty()) {
+        result.error = "пустой ответ LLM";
+        return result;
+    }
+    const std::size_t open = response.find('{');
+    const std::size_t close = response.rfind('}');
+    if (open == std::string::npos || close == std::string::npos || close <= open) {
+        result.error = "в ответе LLM нет JSON (ожидался таксономия в JSON)";
+        return result;
+    }
+    const std::string json = response.substr(open, close - open + 1);
+    bool ok = false;
+    Json j = Json::parse(json, &ok);
+    if (!ok || !j.is_object()) {
+        result.error = "не удалось разобрать JSON таксономии";
+        return result;
+    }
+    const Json& cats = j["categories"];
+    if (cats.is_array()) {
+        for (std::size_t i = 0; i < cats.size(); ++i) {
+            std::string c = trim_tax(cats[i].as_string());
+            if (!c.empty()) result.categories.push_back(c);
+        }
+    }
+    const Json& tags = j["tags"];
+    if (tags.is_array()) {
+        for (std::size_t i = 0; i < tags.size(); ++i) {
+            std::string t = trim_tax(tags[i].as_string());
+            if (!t.empty()) result.tags.push_back(t);
+        }
+    }
+    if (result.categories.empty() && result.tags.empty()) {
+        result.error = "таксономия пуста";
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
+TaxonomyResult translate_taxonomy(const Article& src, const std::string& role_prompt,
+                                  const LlmFn& llm) {
+    TaxonomyResult result;
+    if (!llm) {
+        result.error = "LLM не настроен";
+        return result;
+    }
+    if (src.title_original.empty() && src.categories_original.empty()) {
+        result.error = "нет данных для перевода таксономии";
+        return result;
+    }
+    const std::string user = build_taxonomy_user_prompt(src);
+    std::string response, llm_error;
+    if (!llm(role_prompt, user, response, llm_error)) {
+        result.error = llm_error.empty() ? "LLM недоступен" : llm_error;
+        return result;
+    }
+    return parse_taxonomy_response(response);
+}
+
+TaxonomyResult translate_taxonomy_with_language(const Article& src,
+                                                const std::string& language,
+                                                const LlmFn& llm) {
+    return translate_taxonomy(src, build_taxonomy_role_prompt(language), llm);
 }
 
 } // namespace news_rewriter
