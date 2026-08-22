@@ -475,7 +475,12 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
     // соблюдение иерархии). Best-effort: не роняем статью при сбое.
     auto apply_taxonomy = [&]() {
         if (!cfg.rewrite.taxonomy.enabled) return;
-        if (a.categories_original.empty()) return;
+        // Если в источнике нет <category>, генерируем рубрики/теги из текста
+        // статьи (промпт translate_taxonomy это поддерживает). Достаточно
+        // наличия заголовка или текста, чтобы LLM мог вывести таксономию.
+        if (a.categories_original.empty() && a.title_original.empty() &&
+            a.body_original.empty())
+            return;
         if (!llm_) return;
         TaxonomyResult tr = translate_taxonomy(a, role_taxonomy_, llm_);
         if (tr.ok) {
