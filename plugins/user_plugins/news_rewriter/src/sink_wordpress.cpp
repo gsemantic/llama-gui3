@@ -89,7 +89,15 @@ std::string body_to_html(const std::string& body) {
     }
     if (!cur.empty()) blocks.push_back(cur);
 
+    auto strip_stars = [](const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) if (c != '*') out += c;
+        return out;
+    };
+
     std::string html;
+    bool first_content = true;
     for (auto block : blocks) {
         // Обрезка краевых пробелов/переносов.
         const std::size_t b = block.find_first_not_of(" \t\r\n");
@@ -97,8 +105,24 @@ std::string body_to_html(const std::string& body) {
         const std::size_t e = block.find_last_not_of(" \t\r\n");
         block = block.substr(b, e - b + 1);
 
-        if (block.rfind("# ", 0) == 0) {
-            html += "<h2>" + inline_markdown(block.substr(2)) + "</h2>\n";
+        // Заголовок Markdown: 1–6 решёток + пробел.
+        std::size_t h = 0;
+        while (h < block.size() && block[h] == '#') h++;
+        const bool is_heading = h >= 1 && h <= 6 &&
+                                block.size() > h &&
+                                (block[h] == ' ' || block[h] == '\t');
+        if (is_heading) {
+            std::string text = block.substr(h);
+            const std::size_t tb = text.find_first_not_of(" \t");
+            if (tb != std::string::npos) text = text.substr(tb);
+            if (first_content) {
+                // Первый блок — это вступление-лид: рендерим жирным абзацем,
+                // а не <h2>, даже если модель обернула его в '## ...'.
+                html += "<p><strong>" + inline_markdown(strip_stars(text)) +
+                        "</strong></p>\n";
+            } else {
+                html += "<h2>" + inline_markdown(text) + "</h2>\n";
+            }
         } else {
             std::string with_br;
             std::string line;
@@ -113,6 +137,7 @@ std::string body_to_html(const std::string& body) {
             if (!line.empty()) with_br += inline_markdown(line);
             html += "<p>" + with_br + "</p>\n";
         }
+        first_content = false;
     }
     return html;
 }
