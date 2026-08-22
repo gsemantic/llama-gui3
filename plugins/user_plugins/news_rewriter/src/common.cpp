@@ -442,4 +442,28 @@ std::string ensure_utf8(const std::string& text) {
     return cp1251_to_utf8(text);
 }
 
+bool has_cyrillic(const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        if (b0 < 0x80) { i += 1; continue; }
+        int n = 0;
+        unsigned int cp = 0;
+        if ((b0 & 0xE0) == 0xC0) { n = 1; cp = b0 & 0x1F; }
+        else if ((b0 & 0xF0) == 0xE0) { n = 2; cp = b0 & 0x0F; }
+        else if ((b0 & 0xF8) == 0xF0) { n = 3; cp = b0 & 0x07; }
+        else { i += 1; continue; }
+        const std::size_t end = i + 1 + n;
+        if (end > s.size()) { i += 1; continue; }
+        for (int k = 1; k <= n; ++k) {
+            const unsigned char bk = static_cast<unsigned char>(s[i + k]);
+            if ((bk & 0xC0) != 0x80) { cp = 0; break; }
+            cp = (cp << 6) | (bk & 0x3F);
+        }
+        if (cp >= 0x400 && cp <= 0x4FF) return true;  // кириллический блок
+        i = end;
+    }
+    return false;
+}
+
 } // namespace news_rewriter

@@ -92,4 +92,9 @@ std::string to_utf8(const std::string& text, const std::string& content_type);
 // попадали в интерфейс ни по какому пути.
 std::string ensure_utf8(const std::string& text);
 
+// Содержит ли строка хотя бы один кириллический символ (блок U+0400–U+04FF).
+// Используется, чтобы не дублировать подпись «Автор оригинала» для имён,
+// уже записанных кириллицей.
+bool has_cyrillic(const std::string& text);
+
 } // namespace news_rewriter

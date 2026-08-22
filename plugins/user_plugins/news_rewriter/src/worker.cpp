@@ -9,6 +9,7 @@
 
 #include "extractor.h"
 #include "seo_reformer.h"
+#include "common.h"
 
 namespace news_rewriter {
 
@@ -19,6 +20,46 @@ namespace {
 std::uint64_t estimate_tokens(const std::string& s) {
     if (s.empty()) return 0;
     return std::max<std::uint64_t>(1, s.size() / 4);
+}
+
+// Удаляет строки-подписи «Автор оригинала: …», сгенерированные моделью
+// (в т.ч. с дублем «Имя (Имя)»), чтобы код мог проставить каноническую.
+static std::string strip_author_signature(const std::string& body) {
+    std::string out;
+    std::size_t i = 0;
+    const std::size_t n = body.size();
+    while (i < n) {
+        const std::size_t nl = body.find('\n', i);
+        std::string line = body.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+        std::string t = line;
+        const std::size_t tb = t.find_first_not_of(" \t\r\n");
+        if (tb != std::string::npos) {
+            const std::size_t te = t.find_last_not_of(" \t\r\n");
+            t = t.substr(tb, te - tb + 1);
+        }
+        if (t.rfind("Автор оригинала", 0) == 0) {
+            i = (nl == std::string::npos) ? n : nl + 1;
+            continue;
+        }
+        out += line;
+        if (nl == std::string::npos) break;
+        out += '\n';
+        i = nl + 1;
+    }
+    return out;
+}
+
+// Добавляет подпись «Автор оригинала» в конец переписанного текста для имён,
+// уже записанных кириллицей (модель их не дублирует — ей запрещено, а если
+// всё же добавила — строка удаляется и ставится каноническая). Для
+// не-кириллических имён (китайские/латинские) транслитерацию делает модель,
+// тело не трогаем.
+void ensure_author_signature(Article& a) {
+    if (a.author_original.empty()) return;
+    if (has_cyrillic(a.author_original)) {
+        a.body_rewritten = strip_author_signature(a.body_rewritten);
+        a.body_rewritten += "\n\nАвтор оригинала: " + a.author_original;
+    }
 }
 
 // Порог «SEO-скоркард ниже нормы» (по итоговому баллу 0..100).
@@ -477,6 +518,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
             if (cr.ok && !cr.title.empty() && !cr.body.empty()) {
                 a.title_rewritten = cr.title;
                 a.body_rewritten = cr.body;
+                ensure_author_signature(a);
                 if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 apply_seo(cr.seo);
                 apply_reform();
@@ -498,6 +540,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
                 if (rr.ok) {
                     a.title_rewritten = rr.title;
                     a.body_rewritten = rr.body;
+                    ensure_author_signature(a);
                     if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                     if (seo_enabled && !seo_skipped_.load()) {
                         apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
@@ -513,6 +556,7 @@ bool Worker::rewrite(Article& a, const Config& cfg) {
             if (rr.ok) {
                 a.title_rewritten = rr.title;
                 a.body_rewritten = rr.body;
+                ensure_author_signature(a);
                 if (a.title_rewritten.empty()) a.title_rewritten = a.title_original;
                 if (seo_enabled && !seo_skipped_.load()) {
                     apply_seo(generate_seo(a, cfg.rewrite.seo, role_seo_, llm_));
