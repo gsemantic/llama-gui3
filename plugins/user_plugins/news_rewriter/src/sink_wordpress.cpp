@@ -121,7 +121,9 @@ std::string body_to_html(const std::string& body) {
                 html += "<p><strong>" + inline_markdown(strip_stars(text)) +
                         "</strong></p>\n";
             } else {
-                html += "<h2>" + inline_markdown(text) + "</h2>\n";
+                // Подзаголовки (## …) — в <h3> для SEO-иерархии (H1 — заголовок
+                // записи, H2 резервируем под структуру темы WP).
+                html += "<h3>" + inline_markdown(text) + "</h3>\n";
             }
         } else {
             std::string with_br;
