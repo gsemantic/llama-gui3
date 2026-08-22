@@ -495,6 +495,24 @@ public:
                 cat_ids.insert(cat_ids.end(), dyn_cats.begin(), dyn_cats.end());
                 tag_ids.insert(tag_ids.end(), dyn_tags.begin(), dyn_tags.end());
             }
+            // Убираем дефолтную рубрику WP («Без рубрики»), чтобы не дублировать
+            // её с нашими назначениями — иначе пост попадает и в подходящую
+            // рубрику, и в «Без рубрики» одновременно.
+            const int def = default_category_id(nc, auth);
+            if (def != 0) {
+                std::vector<int> filtered;
+                for (int id : cat_ids) if (id != def) filtered.push_back(id);
+                cat_ids = std::move(filtered);
+            }
+            // Fallback: если конкретных рубрик нет, но таксономия включена —
+            // назначаем рубрику по имени источника, иначе WP всё равно поставит
+            // «Без рубрики».
+            if (taxonomy_auto_assign_ && cat_ids.empty() &&
+                (!article.categories_ru.empty() || !article.tags_ru.empty()) &&
+                !article.source.empty()) {
+                const int fid = resolve_term("categories", article.source, 0, nc, auth);
+                if (fid != 0 && fid != def) cat_ids.push_back(fid);
+            }
             cat_ids = dedupe_ints(cat_ids);
             tag_ids = dedupe_ints(tag_ids);
             if (!cat_ids.empty()) {
@@ -803,6 +821,39 @@ private:
         return ids;
     }
 
+    // Возвращает id дефолтной рубрики WP («Без рубрики»/uncategorized, parent=0).
+    // Кешируется на время жизни sink. Нужно, чтобы не дублировать её с нашими
+    // назначениями (иначе пост попадает и в подходящую рубрику, и в «Без
+    // рубрики» одновременно).
+    int default_category_id(const NetworkConfig& nc, const std::string& auth) {
+        if (default_category_id_ != 0) return default_category_id_;
+        const std::string ep = site_url_ +
+            "/wp-json/wp/v2/categories?per_page=100&_fields=id,name,slug,parent";
+        HttpResponse r = client_.get(
+            ep, nc, std::vector<std::string>{"Authorization: Basic " + auth});
+        if (r.ok && r.status == 200) {
+            bool ok = false;
+            Json arr = Json::parse(r.body, &ok);
+            if (ok && arr.is_array()) {
+                for (std::size_t i = 0; i < arr.size(); ++i) {
+                    const Json& item = arr[i];
+                    if (!item.is_object()) continue;
+                    const int parent = static_cast<int>(item.get("parent").as_int(0));
+                    if (parent != 0) continue;
+                    const std::string slug = item.get("slug").as_string();
+                    const std::string name = item.get("name").as_string();
+                    if (slug == "uncategorized" || name == "Без рубрики" ||
+                        name == "Uncategorized" || name == "Uncat") {
+                        default_category_id_ =
+                            static_cast<int>(item.get("id").as_int(0));
+                        break;
+                    }
+                }
+            }
+        }
+        return default_category_id_;
+    }
+
     HttpClient client_;
     std::string env_path_;      // <data_dir>/news_rewriter/.env (секреты)
     Storage& storage_;         // для стабильного slug-а (сверка с сайтом)
@@ -819,6 +870,7 @@ private:
     std::vector<int> tags_;
     int author_ = 0;
     bool taxonomy_auto_assign_ = true;  // проставлять динамическую таксономию в WP
+    int default_category_id_ = 0;       // кэш id рубрики «Без рубрики» (uncategorized)
     int timeout_ = 20;
     int max_retries_ = 0;
     int retry_delay_ms_ = 1000;
