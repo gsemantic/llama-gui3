@@ -506,9 +506,9 @@ public:
             }
             // Fallback: если конкретных рубрик нет, но таксономия включена —
             // назначаем рубрику по имени источника, иначе WP всё равно поставит
-            // «Без рубрики».
+            // «Без рубрики». Срабатывает всегда (даже если LLM не вывел
+            // таксономию вообще), при наличии имени источника.
             if (taxonomy_auto_assign_ && cat_ids.empty() &&
-                (!article.categories_ru.empty() || !article.tags_ru.empty()) &&
                 !article.source.empty()) {
                 const int fid = resolve_term("categories", article.source, 0, nc, auth);
                 if (fid != 0 && fid != def) cat_ids.push_back(fid);
