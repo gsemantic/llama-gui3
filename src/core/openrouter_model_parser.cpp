@@ -280,23 +280,51 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
     try {
         json data = json::parse(json_str);
 
+        if (!data.is_object()) {
+            // Корень ответа — не объект (строка, массив, число). Иначе любое
+            // data.value()/contains() ниже бросит type_error.
+            std::string head = json_str.substr(0, 200);
+            response.success = false;
+            response.error = "Ошибка провайдера: получен неожиданный формат ответа.\n\n";
+            response.error += "Тело ответа: " + head;
+            LOG_ERROR("[CloudParser] Неожиданный тип корня ответа: " + head);
+            return response;
+        }
+
         if (data.contains("error")) {
             const auto& error = data["error"];
-            std::string error_msg = error.value("message", "Неизвестная ошибка API");
 
-            // Handle both string and number error codes (Zhipu API returns string "1305")
+            // "error" бывает объектом ({"code","message"}) и просто строкой,
+            // например {"success":false,"error":"Access denied by security policy."}
+            std::string error_msg;
             int error_code = -1;
-            if (error.contains("code")) {
-                const auto& code_val = error["code"];
-                if (code_val.is_number_integer()) {
-                    error_code = code_val.get<int>();
-                } else if (code_val.is_string()) {
-                    try {
-                        error_code = std::stoi(code_val.get<std::string>());
-                    } catch (...) {
-                        error_code = -1;
+
+            if (error.is_string()) {
+                error_msg = error.get<std::string>();
+            } else if (error.is_object()) {
+                if (error.contains("message") && error["message"].is_string()) {
+                    error_msg = error["message"].get<std::string>();
+                } else if (error.contains("message")) {
+                    error_msg = error["message"].dump();
+                }
+
+                // Handle both string and number error codes (Zhipu API returns string "1305")
+                if (error.contains("code")) {
+                    const auto& code_val = error["code"];
+                    if (code_val.is_number_integer()) {
+                        error_code = code_val.get<int>();
+                    } else if (code_val.is_string()) {
+                        try {
+                            error_code = std::stoi(code_val.get<std::string>());
+                        } catch (...) {
+                            error_code = -1;
+                        }
                     }
                 }
+            }
+
+            if (error_msg.empty()) {
+                error_msg = "Неизвестная ошибка API";
             }
 
             std::string user_friendly_msg;
@@ -305,7 +333,7 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
                 std::string provider_name = "API";
                 std::string model_name = "";
 
-                if (error.contains("metadata")) {
+                if (error.is_object() && error.contains("metadata") && error["metadata"].is_object()) {
                     const auto& metadata = error["metadata"];
                     if (metadata.contains("provider_name")) {
                         provider_name = metadata.value("provider_name", "API");
@@ -388,7 +416,8 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
         response.id = data.value("id", "");
         response.model = data.value("model", "");
 
-        if (data.contains("choices") && data["choices"].is_array() && !data["choices"].empty()) {
+        if (data.contains("choices") && data["choices"].is_array() && !data["choices"].empty() &&
+            data["choices"][0].is_object()) {
             const auto& choice = data["choices"][0];
             // Контент может быть строкой, массивом частей (Zhipu/GLM:
             // [{"type":"text","text":"..."}]) либо лежать в delta, если
@@ -484,8 +513,9 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
 
     } catch (const json::parse_error& e) {
         response.error = "Ошибка парсинга ответа\n\n";
-        response.error += "Не удалось обработать ответ от сервера.\n";
-        response.error += "Проверьте подключение к интернету.\n\n";
+        response.error += "Не удалось обработать ответ от сервера (обычно это ошибка "
+                          "провайдера, а не проблема сети).\n\n";
+        response.error += "Тело ответа: " + json_str.substr(0, 200) + "\n\n";
         response.error += "Детали: " + std::string(e.what());
         response.success = false;
     } catch (const std::exception& e) {
