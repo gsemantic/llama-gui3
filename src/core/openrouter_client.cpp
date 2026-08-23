@@ -263,6 +263,10 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
     const int kConnectTimeoutsMs[kMaxAttempts] = {10000, 20000, 30000};
     const int kBaseBackoffMs = 1000;
 
+    bool any_content_delivered = false;
+    bool gave_up = false;
+    std::string last_error_message;
+
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         bool delivered_content = false;
         bool failed = false;
@@ -270,7 +274,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         std::string error_message;
 
         http_client_.make_streaming_request("chat/completions", body,
-            [this, &callback, &delivered_content, &failed, &retryable, &error_message](
+            [this, &callback, &delivered_content, &any_content_delivered, &failed, &retryable, &error_message](
                 const std::string& data, bool is_error, bool is_done, bool is_retryable) {
                 if (is_done) {
                     if (is_error) {
@@ -307,6 +311,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                             std::string token = choice["delta"]["content"].get<std::string>();
                             if (!token.empty()) {
                                 delivered_content = true;
+                                any_content_delivered = true;
                                 callback(token, false);
                             }
                         }
@@ -321,10 +326,12 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
             return true;
         }
 
-        // Ошибка не транзиентная или попытки закончились - отдаём пользователю
+        // Ошибка не транзиентная или попытки закончились - выходим из цикла,
+        // возможно попробуем не-streaming запрос (см. ниже)
         if (!retryable || attempt == kMaxAttempts - 1) {
-            callback(error_message, true);
-            return false;
+            gave_up = true;
+            last_error_message = error_message;
+            break;
         }
 
         // Экспоненциальный backoff с джиттером перед следующей попыткой
@@ -334,6 +341,25 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
     }
 
+    // Фолбэк: некоторые провайдеры (например, OVH AI Endpoints для тяжёлых
+    // моделей) отклоняют анонимные streaming-запросы сразу с 429, хотя обычный
+    // запрос проходит. Если стриминг так и не дал контента — пробуем один раз
+    // без stream и отдаём ответ одним куском.
+    if (!any_content_delivered) {
+        std::cout << "[CloudClient] Streaming failed - retrying as non-streaming request" << std::endl;
+        OpenRouterRequestParams fb = params;
+        fb.stream = false;
+        OpenRouterCompletionResponse fallback = complete(fb);
+        if (fallback.success && !fallback.content.empty()) {
+            callback(fallback.content, false);
+            callback("", true);
+            return true;
+        }
+    }
+
+    if (gave_up) {
+        callback(last_error_message, true);
+    }
     return false;
 }
 

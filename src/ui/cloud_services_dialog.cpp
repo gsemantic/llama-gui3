@@ -28,15 +28,12 @@ static size_t write_string_callback(void* contents, size_t size, size_t nmemb, v
 // ============================================================================
 const std::vector<CloudServicesDialog::ProviderPreset>& CloudServicesDialog::get_presets() {
     static const std::vector<ProviderPreset> presets = {
-        {"OpenRouter",  "https://openrouter.ai/api/v1"},
-        {"OpenAI",      "https://api.openai.com/v1"},
-        {"Zhipu (GLM)", "https://open.bigmodel.cn/api/paas/v4"},
-        {"Together AI", "https://api.together.xyz/v1"},
-        {"Groq",        "https://api.groq.com/openai/v1"},
-        {"DeepInfra",   "https://api.deepinfra.com/v1/openai"},
-        {"SiliconFlow", "https://api.siliconflow.com/v1"},
-        {"OpenCode Zen","https://opencode.ai/zen/v1"},
-        {"Custom",      ""},
+        // requires_key=false — публичные эндпоинты, проверены и работают без API-ключа
+        {"Zhipu (GLM)",      "https://open.bigmodel.cn/api/paas/v4",           true},
+        {"OpenCode Zen",     "https://opencode.ai/zen/v1",                     false},
+        {"Pollinations",     "https://text.pollinations.ai/openai",            false},
+        {"OVH AI Endpoints", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", false},
+        {"Custom",           "",                                               true},
     };
     return presets;
 }
@@ -53,6 +50,10 @@ CloudServicesDialog::~CloudServicesDialog() {
     if (models_load_thread_.joinable()) {
         models_load_thread_.join();
     }
+    check_cancelled_ = true;
+    if (check_thread_.joinable()) {
+        check_thread_.join();
+    }
 }
 
 // ============================================================================
@@ -65,6 +66,12 @@ void CloudServicesDialog::open() {
     filtered_models_.clear();
     models_loaded_ = false;
     model_search_buf_[0] = '\0';
+    check_cancelled_ = true;
+    if (check_thread_.joinable()) {
+        check_thread_.join();
+    }
+    checking_ = false;
+    model_check_map_.clear();
 }
 
 void CloudServicesDialog::close() {
@@ -89,8 +96,7 @@ void CloudServicesDialog::load_from_settings() {
 
     // Read API key from .env (provider-specific slot so switching providers
     // never mixes up keys; OpenCode Zen gets its own dedicated slot)
-    std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(cp.provider_name, cp.endpoint_url);
-    std::string key = llama_gui::core::EnvManager::read_key(key_name, settings_.get_profiles_directory());
+    std::string key = read_provider_key(cp.provider_name, cp.endpoint_url);
     std::strncpy(api_key_buf_, key.c_str(), sizeof(api_key_buf_) - 1);
     api_key_buf_[sizeof(api_key_buf_) - 1] = '\0';
 
@@ -252,6 +258,22 @@ void CloudServicesDialog::fetch_models() {
                     for (const auto& item : json["data"]) {
                         if (item.contains("id") && item["id"].is_string()) {
                             std::string id = item["id"].get<std::string>();
+                            // Пропускаем заведомо не-чатовые модели (embeddings,
+                            // tts, whisper, image-gen, guard-модели и т.п.)
+                            std::string lower = id;
+                            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                            bool not_chat =
+                                lower.find("whisper") != std::string::npos ||
+                                lower.find("-tts") != std::string::npos ||
+                                lower.find("tts-") != std::string::npos ||
+                                lower.find("embedding") != std::string::npos ||
+                                lower.find("bge-") != std::string::npos ||
+                                lower.find("rerank") != std::string::npos ||
+                                lower.find("moderation") != std::string::npos ||
+                                lower.find("guard") != std::string::npos ||
+                                lower.find("diffusion") != std::string::npos ||
+                                lower.find("-xl-base") != std::string::npos;
+                            if (not_chat) continue;
                             models.push_back(id);
                             if (item.contains("context_length") && item["context_length"].is_number()) {
                                 ctx_map[id] = item["context_length"].get<int>();
@@ -282,6 +304,192 @@ void CloudServicesDialog::fetch_models() {
     });
 }
 
+// ============================================================================
+// Availability check: probe each listed model with a minimal chat request
+// ============================================================================
+std::string CloudServicesDialog::build_chat_url(const std::string& endpoint_url) {
+    std::string url = endpoint_url;
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    url += "/chat/completions";
+    return url;
+}
+
+std::string CloudServicesDialog::read_provider_key(const std::string& provider_name,
+                                                   const std::string& endpoint_url) {
+    const std::string dir = settings_.get_profiles_directory();
+    const std::string key_name = EnvManager::cloud_provider_api_key_name(provider_name, endpoint_url);
+    std::string key = EnvManager::read_key(key_name, dir);
+
+    // Разовая миграция: до появления отдельных слотов ключ Zhipu (GLM) жил в
+    // общем CLOUD_PROVIDER_API_KEY. Переносим его в персональный слот.
+    if (key.empty() && key_name == "ZHIPU_GLM_API_KEY") {
+        std::string legacy = EnvManager::read_key("CLOUD_PROVIDER_API_KEY", dir);
+        if (!legacy.empty()) {
+            EnvManager::write_key(key_name, legacy, dir);
+            key = legacy;
+            std::cout << "[CloudProvider] Migrated legacy CLOUD_PROVIDER_API_KEY -> "
+                      << key_name << std::endl;
+        }
+    }
+    return key;
+}
+
+void CloudServicesDialog::start_model_checks() {
+    if (checking_ || model_list_.empty()) return;
+
+    check_cancelled_ = true;
+    if (check_thread_.joinable()) {
+        check_thread_.join();
+    }
+    check_cancelled_ = false;
+
+    {
+        std::lock_guard<std::mutex> lk(model_check_mutex_);
+        model_check_map_.clear();
+        for (const auto& m : model_list_) {
+            model_check_map_[m] = ModelCheckResult{};
+        }
+    }
+
+    const std::string url = build_chat_url(endpoint_url_buf_);
+    const std::string key = api_key_buf_;
+    const int timeout = timeout_ms_ > 0 ? timeout_ms_ : 60000;
+    const std::vector<std::string> models = model_list_;
+
+    checking_ = true;
+    check_thread_ = std::thread([this, url, key, timeout, models]() {
+        constexpr int kProbeMaxTokens = 8;
+        constexpr int kPauseMs = 700;
+
+        auto pause = [&]() {
+            for (int waited = 0; waited < kPauseMs && !check_cancelled_; waited += 100) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        };
+
+        for (const auto& model : models) {
+            if (check_cancelled_) break;
+
+            {
+                std::lock_guard<std::mutex> lk(model_check_mutex_);
+                model_check_map_[model].state = ModelCheckResult::Checking;
+            }
+
+            nlohmann::json body;
+            body["model"] = model;
+            body["messages"] = nlohmann::json::array();
+            body["messages"].push_back({{"role", "user"}, {"content", "Reply with the single word OK"}});
+            body["max_tokens"] = kProbeMaxTokens;
+            body["stream"] = false;
+            // ВАЖНО: CURLOPT_POSTFIELDS не копирует данные — строка обязана
+            // жить до завершения curl_easy_perform.
+            const std::string body_str = body.dump();
+
+            // Выполняет POST; with_auth=false — анонимная попытка без ключа
+            auto perform_probe = [&](bool with_auth, std::string& resp, long& code, CURLcode& cres) {
+                resp.clear();
+                CURL* curl = curl_easy_init();
+                if (!curl) {
+                    cres = CURLE_FAILED_INIT;
+                    code = 0;
+                    return;
+                }
+                struct curl_slist* headers = nullptr;
+                headers = curl_slist_append(headers, "Content-Type: application/json");
+                if (with_auth && !key.empty()) {
+                    headers = curl_slist_append(headers, ("Authorization: Bearer " + key).c_str());
+                }
+                curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+                curl_easy_setopt(curl, CURLOPT_POST, 1L);
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_string_callback);
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout);
+                curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                                 timeout > 0 && timeout < 15000 ? timeout : 15000L);
+                curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+                curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+                cres = curl_easy_perform(curl);
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+            };
+
+            std::cout << "[CloudCheck] model=" << model << " key="
+                      << (key.empty() ? "none" : ("len " + std::to_string(key.size())))
+                      << std::endl;
+
+            std::string response;
+            long http_code = 0;
+            CURLcode res = CURLE_OK;
+            auto t0 = std::chrono::steady_clock::now();
+            perform_probe(true, response, http_code, res);
+
+            // Сохранённый ключ может быть протухшим: публичные шлюзы пускают
+            // анонимно, поэтому при 401 повторяем попытку без Authorization.
+            // Если анонимная попытка удачна — модель доступна и без ключа.
+            bool retried_anonymously = false;
+            if (res == CURLE_OK && http_code == 401 && !key.empty()) {
+                std::cout << "[CloudCheck] 401 with stored key, retrying anonymously" << std::endl;
+                perform_probe(false, response, http_code, res);
+                retried_anonymously = true;
+            }
+            long latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+
+            ModelCheckResult r;
+            r.latency_ms = latency_ms;
+            bool alive = false;
+            if (res == CURLE_OK && http_code == 200 && !response.empty()) {
+                try {
+                    auto j = nlohmann::json::parse(response);
+                    // Reasoning-модели могут отдать пустой content при обрезанном
+                    // бюджете токенов — главное, что choices пришли: модель жива.
+                    alive = j.contains("choices") && j["choices"].is_array() && !j["choices"].empty();
+                } catch (const std::exception&) {
+                    alive = false;
+                }
+            }
+            if (alive) {
+                r.state = ModelCheckResult::Ok;
+                // [free]: модель ответила без ключа — либо слот пуст, либо
+                // сохранённый ключ был отклонён и помог анонимный запрос.
+                r.anonymous_ok = retried_anonymously || key.empty();
+            } else {
+                r.state = ModelCheckResult::Fail;
+                r.http_code = (res == CURLE_OK) ? http_code : -1;
+                if (res != CURLE_OK) {
+                    r.error = curl_easy_strerror(res);
+                } else if (http_code == 429) {
+                    r.error = "rate limited";
+                } else if (http_code == 400 &&
+                           response.find("navailable") != std::string::npos) {
+                    r.error = "model unavailable upstream";
+                } else if (http_code == 401 || http_code == 403) {
+                    r.error = "auth/quota/region";
+                } else if (http_code == 404) {
+                    r.error = "model not supported";
+                } else if (!response.empty()) {
+                    r.error = response.substr(0, 120);
+                } else {
+                    r.error = "HTTP " + std::to_string(http_code);
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(model_check_mutex_);
+                model_check_map_[model] = r;
+            }
+
+            pause();
+        }
+        checking_ = false;
+    });
+}
+
 void CloudServicesDialog::filter_models() {
     filtered_models_.clear();
     std::string search = model_search_buf_;
@@ -306,8 +514,25 @@ void CloudServicesDialog::filter_models() {
 void CloudServicesDialog::render_model_list() {
     if (model_list_.empty() && !models_loading_) return;
 
+    int total_checked = 0;
+    int alive_count = 0;
+    {
+        std::lock_guard<std::mutex> lk(model_check_mutex_);
+        for (const auto& kv : model_check_map_) {
+            if (kv.second.state == ModelCheckResult::Ok || kv.second.state == ModelCheckResult::Fail) {
+                ++total_checked;
+                if (kv.second.state == ModelCheckResult::Ok) ++alive_count;
+            }
+        }
+    }
+
     ImGui::Separator();
     ImGui::Text("Available models (%d):", (int)filtered_models_.size());
+    if (total_checked > 0) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "checked %d/%d, alive %d",
+                           total_checked, (int)model_list_.size(), alive_count);
+    }
 
     // Search filter
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 200);
@@ -324,12 +549,56 @@ void CloudServicesDialog::render_model_list() {
 
     // Model list (scrollable)
     if (ImGui::BeginChild("##model_list", ImVec2(0, 200), ImGuiChildFlags_Borders)) {
+        const float status_x = ImGui::GetWindowWidth() - 175;
         for (const auto& model : filtered_models_) {
             bool is_selected = (model == model_id_buf_);
             if (ImGui::Selectable(model.c_str(), is_selected)) {
                 std::strncpy(model_id_buf_, model.c_str(), sizeof(model_id_buf_) - 1);
                 model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
                 settings_modified_ = true;
+            }
+            bool row_hovered = ImGui::IsItemHovered();
+
+            ModelCheckResult r;
+            {
+                std::lock_guard<std::mutex> lk(model_check_mutex_);
+                auto it = model_check_map_.find(model);
+                if (it != model_check_map_.end()) r = it->second;
+            }
+            if (r.state == ModelCheckResult::None) continue;
+
+            ImGui::SameLine(status_x);
+            char label[64];
+            switch (r.state) {
+                case ModelCheckResult::Checking:
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "checking...");
+                    break;
+                case ModelCheckResult::Ok:
+                    if (r.anonymous_ok) {
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "OK %ld ms [free]", r.latency_ms);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "OK %ld ms [key]", r.latency_ms);
+                    }
+                    break;
+                case ModelCheckResult::Fail:
+                    if (r.http_code > 0) {
+                        snprintf(label, sizeof(label), "HTTP %ld", r.http_code);
+                    } else {
+                        snprintf(label, sizeof(label), "%.20s", r.error.c_str());
+                    }
+                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", label);
+                    break;
+                default:
+                    break;
+            }
+            if (row_hovered && (r.state == ModelCheckResult::Ok || !r.error.empty())) {
+                if (r.state == ModelCheckResult::Ok) {
+                    ImGui::SetTooltip("%s", r.anonymous_ok
+                        ? "Модель отвечает без API-ключа (публичный доступ)"
+                        : "Модель работает с вашим сохранённым ключом");
+                } else {
+                    ImGui::SetTooltip("%s", r.error.c_str());
+                }
             }
         }
     }
@@ -387,13 +656,16 @@ void CloudServicesDialog::render() {
                     // so keys are never mixed up between providers
                     std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(
                         provider_name_buf_, endpoint_url_buf_);
-                    std::string key = llama_gui::core::EnvManager::read_key(
-                        key_name, settings_.get_profiles_directory());
+                    std::string key = read_provider_key(provider_name_buf_, endpoint_url_buf_);
                     std::strncpy(api_key_buf_, key.c_str(), sizeof(api_key_buf_) - 1);
                     api_key_buf_[sizeof(api_key_buf_) - 1] = '\0';
                     // Suggest a default free model for OpenCode Zen if none set
                     if (key_name == "OPENCODE_ZEN_API_KEY" && model_id_buf_[0] == '\0') {
                         std::strncpy(model_id_buf_, "deepseek-v4-flash-free", sizeof(model_id_buf_) - 1);
+                        model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
+                    }
+                    if (key_name == "POLLINATIONS_API_KEY" && model_id_buf_[0] == '\0') {
+                        std::strncpy(model_id_buf_, "openai-fast", sizeof(model_id_buf_) - 1);
                         model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
                     }
                     models_loaded_ = false; // Invalidate model list on provider change
@@ -470,6 +742,18 @@ void CloudServicesDialog::render() {
             fetch_models();
         }
 
+        // Probe every listed model with a minimal chat request (sequential,
+        // with pauses — public endpoints enforce strict per-model rate limits)
+        ImGui::SameLine();
+        if (ImGui::SmallButton(checking_ ? "Checking..." : "Check Models") && !checking_ && models_loaded_) {
+            start_model_checks();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Send a tiny test request to each model and show\n"
+                              "which ones actually answer (latency / HTTP error).\n"
+                              "\"Load Models\" first. Sequential to respect rate limits.");
+        }
+
         // Timeout
         ImGui::Text("Timeout (ms):");
         ImGui::SameLine(120);
@@ -539,10 +823,7 @@ void CloudServicesDialog::render() {
                             endpoint_url_buf_[sizeof(endpoint_url_buf_) - 1] = '\0';
                         }
                         // Ключ хранится по слоту провайдера — подтягиваем его
-                        std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(
-                            provider_name_buf_, endpoint_url_buf_);
-                        std::string saved_key = llama_gui::core::EnvManager::read_key(
-                            key_name, settings_.get_profiles_directory());
+                        std::string saved_key = read_provider_key(rm.provider_name, rm.endpoint_url);
                         std::strncpy(api_key_buf_, saved_key.c_str(), sizeof(api_key_buf_) - 1);
                         api_key_buf_[sizeof(api_key_buf_) - 1] = '\0';
                     }
@@ -562,10 +843,18 @@ void CloudServicesDialog::render() {
             ImGui::Separator();
         }
 
-        // Status (провайдер активен только при наличии ключа и выбранной модели)
-        bool has_key = (api_key_buf_[0] != '\0');
-        if (cp.enabled && has_key && model_id_buf_[0] != '\0') {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Cloud provider: active (%s)", model_id_buf_);
+        // Status (провайдер активен при наличии ключа — либо когда ключ не нужен)
+        bool preset_requires_key = true;
+        for (const auto& p : get_presets()) {
+            if (std::string(provider_name_buf_) == p.name) {
+                preset_requires_key = p.requires_key;
+                break;
+            }
+        }
+        bool has_credentials = (api_key_buf_[0] != '\0') || !preset_requires_key;
+        if (cp.enabled && has_credentials && model_id_buf_[0] != '\0') {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Cloud provider: active (%s)%s",
+                               model_id_buf_, preset_requires_key ? "" : " [public endpoint]");
         } else if (cp.enabled) {
             ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Cloud provider: configured but incomplete");
         } else {

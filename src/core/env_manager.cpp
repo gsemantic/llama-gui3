@@ -130,17 +130,36 @@ void EnvManager::remove_key(const std::string& key_name,
 
 std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_name,
                                                     const std::string& endpoint_url) {
-    // OpenCode Zen maps to a dedicated key slot so its key never reuses or
-    // overwrites the generic cloud provider key.
+    // Each built-in provider gets a dedicated key slot so switching providers
+    // never reuses or overwrites another provider's key.
     const std::string provider_lower = provider_name;
     const std::string url_lower = endpoint_url;
     bool is_opencode_zen =
         provider_lower.find("opencode zen") != std::string::npos ||
         provider_lower.find("opencode") != std::string::npos ||
         url_lower.find("opencode.ai") != std::string::npos;
+    bool is_zhipu =
+        provider_lower.find("zhipu") != std::string::npos ||
+        provider_lower.find("glm") != std::string::npos ||
+        url_lower.find("bigmodel.cn") != std::string::npos;
+    bool is_pollinations =
+        provider_lower.find("pollinations") != std::string::npos ||
+        url_lower.find("pollinations.ai") != std::string::npos;
+    bool is_ovh =
+        provider_lower.find("ovh") != std::string::npos ||
+        url_lower.find("kepler.ai.cloud.ovh.net") != std::string::npos;
 
     if (is_opencode_zen) {
         return "OPENCODE_ZEN_API_KEY";
+    }
+    if (is_zhipu) {
+        return "ZHIPU_GLM_API_KEY";
+    }
+    if (is_pollinations) {
+        return "POLLINATIONS_API_KEY";
+    }
+    if (is_ovh) {
+        return "OVH_AI_API_KEY";
     }
 
     return "CLOUD_PROVIDER_API_KEY";

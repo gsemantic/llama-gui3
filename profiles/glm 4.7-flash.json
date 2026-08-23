@@ -65,19 +65,32 @@
         "verbosity": 0
     },
     "cloud_provider": {
+        "context_length": 0,
         "enabled": true,
-        "endpoint_url": "https://opencode.ai/zen/v1",
+        "endpoint_url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 8000,
-        "model_id": "x-preview-f-free",
-        "provider_name": "OpenCode Zen",
+        "model_id": "Qwen3.5-397B-A17B",
+        "provider_name": "OVH AI Endpoints",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
-            "x-preview-f-free",
-            "hy3-free",
-            "glm-4.7-flash"
+            {
+                "endpoint_url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+                "id": "Qwen3.5-397B-A17B",
+                "provider_name": "OVH AI Endpoints"
+            },
+            {
+                "endpoint_url": "https://opencode.ai/zen/v1",
+                "id": "big-pickle",
+                "provider_name": "OpenCode Zen"
+            },
+            {
+                "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
+                "id": "glm-4.7-flash",
+                "provider_name": "Zhipu (GLM)"
+            }
         ],
         "timeout_ms": 120000
     },
@@ -172,16 +185,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 747,
-            "avg_response_time_ms": 473.34,
-            "avg_tokens_generated": 103,
-            "avg_tokens_per_second": 28.66,
-            "first_used": "Sun Aug 23 15:00:23 2026",
-            "last_used": "Sun Aug 23 15:00:23 2026",
+            "avg_context_used": 524,
+            "avg_response_time_ms": 445.02,
+            "avg_tokens_generated": 96,
+            "avg_tokens_per_second": 25.3,
+            "first_used": "Sun Aug 23 23:50:26 2026",
+            "last_used": "Sun Aug 23 23:50:26 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 38
+            "total_generations": 42
         }
     },
     "output": {

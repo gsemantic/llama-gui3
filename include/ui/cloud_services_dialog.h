@@ -10,6 +10,7 @@
 #include <memory>
 #include <atomic>
 #include <thread>
+#include <mutex>
 
 namespace llama_gui {
 namespace ui {
@@ -71,12 +72,33 @@ private:
     void filter_models();
     void render_model_list();
 
+    // Availability check (probe each listed model with a minimal chat request)
+    struct ModelCheckResult {
+        enum State { None = 0, Checking, Ok, Fail } state = None;
+        long latency_ms = 0;
+        long http_code = 0;
+        std::string error;
+        bool anonymous_ok = false;
+    };
+    void start_model_checks();
+    static std::string build_chat_url(const std::string& endpoint_url);
+    std::string read_provider_key(const std::string& provider_name,
+                                  const std::string& endpoint_url);
+
     // Provider presets
     struct ProviderPreset {
         const char* name;
         const char* endpoint;
+        bool requires_key;   // false = публичный эндпоинт, работает без API-ключа
     };
     static const std::vector<ProviderPreset>& get_presets();
+
+    // Model availability check state
+    std::map<std::string, ModelCheckResult> model_check_map_;
+    std::mutex model_check_mutex_;
+    std::thread check_thread_;
+    std::atomic<bool> checking_{false};
+    std::atomic<bool> check_cancelled_{false};
 };
 
 } // namespace ui
