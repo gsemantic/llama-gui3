@@ -104,6 +104,7 @@ struct CloudProviderSettings {
     std::string provider_name = "";          // Имя провайдера (e.g. "OpenRouter", "Custom")
     std::string endpoint_url = "";           // Base URL (e.g. "https://openrouter.ai/api/v1")
     std::string model_id = "";               // Выбранная модель (ID)
+    int context_length = 0;                  // Контекстное окно выбранной модели (из /models, 0 = неизвестно)
     int timeout_ms = 60000;                  // Таймаут запросов (60s default for cloud providers)
     int max_output_tokens = 0;               // Лимит токенов вывода (0 = не ограничено, полагаемся на модель/провайдера)
     bool reasoning_enabled = false;          // Режим размышлений/thinking (для поддерживающих моделей: GLM, DeepSeek, o-серия)

@@ -273,6 +273,8 @@
     "performance.tokens_per_second": "tok/s",
     "performance.generating_short": "Generating: %d tok | %.1f tok/s | %ds | Context: %d/%d",
     "performance.completed_short": "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d",
+    "performance.generating_short_noctx": "Generating: %d tok | %.1f tok/s | %ds | Context: %d",
+    "performance.completed_short_noctx": "✓ %d tok | %.1f tok/s | %ds | Context: %d",
 
     "status.server_running": "Server: Running",
     "status.server_stopped": "Server: Stopped",

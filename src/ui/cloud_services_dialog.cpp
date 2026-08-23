@@ -108,6 +108,8 @@ void CloudServicesDialog::save_to_settings() {
     cp.provider_name = provider_name_buf_;
     cp.endpoint_url = endpoint_url_buf_;
     cp.model_id = model_id_buf_;
+    auto ctx_it = model_context_map_.find(cp.model_id);
+    cp.context_length = (ctx_it != model_context_map_.end()) ? ctx_it->second : 0;
     cp.timeout_ms = timeout_ms_;
     cp.max_output_tokens = max_output_tokens_ < 0 ? 0 : max_output_tokens_;
     cp.reasoning_enabled = reasoning_enabled_;
@@ -157,6 +159,7 @@ void CloudServicesDialog::fetch_models() {
     models_load_cancelled_ = false;
     model_list_.clear();
     filtered_models_.clear();
+    model_context_map_.clear();
 
     // Run in background thread
     if (models_load_thread_.joinable()) {
@@ -196,11 +199,16 @@ void CloudServicesDialog::fetch_models() {
             try {
                 auto json = nlohmann::json::parse(response);
                 std::vector<std::string> models;
+                std::map<std::string, int> ctx_map;
 
                 if (json.contains("data") && json["data"].is_array()) {
                     for (const auto& item : json["data"]) {
                         if (item.contains("id") && item["id"].is_string()) {
-                            models.push_back(item["id"].get<std::string>());
+                            std::string id = item["id"].get<std::string>();
+                            models.push_back(id);
+                            if (item.contains("context_length") && item["context_length"].is_number()) {
+                                ctx_map[id] = item["context_length"].get<int>();
+                            }
                         }
                     }
                 }
@@ -209,6 +217,7 @@ void CloudServicesDialog::fetch_models() {
 
                 if (!models_load_cancelled_) {
                     model_list_ = models;
+                    model_context_map_ = std::move(ctx_map);
                     filter_models();
                     models_loaded_ = true;
                     std::cout << "[CloudClient] Loaded " << models.size() << " models from " << url << std::endl;

@@ -16,6 +16,7 @@ void Settings::serializeOpenRouterSettings(json& j) const {
         {"provider_name", openrouter_settings_.provider_name},
         {"endpoint_url", openrouter_settings_.endpoint_url},
         {"model_id", openrouter_settings_.model_id},
+        {"context_length", openrouter_settings_.context_length},
         {"timeout_ms", openrouter_settings_.timeout_ms},
         {"max_output_tokens", openrouter_settings_.max_output_tokens},
         {"reasoning_enabled", openrouter_settings_.reasoning_enabled},
@@ -34,6 +35,7 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.provider_name = o.value("provider_name", "");
         openrouter_settings_.endpoint_url = o.value("endpoint_url", "");
         openrouter_settings_.model_id = o.value("model_id", "");
+        openrouter_settings_.context_length = o.value("context_length", 0);
         openrouter_settings_.timeout_ms = o.value("timeout_ms", 30000);
         openrouter_settings_.max_output_tokens = o.value("max_output_tokens", 0);
         openrouter_settings_.reasoning_enabled = o.value("reasoning_enabled", false);

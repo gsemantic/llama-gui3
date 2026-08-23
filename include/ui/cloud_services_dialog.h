@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include <vector>
 #include <string>
+#include <map>
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -54,6 +55,7 @@ private:
     // Model list
     std::vector<std::string> model_list_;
     std::vector<std::string> filtered_models_;
+    std::map<std::string, int> model_context_map_;
     char model_search_buf_[256] = "";
     bool models_loaded_ = false;
     bool models_loading_ = false;

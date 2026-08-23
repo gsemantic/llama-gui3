@@ -234,7 +234,7 @@ void ChatInterface::render_typing_indicator() {
 void ChatInterface::render_performance_metrics() {
     // Render metrics in a single compact line
     if (current_metrics_.is_measuring) {
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f),
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.0f, 1.0f),
                           TRF("performance.generating_short", "Generating: %d tok | %.1f tok/s | %ds | Context: %d/%d"),
                           current_metrics_.tokens_generated,
                           current_metrics_.tokens_per_second,
@@ -242,13 +242,22 @@ void ChatInterface::render_performance_metrics() {
                           current_metrics_.context_used + current_metrics_.tokens_generated,
                           current_metrics_.total_context);
     } else if (current_metrics_.response_time_seconds > 0) {
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f),
-                          TRF("performance.completed_short", "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d"),
-                          current_metrics_.tokens_generated,
-                          current_metrics_.tokens_per_second,
-                          static_cast<int>(current_metrics_.response_time_seconds),
-                          current_metrics_.context_used,
-                          current_metrics_.total_context);
+        if (current_metrics_.total_context > 0) {
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f),
+                              TRF("performance.completed_short", "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d"),
+                              current_metrics_.tokens_generated,
+                              current_metrics_.tokens_per_second,
+                              static_cast<int>(current_metrics_.response_time_seconds),
+                              current_metrics_.context_used,
+                              current_metrics_.total_context);
+        } else {
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f),
+                              TRF("performance.completed_short_noctx", "✓ %d tok | %.1f tok/s | %ds | Context: %d"),
+                              current_metrics_.tokens_generated,
+                              current_metrics_.tokens_per_second,
+                              static_cast<int>(current_metrics_.response_time_seconds),
+                              current_metrics_.context_used);
+        }
     }
 }
 

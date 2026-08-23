@@ -291,6 +291,8 @@
     "performance.tokens_per_second": "ток/с",
     "performance.generating_short": "Генерация: %d ток | %.1f ток/с | %dс | Контекст: %d/%d",
     "performance.completed_short": "✓ %d ток | %.1f ток/с | %dс | Контекст: %d/%d",
+    "performance.generating_short_noctx": "Генерация: %d ток | %.1f ток/с | %dс | Контекст: %d",
+    "performance.completed_short_noctx": "✓ %d ток | %.1f ток/с | %dс | Контекст: %d",
 
     "status.server_running": "Сервер: запущен",
     "status.server_stopped": "Сервер: остановлен",

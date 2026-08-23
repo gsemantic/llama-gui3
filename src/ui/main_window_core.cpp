@@ -58,16 +58,30 @@ void MainWindow::render_status_bar() {
         const auto& m = chat_interface_->get_performance_metrics();
         if (m.is_measuring) {
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.0f, 1.0f),
-                TRF("performance.generating_short", "Generating: %d tok | %.1f tok/s | %ds | Context: %d/%d"),
-                m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
-                m.context_used + m.tokens_generated, m.total_context);
+            if (m.total_context > 0) {
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.0f, 1.0f),
+                    TRF("performance.generating_short", "Generating: %d tok | %.1f tok/s | %ds | Context: %d/%d"),
+                    m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
+                    m.context_used + m.tokens_generated, m.total_context);
+            } else {
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.0f, 1.0f),
+                    TRF("performance.generating_short_noctx", "Generating: %d tok | %.1f tok/s | %ds | Context: %d"),
+                    m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
+                    m.context_used + m.tokens_generated);
+            }
         } else if (m.response_time_seconds > 0) {
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
-                TRF("performance.completed_short", "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d"),
-                m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
-                m.context_used, m.total_context);
+            if (m.total_context > 0) {
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
+                    TRF("performance.completed_short", "✓ %d tok | %.1f tok/s | %ds | Context: %d/%d"),
+                    m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
+                    m.context_used, m.total_context);
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
+                    TRF("performance.completed_short_noctx", "✓ %d tok | %.1f tok/s | %ds | Context: %d"),
+                    m.tokens_generated, m.tokens_per_second, static_cast<int>(m.response_time_seconds),
+                    m.context_used);
+            }
         }
     }
 

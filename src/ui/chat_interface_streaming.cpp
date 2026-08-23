@@ -132,7 +132,12 @@ void ChatInterface::update_performance_metrics(const std::string& content, bool 
         current_metrics_.is_measuring = true;
 
         // Initialize context metrics
-        current_metrics_.total_context = settings_.chat().n_ctx;
+        // Для облачного провайдера показываем контекстное окно выбранной модели,
+        // а не локальный n_ctx llama-server (0 = окно неизвестно)
+        const auto& cp = settings_.cloud_provider();
+        const bool cloud_mode = cp.enabled && !cp.model_id.empty();
+        current_metrics_.total_context = cloud_mode ? cp.context_length
+                                                    : settings_.chat().n_ctx;
         
         // Calculate context used by conversation history
         int history_tokens = 0;
