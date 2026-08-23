@@ -115,6 +115,26 @@ void CloudServicesDialog::save_to_settings() {
     cp.reasoning_enabled = reasoning_enabled_;
     cp.reasoning_budget = reasoning_budget_ < 0 ? 0 : reasoning_budget_;
 
+    // Обновляем/создаём запись недавней модели с ТЕКУЩИМ провайдером —
+    // так старые записи без привязки (мигрированные из строк) получают её
+    // после первого же Apply.
+    if (!cp.model_id.empty()) {
+        auto& recent = cp.recent_models;
+        auto r_it = std::find_if(recent.begin(), recent.end(),
+            [&cp](const llama_gui::core::CloudRecentModel& r) { return r.id == cp.model_id; });
+        if (r_it != recent.end()) {
+            r_it->provider_name = cp.provider_name;
+            r_it->endpoint_url = cp.endpoint_url;
+        } else {
+            llama_gui::core::CloudRecentModel entry;
+            entry.id = cp.model_id;
+            entry.provider_name = cp.provider_name;
+            entry.endpoint_url = cp.endpoint_url;
+            recent.insert(recent.begin(), entry);
+            if (recent.size() > 10) recent.resize(10);
+        }
+    }
+
     // Write API key to .env (never to profile JSON).
     // Key is stored per-provider so switching providers never touches other keys.
     std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(provider_name_buf_, endpoint_url_buf_);
@@ -503,8 +523,12 @@ void CloudServicesDialog::render() {
             ImGui::Text("Recent models:");
             for (size_t i = 0; i < cp.recent_models.size(); i++) {
                 const auto& rm = cp.recent_models[i];
+                std::string label = rm.id;
+                if (rm.provider_name.empty()) {
+                    label += " (?)";
+                }
                 bool is_selected = (rm.id == model_id_buf_);
-                if (ImGui::RadioButton(rm.id.c_str(), is_selected)) {
+                if (ImGui::RadioButton(label.c_str(), is_selected)) {
                     std::strncpy(model_id_buf_, rm.id.c_str(), sizeof(model_id_buf_) - 1);
                     model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
                     if (!rm.provider_name.empty()) {
@@ -525,8 +549,8 @@ void CloudServicesDialog::render() {
                     settings_modified_ = true;
                 }
                 ImGui::SameLine();
-                std::string label = "X##del_" + std::to_string(i);
-                if (ImGui::SmallButton(label.c_str())) {
+                std::string del_label = "X##del_" + std::to_string(i);
+                if (ImGui::SmallButton(del_label.c_str())) {
                     cp.recent_models.erase(cp.recent_models.begin() + i);
                     if (is_selected) {
                         model_id_buf_[0] = '\0';
