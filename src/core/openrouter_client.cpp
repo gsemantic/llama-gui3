@@ -240,7 +240,14 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
 OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestParams& params) {
     std::string body = build_completion_body(params);
     std::string response_str = http_client_.make_request("chat/completions", body);
-    return model_parser_.parse_completion_response(response_str);
+    OpenRouterCompletionResponse resp = model_parser_.parse_completion_response(response_str);
+    if (http_client_.last_http_code() == 429) {
+        resp.success = false;
+        resp.content.clear();
+        resp.error = "HTTP 429: лимит запросов провайдера исчерпан — подождите около минуты "
+                     "и повторите (анонимный лимит учитывает и max_tokens)";
+    }
+    return resp;
 }
 
 bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback) {
@@ -355,9 +362,22 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
             callback("", true);
             return true;
         }
+        if (http_client_.last_http_code() == 429) {
+            // Не-streaming тоже отклонён по лимиту — понятное сообщение вместо
+            // сырого тела ответа
+            callback(fallback.error.empty()
+                         ? "HTTP 429: лимит запросов провайдера — подождите около минуты"
+                         : fallback.error,
+                     true);
+            return false;
+        }
     }
 
     if (gave_up) {
+        if (http_client_.last_http_code() == 429) {
+            last_error_message =
+                "HTTP 429: лимит запросов провайдера — подождите около минуты";
+        }
         callback(last_error_message, true);
     }
     return false;

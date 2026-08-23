@@ -122,6 +122,7 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
 
     long response_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    last_http_code_ = response_code;
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
@@ -196,6 +197,7 @@ std::string OpenRouterHttpClient::make_request(const std::string& endpoint, cons
 
     long response_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    last_http_code_ = response_code;
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);

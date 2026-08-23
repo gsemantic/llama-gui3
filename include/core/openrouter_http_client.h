@@ -40,6 +40,9 @@ public:
 
     std::string make_request(const std::string& endpoint, const std::string& body = "");
 
+    /// HTTP-код последнего ответа (0, если запрос не дошёл до сервера)
+    long last_http_code() const { return last_http_code_; }
+
     /**
      * @brief Синхронный стриминговый запрос (SSE).
      *
@@ -61,6 +64,7 @@ private:
     std::string base_url_ = "https://openrouter.ai/api/v1";
     std::string api_key_;
     int timeout_ms_ = 30000;
+    long last_http_code_ = 0;
 
     std::string build_url(const std::string& endpoint);
     std::vector<std::string> get_request_headers() const;
