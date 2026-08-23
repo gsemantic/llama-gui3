@@ -8,6 +8,34 @@ namespace core {
 
 using json = nlohmann::json;
 
+namespace {
+
+// recent_models хранятся объектами {id, provider_name, endpoint_url};
+// строки из старого формата мигрируют без привязки к провайдеру.
+void load_recent_models(const json& o, std::vector<CloudRecentModel>& out) {
+    out.clear();
+    if (!o.contains("recent_models") || !o["recent_models"].is_array()) {
+        return;
+    }
+    for (const auto& item : o["recent_models"]) {
+        CloudRecentModel r;
+        if (item.is_string()) {
+            r.id = item.get<std::string>();
+        } else if (item.is_object()) {
+            r.id = item.value("id", "");
+            r.provider_name = item.value("provider_name", "");
+            r.endpoint_url = item.value("endpoint_url", "");
+        } else {
+            continue;
+        }
+        if (!r.id.empty()) {
+            out.push_back(std::move(r));
+        }
+    }
+}
+
+} // namespace
+
 void Settings::serializeOpenRouterSettings(json& j) const {
     // Serialize as "cloud_provider" (new format)
     // NOTE: api_key is NOT serialized here — it lives in .env
@@ -22,9 +50,17 @@ void Settings::serializeOpenRouterSettings(json& j) const {
         {"reasoning_enabled", openrouter_settings_.reasoning_enabled},
         {"reasoning_budget", openrouter_settings_.reasoning_budget},
         {"free_models_only", openrouter_settings_.free_models_only},
-        {"last_search_query", openrouter_settings_.last_search_query},
-        {"recent_models", openrouter_settings_.recent_models}
+        {"last_search_query", openrouter_settings_.last_search_query}
     };
+    json recent = json::array();
+    for (const auto& r : openrouter_settings_.recent_models) {
+        recent.push_back({
+            {"id", r.id},
+            {"provider_name", r.provider_name},
+            {"endpoint_url", r.endpoint_url}
+        });
+    }
+    j["cloud_provider"]["recent_models"] = recent;
 }
 
 void Settings::deserializeOpenRouterSettings(const json& j) {
@@ -42,9 +78,7 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.reasoning_budget = o.value("reasoning_budget", 0);
         openrouter_settings_.free_models_only = o.value("free_models_only", false);
         openrouter_settings_.last_search_query = o.value("last_search_query", "");
-        if (o.contains("recent_models") && o["recent_models"].is_array()) {
-            openrouter_settings_.recent_models = o["recent_models"].get<std::vector<std::string>>();
-        }
+        load_recent_models(o, openrouter_settings_.recent_models);
         return;
     }
 
@@ -61,9 +95,7 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.reasoning_budget = o.value("reasoning_budget", 0);
         openrouter_settings_.free_models_only = o.value("free_models_only", false);
         openrouter_settings_.last_search_query = o.value("last_search_query", "");
-        if (o.contains("recent_models") && o["recent_models"].is_array()) {
-            openrouter_settings_.recent_models = o["recent_models"].get<std::vector<std::string>>();
-        }
+        load_recent_models(o, openrouter_settings_.recent_models);
 
         // Migrate: move legacy api_key to .env
         std::string legacy_key = o.value("api_key", "");

@@ -94,6 +94,12 @@ struct ServerSettings {
     std::string auth_token = "";
 };
 
+struct CloudRecentModel {
+    std::string id;              // ID модели (e.g. "glm-4.7-flash")
+    std::string provider_name;   // Провайдер, на котором модель сохранена
+    std::string endpoint_url;    // Endpoint того провайдера
+};
+
 /**
  * @brief Настройки облачного провайдера (OpenAI-совместимый)
  *
@@ -113,7 +119,7 @@ struct CloudProviderSettings {
     std::string last_search_query = "";      // Последний поисковый запрос
 
     // Автозаполнение
-    std::vector<std::string> recent_models;  // Недавние модели
+    std::vector<CloudRecentModel> recent_models;  // Недавние модели (с привязкой к провайдеру)
 };
 
 // Backward compatibility alias

@@ -132,9 +132,13 @@ void CloudServicesDialog::check_model_changed() {
         auto& recent = cp.recent_models;
         recent.erase(
             std::remove_if(recent.begin(), recent.end(),
-                [&current_model](const std::string& m) { return m == current_model; }),
+                [&current_model](const llama_gui::core::CloudRecentModel& m) { return m.id == current_model; }),
             recent.end());
-        recent.insert(recent.begin(), current_model);
+        llama_gui::core::CloudRecentModel entry;
+        entry.id = current_model;
+        entry.provider_name = provider_name_buf_;
+        entry.endpoint_url = endpoint_url_buf_;
+        recent.insert(recent.begin(), entry);
         if (recent.size() > 10) recent.resize(10);
         saved_model_id_ = current_model;
     }
@@ -167,33 +171,56 @@ void CloudServicesDialog::fetch_models() {
     }
 
     models_load_thread_ = std::thread([this, url, key]() {
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            models_loading_ = false;
-            return;
-        }
+        constexpr int kMaxAttempts = 3;
 
         std::string response;
-        struct curl_slist* headers = nullptr;
-        // Send Authorization header only if a key is provided
-        if (!key.empty()) {
-            headers = curl_slist_append(headers, ("Authorization: Bearer " + key).c_str());
-        }
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_string_callback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms_);
-        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-
-        CURLcode res = curl_easy_perform(curl);
+        CURLcode res = CURLE_OK;
         long http_code = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
+        // CDN провайдеров (например, open.bigmodel.cn) отдают несколько A-записей,
+        // часть которых может быть недостижима; порядок адресов меняется между
+        // DNS-запросами, поэтому при неудаче повторяем с новым резолвом.
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            CURL* curl = curl_easy_init();
+            if (!curl) {
+                models_loading_ = false;
+                return;
+            }
+
+            response.clear();
+            struct curl_slist* headers = nullptr;
+            if (!key.empty()) {
+                headers = curl_slist_append(headers, ("Authorization: Bearer " + key).c_str());
+            }
+            headers = curl_slist_append(headers, "Content-Type: application/json");
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_string_callback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms_);
+            curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+            curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                             timeout_ms_ > 0 && timeout_ms_ < 15000 ? timeout_ms_ : 15000);
+
+            res = curl_easy_perform(curl);
+            http_code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+
+            if (res == CURLE_OK && http_code == 200 && !response.empty()) {
+                break;
+            }
+            std::cerr << "[CloudClient] Models fetch attempt " << attempt << "/" << kMaxAttempts
+                      << " failed: HTTP " << http_code
+                      << ", curl=" << curl_easy_strerror(res) << std::endl;
+            if (attempt < kMaxAttempts && !models_load_cancelled_) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }
 
         if (res == CURLE_OK && http_code == 200 && !response.empty()) {
             try {
@@ -226,7 +253,9 @@ void CloudServicesDialog::fetch_models() {
                 std::cerr << "[CloudClient] Failed to parse model list: " << e.what() << std::endl;
             }
         } else {
-            std::cerr << "[CloudClient] Failed to fetch models: HTTP " << http_code << std::endl;
+            std::cerr << "[CloudClient] Failed to fetch models: HTTP " << http_code
+                      << ", curl=" << curl_easy_strerror(res)
+                      << ", url=" << url << std::endl;
         }
 
         models_loading_ = false;
@@ -473,10 +502,26 @@ void CloudServicesDialog::render() {
         if (!cp.recent_models.empty()) {
             ImGui::Text("Recent models:");
             for (size_t i = 0; i < cp.recent_models.size(); i++) {
-                bool is_selected = (cp.recent_models[i] == model_id_buf_);
-                if (ImGui::RadioButton(cp.recent_models[i].c_str(), is_selected)) {
-                    std::strncpy(model_id_buf_, cp.recent_models[i].c_str(), sizeof(model_id_buf_) - 1);
+                const auto& rm = cp.recent_models[i];
+                bool is_selected = (rm.id == model_id_buf_);
+                if (ImGui::RadioButton(rm.id.c_str(), is_selected)) {
+                    std::strncpy(model_id_buf_, rm.id.c_str(), sizeof(model_id_buf_) - 1);
                     model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
+                    if (!rm.provider_name.empty()) {
+                        std::strncpy(provider_name_buf_, rm.provider_name.c_str(), sizeof(provider_name_buf_) - 1);
+                        provider_name_buf_[sizeof(provider_name_buf_) - 1] = '\0';
+                        if (!rm.endpoint_url.empty()) {
+                            std::strncpy(endpoint_url_buf_, rm.endpoint_url.c_str(), sizeof(endpoint_url_buf_) - 1);
+                            endpoint_url_buf_[sizeof(endpoint_url_buf_) - 1] = '\0';
+                        }
+                        // Ключ хранится по слоту провайдера — подтягиваем его
+                        std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(
+                            provider_name_buf_, endpoint_url_buf_);
+                        std::string saved_key = llama_gui::core::EnvManager::read_key(
+                            key_name, settings_.get_profiles_directory());
+                        std::strncpy(api_key_buf_, saved_key.c_str(), sizeof(api_key_buf_) - 1);
+                        api_key_buf_[sizeof(api_key_buf_) - 1] = '\0';
+                    }
                     settings_modified_ = true;
                 }
                 ImGui::SameLine();
