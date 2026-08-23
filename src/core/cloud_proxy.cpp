@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <poll.h>
 #include <sys/socket.h>
@@ -383,8 +384,15 @@ void apply_defaults(Settings& settings, nlohmann::json& req) {
     } else {
         req["model"] = cp.model_id;
     }
+    const auto normalize_param = [](nlohmann::json& j) {
+        if (j.is_number()) {
+            j = std::round(j.get<double>() * 100.0) / 100.0;
+        }
+    };
     if (!req.contains("temperature")) req["temperature"] = chat.temperature;
+    normalize_param(req["temperature"]);
     if (!req.contains("top_p")) req["top_p"] = chat.top_p;
+    normalize_param(req["top_p"]);
     if (!req.contains("max_tokens") || req["max_tokens"].is_null()) {
         if (cp.max_output_tokens > 0) req["max_tokens"] = cp.max_output_tokens;
         else req.erase("max_tokens");
@@ -392,9 +400,11 @@ void apply_defaults(Settings& settings, nlohmann::json& req) {
     if (!req.contains("presence_penalty") && chat.presence_penalty != 0.0f) {
         req["presence_penalty"] = chat.presence_penalty;
     }
+    normalize_param(req["presence_penalty"]);
     if (!req.contains("frequency_penalty") && chat.frequency_penalty != 0.0f) {
         req["frequency_penalty"] = chat.frequency_penalty;
     }
+    normalize_param(req["frequency_penalty"]);
 
     // Режим размышлений/thinking.
     if (!req.contains("thinking")) {

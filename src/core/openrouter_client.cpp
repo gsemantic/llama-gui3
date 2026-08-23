@@ -1,5 +1,6 @@
 #include "../../include/core/openrouter_client.h"
 #include "../../include/core/logger.h"
+#include <cmath>
 #include <thread>
 #include <chrono>
 #include <cstdlib>
@@ -157,6 +158,10 @@ OpenRouterModelDetails OpenRouterClient::get_model_details(const std::string& mo
 
 namespace {
 
+double round_sampling_param(double v) {
+    return std::round(v * 100.0) / 100.0;
+}
+
 std::string build_completion_body(const OpenRouterRequestParams& params) {
     nlohmann::json request_body;
 
@@ -187,16 +192,16 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
         request_body["max_tokens"] = params.max_tokens;
     }
     if (params.temperature != 0.7f) {
-        request_body["temperature"] = params.temperature;
+        request_body["temperature"] = round_sampling_param(params.temperature);
     }
     if (params.top_p != 0.9f) {
-        request_body["top_p"] = params.top_p;
+        request_body["top_p"] = round_sampling_param(params.top_p);
     }
     if (params.presence_penalty != 0.0f) {
-        request_body["presence_penalty"] = params.presence_penalty;
+        request_body["presence_penalty"] = round_sampling_param(params.presence_penalty);
     }
     if (params.frequency_penalty != 0.0f) {
-        request_body["frequency_penalty"] = params.frequency_penalty;
+        request_body["frequency_penalty"] = round_sampling_param(params.frequency_penalty);
     }
 
     // Режим размышлений/thinking.
