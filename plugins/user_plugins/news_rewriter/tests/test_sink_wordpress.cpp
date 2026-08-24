@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "sink.h"
+#include "translit.h"
 #include "dotenv.h"
 #include "storage.h"
 #include "test_server.h"
@@ -131,6 +132,56 @@ static void test_wp_sink_heading_glued_midblock_becomes_h3() {
 }
 
 REGISTER_TEST(test_wp_sink_heading_glued_midblock_becomes_h3);
+
+// Подзаголовок, приклеенный ВНУТРЬ строки абзаца («…дня. ## Как кризис…»),
+// вырезается из абзаца и становится отдельным <h3> (кейс поста про АИ-95).
+static void test_wp_sink_heading_inline_midparagraph_becomes_h3() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.body_rewritten =
+        "Рекомендовано пользоваться приложением как наиболее точным по "
+        "данным на первую половину дня. ## Как топливный кризис повлиял "
+        "на настроения\nВодители начали создавать ироничный контент.";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    // Абзац заканчивается до решёток, заголовок — отдельный h3.
+    TEST_ASSERT(req.find("половину дня.</p>") != std::string::npos);
+    TEST_ASSERT(req.find("<h3>Как топливный кризис повлиял на настроения</h3>")
+                != std::string::npos);
+    TEST_ASSERT(req.find("<p>Водители начали") != std::string::npos);
+    TEST_ASSERT(req.find("##") == std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_heading_inline_midparagraph_becomes_h3);
+
+// Slug: при пустом SEO-slug ярлык строится на месте из focus_keyword
+// (транслит), а не из host_hash.
+static void test_wp_sink_slug_from_focus_keyword_when_seo_slug_empty() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.seo_slug.clear();
+    a.seo_focus_keyword = "дефицит аи-95";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    const std::string expected = "\"slug\":\"" + make_slug("дефицит аи-95") + "\"";
+    TEST_ASSERT(req.find(expected) != std::string::npos);
+    TEST_ASSERT(req.find("zebra_tv_ru") == std::string::npos ||
+                req.find(expected) < req.find("zebra_tv_ru"));
+}
+
+REGISTER_TEST(test_wp_sink_slug_from_focus_keyword_when_seo_slug_empty);
 
 // Заголовок в начале блока со склеенным абзацем: склейки нет — заголовок
 // рендерится отдельно (первый блок по правилу лида → жирный <p>), абзац —

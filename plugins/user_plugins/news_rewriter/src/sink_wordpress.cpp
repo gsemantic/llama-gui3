@@ -11,6 +11,7 @@
 #include "dotenv.h"
 #include "http.h"
 #include "json.h"
+#include "translit.h"
 
 namespace news_rewriter {
 
@@ -86,6 +87,35 @@ std::string body_to_html(const std::string& body) {
                (line[h] == ' ' || line[h] == '\t');
     };
 
+    // Маркер заголовка бывает приклеен ВНУТРЬ строки абзаца («…дня. ## Как
+    // топливный кризис…») — LLM пишет подзаголовок в конец абзаца через
+    // пробел. Режем строку на «текст до» и «заголовок до конца строки».
+    auto split_inline_heading = [](const std::string& line) {
+        std::vector<std::string> out;
+        for (std::size_t i = 0; i < line.size(); ++i) {
+            if (line[i] != '#') continue;
+            if (i != 0 && line[i - 1] != ' ' && line[i - 1] != '\t') continue;
+            std::size_t h = 0;
+            while (h < 6 && i + h < line.size() && line[i + h] == '#') ++h;
+            if (h >= 1 && i + h < line.size() &&
+                (line[i + h] == ' ' || line[i + h] == '\t')) {
+                if (i > 0) {
+                    std::string left = line.substr(0, i);
+                    while (!left.empty() && (left.back() == ' ' ||
+                                             left.back() == '\t' ||
+                                             left.back() == '\r')) {
+                        left.pop_back();
+                    }
+                    if (!left.empty()) out.push_back(left);
+                }
+                out.push_back(line.substr(i));
+                return out;
+            }
+        }
+        out.push_back(line);
+        return out;
+    };
+
     // Нормализация: заголовок должен НАЧИНАТЬ свой блок И ЗАКАНЧИВАТЬ его —
     // иначе склеенный с ним текст уезжает внутрь <h3> (с <br> между строками),
     // а при одиночном \n перед заголовком решётки остаются литералом в абзаце.
@@ -106,21 +136,24 @@ std::string body_to_html(const std::string& body) {
             if (line_end == std::string::npos) line_end = body.size();
             const std::string line =
                 body.substr(line_begin, line_end - line_begin);
-            if (heading_line(line)) {
-                if (!norm.empty() && !tail_has_blank(norm)) {
-                    std::size_t k = norm.size();
-                    while (k > 0 && (norm[k - 1] == '\n' || norm[k - 1] == ' ' ||
-                                     norm[k - 1] == '\t' || norm[k - 1] == '\r')) {
-                        --k;
+            for (const std::string& seg : split_inline_heading(line)) {
+                if (heading_line(seg)) {
+                    if (!norm.empty() && !tail_has_blank(norm)) {
+                        std::size_t k = norm.size();
+                        while (k > 0 &&
+                               (norm[k - 1] == '\n' || norm[k - 1] == ' ' ||
+                                norm[k - 1] == '\t' || norm[k - 1] == '\r')) {
+                            --k;
+                        }
+                        norm.resize(k);
+                        norm += "\n\n";
                     }
-                    norm.resize(k);
+                    norm += seg;
                     norm += "\n\n";
+                } else {
+                    norm += seg;
+                    norm += '\n';
                 }
-                norm += line;
-                norm += "\n\n";
-            } else {
-                norm += line;
-                norm += '\n';
             }
             line_begin = line_end + 1;
         }
@@ -877,17 +910,10 @@ public:
         body["content"] = html;
         body["status"] = status_;
         if (!excerpt_.empty()) body["excerpt"] = excerpt_;
-        // Стабильный slug от источника (если не задан вручную в params),
-        // чтобы дедуп по сайту мог надёжно находить ранее созданный пост.
-        // Стабильный slug от источника (если не задан вручную в params),
-        // либо оптимизированный SEO-slug из focus_keyword, когда доступен.
-        if (!slug_.empty()) {
-            body["slug"] = slug_;
-        } else if (!article.seo_slug.empty()) {
-            body["slug"] = article.seo_slug;
-        } else {
-            body["slug"] = storage_.slug_for(article.url);
-        }
+        // Slug: ручной из params → SEO-slug из focus_keyword → транслит
+        // focus_keyword на месте (SEO-шаг мог не отдать slug) → стабильный
+        // slug от источника (host_hash, нужен дедупу по сайту).
+        body["slug"] = candidate_slugs(article).front();
         // Обложка поста — id картинки, залитой в медиатеку WP выше.
         if (media_id != 0) body["featured_media"] = static_cast<int64_t>(media_id);
         // Категории/теги поддерживают не все типы: стандартные «страницы»
@@ -961,6 +987,24 @@ public:
         return true;
     }
 
+    // Все варианты slug, которыми пост публикуется/мог быть опубликован
+    // (в порядке приоритета записи). Используется и для записи, и для
+    // сверки дедупа с сайтом (пост мог выйти с любым из исторических slug).
+    std::vector<std::string> candidate_slugs(const Article& a) const {
+        std::vector<std::string> out;
+        if (!slug_.empty()) {
+            out.push_back(slug_);
+            return out;
+        }
+        if (!a.seo_slug.empty()) out.push_back(a.seo_slug);
+        if (!a.seo_focus_keyword.empty()) {
+            const std::string ks = make_slug(a.seo_focus_keyword);
+            if (!ks.empty()) out.push_back(ks);
+        }
+        out.push_back(storage_.slug_for(a.url));
+        return out;
+    }
+
     const char* name() const override { return "wordpress"; }
 
     // Реальное состояние статьи на сайте: есть ли уже пост с нашим slug-ом.
@@ -973,26 +1017,31 @@ public:
 
         HttpClient client;
         if (!client.init()) return Presence::Unknown;
-        const std::string slug = storage_.slug_for(a.url);
-        const std::string ep = site_url_ + "/wp-json/wp/v2/" + post_type_ +
-                               "?slug=" + slug + "&status=any&per_page=1";
         NetworkConfig nc;
         nc.timeout_seconds = timeout_;
         const std::string auth = "Authorization: Basic " +
                                  base64_encode(user + ":" + pass);
-        HttpResponse resp = client.get(ep, nc, std::vector<std::string>{auth});
-        if (!resp.ok || resp.status != 200) {
-            if (log_) {
-                log_("WordPressSink: не удалось сверить состояние сайта "
-                     "(HTTP " + std::to_string(resp.status) + "), дедуп по "
-                     "локальному индексу");
+        // Пост мог быть опубликован с любым из исторических slug
+        // (SEO-slug, транслит ключевого слова, host_hash) — проверяем все.
+        for (const std::string& slug : candidate_slugs(a)) {
+            const std::string ep = site_url_ + "/wp-json/wp/v2/" + post_type_ +
+                                   "?slug=" + slug + "&status=any&per_page=1";
+            HttpResponse resp =
+                client.get(ep, nc, std::vector<std::string>{auth});
+            if (!resp.ok || resp.status != 200) {
+                if (log_) {
+                    log_("WordPressSink: не удалось сверить состояние сайта "
+                         "(HTTP " + std::to_string(resp.status) +
+                         "), дедуп по локальному индексу");
+                }
+                return Presence::Unknown;
             }
-            return Presence::Unknown;
+            bool ok = false;
+            Json j = Json::parse(resp.body, &ok);
+            if (!ok || !j.is_array()) return Presence::Unknown;
+            if (j.size() > 0) return Presence::Present;
         }
-        bool ok = false;
-        Json j = Json::parse(resp.body, &ok);
-        if (!ok || !j.is_array()) return Presence::Unknown;
-        return j.size() > 0 ? Presence::Present : Presence::Absent;
+        return Presence::Absent;
     }
 
 private:
