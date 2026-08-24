@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -396,6 +397,193 @@ std::string build_related_html(const std::vector<RelatedPost>& related) {
     return html;
 }
 
+// --- Первоисточник и инлайн-перелинковка ------------------------------------
+
+// Нижний регистр для ASCII и кириллицы (UTF-8). Длина строки в байтах не
+// меняется, поэтому смещения в приведённой копии совпадают с оригиналом.
+std::string lower_ru(const std::string& in) {
+    std::string s = in;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c >= 'A' && c <= 'Z') s[i] = static_cast<char>(c - 'A' + 'a');
+    }
+    for (std::size_t i = 0; i + 1 < s.size(); ++i) {
+        const unsigned char c0 = static_cast<unsigned char>(s[i]);
+        const unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+        if (c0 == 0xD0 && c1 >= 0x90 && c1 <= 0x9F) {
+            s[i + 1] = static_cast<char>(c1 + 0x20);   // А..П → а..п
+        } else if (c0 == 0xD0 && c1 >= 0xA0 && c1 <= 0xAF) {
+            s[i] = static_cast<char>(0xD1);            // Р..Я → р..я
+            s[i + 1] = static_cast<char>(c1 - 0x20);
+        } else if (c0 == 0xD0 && c1 == 0x81) {
+            s[i] = static_cast<char>(0xD1);            // Ё → ё
+            s[i + 1] = static_cast<char>(0x91);
+        }
+    }
+    return s;
+}
+
+// Первые nchars символов UTF-8 строки.
+std::string utf8_prefix(const std::string& s, std::size_t nchars) {
+    std::size_t i = 0, chars = 0;
+    while (i < s.size() && chars < nchars) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        std::size_t len = 1;
+        if ((c & 0x80) != 0)
+            len = ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : 4;
+        i += len;
+        ++chars;
+    }
+    return s.substr(0, i);
+}
+
+// Анкор намекает на ссылку-источник («по данным …», «источник», «сообщает»).
+bool anchor_mentions_source(const std::string& text) {
+    static const char* kW[] = {"источник", "по данным", "по информации",
+                               "сообщает", "source", "reports"};
+    const std::string t = lower_ru(text);
+    for (const char* w : kW)
+        if (!std::string(w).empty() && t.find(w) != std::string::npos) return true;
+    return false;
+}
+
+// Выбирает ОДНУ ссылку на первоисточник из внешних ссылок оригинала:
+// 1) nofollow/noindex + говорящий анкор; 2) nofollow/noindex; 3) анкор.
+const ExternalLink* pick_primary_source(const std::vector<ExternalLink>& links) {
+    const ExternalLink* best = nullptr;
+    int best_rank = 0;
+    for (const auto& l : links) {
+        int rank = 0;
+        if (l.source_ref && anchor_mentions_source(l.text)) rank = 3;
+        else if (l.source_ref) rank = 2;
+        else if (anchor_mentions_source(l.text)) rank = 1;
+        if (rank > best_rank) { best = &l; best_rank = rank; }
+    }
+    return best;
+}
+
+// Слова значимой длины из заголовка (нижний регистр): кандидаты на якорь.
+std::vector<std::string> title_keywords(const std::string& title) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char ch : lower_ru(title)) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                            c >= 0x80;
+        if (letter) cur += ch;
+        else { if (cur.size() >= 8) out.push_back(cur); cur.clear(); }
+    }
+    if (cur.size() >= 8) out.push_back(cur);
+    return out;
+}
+
+struct ProseWord { std::size_t begin; std::size_t end; };
+
+// Слова в текстовых узлах HTML: вне тегов, вне <a>…</a> и заголовков h1–h6
+// (в них ссылки не встраиваем). Смещения — по исходной строке.
+std::vector<ProseWord> prose_words(const std::string& html) {
+    std::vector<ProseWord> out;
+    int anchor_depth = 0, heading_depth = 0;
+    std::size_t word_begin = std::string::npos;
+    auto flush = [&](std::size_t i) {
+        if (word_begin != std::string::npos) {
+            if (anchor_depth == 0 && heading_depth == 0 && i > word_begin)
+                out.push_back({word_begin, i});
+            word_begin = std::string::npos;
+        }
+    };
+    auto is_heading = [](const std::string& n) {
+        return n.size() == 2 && n[0] == 'h' && n[1] >= '1' && n[1] <= '6';
+    };
+    std::size_t i = 0;
+    while (i < html.size()) {
+        if (html[i] == '<') {
+            flush(i);
+            std::size_t j = i + 1;
+            bool closing = false;
+            if (j < html.size() && html[j] == '/') { closing = true; ++j; }
+            std::string name;
+            while (j < html.size()) {
+                const char ch = html[j];
+                const unsigned char uc = static_cast<unsigned char>(ch);
+                const bool name_ch =
+                    (uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') ||
+                    (uc >= '0' && uc <= '9');
+                if (!name_ch) break;
+                name += static_cast<char>(
+                    (uc >= 'A' && uc <= 'Z') ? uc - 'A' + 'a' : uc);
+                ++j;
+            }
+            while (j < html.size() && html[j] != '>') ++j;
+            if (j < html.size()) ++j;
+            if (name == "a") {
+                anchor_depth += closing ? -1 : 1;
+                if (anchor_depth < 0) anchor_depth = 0;
+            } else if (is_heading(name)) {
+                heading_depth += closing ? -1 : 1;
+                if (heading_depth < 0) heading_depth = 0;
+            }
+            i = j;
+            continue;
+        }
+        const unsigned char uc = static_cast<unsigned char>(html[i]);
+        const bool letter = (uc >= 'a' && uc <= 'z') || (uc >= '0' && uc <= '9') ||
+                            uc >= 0x80;
+        if (letter) {
+            if (word_begin == std::string::npos) word_begin = i;
+        } else {
+            flush(i);
+        }
+        ++i;
+    }
+    flush(html.size());
+    return out;
+}
+
+// Вставляет <a href> вокруг пары соседних слов текста, совпадающей с парой
+// ключевых слов заголовка похожей записи (сравнение по 5-символьному префиксу
+// переживает падежные окончания; окно длины отсекает однокоренные «не те»
+// слова вроде «министр» против «министерство»). Возвращает новый HTML либо
+// пустую строку, если подходящего места нет.
+std::string insert_inline_link(const std::string& html, const std::string& url,
+                               const std::vector<std::string>& kws,
+                               const std::set<std::string>& used_urls) {
+    if (kws.size() < 2 || url.empty() || used_urls.count(url)) return "";
+    const std::string low = lower_ru(html);
+    const std::vector<ProseWord> words = prose_words(low);
+    if (words.size() < 2) return "";
+    for (std::size_t k = 0; k + 1 < kws.size(); ++k) {
+        // Префикс 4 символа: у прилагательных падеж меняет уже 5-ю букву
+        // (скорая/скорой/скорую), пара слов отсекает ложные совпадения.
+        const std::string p1 = utf8_prefix(kws[k], 4);
+        const std::string p2 = utf8_prefix(kws[k + 1], 4);
+        if (p1.size() < 8 || p2.size() < 8) continue;
+        for (std::size_t w = 0; w + 1 < words.size(); ++w) {
+            const std::string t1 = low.substr(words[w].begin,
+                                              words[w].end - words[w].begin);
+            const std::string t2 = low.substr(words[w + 1].begin,
+                                              words[w + 1].end - words[w + 1].begin);
+            if (utf8_prefix(t1, 4) != p1 || utf8_prefix(t2, 4) != p2) continue;
+            // Окно длины: слово текста не короче ключевого на >1 символ и не
+            // длиннее на >4 (морфологические суффиксы).
+            if (t1.size() + 2 < kws[k].size() ||
+                t1.size() > kws[k].size() + 8) continue;
+            if (t2.size() + 2 < kws[k + 1].size() ||
+                t2.size() > kws[k + 1].size() + 8) continue;
+            const std::size_t from = words[w].begin;
+            const std::size_t to = words[w + 1].end;
+            std::string out = html.substr(0, from);
+            out += "<a href=\"" + html_escape(url) +
+                   "\" target=\"_blank\" rel=\"noopener\">";
+            out += html.substr(from, to - from);
+            out += "</a>";
+            out += html.substr(to);
+            return out;
+        }
+    }
+    return "";
+}
+
 // --- WordPressSink ----------------------------------------------------------
 
 class WordPressSink : public Sink {
@@ -420,6 +608,8 @@ public:
               cfg.params.get("taxonomy_auto_assign").as_bool(true)),
           internal_related_max_(
               static_cast<int>(cfg.params.get("internal_related_max").as_int(2))),
+          external_links_mode_(
+              cfg.params.get("external_links_mode").as_string("source")),
           timeout_(static_cast<int>(
               cfg.params.get("timeout_seconds").as_int(20))),
           max_retries_(static_cast<int>(
@@ -573,11 +763,53 @@ public:
                        html_escape(alt) + "\"></p>\n" + html;
             }
         }
-        // Внешние ссылки оригинала (блок «Источники») — SEO: сохраняем все
-        // внешние ссылки исходной статьи, открываются в новой вкладке.
-        html += build_external_links_html(article.external_links);
-        // Внутренние похожие материалы (блок «Читайте также»).
-        html += build_related_html(related);
+        // Внешние ссылки оригинала. По умолчанию (source) — только ОДНА
+        // ссылка на первоисточник одной строкой: публиковать все внешние
+        // ссылки исходной статьи не нужно (получался «список из 23 ссылок»).
+        // external_links_mode=all вернёт прежний блок «Источники», none —
+        // полностью отключит вывод.
+        if (external_links_mode_ == "all") {
+            html += build_external_links_html(article.external_links);
+        } else if (external_links_mode_ == "source") {
+            const ExternalLink* primary =
+                pick_primary_source(article.external_links);
+            if (primary) {
+                html += "\n<p>Первоисточник: <a href=\"" +
+                        html_escape(primary->url) +
+                        "\" target=\"_blank\" rel=\"noopener nofollow\">" +
+                        html_escape(host_of(primary->url)) + "</a></p>";
+                if (log_)
+                    log_("WordPressSink: первоисточник оригинала: " +
+                         primary->url);
+            }
+        }
+        // Внутренняя перелинковка: сначала пробуем встроить ссылки прямо в
+        // текст — на упоминании темы похожей записи (по словам заголовка).
+        // Куда встроить не удалось — остаются в блоке «Читайте также».
+        {
+            std::vector<RelatedPost> rest;
+            std::set<std::string> used_urls;
+            int placed_inline = 0;
+            for (const auto& r : related) {
+                const std::vector<std::string> kws = title_keywords(r.title);
+                std::string updated =
+                    insert_inline_link(html, r.link, kws, used_urls);
+                if (!updated.empty()) {
+                    html = std::move(updated);
+                    used_urls.insert(r.link);
+                    ++placed_inline;
+                } else {
+                    rest.push_back(r);
+                }
+            }
+            if (log_ && !related.empty()) {
+                log_("WordPressSink: внутренние ссылки: в тексте=" +
+                     std::to_string(placed_inline) + ", в блоке=" +
+                     std::to_string(rest.size()));
+            }
+            // Внутренние похожие материалы (блок «Читайте также»).
+            html += build_related_html(rest);
+        }
         {
             const std::string host = host_of(article.url);
             html += "\n<p>Источник: <a href=\"" + html_escape(article.url) +
@@ -1017,7 +1249,8 @@ private:
     std::vector<int> tags_;
     int author_ = 0;
     bool taxonomy_auto_assign_ = true;  // проставлять динамическую таксономию в WP
-    int internal_related_max_ = 2;      // число внутренних ссылок «Читайте также» (1..2)
+    int internal_related_max_ = 2;      // число внутренних ссылок (1..2)
+    std::string external_links_mode_ = "source";  // source | all | none
     int default_category_id_ = 0;       // кэш id рубрики «Без рубрики» (uncategorized)
     int timeout_ = 20;
     int max_retries_ = 0;

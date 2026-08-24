@@ -27,6 +27,7 @@ enum class TaskStatus {
 struct ExternalLink {
     std::string url;    // абсолютный URL (резолвится по базе страницы)
     std::string text;   // видимый текст ссылки (anchor); пусто → берём хост
+    bool source_ref = false;  // помечена как «ссылка на источник» (nofollow/noindex)
 };
 
 const char* task_status_name(TaskStatus s);

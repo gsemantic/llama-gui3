@@ -63,6 +63,15 @@ public:
         routes_[path] = Route{body, content_type};
     }
 
+    // Маршрут для конкретного метода (GET/POST): приоритетнее add_route.
+    // Нужен, когда GET-поиск и POST-создание идут на один путь (wp/v2/posts).
+    void add_route_method(const std::string& method, const std::string& path,
+                          const std::string& body,
+                          const std::string& content_type = "text/plain") {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        method_routes_[method + " " + path] = Route{body, content_type};
+    }
+
     int port() const { return port_; }
     std::string base_url() const {
         return "http://127.0.0.1:" + std::to_string(port_);
@@ -129,17 +138,27 @@ private:
                 request_ += req;
             }
 
-            // Выбираем ответ: маршрут или fallback-тело.
+            // Выбираем ответ: метод+путь, затем путь, затем fallback-тело.
             std::string body = body_;
             std::string ctype = content_type_;
             int status = status_;
             {
                 std::lock_guard<std::mutex> lock(routes_mutex_);
-                const auto it = routes_.find(request_path(req));
-                if (it != routes_.end()) {
-                    body = it->second.body;
-                    ctype = it->second.content_type;
+                const std::string method =
+                    req.substr(0, req.find(' '));
+                const auto im = method_routes_.find(method + " " +
+                                                    request_path(req));
+                if (im != method_routes_.end()) {
+                    body = im->second.body;
+                    ctype = im->second.content_type;
                     status = 200;
+                } else {
+                    const auto it = routes_.find(request_path(req));
+                    if (it != routes_.end()) {
+                        body = it->second.body;
+                        ctype = it->second.content_type;
+                        status = 200;
+                    }
                 }
             }
 
@@ -170,6 +189,7 @@ private:
     mutable std::mutex req_mutex_;
     std::atomic<int> request_count_{0};
     std::map<std::string, Route> routes_;
+    std::map<std::string, Route> method_routes_;
     mutable std::mutex routes_mutex_;
 };
 

@@ -406,6 +406,126 @@ static void test_wp_sink_seo_meta_nr_keys_and_slug() {
 
 REGISTER_TEST(test_wp_sink_seo_meta_nr_keys_and_slug);
 
+// Внешние ссылки оригинала: по умолчанию публикуется только ОДНА ссылка на
+// первоисточник (помечена nofollow/noindex), а не весь список «Источники».
+static void test_wp_sink_primary_source_only() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.external_links = {
+        {"https://t.me/channel", "Телеграм-канал", false},
+        {"https://www.spvo.ru/activity/meropr/2026/4993.html",
+         "провела проверку", true},
+        {"https://other.example/page", "Случайный сайт", false},
+    };
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    // Блока со всеми ссылками больше нет.
+    TEST_ASSERT(req.find("Источники:") == std::string::npos);
+    TEST_ASSERT(req.find("t.me") == std::string::npos);
+    TEST_ASSERT(req.find("other.example") == std::string::npos);
+    // Первоисточник — одна строка после статьи. Кавычки внутри JSON-значения
+    // приходят на провод экранированными (\").
+    TEST_ASSERT(req.find("Первоисточник: <a href=\\\"https://www.spvo.ru/"
+                         "activity/meropr/2026/4993.html\\\"")
+                != std::string::npos);
+    TEST_ASSERT(req.find("spvo.ru</a>") != std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_primary_source_only);
+
+// external_links_mode=all возвращает прежний блок «Источники» со списком.
+static void test_wp_sink_external_links_mode_all() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    SinkConfig cfg = make_config(srv.base_url());
+    cfg.params["external_links_mode"] = "all";
+    Storage storage;
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+    Article a = make_article();
+    a.external_links = {
+        {"https://a.example/1", "Первый источник", true},
+        {"https://b.example/2", "Второй сайт", false},
+    };
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("Источники:</strong>") != std::string::npos);
+    TEST_ASSERT(req.find("b.example/2") != std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_external_links_mode_all);
+
+// Внутренняя перелинковка: если в тексте упоминается тема похожей записи
+// (по словам заголовка), ссылка встраивается прямо в текст, а не в блок
+// «Читайте также».
+static void test_wp_sink_inline_internal_link() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+    // GET-поиск похожих по тегу; POST-создание остаётся на fallback (201).
+    srv.add_route_method(
+        "GET", "/wp-json/wp/v2/posts",
+        "[{\"title\":{\"rendered\":\"Скорая помощь получила новые "
+        "автомобили\"},\"link\":\"https://site.example/skoraya/\"}]");
+
+    SinkConfig cfg = make_config(srv.base_url());
+    Json tags = Json::array(); tags.push(static_cast<int64_t>(7));
+    cfg.params["tags"] = tags;
+    Storage storage;
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+
+    Article a = make_article();
+    a.link_internal_related = true;
+    a.body_rewritten =
+        "Водитель скорой помощи рассказал о новой смене.\n\n"
+        "Второй абзац без упоминаний.";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("<a href=\\\"https://site.example/skoraya/\\\" "
+                         "target=\\\"_blank\\\" rel=\\\"noopener\\\">скорой "
+                         "помощи</a>") != std::string::npos);
+    // Блок не добавляется, когда ссылка встроена в текст.
+    TEST_ASSERT(req.find("Читайте также") == std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_inline_internal_link);
+
+// Если упоминания темы похожей записи в тексте нет — запись уходит в блок
+// «Читайте также» (фолбэк прежнего поведения).
+static void test_wp_sink_related_fallback_block() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+    srv.add_route_method(
+        "GET", "/wp-json/wp/v2/posts",
+        "[{\"title\":{\"rendered\":\"Скорая помощь получила новые "
+        "автомобили\"},\"link\":\"https://site.example/skoraya/\"}]");
+
+    SinkConfig cfg = make_config(srv.base_url());
+    Json tags = Json::array(); tags.push(static_cast<int64_t>(7));
+    cfg.params["tags"] = tags;
+    Storage storage;
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+
+    Article a = make_article();
+    a.link_internal_related = true;
+    a.body_rewritten = "Текст совсем о другом: о городском парке и фонтанах.";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("Читайте также:") != std::string::npos);
+    TEST_ASSERT(req.find("<li><a href=\\\"https://site.example/skoraya/\\\"")
+                != std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_related_fallback_block);
+
 // Проверка подключения: 200 + имя пользователя.
 static void test_wp_check_connection_ok() {
     MiniHttpServer srv;

@@ -347,6 +347,33 @@ REGISTER_TEST(test_extract_page_items_listing_splits_articles);
 REGISTER_TEST(test_extract_page_items_homepage_catalog_is_list);
 REGISTER_TEST(test_extract_page_items_single_article_stays_one);
 
+// Ссылки на чужие домены в тексте статьи (источник, партнёрские блоки) не
+// должны превращать страницу в «листинг» и краулиться как её элементы.
+// Регрессия: zebra-tv со ссылкой на spvo.ru в тексте — плагин переписал
+// материал с чужого ресурса вместо указанной статьи.
+static void test_extract_page_items_ignores_foreign_host_links() {
+    const std::string html =
+        "<html><body>"
+        "<article><h1>Женщины жалуются на условия в больнице</h1>"
+        "<p>Основной текст статьи про больницу, довольно длинный.</p>"
+        "<p>Кстати, <a href=\"https://www.spvo.ru/activity/meropr/2026/4993.html\">"
+        "провела проверку</a> деятельности больницы.</p></article>"
+        "<div class=\"additional-catalog\">"
+        "<a target=\"_blank\" href=\"https://kluch.media/materials/a\">Партнёрский материал про город</a>"
+        "<a target=\"_blank\" href=\"https://kluch.media/materials/b\">Ещё один партнёрский материал</a>"
+        "</div>"
+        "</body></html>";
+    const std::vector<ExtractedArticle> items =
+        extract_page_items(html, "https://zebra-tv.ru/novosti/jizn/post/",
+                           SourceExtract{});
+    for (const auto& it : items) {
+        TEST_ASSERT(it.url.empty() ||
+                    it.url.find("zebra-tv.ru") != std::string::npos);
+    }
+}
+
+REGISTER_TEST(test_extract_page_items_ignores_foreign_host_links);
+
 static void test_extract_page_items_skips_sidebar_widget() {
     const std::string html =
         "<html><body>"
@@ -739,5 +766,24 @@ static void test_extract_external_links_fallback_text_to_host() {
 REGISTER_TEST(test_extract_external_links_keeps_external_drops_internal);
 REGISTER_TEST(test_extract_external_links_dedupes);
 REGISTER_TEST(test_extract_external_links_fallback_text_to_host);
+
+// Ссылки, помеченные nofollow и/или обёрнутые в <noindex>, помечаются как
+// «ссылка на источник» (source_ref) — по ним sink выбирает первоисточник.
+static void test_extract_external_links_marks_source_refs() {
+    const std::string html =
+        "<p>Текст со <a href=\"https://a.example/x\">обычной ссылкой про город"
+        "</a> и далее.</p>"
+        "<!--noindex--><a rel=\"nofollow\" target=\"_blank\" "
+        "href=\"https://www.spvo.ru/doc.html\">провела проверку</a>"
+        "<!--/noindex-->";
+    const std::vector<ExternalLink> links =
+        extract_external_links(html,
+                               "https://zebra-tv.ru/novosti/jizn/post/");
+    TEST_ASSERT_EQUAL(links.size(), 2u);
+    TEST_ASSERT(!links[0].source_ref);
+    TEST_ASSERT(links[1].source_ref);
+}
+
+REGISTER_TEST(test_extract_external_links_marks_source_refs);
 
 } // namespace

@@ -731,6 +731,20 @@ bool has_noise_class(const std::string& tag);
 std::size_t find_tag_open(const std::string& html, std::size_t pos,
                           const std::string& tag);
 
+// Хост URL без ведущего «www.».
+std::string host_no_www(const std::string& url) {
+    std::string h = host_of(url);
+    if (h.size() >= 4 && h.compare(0, 4, "www.") == 0) h.erase(0, 4);
+    return h;
+}
+
+// Тот же сайт, что и база (без учёта www). Ссылки на чужие домены (источник в
+// тексте статьи, партнёрские блоки) не считаются элементами листинга — иначе
+// page-режим уходит краулить другой ресурс вместо указанного источника.
+bool same_site_url(const std::string& url, const std::string& base) {
+    return host_no_www(url) == host_no_www(base);
+}
+
 // Поиск блоков статей по тегу <article> (основной путь для современных сайтов).
 std::vector<ExtractedArticle> detect_article_tags(const std::string& html,
                                                   const std::string& base) {
@@ -746,7 +760,10 @@ std::vector<ExtractedArticle> detect_article_tags(const std::string& html,
         const std::size_t end = (close == std::string::npos) ? html.size() : close;
         const std::string block = html.substr(gt + 1, end - (gt + 1));
         ExtractedArticle it = item_fields_from_block(block, base);
-        if (!it.body.empty() || !it.title.empty()) items.push_back(std::move(it));
+        const bool foreign =
+            !it.url.empty() && !same_site_url(it.url, base);
+        if (!foreign && (!it.body.empty() || !it.title.empty()))
+            items.push_back(std::move(it));
         p = (close == std::string::npos) ? html.size() : close;
     }
     return items;
@@ -770,11 +787,15 @@ std::vector<ExtractedArticle> detect_anchor_items(const std::string& html,
         const std::string text =
             html_to_text(html.substr(gt + 1, end - (gt + 1)));
         if (is_article_href(href) && letter_count(text) >= 15) {
-            Anchor a;
-            a.href = resolve_page_url(href, base);
-            a.text = text;
-            a.pos = p;
-            anchors.push_back(std::move(a));
+            const std::string abs = resolve_page_url(href, base);
+            // Чужие хосты не элементы листинга (см. same_site_url).
+            if (same_site_url(abs, base)) {
+                Anchor a;
+                a.href = abs;
+                a.text = text;
+                a.pos = p;
+                anchors.push_back(std::move(a));
+            }
         }
         p = gt + 1;
     }
@@ -1244,7 +1265,7 @@ std::vector<ExternalLink> extract_external_links(const std::string& html,
         if (close != std::string::npos) {
             text = html_to_text(html.substr(pos, close - pos));
         }
-        // Лёгкая очистка краёвых пробелов.
+        // Лёгкая очистка краёв пробелов.
         const std::size_t b = text.find_first_not_of(" \t\r\n");
         std::string norm = (b == std::string::npos)
                                 ? std::string()
@@ -1255,9 +1276,20 @@ std::vector<ExternalLink> extract_external_links(const std::string& html,
         }
         if (norm.size() > 200) norm = norm.substr(0, 200);
 
+        // Ссылка на источник: rel="nofollow" и/или обёртка <noindex> — так
+        // сайты обычно размечают ссылки на первоисточник/чужие материалы.
+        bool source_ref =
+            get_attr(tag, "rel").find("nofollow") != std::string::npos;
+        if (!source_ref) {
+            const std::size_t no_open = html.rfind("<noindex", pos);
+            const std::size_t no_close = html.rfind("</noindex", pos);
+            source_ref = no_open != std::string::npos &&
+                         (no_close == std::string::npos || no_open > no_close);
+        }
+
         // Дедуп по URL (сохраняем первое вхождение с непустым текстом).
         if (!seen.insert(href).second) continue;
-        out.push_back({href, norm});
+        out.push_back({href, norm, source_ref});
     }
     return out;
 }

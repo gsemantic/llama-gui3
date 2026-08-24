@@ -264,14 +264,17 @@ void render_settings_rewrite([[maybe_unused]] UiDeps& deps, Config& draft) {
     ImGui::TextUnformatted("Ссылки в выходном материале (SEO):");
     ImGui::Checkbox("Сохранять внешние ссылки оригинала (блок «Источники»)",
                     &draft.links.preserve_external);
-    ImGui::TextDisabled("Сохраняет ВСЕ внешние ссылки исходной статьи. "
-                        "Для type=article включено автоматически.");
+    ImGui::TextDisabled("Извлекает внешние ссылки исходной статьи. Для "
+                        "type=article включено автоматически. Что попадёт в "
+                        "пост, задаётся параметром sink «Внешние ссылки "
+                        "оригинала» (по умолчанию — только первоисточник).");
     ImGui::Checkbox("Внутренние «похожие материалы» на выходном сайте (WordPress)",
                     &draft.links.internal_related);
-    ImGui::TextDisabled("Ищет на сайте WP по сгенерированным тегам и добавляет "
-                        "1–2 внутренние ссылки (блок «Читайте также»). Если "
-                        "подходящих нет — ничего не добавляет. Только для sink "
-                        "wordpress.");
+    ImGui::TextDisabled("Ищет на сайте WP по сгенерированным тегам похожие "
+                        "записи: ссылка встраивается прямо в текст на "
+                        "упоминании темы (напр. «скорой помощи»), а если места "
+                        "нет — запись остаётся в блоке «Читайте также». "
+                        "Только для sink wordpress.");
     int mx = draft.links.internal_related_max;
     if (ImGui::InputInt("Макс. внутренних ссылок (1–2)", &mx)) {
         if (mx < 1) mx = 1;
@@ -343,6 +346,24 @@ void render_settings_output(UiDeps& deps, Config& draft) {
             ImGui::EndCombo();
         }
         draft.sink.params["status"] = status;
+
+        // Внешние ссылки оригинала: одна строка первоисточника по умолчанию,
+        // полный список «Источники» или полностью выключено.
+        std::string elinks =
+            draft.sink.params["external_links_mode"].as_string("source");
+        if (ImGui::BeginCombo("Внешние ссылки оригинала",
+                              elinks == "all" ? "все (блок «Источники»)"
+                              : elinks == "none" ? "не сохранять"
+                                                 : "только первоисточник")) {
+            if (ImGui::Selectable("только первоисточник")) elinks = "source";
+            if (ImGui::Selectable("все (блок «Источники»)")) elinks = "all";
+            if (ImGui::Selectable("не сохранять")) elinks = "none";
+            ImGui::EndCombo();
+        }
+        draft.sink.params["external_links_mode"] = elinks;
+        ImGui::TextDisabled("Первоисточник — ссылка оригинала, помеченная "
+                            "nofollow/noindex или анкором «по данным…». "
+                            "Остаётся также строка «Источник: <домен>».");
 
         std::string cats = int_list_to_csv(draft.sink.params["categories"]);
         input_text("Категории (id через запятую)", cats);
