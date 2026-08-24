@@ -12,10 +12,13 @@
 
 namespace news_rewriter {
 
-namespace {
-
-// Используется extract_author (объявлен ниже); определён позже в этом файле.
+// Вспомогательные функции, используемые как внутри анонимного namespace, так и
+// публичной extract_external_links; определены позже в этом файле.
 std::string get_attr(const std::string& tag, const std::string& attr);
+std::string resolve_page_url(const std::string& href, const std::string& base);
+bool is_article_href(const std::string& href);
+
+namespace {
 
 // Автор оригинала: мета-тег <meta name="author"/property="…author…"> либо
 // явная подпись в тексте («作者：Имя», «Автор: Имя», «By Имя»). Возвращает
@@ -353,22 +356,7 @@ double text_density(const std::string& text) {
     return static_cast<double>(letter_count(text)) / static_cast<double>(ch);
 }
 
-// Значение атрибута внутри тега (attr="..." или attr='...').
-std::string get_attr(const std::string& tag, const std::string& attr) {
-    const std::string key = attr + "=";
-    std::size_t p = 0;
-    while ((p = tag.find(key, p)) != std::string::npos) {
-        std::size_t v = p + key.size();
-        while (v < tag.size() && (tag[v] == ' ' || tag[v] == '\t')) ++v;
-        if (v < tag.size() && (tag[v] == '"' || tag[v] == '\'')) {
-            const char quote = tag[v++];
-            const std::size_t e = tag.find(quote, v);
-            if (e != std::string::npos) return tag.substr(v, e - v);
-        }
-        p += key.size();
-    }
-    return "";
-}
+// Значение атрибута get_attr() определено ниже на уровне namespace news_rewriter.
 
 // URL из <meta property="..."> / <meta name="..."> с content="...".
 // Ищем тег <meta> (og:image/twitter:image задаются именно им, не <img>).
@@ -467,26 +455,7 @@ std::string extract_image_url(const std::string& html) {
 
 // --- helpers для разбора страниц-списков (page mode) ----------------------
 
-// Резолв относительного href в абсолютный URL по базовому адресу страницы.
-std::string resolve_page_url(const std::string& href, const std::string& base) {
-    if (href.empty() || base.empty()) return href;
-    if (href.find("://") != std::string::npos) return href;        // уже абсолютный
-    if (href.size() >= 2 && href[0] == '/' && href[1] == '/') {    // //host/path
-        const std::size_t scheme = base.find("://");
-        if (scheme == std::string::npos) return href;
-        return base.substr(0, scheme + 3) + href.substr(2);
-    }
-    const std::size_t scheme = base.find("://");
-    if (scheme == std::string::npos) return href;
-    const std::size_t host_end = base.find('/', scheme + 3);
-    const std::string origin = host_end == std::string::npos
-                                   ? base : base.substr(0, host_end);
-    if (!href.empty() && href[0] == '/') return origin + href;     // /path
-    const std::size_t last_slash = base.rfind('/');
-    const std::string dir = last_slash != std::string::npos
-                                ? base.substr(0, last_slash + 1) : origin + "/";
-    return dir + href;
-}
+// resolve_page_url() определён ниже на уровне namespace news_rewriter.
 
 // Первый <img> в диапазоне [from, to) HTML: предпочитаем src, иначе
 // data-src/data-lazy-src (lazy-load). Пропускаем data: URI.
@@ -754,26 +723,8 @@ ExtractedArticle item_fields_from_block(const std::string& block,
     return it;
 }
 
-// Похоже ли href на ссылку на отдельную статью (отсекаем навигацию/ассеты).
-bool is_article_href(const std::string& href) {
-    if (href.empty()) return false;
-    if (href.compare(0, 11, "javascript:") == 0) return false;
-    if (href.compare(0, 7, "mailto:") == 0) return false;
-    if (href.compare(0, 4, "tel:") == 0) return false;
-    if (href[0] == '#') return false;
-    const std::size_t q = href.find('?');
-    const std::string path = (q == std::string::npos) ? href : href.substr(0, q);
-    const std::size_t dot = path.find_last_of('.');
-    if (dot != std::string::npos) {
-        const std::string ext = path.substr(dot + 1);
-        if (ext == "css" || ext == "js" || ext == "json" || ext == "xml" ||
-            ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
-            ext == "webp" || ext == "svg" || ext == "ico" || ext == "pdf") {
-            return false;
-        }
-    }
-    return true;
-}
+// is_article_href() и extract_external_links() определены ниже на уровне
+// namespace news_rewriter (их нужно видеть извне анонимного namespace).
 
 // forward declarations (определены ниже в этом namespace)
 bool has_noise_class(const std::string& tag);
@@ -1197,6 +1148,119 @@ std::string rebuild_body_skipping(const std::vector<std::string>& lines,
 }
 
 } // namespace
+
+// --- helpers на уровне namespace news_rewriter (видны снаружи анонимного ns) ---
+
+// Значение атрибута внутри тега (attr="..." или attr='...').
+std::string get_attr(const std::string& tag, const std::string& attr) {
+    const std::string key = attr + "=";
+    std::size_t p = 0;
+    while ((p = tag.find(key, p)) != std::string::npos) {
+        std::size_t v = p + key.size();
+        while (v < tag.size() && (tag[v] == ' ' || tag[v] == '\t')) ++v;
+        if (v < tag.size() && (tag[v] == '"' || tag[v] == '\'')) {
+            const char quote = tag[v++];
+            const std::size_t e = tag.find(quote, v);
+            if (e != std::string::npos) return tag.substr(v, e - v);
+        }
+        p += key.size();
+    }
+    return "";
+}
+
+// Резолв относительного href в абсолютный URL по базовому адресу страницы.
+std::string resolve_page_url(const std::string& href, const std::string& base) {
+    if (href.empty() || base.empty()) return href;
+    if (href.find("://") != std::string::npos) return href;        // уже абсолютный
+    if (href.size() >= 2 && href[0] == '/' && href[1] == '/') {    // //host/path
+        const std::size_t scheme = base.find("://");
+        if (scheme == std::string::npos) return href;
+        return base.substr(0, scheme + 3) + href.substr(2);
+    }
+    const std::size_t scheme = base.find("://");
+    if (scheme == std::string::npos) return href;
+    const std::size_t host_end = base.find('/', scheme + 3);
+    const std::string origin = host_end == std::string::npos
+                                    ? base : base.substr(0, host_end);
+    if (!href.empty() && href[0] == '/') return origin + href;     // /path
+    const std::size_t last_slash = base.rfind('/');
+    const std::string dir = last_slash != std::string::npos
+                                 ? base.substr(0, last_slash + 1) : origin + "/";
+    return dir + href;
+}
+
+// Похоже ли href на ссылку на отдельную статью (отсекаем навигацию/ассеты).
+bool is_article_href(const std::string& href) {
+    if (href.empty()) return false;
+    if (href.compare(0, 11, "javascript:") == 0) return false;
+    if (href.compare(0, 7, "mailto:") == 0) return false;
+    if (href.compare(0, 4, "tel:") == 0) return false;
+    if (href[0] == '#') return false;
+    const std::size_t q = href.find('?');
+    const std::string path = (q == std::string::npos) ? href : href.substr(0, q);
+    const std::size_t dot = path.find_last_of('.');
+    if (dot != std::string::npos) {
+        const std::string ext = path.substr(dot + 1);
+        if (ext == "css" || ext == "js" || ext == "json" || ext == "xml" ||
+            ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
+            ext == "webp" || ext == "svg" || ext == "ico" || ext == "pdf") {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<ExternalLink> extract_external_links(const std::string& html,
+                                                 const std::string& base_url) {
+    std::vector<ExternalLink> out;
+    std::set<std::string> seen;
+    const std::string base_host = host_of(base_url);
+
+    std::size_t pos = 0;
+    while ((pos = html.find("<a ", pos)) != std::string::npos) {
+        const std::size_t gt = html.find('>', pos);
+        if (gt == std::string::npos) break;
+        const std::string tag = html.substr(pos, gt - pos + 1);
+        const std::string raw_href = get_attr(tag, "href");
+        pos = gt + 1;  // продолжаем поиск со следующего символа
+
+        // Служебные/якорные ссылки отсекаем сразу.
+        if (raw_href.empty() || raw_href[0] == '#' ||
+            raw_href.compare(0, 11, "javascript:") == 0 ||
+            raw_href.compare(0, 7, "mailto:") == 0 ||
+            raw_href.compare(0, 4, "tel:") == 0) {
+            continue;
+        }
+
+        const std::string href = resolve_page_url(raw_href, base_url);
+        // Только внешние (чужой хост относительно источника).
+        if (host_of(href) == base_host) continue;
+        // Ассеты (картинки/скрипты/файлы) не несут смысловой ссылки.
+        if (!is_article_href(href)) continue;
+
+        // Видимый текст якоря: до закрывающего </a>.
+        std::string text;
+        const std::size_t close = html.find("</a", pos);
+        if (close != std::string::npos) {
+            text = html_to_text(html.substr(pos, close - pos));
+        }
+        // Лёгкая очистка краёвых пробелов.
+        const std::size_t b = text.find_first_not_of(" \t\r\n");
+        std::string norm = (b == std::string::npos)
+                                ? std::string()
+                                : text.substr(b, text.find_last_not_of(" \t\r\n") - b + 1);
+        if (norm.empty()) {
+            // Нет текста (напр. ссылка-картинка) — берём хост как подпись.
+            norm = host_of(href);
+        }
+        if (norm.size() > 200) norm = norm.substr(0, 200);
+
+        // Дедуп по URL (сохраняем первое вхождение с непустым текстом).
+        if (!seen.insert(href).second) continue;
+        out.push_back({href, norm});
+    }
+    return out;
+}
 
 bool extract_author_from_text(const std::string& text, std::string& author,
                               std::string& body) {

@@ -334,6 +334,68 @@ std::vector<int> dedupe_ints(std::vector<int> v) {
     return out;
 }
 
+// Похожий материал на выходном сайте (для внутренней перелинковки).
+struct RelatedPost {
+    std::string title;   // очищенный от тегов заголовок
+    std::string link;    // абсолютный URL записи
+};
+
+// Убирает HTML-теги из строки (заголовки WP приходят как HTML).
+std::string strip_html(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    bool in_tag = false;
+    for (char c : in) {
+        if (c == '<') { in_tag = true; continue; }
+        if (c == '>') { in_tag = false; continue; }
+        if (!in_tag) out += c;
+    }
+    // Схлопываем повторные пробелы и краевые.
+    std::string norm;
+    bool space = false;
+    for (char c : out) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!space) norm += ' ';
+            space = true;
+        } else {
+            norm += c;
+            space = false;
+        }
+    }
+    const std::size_t b = norm.find_first_not_of(' ');
+    if (b == std::string::npos) return "";
+    const std::size_t e = norm.find_last_not_of(' ');
+    return norm.substr(b, e - b + 1);
+}
+
+// Собирает HTML-блок «Источники» из внешних ссылок оригинала.
+// Все ссылки открываются в новой вкладке (target="_blank", rel="noopener").
+std::string build_external_links_html(const std::vector<ExternalLink>& links) {
+    if (links.empty()) return "";
+    std::string html = "<p><strong>Источники:</strong></p>\n<ul>\n";
+    for (const auto& l : links) {
+        const std::string text = l.text.empty() ? html_escape(host_of(l.url)) : html_escape(l.text);
+        html += "<li><a href=\"" + html_escape(l.url) +
+                "\" target=\"_blank\" rel=\"noopener\">" + text + "</a></li>\n";
+    }
+    html += "</ul>\n";
+    return html;
+}
+
+// Собирает HTML-блок «Читайте также» из похожих материалов выходного сайта.
+// Ссылки открываются в новой вкладке (target="_blank", rel="noopener").
+std::string build_related_html(const std::vector<RelatedPost>& related) {
+    if (related.empty()) return "";
+    std::string html = "<p><strong>Читайте также:</strong></p>\n<ul>\n";
+    for (const auto& r : related) {
+        const std::string text = r.title.empty() ? html_escape(r.link) : html_escape(r.title);
+        html += "<li><a href=\"" + html_escape(r.link) +
+                "\" target=\"_blank\" rel=\"noopener\">" + text + "</a></li>\n";
+    }
+    html += "</ul>\n";
+    return html;
+}
+
 // --- WordPressSink ----------------------------------------------------------
 
 class WordPressSink : public Sink {
@@ -354,14 +416,16 @@ public:
           excerpt_(cfg.params.get("excerpt").as_string()),
           slug_(cfg.params.get("slug").as_string()),
           featured_image_(cfg.params.get("featured_image").as_string()),
+          taxonomy_auto_assign_(
+              cfg.params.get("taxonomy_auto_assign").as_bool(true)),
+          internal_related_max_(
+              static_cast<int>(cfg.params.get("internal_related_max").as_int(2))),
           timeout_(static_cast<int>(
               cfg.params.get("timeout_seconds").as_int(20))),
           max_retries_(static_cast<int>(
               cfg.params.get("max_retries").as_int(0))),
           retry_delay_ms_(static_cast<int>(
               cfg.params.get("retry_delay_ms").as_int(1000))),
-          taxonomy_auto_assign_(
-              cfg.params.get("taxonomy_auto_assign").as_bool(true)),
           log_(log) {
         // Опциональные числовые id-массивы/скаляры.
         const Json& cats = cfg.params.get("categories");
@@ -442,6 +506,65 @@ public:
         // (featured_media) не задана и пост бы остался без фото. Если заливка
         // прошла — тема уже показывает изображение через featured_media, и
         // дублировать его внутри текста (в оригинальном размере) не нужно.
+        // --- Таксономия: резолвим рубрики/теги ДО сборки HTML, чтобы по
+        // сгенерированным тегам можно было найти похожие материалы на сайте. ---
+        std::vector<int> cat_ids, tag_ids;
+        if (post_type_ != "pages") {
+            cat_ids = categories_;
+            tag_ids = tags_;
+            // Динамическая таксономия из статьи (переведённые рубрики/теги).
+            if (taxonomy_auto_assign_) {
+                const std::vector<int> dyn_cats =
+                    resolve_categories(article, nc, auth);
+                const std::vector<int> dyn_tags =
+                    resolve_tags(article, nc, auth);
+                cat_ids.insert(cat_ids.end(), dyn_cats.begin(), dyn_cats.end());
+                tag_ids.insert(tag_ids.end(), dyn_tags.begin(), dyn_tags.end());
+            }
+            // Убираем дефолтную рубрику WP («Без рубрики»), чтобы не дублировать
+            // её с нашими назначениями — иначе пост попадает и в подходящую
+            // рубрику, и в «Без рубрики» одновременно. GET за списком рубрик
+            // делаем только когда есть что фильтровать (иначе лишний запрос).
+            int def = 0;
+            if (!cat_ids.empty()) {
+                def = default_category_id(nc, auth);
+                if (def != 0) {
+                    std::vector<int> filtered;
+                    for (int id : cat_ids) if (id != def) filtered.push_back(id);
+                    cat_ids = std::move(filtered);
+                }
+            }
+            // Fallback: если конкретных рубрик нет, но таксономия включена И
+            // сайт настроен на рубрики (заданы в конфиге или выведены LLM) —
+            // назначаем рубрику по имени источника, иначе WP всё равно поставит
+            // «Без рубрики». Не делаем лишний запрос, когда рубрик нет вообще
+            // (пост и так попадёт в «Без рубрики» — это ожидаемое поведение).
+            if (taxonomy_auto_assign_ && cat_ids.empty() &&
+                !article.source.empty() &&
+                (!categories_.empty() || !article.categories_ru.empty())) {
+                const int fid = resolve_term("categories", article.source, 0, nc, auth);
+                if (fid != 0 && fid != def) cat_ids.push_back(fid);
+            }
+            cat_ids = dedupe_ints(cat_ids);
+            tag_ids = dedupe_ints(tag_ids);
+        }
+
+        // Внутренние «похожие материалы» выходного сайта (по тегам статьи или
+        // ключевому слову). 1–2 ссылки; если подходящих нет — список пустой,
+        // блок «Читайте также» не добавляется.
+        std::vector<RelatedPost> related;
+        if (article.link_internal_related && post_type_ != "pages") {
+            int maxrel = internal_related_max_;
+            if (maxrel < 1) maxrel = 1;
+            if (maxrel > 2) maxrel = 2;
+            related = find_related_posts(nc, auth, tag_ids, maxrel,
+                                         article.seo_focus_keyword);
+            if (log_ && !related.empty()) {
+                log_("WordPressSink: добавлены внутренние ссылки на похожие "
+                     "материалы: " + std::to_string(related.size()));
+            }
+        }
+
         std::string html = body_to_html(article.body_rewritten);
         if (media_id == 0) {
             const std::string hero_src = media_url.empty() ? image_url : media_url;
@@ -450,6 +573,11 @@ public:
                        html_escape(alt) + "\"></p>\n" + html;
             }
         }
+        // Внешние ссылки оригинала (блок «Источники») — SEO: сохраняем все
+        // внешние ссылки исходной статьи, открываются в новой вкладке.
+        html += build_external_links_html(article.external_links);
+        // Внутренние похожие материалы (блок «Читайте также»).
+        html += build_related_html(related);
         {
             const std::string host = host_of(article.url);
             html += "\n<p>Источник: <a href=\"" + html_escape(article.url) +
@@ -484,37 +612,6 @@ public:
         // Категории/теги поддерживают не все типы: стандартные «страницы»
         // (pages) их не принимают — WP вернёт 400. Для них не шлём таксономию.
         if (post_type_ != "pages") {
-            std::vector<int> cat_ids = categories_;
-            std::vector<int> tag_ids = tags_;
-            // Динамическая таксономия из статьи (переведённые рубрики/теги).
-            if (taxonomy_auto_assign_) {
-                const std::vector<int> dyn_cats =
-                    resolve_categories(article, nc, auth);
-                const std::vector<int> dyn_tags =
-                    resolve_tags(article, nc, auth);
-                cat_ids.insert(cat_ids.end(), dyn_cats.begin(), dyn_cats.end());
-                tag_ids.insert(tag_ids.end(), dyn_tags.begin(), dyn_tags.end());
-            }
-            // Убираем дефолтную рубрику WP («Без рубрики»), чтобы не дублировать
-            // её с нашими назначениями — иначе пост попадает и в подходящую
-            // рубрику, и в «Без рубрики» одновременно.
-            const int def = default_category_id(nc, auth);
-            if (def != 0) {
-                std::vector<int> filtered;
-                for (int id : cat_ids) if (id != def) filtered.push_back(id);
-                cat_ids = std::move(filtered);
-            }
-            // Fallback: если конкретных рубрик нет, но таксономия включена —
-            // назначаем рубрику по имени источника, иначе WP всё равно поставит
-            // «Без рубрики». Срабатывает всегда (даже если LLM не вывел
-            // таксономию вообще), при наличии имени источника.
-            if (taxonomy_auto_assign_ && cat_ids.empty() &&
-                !article.source.empty()) {
-                const int fid = resolve_term("categories", article.source, 0, nc, auth);
-                if (fid != 0 && fid != def) cat_ids.push_back(fid);
-            }
-            cat_ids = dedupe_ints(cat_ids);
-            tag_ids = dedupe_ints(tag_ids);
             if (!cat_ids.empty()) {
                 Json arr = Json::array();
                 for (int id : cat_ids) arr.push(static_cast<int64_t>(id));
@@ -821,6 +918,56 @@ private:
         return ids;
     }
 
+    // Ищет на выходном сайте похожие материалы по тегам статьи (либо по
+    // ключевому слову, если тегов нет) и возвращает до max записей. Используется
+    // для внутренней перелинковки (links.internal_related). Если подходящих нет
+    // — возвращает пустой список (в блок «Читайте также» ничего не добавляем).
+    std::vector<RelatedPost> find_related_posts(const NetworkConfig& nc,
+                                                const std::string& auth,
+                                                const std::vector<int>& tag_ids,
+                                                int max,
+                                                const std::string& search_term) {
+        if (max <= 0) return {};
+        std::string ep = site_url_ + "/wp-json/wp/v2/" + post_type_ +
+                         "?per_page=" + std::to_string(max) +
+                         "&status=publish&_fields=title,link";
+        if (!tag_ids.empty()) {
+            ep += "&tags[]=";
+            for (std::size_t i = 0; i < tag_ids.size(); ++i) {
+                if (i) ep += "&tags[]=";
+                ep += std::to_string(tag_ids[i]);
+            }
+        } else if (!search_term.empty()) {
+            ep += "&search=" + url_encode(search_term);
+        } else {
+            return {};   // не по чем искать — не добавляем блок
+        }
+        HttpResponse r = client_.get(
+            ep, nc, std::vector<std::string>{"Authorization: Basic " + auth});
+        if (!r.ok || r.status != 200) {
+            if (log_) {
+                log_("WordPressSink: не удалось найти похожие материалы "
+                     "(HTTP " + std::to_string(r.status) + ")");
+            }
+            return {};
+        }
+        bool ok = false;
+        Json arr = Json::parse(r.body, &ok);
+        std::vector<RelatedPost> out;
+        if (ok && arr.is_array()) {
+            for (std::size_t i = 0; i < arr.size() && (int)out.size() < max; ++i) {
+                const Json& item = arr[i];
+                if (!item.is_object()) continue;
+                RelatedPost rp;
+                rp.title = strip_html(item.get("title").get("rendered").as_string());
+                rp.link = item.get("link").as_string();
+                if (rp.link.empty()) continue;
+                out.push_back(std::move(rp));
+            }
+        }
+        return out;
+    }
+
     // Возвращает id дефолтной рубрики WP («Без рубрики»/uncategorized, parent=0).
     // Кешируется на время жизни sink. Нужно, чтобы не дублировать её с нашими
     // назначениями (иначе пост попадает и в подходящую рубрику, и в «Без
@@ -870,6 +1017,7 @@ private:
     std::vector<int> tags_;
     int author_ = 0;
     bool taxonomy_auto_assign_ = true;  // проставлять динамическую таксономию в WP
+    int internal_related_max_ = 2;      // число внутренних ссылок «Читайте также» (1..2)
     int default_category_id_ = 0;       // кэш id рубрики «Без рубрики» (uncategorized)
     int timeout_ = 20;
     int max_retries_ = 0;

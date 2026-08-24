@@ -682,4 +682,62 @@ REGISTER_TEST(test_extract_page_author_from_meta);
 REGISTER_TEST(test_extract_page_author_from_russian_signature);
 REGISTER_TEST(test_extract_page_author_absent_is_empty);
 
+// Все ВНЕШНИЕ ссылки оригинала извлекаются (с абсолютными URL и текстом),
+// внутренние (тот же хост) — отсекаются. Относительные резолвятся по base.
+static void test_extract_external_links_keeps_external_drops_internal() {
+    const std::string html =
+        "<html><body>"
+        "<p>Текст статьи с <a href=\"https://other-site.com/report\">полным отчётом</a> "
+        "и ссылкой на <a href=\"/our-news/123\">нашу новость</a>.</p>"
+        "<p>Ещё <a href=\"https://wiki.org/Alpha\">подробная справка</a> и "
+        "<a href=\"javascript:void(0)\">кнопка</a>.</p>"
+        "</body></html>";
+    const std::vector<ExternalLink> links =
+        extract_external_links(html, "http://example.com/article");
+    // Внутренняя /our-news/123 и javascript: отсеяны → 2 внешние.
+    TEST_ASSERT_EQUAL(links.size(), 2u);
+    bool has_other = false, has_wiki = false;
+    for (const auto& l : links) {
+        if (l.url == "https://other-site.com/report") {
+            has_other = true;
+            TEST_ASSERT_EQUAL(l.text, "полным отчётом");
+        }
+        if (l.url == "https://wiki.org/Alpha") {
+            has_wiki = true;
+            TEST_ASSERT_EQUAL(l.text, "подробная справка");
+        }
+    }
+    TEST_ASSERT_TRUE(has_other);
+    TEST_ASSERT_TRUE(has_wiki);
+}
+
+// Дубликаты внешних ссылок (по URL) не должны попадать в результат дважды.
+static void test_extract_external_links_dedupes() {
+    const std::string html =
+        "<html><body>"
+        "<a href=\"https://ext.com/a\">Первый раз</a>"
+        "<a href=\"https://ext.com/a\">Второй раз</a>"
+        "</body></html>";
+    const std::vector<ExternalLink> links =
+        extract_external_links(html, "http://example.com/");
+    TEST_ASSERT_EQUAL(links.size(), 1u);
+    TEST_ASSERT_EQUAL(links[0].text, "Первый раз");
+}
+
+// Если у ссылки нет текста (напр. ссылка-картинка) — подпись берётся из хоста.
+static void test_extract_external_links_fallback_text_to_host() {
+    const std::string html =
+        "<html><body>"
+        "<a href=\"https://news.agency.com/press-release\"><img src=\"x.png\"></a>"
+        "</body></html>";
+    const std::vector<ExternalLink> links =
+        extract_external_links(html, "http://example.com/");
+    TEST_ASSERT_EQUAL(links.size(), 1u);
+    TEST_ASSERT_EQUAL(links[0].text, "news.agency.com");
+}
+
+REGISTER_TEST(test_extract_external_links_keeps_external_drops_internal);
+REGISTER_TEST(test_extract_external_links_dedupes);
+REGISTER_TEST(test_extract_external_links_fallback_text_to_host);
+
 } // namespace

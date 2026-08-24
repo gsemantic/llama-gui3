@@ -23,6 +23,12 @@ enum class TaskStatus {
     Error
 };
 
+// Одна внешняя ссылка оригинала, сохраняемая в выходной статье.
+struct ExternalLink {
+    std::string url;    // абсолютный URL (резолвится по базе страницы)
+    std::string text;   // видимый текст ссылки (anchor); пусто → берём хост
+};
+
 const char* task_status_name(TaskStatus s);
 
 // Готовая статья (модель данных, см. docs/ARCHITECTURE.md).
@@ -50,6 +56,11 @@ struct Article {
                                                     // (иерархия как "A / B" или "A > B")
     std::vector<std::string> categories_ru;        // переведённые рубрики (пути "РуA > РуB")
     std::vector<std::string> tags_ru;              // переведённые теги (плоский список)
+    // Внешние ссылки оригинала, сохраняемые в выходной статье (links.preserve_external).
+    std::vector<ExternalLink> external_links;
+    // Искать на выходном сайте (WP) похожие материалы по тегам и добавить
+    // внутренние ссылки (links.internal_related). Эффект только для sink wordpress.
+    bool link_internal_related = false;
     TaskStatus status = TaskStatus::Pending;
     std::string error;
     uint32_t retry_count = 0;

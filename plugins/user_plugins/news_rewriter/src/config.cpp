@@ -131,6 +131,12 @@ Json config_to_json(const Config& cfg) {
     j["max_age_hours"] = cfg.max_age_hours;
     j["max_retries"] = cfg.max_retries;
 
+    Json links = Json::object();
+    links["preserve_external"] = cfg.links.preserve_external;
+    links["internal_related"] = cfg.links.internal_related;
+    links["internal_related_max"] = cfg.links.internal_related_max;
+    j["links"] = links;
+
     return j;
 }
 
@@ -271,6 +277,19 @@ Config config_from_json(const Json& j) {
     cfg.max_age_hours =
         static_cast<int>(j.get("max_age_hours").as_int(cfg.max_age_hours));
     cfg.max_retries = static_cast<int>(j.get("max_retries").as_int(cfg.max_retries));
+
+    const Json& links = j.get("links");
+    if (links.is_object()) {
+        cfg.links.preserve_external =
+            links.get("preserve_external").as_bool(cfg.links.preserve_external);
+        cfg.links.internal_related =
+            links.get("internal_related").as_bool(cfg.links.internal_related);
+        cfg.links.internal_related_max =
+            static_cast<int>(links.get("internal_related_max")
+                                 .as_int(cfg.links.internal_related_max));
+        if (cfg.links.internal_related_max < 1) cfg.links.internal_related_max = 1;
+        if (cfg.links.internal_related_max > 2) cfg.links.internal_related_max = 2;
+    }
 
     return cfg;
 }

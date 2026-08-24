@@ -649,6 +649,9 @@ bool Worker::export_article(const Config& cfg, Article& a) {
     // article.categories_ru / tags_ru, если taxonomy.enabled).
     sink_cfg.params["taxonomy_auto_assign"] =
         cfg.rewrite.taxonomy.auto_assign;
+    // Передаём лимит внутренних ссылок «Читайте также» в sink (используется
+    // WordPressSink для поиска похожих материалов по тегам).
+    sink_cfg.params["internal_related_max"] = cfg.links.internal_related_max;
     std::unique_ptr<Sink> sink = SinkRegistry::instance().create(
         sink_cfg, storage_, log_callback_);
     if (!sink) {
@@ -952,6 +955,47 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
     // убираем устаревшую заглушку из снапшота.
     remove_stale_source_error(src.url);
 
+    // Сохранять ли внешние ссылки оригинала. Для явного режима type="article"
+    // включаем принудительно (по требованию: выходной материал хранит все
+    // внешние ссылки оригинала); для прочих режимов — по флагу links.preserve_external.
+    const bool keep_external = cfg.links.preserve_external || src.type == "article";
+    // Внутренние «похожие материалы» на выходном сайте (по тегам) — для sink WP.
+    const bool want_internal = cfg.links.internal_related || src.type == "article";
+
+    if (src.type == "article") {
+        // Режим «отдельная страница оригинала»: пользователь указывает URL
+        // конкретной статьи. Извлекаем её текст и ВСЕ внешние ссылки, затем
+        // рерайтим и публикуем (как одиночную страницу).
+        Article a = make_source_article();
+        a.status = TaskStatus::Extracting;
+        set_status(a, "извлечение текста: " + src.url);
+        a.link_internal_related = want_internal;
+        const ExtractedArticle ex = extract_page(res.html, src.url, src.extract);
+        a.title_original = ex.title;
+        a.body_original = ex.body;
+        a.source_image = resolve_url(ex.image, src.url);
+        a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
+        if (keep_external) {
+            a.external_links = extract_external_links(res.html, src.url);
+            log("article: внешних ссылок оригинала сохранено: " +
+                std::to_string(a.external_links.size()));
+        }
+        if (a.body_original.empty()) {
+            a.status = TaskStatus::Error;
+            a.retry_count = retries;
+            a.error = "не удалось извлечь текст страницы";
+            set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
+            return true;
+        }
+        if (!export_article(cfg, a)) {
+            set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
+            return true;
+        }
+        set_status(a, "статья: " + (a.title_original.empty()
+                                            ? src.url : a.title_original));
+        return true;
+    }
+
     if (src.type == "page") {
         // Режим предпросмотра (разведки): вместо авто-извлечения и сразу рерайта
         // сначала предлагаем пользователю варианты текста/фото и ждём явного
@@ -994,6 +1038,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             Article a = make_source_article();
             a.status = TaskStatus::Extracting;
             set_status(a, "извлечение текста: " + src.url);
+            a.link_internal_related = want_internal;
             const ExtractedArticle& ex = items.front();
             a.title_original = ex.title;
             a.body_original = ex.body;
@@ -1001,6 +1046,9 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             a.source_image = resolve_url(ex.image, src.url);
             a.content_hash =
                 sha256_hex(a.title_original + "\n" + a.body_original);
+            if (keep_external) {
+                a.external_links = extract_external_links(res.html, src.url);
+            }
             if (!export_article(cfg, a)) {
                 set_status(a, "ошибка обработки: " + src.url + " — " + a.error);
                 return true;
@@ -1068,6 +1116,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             } else {
                 a.url = strip_tracking_params(item.url);
             }
+            a.link_internal_related = want_internal;
             a.id = sha256_hex(a.url);
             a.source = host_of(src.url);
             a.fetched_at = iso8601_now();
@@ -1077,9 +1126,13 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             set_status(a, "извлечение: " + (item.title.empty() ? a.url : item.title));
 
             ExtractedArticle ex = item;
+            std::string article_html;   // HTML страницы статьи (для внеш. ссылок)
             if (!item.url.empty()) {
                 const FetchResult ar = fetcher_->fetch(item.url, "page", cfg.network);
-                if (ar.ok) ex = extract_page(ar.html, item.url, src.extract);
+                if (ar.ok) {
+                    ex = extract_page(ar.html, item.url, src.extract);
+                    article_html = ar.html;
+                }
                 // иначе оставляем сниппет с листинга
             }
             // Относительную ссылку на фото резолвим в абсолютную по URL статьи.
@@ -1090,6 +1143,9 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
             a.source_image = ex.image.empty() ? item.image : ex.image;
             a.content_hash =
                 sha256_hex(a.title_original + "\n" + a.body_original);
+            if (keep_external && !article_html.empty()) {
+                a.external_links = extract_external_links(article_html, item.url);
+            }
 
             if (!export_article(cfg, a)) {
                 set_status(a, "ошибка обработки: " +
@@ -1133,6 +1189,7 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
         a.url = item.link.empty() ? src.url : item.link;
         a.id = sha256_hex(a.url);
         a.source = host_of(src.url);
+        a.link_internal_related = want_internal;
         a.fetched_at = iso8601_now();
         a.published_at = parse_feed_time(item.pub_date);
         a.language = cfg.rewrite.language;
@@ -1163,6 +1220,10 @@ bool Worker::process_source(const Config& cfg, const SourceConfig& src, uint32_t
                 // напр. scienenet: «作者：Имя 来源：…»). Если страница не дала —
                 // остаётся автор из ленты (выше).
                 if (!fx.author.empty()) a.author_original = fx.author;
+                // Внешние ссылки оригинала (links.preserve_external).
+                if (keep_external) {
+                    a.external_links = extract_external_links(ar.html, item.link);
+                }
             }
         }
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
@@ -1261,6 +1322,7 @@ bool Worker::recon_and_confirm(const Config& cfg, const SourceConfig& src,
         a.title_original = art.title;
         a.body_original = art.body;
         a.source_image = art.image;  // ExtractedArticle.image → Article.source_image
+        a.link_internal_related = cfg.links.internal_related;
         a.content_hash = sha256_hex(a.title_original + "\n" + a.body_original);
         if (!export_article(cfg, a)) {
             set_status(a, "ошибка обработки: " +

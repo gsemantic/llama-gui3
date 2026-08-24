@@ -324,6 +324,17 @@ Json article_to_json(const Article& a) {
         for (const auto& t : a.tags_ru) arr.push(t);
         j["tags_ru"] = arr;
     }
+    // Внешние ссылки оригинала (links.preserve_external) — для отладки/повтора.
+    if (!a.external_links.empty()) {
+        Json arr = Json::array();
+        for (const auto& l : a.external_links) {
+            Json o = Json::object();
+            o["url"] = l.url;
+            o["text"] = l.text;
+            arr.push(o);
+        }
+        j["external_links"] = arr;
+    }
     return j;
 }
 

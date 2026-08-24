@@ -49,7 +49,7 @@ void input_text_multiline(const char* label, std::string& value, float height) {
 
 void combo_type(const char* label, std::string& type) {
     if (ImGui::BeginCombo(label, type.c_str())) {
-        for (const char* t : {"rss", "atom", "page"}) {
+        for (const char* t : {"rss", "atom", "page", "article"}) {
             const bool selected = (type == t);
             if (ImGui::Selectable(t, selected)) type = t;
         }
@@ -255,9 +255,28 @@ void render_settings_rewrite([[maybe_unused]] UiDeps& deps, Config& draft) {
         ImGui::Checkbox("Проставлять рубрики/теги в WP (иначе только хранить "
                         "в статье)", &draft.rewrite.taxonomy.auto_assign);
         ImGui::TextDisabled("Рубрики и теги извлекаются из RSS <category>, "
-                            "переводятся на русский и создаются в WP при "
-                            "необходимости (с соблюдением иерархии). Best-effort: "
-                            "сбой таксономии не роняет статью.");
+                             "переводятся на русский и создаются в WP при "
+                             "необходимости (с соблюдением иерархии). Best-effort: "
+                             "сбой таксономии не роняет статью.");
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Ссылки в выходном материале (SEO):");
+    ImGui::Checkbox("Сохранять внешние ссылки оригинала (блок «Источники»)",
+                    &draft.links.preserve_external);
+    ImGui::TextDisabled("Сохраняет ВСЕ внешние ссылки исходной статьи. "
+                        "Для type=article включено автоматически.");
+    ImGui::Checkbox("Внутренние «похожие материалы» на выходном сайте (WordPress)",
+                    &draft.links.internal_related);
+    ImGui::TextDisabled("Ищет на сайте WP по сгенерированным тегам и добавляет "
+                        "1–2 внутренние ссылки (блок «Читайте также»). Если "
+                        "подходящих нет — ничего не добавляет. Только для sink "
+                        "wordpress.");
+    int mx = draft.links.internal_related_max;
+    if (ImGui::InputInt("Макс. внутренних ссылок (1–2)", &mx)) {
+        if (mx < 1) mx = 1;
+        if (mx > 2) mx = 2;
+        draft.links.internal_related_max = mx;
     }
 }
 

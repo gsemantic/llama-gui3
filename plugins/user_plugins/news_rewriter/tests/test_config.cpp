@@ -65,6 +65,34 @@ static void test_config_network_roundtrip() {
     TEST_ASSERT_EQUAL(back.network.extra_headers, "Authorization: Bearer abc\nX-Custom: 1");
 }
 
+// Блок links (сохранение внешних/внутренних ссылок) сериализуется и
+// десериализуется корректно, с ограничением internal_related_max в диапазоне 1..2.
+static void test_config_links_roundtrip() {
+    Config cfg = default_config();
+    cfg.links.preserve_external = true;
+    cfg.links.internal_related = true;
+    cfg.links.internal_related_max = 2;
+
+    const Config back = config_from_json(config_to_json(cfg));
+    TEST_ASSERT_TRUE(back.links.preserve_external);
+    TEST_ASSERT_TRUE(back.links.internal_related);
+    TEST_ASSERT_EQUAL(back.links.internal_related_max, 2);
+
+    // Избыточные значения обрезаются до 1..2.
+    Json j = Json::object();
+    Json links = Json::object();
+    links["preserve_external"] = true;
+    links["internal_related"] = true;
+    links["internal_related_max"] = 99;
+    j["links"] = links;
+    const Config clamped = config_from_json(j);
+    TEST_ASSERT_EQUAL(clamped.links.internal_related_max, 2);
+    links["internal_related_max"] = 0;
+    j["links"] = links;
+    const Config clamped2 = config_from_json(j);
+    TEST_ASSERT_EQUAL(clamped2.links.internal_related_max, 1);
+}
+
 static void test_config_migrates_bot_user_agent() {
     // Старый бот-UA "news_rewriter/1.0" блокируется сайтами (VK отдаёт 302 на
     // страницу-челлендж). При загрузке он заменяется на браузерный по умолчанию.
@@ -86,6 +114,7 @@ static void test_config_keeps_custom_user_agent() {
 }
 
 REGISTER_TEST(test_config_roundtrip_new_fields);
+REGISTER_TEST(test_config_links_roundtrip);
 REGISTER_TEST(test_config_from_json_defaults);
 REGISTER_TEST(test_config_source_roundtrip);
 REGISTER_TEST(test_config_network_roundtrip);

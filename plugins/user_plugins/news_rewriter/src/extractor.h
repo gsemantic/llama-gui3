@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "common.h"
 #include "config.h"
 
 namespace news_rewriter {
@@ -22,6 +23,14 @@ std::string html_to_text(const std::string& html);
 
 // HTML-описание из фида (description/summary) → чистый текст.
 ExtractedArticle extract_from_description(const std::string& desc);
+
+// Извлекает ВСЕ ВНЕШНИЕ ссылки страницы (href + видимый текст якоря), резолвя
+// относительные URL по base_url. «Внешняя» = хост ссылки отличается от хоста
+// base_url (т.е. не внутренняя для сайта-источника). Отсекаются служебные
+// схемы (javascript:/mailto:/tel:/#), пустые и дубликаты. Используется, чтобы
+// сохранить ссылки оригинала в выходной статье (links.preserve_external).
+std::vector<ExternalLink> extract_external_links(const std::string& html,
+                                                 const std::string& base_url);
 
 // HTML-страница → заголовок + основной текст.
 // Если в cfg заданы маркеры — берётся текст между ними; иначе эвристика:

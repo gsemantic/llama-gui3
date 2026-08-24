@@ -18,7 +18,7 @@ struct SourceExtract {
 
 struct SourceConfig {
     std::string url;
-    std::string type;            // "rss" | "atom" | "page"
+    std::string type;            // "rss" | "atom" | "page" | "article"
     SourceExtract extract;
     bool enabled = true;
     // Предпросмотр (разведка): для type="page" вместо авто-извлечения и сразу
@@ -92,6 +92,22 @@ struct SeoConfig {
     SeoDeliveryConfig delivery;  // доставка мета (Phase 5)
 };
 
+// Сохранение ссылок в выходном материале (SEO: внешние — из оригинала,
+// внутренние — «похожие материалы» на выходном сайте). См. worker.cpp и
+// sink_wordpress.cpp / sink_local_file.cpp.
+struct LinkConfig {
+    // Сохранять ВСЕ внешние ссылки оригинала в выходной статье (блок
+    // «Источники» / «Внешние ссылки»). Эффект есть во всех режимах, но по
+    // умолчанию включается для type="article".
+    bool preserve_external = false;
+    // Искать на выходном сайте (WordPress) похожие материалы по сгенерированным
+    // тегам статьи и добавлять 1–2 внутренние ссылки на них (блок «Читайте
+    // также»). Если подходящих нет — ничего не добавляем. Работает только для
+    // sink типа wordpress (нужен доступ к REST API сайта).
+    bool internal_related = false;
+    int internal_related_max = 2;   // 1..2 (по SEO — не более двух)
+};
+
 // Автоперевод таксономии (рубрики/теги источника → русские названия) и
 // проставление их в приёмник (WordPress). См. rewriter.cpp (translate_taxonomy)
 // и sink_wordpress.cpp (резолв/создание терминов с соблюдением иерархии).
@@ -162,6 +178,7 @@ struct Config {
     int max_items_per_source = 0;    // 0 = без ограничения (кол-во свежих статей)
     int max_age_hours = 0;           // 0 = без ограничения (свежесть в часах)
     int max_retries = 3;             // повторных попыток после 1-го сбоя источника
+    LinkConfig links;                // сохранение внешних/внутренних ссылок в выходе
 };
 
 // Чистая сериализация/десериализация (без зависимостей от хоста).

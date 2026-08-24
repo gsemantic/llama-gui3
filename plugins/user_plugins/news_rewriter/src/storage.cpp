@@ -113,6 +113,17 @@ bool Storage::save_article_md(const Article& a) {
     if (!body.empty()) {
         md += body + "\n\n";
     }
+    // Внешние ссылки оригинала (links.preserve_external): блок «Источники»
+    // в конце материала. Внутренние «похожие материалы» (только WordPress)
+    // здесь не добавляем — для локального файла нет сайта для поиска.
+    if (!a.external_links.empty()) {
+        md += "## Источники\n\n";
+        for (const auto& l : a.external_links) {
+            const std::string text = l.text.empty() ? l.url : l.text;
+            md += "- [" + text + "](" + l.url + ")\n";
+        }
+        md += "\n";
+    }
     md += "Источник: " + a.url + "\n";
     if (a.published_at > 0) {
         md += "Дата оригинала: " + iso8601_of(a.published_at) + "\n";
