@@ -312,7 +312,9 @@ FetchResult Fetcher::fetch(const std::string& url, const std::string& type,
     // кириллица ломает последующий разбор JSON и показывается «кракозябрами».
     const std::string body = to_utf8(resp.body, resp.content_type);
 
-    if (type == "page") {
+    // Режим "article" (одна страница-оригинал) обрабатываем как "page":
+    // возвращаем HTML страницы, дальше worker сам извлечёт текст и ссылки.
+    if (type == "page" || type == "article") {
         std::string html = body;
         // Headless-рендер: принудительно (headless_enabled) либо авто-фолбэк,
         // когда обычный HTTP-фетч вернул пустую JS-оболочку (SPA, напр. VK.ru).

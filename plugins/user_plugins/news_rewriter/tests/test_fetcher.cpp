@@ -69,6 +69,20 @@ static void test_fetcher_page() {
     TEST_ASSERT_TRUE(res.items.empty());
 }
 
+// Режим "article" (одна страница-оригинал) обрабатывается как "page":
+// возвращает HTML страницы, а не ошибку «неизвестный тип».
+static void test_fetcher_article_returns_html() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(200, "<html><body><h1>Статья</h1></body></html>", "text/html"));
+    Fetcher f;
+    TEST_ASSERT_TRUE(f.init());
+    NetworkConfig cfg;
+    const FetchResult res = f.fetch(srv.base_url() + "/news/1", "article", cfg);
+    TEST_ASSERT_TRUE(res.ok);
+    TEST_ASSERT_TRUE(res.html.find("<html>") != std::string::npos);
+    TEST_ASSERT_TRUE(res.items.empty());
+}
+
 static void test_fetcher_http_error() {
     MiniHttpServer srv;
     TEST_ASSERT_TRUE(srv.start(404, "not found"));
@@ -231,6 +245,7 @@ static void test_fetcher_atom_categories() {
 REGISTER_TEST(test_fetcher_rss);
 REGISTER_TEST(test_fetcher_atom);
 REGISTER_TEST(test_fetcher_page);
+REGISTER_TEST(test_fetcher_article_returns_html);
 REGISTER_TEST(test_fetcher_http_error);
 REGISTER_TEST(test_fetcher_unknown_type);
 REGISTER_TEST(test_fetcher_bad_xml);
