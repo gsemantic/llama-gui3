@@ -108,6 +108,57 @@ static void test_wp_sink_created_201() {
     TEST_ASSERT(req.find(" & амперсандом") == std::string::npos);
 }
 
+// Подзаголовок Markdown («## …»), склеенный с соседним текстом одиночным \n
+// (не в начале блока), должен превратиться в <h3>, а не остаться литералом
+// «##» внутри абзаца.
+static void test_wp_sink_heading_glued_midblock_becomes_h3() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.body_rewritten =
+        "Первый абзац рассказа.\n"
+        "## Подзаголовок раздела\n"
+        "Продолжение текста после подзаголовка.";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    TEST_ASSERT(req.find("<h3>Подзаголовок раздела</h3>") != std::string::npos);
+    TEST_ASSERT(req.find("##") == std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_heading_glued_midblock_becomes_h3);
+
+// Заголовок в начале блока со склеенным абзацем: склейки нет — заголовок
+// рендерится отдельно (первый блок по правилу лида → жирный <p>), абзац —
+// своим <p>; решётки не остаются в тексте.
+static void test_wp_sink_heading_start_keeps_paragraph_out_of_h3() {
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":123}"));
+
+    Storage storage;
+    const auto sink = make_wordpress_sink(
+        make_config(srv.base_url()), storage, nullptr);
+    Article a = make_article();
+    a.body_rewritten =
+        "## Заголовок раздела\nАбзац после заголовка с деталями.";
+    TEST_ASSERT_TRUE(sink->write(a));
+
+    const std::string req = srv.last_request();
+    // Первый блок — лид: жирный абзац, не h3.
+    TEST_ASSERT(req.find("<p><strong>Заголовок раздела</strong></p>")
+                != std::string::npos);
+    // Абзац рендерится отдельным <p>, без <br>-склейки с заголовком.
+    TEST_ASSERT(req.find("<p>Абзац после заголовка") != std::string::npos);
+    TEST_ASSERT(req.find("Заголовок раздела<br>") == std::string::npos);
+    TEST_ASSERT(req.find("##") == std::string::npos);
+}
+
+REGISTER_TEST(test_wp_sink_heading_start_keeps_paragraph_out_of_h3);
+
 // 7.1: 401 (неверный пароль/пользователь) → неуспех, без бесконечных ретраев.
 static void test_wp_sink_unauthorized_401() {
     MiniHttpServer srv;

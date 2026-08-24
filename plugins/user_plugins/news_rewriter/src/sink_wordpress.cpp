@@ -74,19 +74,68 @@ std::string inline_markdown(const std::string& text) {
 // Превращает body_rewritten (текст/лёгкий Markdown) в HTML для WP:
 //   - блоки по \n\n → <p>…</p>
 //   - одинарные \n внутри блока → <br>
-//   - # заголовок → <h2>
+//   - # заголовок → <h2>, ## … ###### подзаголовки → <h3>
 std::string body_to_html(const std::string& body) {
     if (body.empty()) return "";
+
+    // Строка-заголовок Markdown: 1–6 решёток + пробел/таб.
+    auto heading_line = [](const std::string& line) {
+        std::size_t h = 0;
+        while (h < line.size() && line[h] == '#') ++h;
+        return h >= 1 && h <= 6 && line.size() > h &&
+               (line[h] == ' ' || line[h] == '\t');
+    };
+
+    // Нормализация: заголовок должен НАЧИНАТЬ свой блок И ЗАКАНЧИВАТЬ его —
+    // иначе склеенный с ним текст уезжает внутрь <h3> (с <br> между строками),
+    // а при одиночном \n перед заголовком решётки остаются литералом в абзаце.
+    // Вставляем разбивку блока до и после строки-заголовка, если её нет.
+    std::string norm;
+    norm.reserve(body.size());
+    auto tail_has_blank = [](const std::string& s) {
+        std::size_t i = s.size();
+        while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' ||
+                         s[i - 1] == '\r'))
+            --i;
+        return i >= 2 && s[i - 1] == '\n' && s[i - 2] == '\n';
+    };
+    {
+        std::size_t line_begin = 0;
+        while (line_begin < body.size()) {
+            std::size_t line_end = body.find('\n', line_begin);
+            if (line_end == std::string::npos) line_end = body.size();
+            const std::string line =
+                body.substr(line_begin, line_end - line_begin);
+            if (heading_line(line)) {
+                if (!norm.empty() && !tail_has_blank(norm)) {
+                    std::size_t k = norm.size();
+                    while (k > 0 && (norm[k - 1] == '\n' || norm[k - 1] == ' ' ||
+                                     norm[k - 1] == '\t' || norm[k - 1] == '\r')) {
+                        --k;
+                    }
+                    norm.resize(k);
+                    norm += "\n\n";
+                }
+                norm += line;
+                norm += "\n\n";
+            } else {
+                norm += line;
+                norm += '\n';
+            }
+            line_begin = line_end + 1;
+        }
+    }
+
     std::vector<std::string> blocks;
     std::string cur;
-    for (std::size_t i = 0; i < body.size(); ++i) {
-        if (body[i] == '\n' && i + 1 < body.size() && body[i + 1] == '\n') {
+    for (std::size_t i = 0; i < norm.size(); ++i) {
+        if (norm[i] == '\n' && i + 1 < norm.size() && norm[i + 1] == '\n') {
             blocks.push_back(cur);
             cur.clear();
             ++i;
             continue;
         }
-        cur += body[i];
+        cur += norm[i];
     }
     if (!cur.empty()) blocks.push_back(cur);
 
