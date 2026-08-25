@@ -728,6 +728,16 @@ void MainWindow::run() {
 
         // Process pending LlamaInterface reconnect (non-blocking, throttled)
         if (pending_reconnect_) {
+            // Облачный режим: запросы идут напрямую к провайдеру (OpenRouter и пр.),
+            // локальный бэкенд не требуется — сбрасываем запрос реконнекта.
+            const bool cloud_active = settings_.cloud_provider().enabled &&
+                                      !settings_.cloud_provider().model_id.empty();
+            if (cloud_active) {
+                std::cout << "MainWindow: облачный режим активен — реконнект к "
+                             "локальному серверу не требуется" << std::endl;
+                pending_reconnect_ = false;
+                chat_interface_->set_server_ready(true);
+            } else {
             static uint32_t last_reconnect_attempt_ = 0;
             static uint32_t reconnect_fail_count_ = 0;
             uint32_t now = SDL_GetTicks();
@@ -752,6 +762,7 @@ void MainWindow::run() {
                                   << reconnect_fail_count_ << ")" << std::endl;
                     }
                 }
+            }
             }
         }
 
