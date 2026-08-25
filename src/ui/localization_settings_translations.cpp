@@ -120,8 +120,15 @@ void LocalizationManager::initializeSettingsTranslations() {
     addTranslation("settings.security.ssl", "SSL / TLS", "SSL / TLS");
     addTranslation("settings.security.verify_ssl", "Проверять SSL-сертификаты", "Verify SSL Certificates");
     addTranslation("settings.security.verify_ssl.help", "Отключите только если используете самоподписанные сертификаты", "Disable only if you use self-signed certificates");
-    addTranslation("settings.security.token", "Токен доступа", "Access Token");
-    addTranslation("settings.security.token.help", "Токен для аутентификации на сервере (если включена)", "Token for server authentication (if enabled)");
+    addTranslation("settings.security.server_access", "Доступ к серверу", "Server Access");
+    addTranslation("settings.security.token", "Токен доступа к llama-серверу (Bearer)", "llama-server access token (Bearer)");
+    addTranslation("settings.security.token.help",
+                   "Bearer-токен для подключения GUI к llama-серверу. Нужен ТОЛЬКО если сервер "
+                   "запущен с --api-key (см. Server Runtime): укажите то же значение. "
+                   "Для локальной работы оставьте пустым. Применяется при подключении/переподключении.",
+                   "Bearer token for GUI-to-server connections. Only needed if the server runs with "
+                   "--api-key (see Server Runtime): enter the same value. Leave empty for local use. "
+                   "Applied on connect/reconnect.");
 
     // Profiles
     addTranslation("settings.profiles.title", "Профили настроек", "Settings Profiles");

@@ -172,16 +172,24 @@ void SettingsDialog::render_security_settings() {
         HelpMarker(TRF("settings.security.verify_ssl.help", "Disable only if you use self-signed certificates"));
     }
 
-    if (ImGui::CollapsingHeader(TRF("settings.security.token", "Access Token"), ImGuiTreeNodeFlags_DefaultOpen)) {
+    // Заголовок секции короче подписи поля — разные ключи локализации
+    if (ImGui::CollapsingHeader(TRF("settings.security.server_access", "Server Access"), ImGuiTreeNodeFlags_DefaultOpen)) {
         char token[256];
         std::strncpy(token, server.auth_token.c_str(), sizeof(token) - 1);
         token[sizeof(token) - 1] = '\0';
-        if (ImGui::InputText(TRF("settings.security.token", "Access Token"), token, sizeof(token), ImGuiInputTextFlags_Password)) {
+        // "##auth_token" делает ID поля уникальным в окне
+        const std::string token_label =
+            std::string(TRF("settings.security.token", "llama-server access token (Bearer)")) + "##auth_token";
+        if (ImGui::InputText(token_label.c_str(), token, sizeof(token), ImGuiInputTextFlags_Password)) {
             server.auth_token = token;
             settings_modified_ = true;
         }
         InputTextContextMenu();
-        HelpMarker(TRF("settings.security.token.help", "Token for server authentication (if enabled)"));
+        HelpMarker(TRF("settings.security.token.help",
+            "Bearer-токен для подключения к серверу. Нужен ТОЛЬКО если сервер "
+            "запущен с --api-key (см. Server Runtime): тогда укажите здесь то же "
+            "значение. Для локальной работы оставьте пустым. "
+            "Применяется при подключении/переподключении к серверу."));
     }
 }
 

@@ -123,6 +123,13 @@ public:
         current_tab_ = SettingsTab::UI;
     }
 
+    // Безопасность: SSL/TLS и токен доступа (ранее вкладка не была достижима)
+    void show_security_settings() {
+        show_dialog_ = true;
+        show_quick_ = true;
+        current_tab_ = SettingsTab::Security;
+    }
+
     // Настройки GPU и оборудования (GPU & Hardware)
     void show_gpu_settings() {
         show_dialog_ = true;
@@ -347,6 +354,7 @@ private:
         Chat,
         Models,
         UI,
+        Security,
         // Advanced Settings
         GPU,
         Cache,

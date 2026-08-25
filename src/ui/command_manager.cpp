@@ -234,13 +234,9 @@ void CommandManager::initializeDefaultCommands(
     // Дополнительные команды
     // =========================================================================
 
-    // Register additional commands with callbacks (to be filled by MainWindow)
-    registerCommand("export_conversation_json", CommandFactory::createFunctionalCommand(
-        "export_conversation_json",
-        []() { std::cout << "Export conversation JSON not implemented yet" << std::endl; },
-        "Export conversation as JSON",
-        "",
-        nullptr));
+    // "export_conversation_json" удалён: недостижимая заглушка,
+    // печатавшая "not implemented" в stdout (см. UI-аудит).
+    // Реальный экспорт: conversation_file_manager_->saveCurrentConversationAs().
 
     registerCommand("open_file", CommandFactory::createFunctionalCommand(
         "open_file",
@@ -348,30 +344,10 @@ void CommandManager::initializeDefaultCommands(
         "",
         nullptr));
 
-    registerCommand("export_settings", CommandFactory::createFunctionalCommand(
-        "export_settings",
-        []() { std::cout << "Export settings not implemented yet" << std::endl; },
-        "Export application settings",
-        "",
-        nullptr));
-    registerCommand("import_settings", CommandFactory::createFunctionalCommand(
-        "import_settings",
-        []() { std::cout << "Import settings not implemented yet" << std::endl; },
-        "Import application settings",
-        "",
-        nullptr));
-    registerCommand("export_chat_history", CommandFactory::createFunctionalCommand(
-        "export_chat_history",
-        []() { std::cout << "Export chat history not implemented yet" << std::endl; },
-        "Export chat history",
-        "",
-        nullptr));
-    registerCommand("import_conversation", CommandFactory::createFunctionalCommand(
-        "import_conversation",
-        []() { std::cout << "Import conversation not implemented yet" << std::endl; },
-        "Import conversation",
-        "",
-        nullptr));
+    // "export_settings"/"import_settings"/"export_chat_history"/
+    // "import_conversation" удалены: были недостижимыми заглушками,
+    // печатавшими "not implemented" в stdout (см. UI-аудит).
+
     // Commands for additional dialog windows
     registerCommand("toggle_window_cloud_services", CommandFactory::createFunctionalCommand(
         "toggle_window_cloud_services",

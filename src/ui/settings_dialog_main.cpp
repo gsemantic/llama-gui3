@@ -150,6 +150,9 @@ void SettingsDialog::render() {
                 case SettingsTab::UI:
                     render_ui_settings();
                     break;
+                case SettingsTab::Security:
+                    render_security_settings();
+                    break;
                 default:
                     render_server_settings();
                     break;

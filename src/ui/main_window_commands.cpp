@@ -1,7 +1,9 @@
 #include "main_window.h"
 #include "commands_workspace.h"
 #include "commands_settings.h"
+#include "../../include/core/logger.h"
 #include <iostream>
+#include <fstream>
 
 namespace llama_gui {
 namespace ui {
@@ -400,63 +402,246 @@ void MainWindow::connectDeveloperCommands() {
     std::cout << "✓ Connected developer commands" << std::endl;
 }
 
-void MainWindow::connectStubCommands() {
-    std::cout << "Connecting stub commands (show 'not implemented' message)..." << std::endl;
+void MainWindow::connectSecondaryCommands() {
+    std::cout << "Connecting secondary commands..." << std::endl;
 
-    auto stub = [this](const std::string& feature_name) {
-        return [this, feature_name]() {
-            dialog_manager_.showInfo("Заглушка",
-                "Функция '" + feature_name + "' ещё не реализована.");
-        };
+    // Сохранение текущего профиля (персистентность изменений из меню)
+    auto save_active_profile = [this]() {
+        std::string profile = settings_.get_current_profile_name();
+        settings_.save_profile(profile.empty() ? "default" : profile);
     };
 
-    // Регистрирует команду-заглушку и помечает её как неактивную (отображается серым)
-    auto registerStub = [this, &stub](const std::string& name, const std::string& feature_name) {
-        registerCommand(name, CommandFactory::createFunctionalCommand(
-            name, stub(feature_name), "Stub", "", nullptr));
-        if (command_manager_) {
-            command_manager_->markCommandAsStub(name);
+    auto logger_level_name = [](llama_gui::core::Logger::Level level) -> std::string {
+        switch (level) {
+            case llama_gui::core::Logger::Level::None:    return "None";
+            case llama_gui::core::Logger::Level::Error:   return "Error";
+            case llama_gui::core::Logger::Level::Warning: return "Warning";
+            case llama_gui::core::Logger::Level::Info:    return "Info";
+            case llama_gui::core::Logger::Level::Debug:   return "Debug";
         }
+        return "?";
     };
 
-    // Settings stubs
-    registerStub("open_auth_settings", "Auth Settings");
-    registerStub("open_ssl_settings", "SSL Settings");
-    registerStub("open_extensions", "Extensions");
-    registerStub("open_plugins", "Plugins");
+    // =========================================================================
+    // Security
+    // =========================================================================
 
-    // View stubs
-    registerStub("reload_ui", "Reload UI");
-    registerStub("toggle_performance", "Performance Overlay");
-    registerStub("toggle_smart_redraw", "Smart Redraw");
-    registerStub("toggle_vsync", "VSync");
-    registerStub("toggle_fps_limit", "FPS Limit");
+    // SSL/TLS и токен доступа редактируются на реальной вкладке Security
+    registerCommand("open_security_settings", CommandFactory::createFunctionalCommand(
+        "open_security_settings",
+        [this]() { settings_dialog_->show_security_settings(); },
+        "Open security settings (SSL/TLS, access token)", "", nullptr));
 
-    // Help stubs
-    registerStub("check_updates", "Check for Updates");
+    registerCommand("toggle_verify_ssl", CommandFactory::createFunctionalCommand(
+        "toggle_verify_ssl",
+        [this, save_active_profile]() {
+            bool& verify = settings_.server().verify_ssl;
+            verify = !verify;
+            save_active_profile();
+            // Обратная связь — галочка в меню (check_func), лог для консоли
+            std::cout << "Verify SSL: " << (verify ? "ON" : "OFF")
+                      << " (применяется к новым https-подключениям)" << std::endl;
+        },
+        "Toggle SSL certificate verification", "", nullptr));
 
-    // Developer stubs
-    registerStub("toggle_debug_mode", "Debug Mode");
-    registerStub("show_command_manager_state", "Command Manager State");
-    registerStub("show_window_manager_state", "Window Manager State");
-    registerStub("export_debug_info", "Export Debug Info");
-    registerStub("clear_cache", "Clear Cache");
-    registerStub("show_logger_info", "Logger Info");
-    registerStub("validate_files", "Validate Files");
+    // =========================================================================
+    // Performance
+    // =========================================================================
 
-    // Logging stubs
-    registerStub("flush_logs", "Flush Logs");
-    registerStub("export_logs", "Export Logs");
-    registerStub("view_logs", "View Logs");
-    registerStub("toggle_log_level", "Toggle Log Level");
-    registerStub("toggle_log_to_file", "Toggle Log to File");
+    // Оверлей производительности = реальное окно ImGui Metrics
+    registerCommand("toggle_performance", CommandFactory::createFunctionalCommand(
+        "toggle_performance",
+        [this]() { show_metrics_window_ = !show_metrics_window_; },
+        "Toggle performance overlay window", "", nullptr));
 
-    // Misc stubs
-    registerStub("toggle_flash_style_colors", "Flash Style Colors");
-    registerStub("toggle_verify_ssl", "Verify SSL");
-    registerStub("toggle_group_rects", "Show Group Rects");
+    registerCommand("toggle_vsync", CommandFactory::createFunctionalCommand(
+        "toggle_vsync",
+        [this, save_active_profile]() {
+            bool& vsync = settings_.performance().enable_vsync;
+            vsync = !vsync;
+            applied_swap_interval_ = vsync ? 1 : 0;
+            if (sdl_window_ && gl_context_) {
+                SDL_GL_SetSwapInterval(applied_swap_interval_);
+            }
+            save_active_profile();
+            dialog_manager_.showInfo("V-Sync",
+                std::string("Вертикальная синхронизация: ") + (vsync ? "ВКЛ" : "ВЫКЛ"));
+        },
+        "Toggle V-Sync", "", nullptr));
 
-    std::cout << "✓ Connected stub commands" << std::endl;
+    registerCommand("toggle_fps_limit", CommandFactory::createFunctionalCommand(
+        "toggle_fps_limit",
+        [this, save_active_profile]() {
+            static const int kLimits[] = {60, 120, 240, 30};
+            int& fps = settings_.performance().target_fps;
+            size_t idx = 0;
+            for (size_t i = 0; i < 4; ++i) {
+                if (fps == kLimits[i]) { idx = (i + 1) % 4; break; }
+            }
+            fps = kLimits[idx];
+            save_active_profile();
+            dialog_manager_.showInfo("Ограничение FPS",
+                "Целевой FPS: " + std::to_string(fps));
+        },
+        "Cycle FPS limit (60 → 120 → 240 → 30)", "", nullptr));
+
+    registerCommand("toggle_smart_redraw", CommandFactory::createFunctionalCommand(
+        "toggle_smart_redraw",
+        [this, save_active_profile]() {
+            bool& smart = settings_.performance().enable_smart_redraw;
+            smart = !smart;
+            save_active_profile();
+            dialog_manager_.showInfo("Умная перерисовка",
+                std::string("Режим: ") + (smart ? "ВКЛ" : "ВЫКЛ") +
+                "\nИзменение применится после перезапуска приложения.");
+        },
+        "Toggle smart redraw mode", "", nullptr));
+
+    // =========================================================================
+    // Logging / Debug
+    // =========================================================================
+
+    // Просмотр логов = встроенное окно Dear ImGui Debug Log
+    registerCommand("view_logs", CommandFactory::createFunctionalCommand(
+        "view_logs",
+        [this]() { show_debug_log_window_ = true; },
+        "Show application log window", "", nullptr));
+
+    registerCommand("toggle_log_level", CommandFactory::createFunctionalCommand(
+        "toggle_log_level",
+        [logger_level_name]() {
+            auto& logger = llama_gui::core::Logger::instance();
+            using L = llama_gui::core::Logger::Level;
+            L level = logger.get_level();
+            int next = static_cast<int>(level);
+            do {
+                next = next >= static_cast<int>(L::Debug)
+                           ? static_cast<int>(L::Error) : next + 1;
+            } while (static_cast<L>(next) == L::None);  // None не даём: глушит всё
+            logger.set_level(static_cast<L>(next));
+            std::cout << "Log level → " << logger_level_name(logger.get_level()) << std::endl;
+        },
+        "Cycle log level (Error → Warning → Info → Debug)", "", nullptr));
+
+    registerCommand("show_logger_info", CommandFactory::createFunctionalCommand(
+        "show_logger_info",
+        [this, logger_level_name]() {
+            auto& logger = llama_gui::core::Logger::instance();
+            const auto& perf = settings_.performance();
+            dialog_manager_.showInfo("Logger",
+                std::string("Текущий уровень: ") + logger_level_name(logger.get_level()) +
+                "\nОтладочный режим: " + (logger.is_debug_mode() ? "да" : "нет") +
+                "\nЛог в файл настройках: " + (perf.log_to_file ? "вкл (не реализовано)" : "выкл") +
+                "\nФайл лога: " + (perf.log_file_path.empty() ? "<не задан>" : perf.log_file_path) +
+                "\n\nЛоггер выводит сообщения в консоль (stdout/stderr).");
+        },
+        "Show Logger information", "", nullptr));
+
+    registerCommand("toggle_debug_mode", CommandFactory::createFunctionalCommand(
+        "toggle_debug_mode",
+        [this, save_active_profile]() {
+            auto& logger = llama_gui::core::Logger::instance();
+            bool enable = !logger.is_debug_mode();
+            logger.set_debug_mode(enable);
+            settings_.performance().debug_mode = enable;  // персистентность
+            save_active_profile();
+            std::cout << "Debug mode " << (enable ? "ENABLED" : "disabled") << std::endl;
+        },
+        "Toggle verbose debug logging", "", nullptr));
+
+    // =========================================================================
+    // Application state
+    // =========================================================================
+
+    registerCommand("show_command_manager_state", CommandFactory::createFunctionalCommand(
+        "show_command_manager_state",
+        [this]() {
+            const auto stats = command_manager_->getStatistics();
+            const auto names = command_manager_->getAllCommandNames();
+            std::string text = "Зарегистрировано команд: " + std::to_string(stats.total_commands) +
+                "\nГорячих клавиш: " + std::to_string(stats.total_shortcuts) +
+                "\nИстория (undo): " + std::to_string(stats.history_size);
+            text += "\n\nКоманды:";
+            for (const auto& n : names) {
+                text += "\n  • " + n;
+                if (command_manager_->isCommandStub(n)) text += "  [заглушка]";
+            }
+            dialog_manager_.showInfo("Состояние CommandManager", text);
+        },
+        "Show Command Manager state and statistics", "", nullptr));
+
+    registerCommand("show_window_manager_state", CommandFactory::createFunctionalCommand(
+        "show_window_manager_state",
+        [this]() {
+            const auto states = window_manager_.getAllWindowStates();
+            std::string text = "Зарегистрировано окон: " + std::to_string(states.size()) + "\n";
+            for (const auto& w : states) {
+                text += "\n  • " + w.name +
+                    "  pos=(" + std::to_string((int)w.position.x) + "," + std::to_string((int)w.position.y) + ")" +
+                    "  size=" + std::to_string((int)w.size.x) + "x" + std::to_string((int)w.size.y) +
+                    (w.visible ? "  [видимо]" : "  [скрыто]");
+            }
+            dialog_manager_.showInfo("Состояние WindowManager", text);
+        },
+        "Show Window Manager state and window positions", "", nullptr));
+
+    registerCommand("export_debug_info", CommandFactory::createFunctionalCommand(
+        "export_debug_info",
+        [this]() {
+            file_dialog_manager_->pick_save("Export Debug Info", "debug_info.txt",
+                [this](const std::string& path) {
+                    if (path.empty()) return;
+                    std::ofstream file(path);
+                    if (!file.is_open()) {
+                        dialog_manager_.showError("Экспорт отладочной информации",
+                            "Не удалось открыть файл:\n" + path);
+                        return;
+                    }
+                    const auto stats = command_manager_->getStatistics();
+                    file << "=== Llama GUI debug info ===\n";
+                    file << "Команд зарегистрировано: " << stats.total_commands << "\n";
+                    file << "Горячих клавиш: " << stats.total_shortcuts << "\n";
+                    file << "Окон в WindowManager: " << window_manager_.getAllWindowNames().size() << "\n";
+                    for (const auto& w : window_manager_.getAllWindowStates()) {
+                        file << "  " << w.name << " pos=(" << w.position.x << "," << w.position.y
+                             << ") size=" << w.size.x << "x" << w.size.y
+                             << (w.visible ? " visible" : " hidden") << "\n";
+                    }
+                    file.close();
+                    dialog_manager_.showInfo("Экспорт отладочной информации",
+                        "Сохранено в:\n" + path);
+                });
+        },
+        "Export debug information to file", "", nullptr));
+
+    // =========================================================================
+    // Tools
+    // =========================================================================
+
+    registerCommand("open_plugins", CommandFactory::createFunctionalCommand(
+        "open_plugins",
+        [this]() {
+            const auto plugins = plugin_manager_ ? plugin_manager_->list_plugins()
+                                                 : std::vector<plugin::PluginInfo>();
+            std::string text = "Загружено плагинов: " + std::to_string(plugins.size()) + "\n";
+            for (const auto& p : plugins) {
+                text += "\n  • " + p.name + " v" + p.version +
+                        "\n    " + (p.description.empty() ? "<без описания>" : p.description);
+            }
+            dialog_manager_.showInfo("Плагины", text);
+        },
+        "Show loaded plugins", "", nullptr));
+
+    registerCommand("reload_ui", CommandFactory::createFunctionalCommand(
+        "reload_ui",
+        [this]() {
+            advanced_menu_system_.rebuildModernMenu();
+            force_ui_update_ = true;
+            std::cout << "UI reloaded by user request" << std::endl;
+        },
+        "Rebuild menus and refresh UI state", "", nullptr));
+
+    std::cout << "✓ Connected secondary commands" << std::endl;
 }
 
 } // namespace ui

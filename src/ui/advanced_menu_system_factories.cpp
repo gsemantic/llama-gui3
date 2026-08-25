@@ -305,9 +305,8 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createHelpMenu() {
     about_submenu.submenu_items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.help.about.devs", "About Developers"),
         "show_about_devs", "", "Show information about developers"));
-    about_submenu.submenu_items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.help.check_updates", "Check for Updates"),
-        "check_updates", "", "Check for application updates"));
+    // "Check for Updates" удалён: система обновлений не реализована,
+    // пункт был заглушкой (см. UI-аудит).
     menu->items.push_back(about_submenu);
 
     return menu;
@@ -341,12 +340,8 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createDeveloperMenu() {
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.developer.debug.debug_mode", "Debug Mode"),
         "toggle_debug_mode", "", "Enable/disable debug mode"));
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.developer.debug.show_group_rects", "Show Group Rects"),
-        "toggle_group_rects", "", "Show layout group rects for debugging"));
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.developer.debug.flash_style_colors", "Flash Style Colors"),
-        "toggle_flash_style_colors", "", "Flash style colors for visual debugging"));
+    // "Show Group Rects"/"Flash Style Colors" удалены: инструментов не существует,
+    // пункты были заглушками (см. UI-аудит).
 
     menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
 
@@ -369,10 +364,9 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createDeveloperMenu() {
     // Utility commands
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.developer.reload_ui", "Reload UI"),
-        "reload_ui", "", "Reload the user interface"));
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.developer.clear_cache", "Clear Cache"),
-        "clear_cache", "", "Clear application caches"));
+        "reload_ui", "", "Rebuild menus and reload fonts"));
+    // "Clear Cache" удалён: неоднозначная заглушка — очистка KV/чата
+    // выполняется из интерфейса чата (см. UI-аудит).
 
     return menu;
 }
@@ -388,11 +382,9 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createToolsMenu() {
 
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.tools.plugins", "Plugins"),
-        "open_plugins", "", "Manage plugins"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.tools.extensions", "Extensions"),
-        "open_extensions", "", "Manage extensions"));
+        "open_plugins", "", "Show loaded plugins"));
+    // "Extensions" удалён: подсистемы расширений не существует,
+    // пункт был заглушкой (см. UI-аудит).
 
 #ifdef ENABLE_LLAMA_BENCH
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
@@ -444,24 +436,19 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createSecurityMenu() {
     menu->menu_key = "Security";
     menu->name = TRF("menu.security", "Security");
 
+    // SSL/TLS и токен редактируются на реальной вкладке Security диалога настроек
+    // (ранее пункты были заглушками; render_security_settings() не вызывался вовсе)
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.security.ssl", "SSL/TLS Settings"),
-        "open_ssl_settings", "", "Configure SSL/TLS"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.security.auth_token", "Auth Token"),
-        "open_auth_settings", "", "Manage authentication token"));
+        "open_security_settings", "", "Configure SSL/TLS and access token"));
 
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.security.verify_ssl", "Verify SSL"),
-        "toggle_verify_ssl", "", "Toggle SSL verification"));
+        "toggle_verify_ssl", "", "Toggle SSL certificate verification (applies to new connections)"));
 
     menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
 
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.security.file_validation", "File Validation"),
-        "validate_files", "", "Validate uploaded files"));
-
+    // "File Validation" удалён: функциональность не существует (заглушка).
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.security.audit_log", "Audit Log"),
         "show_audit_log", "", "Show security audit log"));
@@ -484,21 +471,12 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createLoggingMenu() {
 
     menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
         TRF("menu.logging.log_level", "Log Level"),
-        "toggle_log_level", "", "Change log level"));
+        "toggle_log_level", "", "Cycle log level (Error → Warning → Info → Debug)"));
 
     menu->items.push_back(AdvancedMenuItemFactory::createSeparator());
 
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.logging.log_to_file", "Log to File"),
-        "toggle_log_to_file", "", "Toggle file logging"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.logging.flush_logs", "Flush Logs"),
-        "flush_logs", "", "Flush log buffers"));
-
-    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
-        TRF("menu.logging.export_logs", "Export Logs"),
-        "export_logs", "", "Export logs to file"));
+    // "Log to File"/"Flush Logs"/"Export Logs" удалены: Logger пишет только
+    // в консоль, файловое логирование не реализовано (см. UI-аудит).
 
     return menu;
 }

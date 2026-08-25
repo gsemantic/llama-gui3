@@ -629,8 +629,9 @@
     "settings.security.ssl": "SSL / TLS",
     "settings.security.verify_ssl": "Проверять SSL-сертификаты",
     "settings.security.verify_ssl.help": "Отключите только если используете самоподписанные сертификаты",
-    "settings.security.token": "Токен доступа",
-    "settings.security.token.help": "Токен для аутентификации на сервере (если включена)",
+    "settings.security.server_access": "Доступ к серверу",
+    "settings.security.token": "Токен доступа к llama-серверу (Bearer)",
+    "settings.security.token.help": "Bearer-токен для подключения GUI к llama-серверу. Нужен ТОЛЬКО если сервер запущен с --api-key (см. Server Runtime): укажите то же значение. Для локальной работы оставьте пустым. Применяется при подключении/переподключении.",
 
     "settings.viewer.title": "Просмотр настроек INI",
     "settings.viewer.filter": "Фильтр:",

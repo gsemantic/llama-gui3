@@ -179,6 +179,12 @@ void host_menu_add_item(LlamaPluginHost* host, LlamaPluginMenu* menu,
     if (command_name) item.command = command_name;
     if (shortcut) item.shortcut = shortcut;
     item.type = ui::AdvancedMenuItemType::Item;
+
+    // Дедупликация: несколько плагинов добавляют пункты с одинаковыми
+    // именами ("About", "Open" и т.п.) в одно меню — уточняем имя плагином.
+    if (pd->plugin && ms->findMenuItem(handle->name, item.name)) {
+        item.name = pd->plugin->info.name + ": " + item.name;
+    }
     ms->addMenuItem(handle->name, item);
 
     // Сохраняем пункт для восстановления после перестройки меню приложением.

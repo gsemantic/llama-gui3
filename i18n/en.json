@@ -611,8 +611,9 @@
     "settings.security.ssl": "SSL / TLS",
     "settings.security.verify_ssl": "Verify SSL Certificates",
     "settings.security.verify_ssl.help": "Disable only if you use self-signed certificates",
-    "settings.security.token": "Access Token",
-    "settings.security.token.help": "Token for server authentication (if enabled)",
+    "settings.security.server_access": "Server Access",
+    "settings.security.token": "llama-server access token (Bearer)",
+    "settings.security.token.help": "Bearer token for GUI-to-server connections. Only needed if the server runs with --api-key (see Server Runtime): enter the same value. Leave empty for local use. Applied on connect/reconnect.",
 
     "settings.viewer.title": "Settings INI Viewer",
     "settings.viewer.filter": "Filter:",
