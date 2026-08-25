@@ -32,6 +32,48 @@ const AdvancedMenu* AdvancedMenuSystem::getMenuByKey(const std::string& menu_key
     return const_cast<AdvancedMenuSystem*>(this)->getMenuByKey(menu_key);
 }
 
+std::vector<std::string> AdvancedMenuSystem::getAllMenuNames() const {
+    std::vector<std::string> keys;
+    keys.reserve(menus_ordered_.size());
+    for (const auto& menu : menus_ordered_) {
+        if (!menu) continue;
+        // Возвращаем стабильный ключ меню (не зависит от локали отображаемого имени)
+        keys.push_back(!menu->menu_key.empty() ? menu->menu_key : menu->name);
+    }
+    return keys;
+}
+
+AdvancedMenuItem* AdvancedMenuSystem::findMenuItem(const std::string& menu_name,
+                                                   const std::string& item_name) {
+    AdvancedMenu* menu = findMenuInternal(menu_name);
+    if (!menu) return nullptr;
+    return const_cast<AdvancedMenuItem*>(
+        const_cast<const AdvancedMenuSystem*>(this)->findMenuItem(menu_name, item_name));
+}
+
+const AdvancedMenuItem* AdvancedMenuSystem::findMenuItem(const std::string& menu_name,
+                                                         const std::string& item_name) const {
+    // Поиск по имени меню и по стабильному ключу; рекурсивно в подменю
+    const AdvancedMenu* menu = getMenu(menu_name);
+    if (!menu) menu = getMenuByKey(menu_name);
+    if (!menu) return nullptr;
+
+    std::function<const AdvancedMenuItem*(const std::vector<AdvancedMenuItem>&)> search =
+        [&](const std::vector<AdvancedMenuItem>& items) -> const AdvancedMenuItem* {
+        for (const auto& item : items) {
+            if (item.name == item_name && item.type != AdvancedMenuItemType::Separator) {
+                return &item;
+            }
+            if (item.type == AdvancedMenuItemType::Submenu) {
+                if (const auto* found = search(item.submenu_items)) return found;
+            }
+        }
+        return nullptr;
+    };
+
+    return search(menu->items);
+}
+
 void AdvancedMenuSystem::initialize(CommandManager* command_manager, WindowManager* window_manager, WorkspaceManager* workspace_manager) {
     command_manager_ = command_manager;
     window_manager_ = window_manager;
@@ -231,6 +273,12 @@ void AdvancedMenuSystem::updateMenuItemState(AdvancedMenuItem& item) {
     // Update window toggle items
     if (item.is_window_toggle && !item.window_name.empty() && window_manager_) {
         item.checked = window_manager_->isWindowVisible(item.window_name);
+    }
+
+    // Живое состояние чекбоксов: check_func возвращает актуальное значение
+    // настройки (ранее поле check_func не использовалось вовсе)
+    if (item.check_func) {
+        item.checked = item.check_func();
     }
 
     // Отключаем элементы, чьи команды являются заглушками или не зарегистрированы.

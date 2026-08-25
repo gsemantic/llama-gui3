@@ -6,7 +6,11 @@ namespace ui {
 
 void DialogManager::renderHelpDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Llama GUI - Chat Interface for Language Models");
         ImGui::Separator();
         ImGui::Text("Version: 1.0.0");
@@ -33,7 +37,11 @@ void DialogManager::renderHelpDialog(Dialog& dialog) {
 
 void DialogManager::renderAboutDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Llama GUI");
         ImGui::Separator();
         ImGui::Text("Version: 1.0.0");
@@ -56,7 +64,11 @@ void DialogManager::renderAboutDialog(Dialog& dialog) {
 
 void DialogManager::renderKeyboardShortcutsDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Keyboard Shortcuts");
         ImGui::Separator();
 
@@ -87,7 +99,11 @@ void DialogManager::renderKeyboardShortcutsDialog(Dialog& dialog) {
 
 void DialogManager::renderServerStatusDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Server Status");
         ImGui::Separator();
         ImGui::TextWrapped(dialog.message.c_str());
@@ -110,7 +126,11 @@ void DialogManager::renderServerStatusDialog(Dialog& dialog) {
 
 void DialogManager::renderConfirmationDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped(dialog.message.c_str());
         ImGui::Separator();
 
@@ -140,7 +160,11 @@ void DialogManager::renderConfirmationDialog(Dialog& dialog) {
 
 void DialogManager::renderInfoDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped(dialog.message.c_str());
 
         if (!dialog.details.empty()) {
@@ -160,7 +184,11 @@ void DialogManager::renderInfoDialog(Dialog& dialog) {
 
 void DialogManager::renderErrorDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Error:");
         ImGui::TextWrapped(dialog.message.c_str());
 
@@ -183,7 +211,11 @@ void DialogManager::renderErrorDialog(Dialog& dialog) {
 void DialogManager::renderFileDialog(Dialog& dialog) {
 #ifdef USE_IMGUI
     // Простая реализация диалога файлов (в реальном проекте нужна более сложная логика)
-    if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!dialog.popup_opened) {
+            ImGui::OpenPopup(dialog.title.c_str());
+            dialog.popup_opened = true;
+        }
+        if (ImGui::BeginPopupModal(dialog.title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("File Dialog (Placeholder)");
         ImGui::Text("This is a simplified file dialog.");
         ImGui::Text("In a full implementation, this would show:");

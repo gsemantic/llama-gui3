@@ -26,6 +26,9 @@
 namespace llama_gui {
 namespace ui {
 
+// Запрос корректной остановки из обработчика сигналов (см. requestExternalStop)
+std::atomic<bool> MainWindow::external_stop_flag_{false};
+
 namespace {
 
 // ---- Буфер обмена --------------------------------------------------------
@@ -304,22 +307,27 @@ bool MainWindow::initialize(int width, int height) {
     );
     if (!sdl_window_) {
         std::cerr << "❌ Failed to create SDL2 window: " << SDL_GetError() << std::endl;
-        return false;
+        if (!audit_ui_mode_) return false;
+        // Аудиту рендер не нужен: продолжаем без окна
+        LOG_WARNING("UI Audit mode: работаем без SDL-окна");
+    } else {
+        LOG_INFO("SDL2 окно создано успешно");
     }
-    LOG_INFO("SDL2 окно создано успешно");
     
     // === Create OpenGL context ===
 #ifdef USE_OPENGL
     gl_context_ = SDL_GL_CreateContext(sdl_window_);
     if (!gl_context_) {
         std::cerr << "❌ Failed to create OpenGL context: " << SDL_GetError() << std::endl;
-        return false;
-    }
-    LOG_INFO("OpenGL контекст создан успешно");
+        if (!audit_ui_mode_) return false;
+        LOG_WARNING("UI Audit mode: работаем без OpenGL-контекста");
+    } else {
+        LOG_INFO("OpenGL контекст создан успешно");
 
-    // V-Sync из настроек (раньше настройка существовала, но не применялась)
-    applied_swap_interval_ = settings_.performance().enable_vsync ? 1 : 0;
-    SDL_GL_SetSwapInterval(applied_swap_interval_);
+        // V-Sync из настроек (раньше настройка существовала, но не применялась)
+        applied_swap_interval_ = settings_.performance().enable_vsync ? 1 : 0;
+        SDL_GL_SetSwapInterval(applied_swap_interval_);
+    }
 #endif
 #endif
 
@@ -341,7 +349,9 @@ bool MainWindow::initialize(int width, int height) {
 
     // Initialize RAG manager
     std::string embedding_model_path = settings_.get_embedding_model_path();
-    if (!embedding_model_path.empty()) {
+    if (audit_ui_mode_) {
+        LOG_INFO("UI Audit mode: RAG и эмбеддинг-сервер не запускаются");
+    } else if (!embedding_model_path.empty()) {
         // Запускаем выделенный сервер эмбеддингов (bge-m3) при старте,
         // если пользователь не указал внешний URL сервера вручную.
         std::string auto_embedding_url;
@@ -436,7 +446,9 @@ bool MainWindow::initialize(int width, int height) {
     // });
 
     // Auto-load model from profile (skip if cloud provider is enabled)
-    if (settings_.cloud_provider().enabled && !settings_.cloud_provider().model_id.empty()) {
+    if (audit_ui_mode_) {
+        LOG_INFO("UI Audit mode: автозагрузка модели пропущена");
+    } else if (settings_.cloud_provider().enabled && !settings_.cloud_provider().model_id.empty()) {
         LOG_INFO("Cloud provider enabled, skipping local model load");
     } else {
         std::string model_path = settings_.get_model_path();
@@ -566,11 +578,21 @@ bool MainWindow::initialize(int width, int height) {
         std::cerr << "UNKNOWN ERROR in connectSettingsMenuCommands()" << std::endl;
     }
 
-    // Register stub commands (show "not implemented" message)
+    // Регистрируем вторичные команды (Security/Performance/Logging/Debug/Tools)
     try {
-        connectStubCommands();
+        connectSecondaryCommands();
     } catch (const std::exception& e) {
-        std::cerr << "ERROR in connectStubCommands(): " << e.what() << std::endl;
+        std::cerr << "ERROR in connectSecondaryCommands(): " << e.what() << std::endl;
+    }
+
+    // Живая галочка «Проверка SSL»: пункт меню отражает реальное состояние
+    // настройки (check_func вызывается каждый кадр из updateMenuStates())
+    if (AdvancedMenu* sec_menu = advanced_menu_system_.getMenuByKey("Security")) {
+        for (auto& item : sec_menu->items) {
+            if (item.command == "toggle_verify_ssl") {
+                item.check_func = [this]() { return settings_.server().verify_ssl; };
+            }
+        }
     }
 
     // Register developer commands (Dear ImGui tools)
@@ -651,9 +673,21 @@ void MainWindow::run() {
     // Load fonts
     load_fonts_with_cyrillic();
 
+    // Применяем ini-blob из профиля __last_session__ (collapsed/скроллы/колонки),
+    // загруженный ещё в initialize() до создания контекста — до первого NewFrame()
+    workspace_layout_manager_.applyPendingImguiIni();
+
     // Main loop
     last_ui_activity_ms_ = SDL_GetTicks();
     while (is_running_) {
+        // Запрос остановки извне (SIGTERM/SIGINT из main.cpp) — корректное
+        // завершение с сохранением сессии, как при закрытии окна.
+        if (external_stop_flag_.load()) {
+            std::cout << "Получен внешний запрос остановки: завершаем цикл GUI" << std::endl;
+            is_running_ = false;
+        }
+        // Отложенное восстановление z-order окон (после создания окон первыми кадрами)
+        workspace_layout_manager_.tickDeferredApply();
         const Uint32 frame_start_ms = SDL_GetTicks();
 #ifdef USE_SDL2
         if (sdl_window_) {
@@ -703,6 +737,10 @@ void MainWindow::run() {
             uint32_t now = SDL_GetTicks();
             if (now - last_reconnect_attempt_ > 2000) {  // Retry every 2 seconds max
                 last_reconnect_attempt_ = now;
+                // Токен/SSL берём из настроек при каждом переподключении —
+                // изменения на вкладке Security подхватываются без перезапуска
+                llama_interface_.set_api_key(settings_.server().auth_token);
+                llama_interface_.set_ssl_verify(settings_.server().verify_ssl);
                 if (llama_interface_.initialize(settings_.get_server_url())) {
                     std::cout << "MainWindow: LlamaInterface connected successfully" << std::endl;
                     pending_reconnect_ = false;

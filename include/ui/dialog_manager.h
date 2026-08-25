@@ -42,6 +42,7 @@ struct Dialog {
     std::string details;
     bool visible = false;
     bool modal = true;
+    bool popup_opened = false;  // OpenPopup() уже вызван для этого кадра-цикла
     ImVec2 position = ImVec2(0, 0);
     ImVec2 size = ImVec2(400, 300);
     

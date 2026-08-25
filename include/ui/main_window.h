@@ -116,6 +116,20 @@ public:
     // Main render method
     void render();
 
+    // =========================================================================
+    // Режим аудита UI (--audit-ui): инициализация без рендера и тяжёлых
+    // подсистем (модель, эмбеддинг-сервер), затем проверка консистентности
+    // меню/команд/хоткеев/окон. Возвращает число ошибок (0 = чисто).
+    // =========================================================================
+    void set_audit_ui_mode(bool enabled) { audit_ui_mode_ = enabled; }
+    bool is_audit_ui_mode() const { return audit_ui_mode_; }
+    int runUiAudit();
+
+    // Корректная остановка цикла из обработчика сигналов (SIGTERM/SIGINT):
+    // сессия (__last_session__) сохраняется так же, как при закрытии окна.
+    static void requestExternalStop() { external_stop_flag_.store(true); }
+
+
     // Plugin system host (загружает и вызывает плагины приложения)
     void initializePlugins();
 
@@ -208,7 +222,7 @@ public:
     void connectAdditionalWindowCommands();
     void connectSettingsMenuCommands();
     void connectDeveloperCommands();
-    void connectStubCommands();
+    void connectSecondaryCommands();
     void create_backup();
     void restore_from_backup(const std::string& backup_path);
 
@@ -229,6 +243,8 @@ public:
     void open_embedding_model_picker(const std::function<void(const std::string&)>& on_result);
 
 private:
+    static std::atomic<bool> external_stop_flag_;  // см. requestExternalStop()
+
     // Platform-specific initialization
     bool init_opengl();
     bool init_sdl2();
@@ -369,6 +385,7 @@ private:
     int height_ = 800;
     bool is_initialized_ = false;
     bool is_running_ = false;
+    bool audit_ui_mode_ = false;  // --audit-ui: без рендера и тяжёлых подсистем
 
     // FPS limiting: время последнего события ввода (для перехода в idle_fps)
     Uint32 last_ui_activity_ms_ = 0;

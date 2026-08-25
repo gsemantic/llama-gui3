@@ -115,6 +115,8 @@ static void print_headless_help() {
     std::cout << "                              (Это режим САМОГО приложения, НЕ headless-браузер!)" << std::endl;
     std::cout << "                              Для рендеринга веб-страниц через Chromium используйте" << std::endl;
     std::cout << "                              панель «Headless-браузер» в основном окне или агента web_render_agent." << std::endl;
+    std::cout << "  --audit-ui                  Аудит UI без рендера: консистентность меню, команд," << std::endl;
+    std::cout << "                              хоткеев и окон. Код выхода: 0 - чисто, 2 - есть ошибки" << std::endl;
     std::cout << "  --cloud                     Облачный прокси: endpoint пересылает запросы в облачного" << std::endl;
     std::cout << "                              провайдера (OpenRouter и пр.) с настройками профиля + RAG" << std::endl;
     std::cout << "  --proxy                     (GUI-режим) поднять облачный прокси в фоне на порту из" << std::endl;
@@ -228,6 +230,7 @@ int main(int argc, char* argv[]) {
     // Parse command line arguments
     bool debug_mode = false;
     bool show_help = false;
+    bool audit_ui = false;
     std::string server_url = "http://localhost:8081";
     HeadlessOptions headless;
     
@@ -235,6 +238,8 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--debug" || arg == "-d") {
             debug_mode = true;
+        } else if (arg == "--audit-ui") {
+            audit_ui = true;
         } else if (arg == "--headless" || arg == "-s" || arg == "--server") {
             headless.enabled = true;
         } else if (arg == "--cloud" || arg == "-cld") {
@@ -320,9 +325,19 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Проверка single-instance: если другой экземпляр уже запущен — завершаемся
-    if (!acquire_single_instance_lock()) {
-        return 1;
+    // Аудит UI (--audit-ui): только чтение, допускается параллельно с GUI.
+    // Без дисплея (CI) используем dummy-видеодрайвер, если пользователь не задал свой.
+    if (audit_ui) {
+        setenv("SDL_VIDEODRIVER", "dummy", 0);
+    } else {
+        // Проверка single-instance: если другой экземпляр уже запущен — завершаемся
+        if (!acquire_single_instance_lock()) {
+            return 1;
+        }
+
+        // SIGTERM/SIGINT: корректное завершение GUI с сохранением сессии
+        std::signal(SIGTERM, [](int) { MainWindow::requestExternalStop(); });
+        std::signal(SIGINT, [](int) { MainWindow::requestExternalStop(); });
     }
 
     try {
@@ -347,6 +362,10 @@ int main(int argc, char* argv[]) {
         } else {
             LOG_WARNING("LlamaInterface в режиме заглушки");
         }
+        // Авторизация и проверка SSL для подключений к бэкенду (вкладка Security).
+        // По умолчанию обе опции выключены — локальный сценарий.
+        llama_interface.set_api_key(settings.server().auth_token);
+        llama_interface.set_ssl_verify(settings.server().verify_ssl);
 
         StateManager state_manager;
         state_manager.initialize(settings);
@@ -374,8 +393,23 @@ int main(int argc, char* argv[]) {
         // Создание главного окна с автоматическим определением размера
         try {
             MainWindow main_window(state_manager, settings, llama_interface);
+            if (audit_ui) {
+                main_window.set_audit_ui_mode(true);
+            }
             if (main_window.initialize(0, 0)) { // 0,0 означает автоопределение размера
                 LOG_INFO("MainWindow инициализирован");
+
+                // Режим аудита: отчёт и выход без входа в рендер-цикл.
+                // Код выхода: 0 - чисто, 2 - найдены ошибки (для CI).
+                if (audit_ui) {
+                    const int audit_errors = main_window.runUiAudit();
+                    main_window.shutdown();
+                    if (proxy_thread.joinable()) {
+                        proxy_stop.store(true);
+                        proxy_thread.join();
+                    }
+                    return audit_errors > 0 ? 2 : 0;
+                }
 
                 // Запуск главного цикла приложения
                 LOG_INFO("Запуск главного цикла приложения...");
