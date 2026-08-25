@@ -144,11 +144,20 @@ public:
     int get_timeout() const { return timeout_seconds_; }
     void set_timeout(int seconds) { timeout_seconds_ = seconds; }
 
+    // Проверка SSL-сертификатов для https:// подключений к бэкенду.
+    // По умолчанию отключена (локальные сценарии, см. UI-аудит).
+    void set_ssl_verify(bool verify) { ssl_verify_ = verify; }
+    bool get_ssl_verify() const { return ssl_verify_; }
+
 private:
+    // Применить настройки SSL к curl-хендлу (VERIFYPEER/VERIFYHOST)
+    void apply_ssl_options(CURL* curl) const;
+
     // Connection state
     std::string server_url_;
     std::string api_key_;
     int timeout_seconds_;
+    bool ssl_verify_ = false;
     
     // CURL handle
     CURL* curl_handle_;

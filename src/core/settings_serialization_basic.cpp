@@ -187,7 +187,7 @@ void Settings::deserializeServerSettings(const json& j) {
         server_settings_.connection_timeout = s.value("connection_timeout", 30000);
         server_settings_.request_timeout = s.value("request_timeout", 60000);
         server_settings_.max_retries = s.value("max_retries", 3);
-        server_settings_.verify_ssl = s.value("verify_ssl", true);
+        server_settings_.verify_ssl = s.value("verify_ssl", false);
     }
 }
 

@@ -302,6 +302,7 @@ public:
 
     // Настройки
     void set_api_key(const std::string& api_key);
+    void set_ssl_verify(bool verify);
     void set_timeout(int seconds);
 
     /**

@@ -84,6 +84,10 @@ void LlamaInterface::set_api_key(const std::string& api_key) {
     pImpl->set_api_key(api_key);
 }
 
+void LlamaInterface::set_ssl_verify(bool verify) {
+    pImpl->set_ssl_verify(verify);
+}
+
 void LlamaInterface::set_timeout(int seconds) {
     pImpl->set_timeout(seconds);
 }

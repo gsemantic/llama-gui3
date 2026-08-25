@@ -63,6 +63,13 @@ void set_from_ini<std::string>(const IniParser::Document& doc, const std::string
     value = val;
 }
 
+// Зеркальные хелперы записи: секция/ключ совпадают с set_from_ini при загрузке
+template<typename T>
+void add_to_ini(IniParser::Document& doc, const std::string& section,
+                const std::string& key, const T& value) {
+    IniParser::set(doc, section, key, to_string_impl(value));
+}
+
 } // anonymous namespace
 
 // =========================================================================
@@ -437,11 +444,348 @@ void Settings::load_output_settings(const IniParser::Document& doc) {
 // Сохранение в INI
 // =========================================================================
 
+void Settings::save_display_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "display", "window_width", display_settings_.window_width);
+    add_to_ini(doc, "display", "window_height", display_settings_.window_height);
+    add_to_ini(doc, "display", "window_maximized", display_settings_.window_maximized);
+    add_to_ini(doc, "display", "window_x", display_settings_.window_x);
+    add_to_ini(doc, "display", "window_y", display_settings_.window_y);
+    add_to_ini(doc, "display", "use_dark_theme", display_settings_.use_dark_theme);
+    add_to_ini(doc, "display", "font_size", display_settings_.font_size);
+    add_to_ini(doc, "display", "font_family", display_settings_.font_family);
+    add_to_ini(doc, "display", "enable_animation", display_settings_.enable_animation);
+    add_to_ini(doc, "display", "frame_rate_limit", display_settings_.frame_rate_limit);
+    add_to_ini(doc, "display", "screen_width", display_settings_.screen_width);
+    add_to_ini(doc, "display", "screen_height", display_settings_.screen_height);
+    add_to_ini(doc, "display", "dpi_scale", display_settings_.dpi_scale);
+    add_to_ini(doc, "display", "auto_resize", display_settings_.auto_resize);
+    add_to_ini(doc, "display", "min_window_width", display_settings_.min_window_width);
+    add_to_ini(doc, "display", "min_window_height", display_settings_.min_window_height);
+    add_to_ini(doc, "display", "center_window", display_settings_.center_window);
+    add_to_ini(doc, "display", "margin", display_settings_.margin);
+    add_to_ini(doc, "display", "language", display_settings_.language);
+}
+
+void Settings::save_performance_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "performance", "enable_vsync", performance_settings_.enable_vsync);
+    add_to_ini(doc, "performance", "target_fps", performance_settings_.target_fps);
+    add_to_ini(doc, "performance", "idle_fps", performance_settings_.idle_fps);
+    add_to_ini(doc, "performance", "idle_timeout_ms", performance_settings_.idle_timeout_ms);
+    add_to_ini(doc, "performance", "enable_smart_redraw", performance_settings_.enable_smart_redraw);
+    add_to_ini(doc, "performance", "show_performance_overlay", performance_settings_.show_performance_overlay);
+    add_to_ini(doc, "performance", "performance_update_interval_ms", performance_settings_.performance_update_interval_ms);
+    add_to_ini(doc, "performance", "enable_logging", performance_settings_.enable_logging);
+    add_to_ini(doc, "performance", "log_level", performance_settings_.log_level);
+    add_to_ini(doc, "performance", "log_to_file", performance_settings_.log_to_file);
+    add_to_ini(doc, "performance", "log_file_path", performance_settings_.log_file_path);
+    add_to_ini(doc, "performance", "log_flush_policy", performance_settings_.log_flush_policy);
+    add_to_ini(doc, "performance", "debug_mode", performance_settings_.debug_mode);
+}
+
+void Settings::save_server_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "server", "host", server_settings_.host);
+    add_to_ini(doc, "server", "port", server_settings_.port);
+    add_to_ini(doc, "server", "api_url", server_settings_.api_url);
+    add_to_ini(doc, "server", "connection_timeout", server_settings_.connection_timeout);
+    add_to_ini(doc, "server", "request_timeout", server_settings_.request_timeout);
+    add_to_ini(doc, "server", "max_retries", server_settings_.max_retries);
+    add_to_ini(doc, "server", "verify_ssl", server_settings_.verify_ssl);
+    add_to_ini(doc, "server", "auth_token", server_settings_.auth_token);
+}
+
+void Settings::save_chat_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "chat", "auto_scroll", chat_settings_.auto_scroll);
+    add_to_ini(doc, "chat", "max_messages_display", chat_settings_.max_messages_display);
+    add_to_ini(doc, "chat", "show_timestamps", chat_settings_.show_timestamps);
+    add_to_ini(doc, "chat", "show_system_messages", chat_settings_.show_system_messages);
+    add_to_ini(doc, "chat", "preserve_formatting", chat_settings_.preserve_formatting);
+    add_to_ini(doc, "chat", "default_system_prompt", chat_settings_.default_system_prompt);
+    add_to_ini(doc, "chat", "max_tokens", chat_settings_.max_tokens);
+    add_to_ini(doc, "chat", "temperature", chat_settings_.temperature);
+    add_to_ini(doc, "chat", "top_p", chat_settings_.top_p);
+    add_to_ini(doc, "chat", "top_k", chat_settings_.top_k);
+    add_to_ini(doc, "chat", "min_p", chat_settings_.min_p);
+    add_to_ini(doc, "chat", "repeat_penalty", chat_settings_.repeat_penalty);
+    add_to_ini(doc, "chat", "presence_penalty", chat_settings_.presence_penalty);
+    add_to_ini(doc, "chat", "frequency_penalty", chat_settings_.frequency_penalty);
+    add_to_ini(doc, "chat", "mirostat_mode", chat_settings_.mirostat_mode);
+    add_to_ini(doc, "chat", "mirostat_tau", chat_settings_.mirostat_tau);
+    add_to_ini(doc, "chat", "mirostat_eta", chat_settings_.mirostat_eta);
+    add_to_ini(doc, "chat", "stop_on_newline", chat_settings_.stop_on_newline);
+    add_to_ini(doc, "chat", "threads", chat_settings_.threads);
+    add_to_ini(doc, "chat", "n_ctx", chat_settings_.n_ctx);
+    add_to_ini(doc, "chat", "seed", chat_settings_.seed);
+    add_to_ini(doc, "chat", "tfs_z", chat_settings_.tfs_z);
+    add_to_ini(doc, "chat", "typical_p", chat_settings_.typical_p);
+    add_to_ini(doc, "chat", "n_gpu_layers", chat_settings_.n_gpu_layers);
+    add_to_ini(doc, "chat", "tensor_split", chat_settings_.tensor_split);
+    add_to_ini(doc, "chat", "numa", chat_settings_.numa);
+    add_to_ini(doc, "chat", "lora_base", chat_settings_.lora_base);
+    add_to_ini(doc, "chat", "mmproj", chat_settings_.mmproj);
+    add_to_ini(doc, "chat", "grammar", chat_settings_.grammar);
+    add_to_ini(doc, "chat", "chat_template", chat_settings_.chat_template);
+    add_to_ini(doc, "chat", "embedding", chat_settings_.embedding);
+    add_to_ini(doc, "chat", "log_format", chat_settings_.log_format);
+    add_to_ini(doc, "chat", "verbosity", chat_settings_.verbosity);
+}
+
+void Settings::save_file_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "files", "default_save_path", file_settings_.default_save_path);
+    add_to_ini(doc, "files", "default_export_path", file_settings_.default_export_path);
+    add_to_ini(doc, "files", "auto_save_path", file_settings_.auto_save_path);
+    add_to_ini(doc, "files", "auto_save_enabled", file_settings_.auto_save_enabled);
+    add_to_ini(doc, "files", "auto_save_interval", file_settings_.auto_save_interval);
+    add_to_ini(doc, "files", "max_file_size", file_settings_.max_file_size);
+}
+
+void Settings::save_rag_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "rag", "embedding_model_path", rag_settings_.embedding_model_path);
+    add_to_ini(doc, "rag", "embedding_server_url", rag_settings_.embedding_server_url);
+    add_to_ini(doc, "rag", "max_chunks_in_memory", rag_settings_.max_chunks_in_memory);
+    add_to_ini(doc, "rag", "similarity_threshold", rag_settings_.similarity_threshold);
+    add_to_ini(doc, "rag", "max_embedding_cache_size", rag_settings_.max_embedding_cache_size);
+    add_to_ini(doc, "rag", "embedding_dimension", rag_settings_.embedding_dimension);
+    add_to_ini(doc, "rag", "max_sequence_length", rag_settings_.max_sequence_length);
+    add_to_ini(doc, "rag", "max_tokens_per_chunk", rag_settings_.max_tokens_per_chunk);
+    add_to_ini(doc, "rag", "search_k", rag_settings_.search_k);
+    add_to_ini(doc, "rag", "mmr_lambda", rag_settings_.mmr_lambda);
+    add_to_ini(doc, "rag", "enable_mmr", rag_settings_.enable_mmr);
+    add_to_ini(doc, "rag", "enable_rag", rag_settings_.enable_rag);
+    add_to_ini(doc, "rag", "enable_caching", rag_settings_.enable_caching);
+    IniParser::set(doc, "rag", "rag_mode", std::to_string(static_cast<int>(rag_settings_.rag_mode)));
+    add_to_ini(doc, "rag", "enable_hybrid_search", rag_settings_.enable_hybrid_search);
+    add_to_ini(doc, "rag", "keyword_boost_weight", rag_settings_.keyword_boost_weight);
+    add_to_ini(doc, "rag", "enable_query_expansion", rag_settings_.enable_query_expansion);
+    IniParser::set(doc, "rag", "deep_analysis_mode",
+                   std::to_string(static_cast<int>(rag_settings_.deep_analysis.mode)));
+    add_to_ini(doc, "rag", "deep_analysis_chunks_per_batch", rag_settings_.deep_analysis.chunks_per_batch);
+    add_to_ini(doc, "rag", "deep_analysis_max_iterations", rag_settings_.deep_analysis.max_iterations);
+    add_to_ini(doc, "rag", "deep_analysis_enable_progressive_summary", rag_settings_.deep_analysis.enable_progressive_summary);
+    add_to_ini(doc, "rag", "deep_analysis_final_synthesis_chunks", rag_settings_.deep_analysis.final_synthesis_chunks);
+    add_to_ini(doc, "rag", "deep_analysis_auto_adjust_context_size", rag_settings_.deep_analysis.auto_adjust_context_size);
+    add_to_ini(doc, "rag", "deep_analysis_target_context_size", rag_settings_.deep_analysis.target_context_size);
+}
+
+void Settings::save_sampling_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "sampling", "temperature", sampling_settings_.temperature);
+    add_to_ini(doc, "sampling", "top_k", sampling_settings_.top_k);
+    add_to_ini(doc, "sampling", "top_p", sampling_settings_.top_p);
+    add_to_ini(doc, "sampling", "min_p", sampling_settings_.min_p);
+    add_to_ini(doc, "sampling", "typical_p", sampling_settings_.typical_p);
+    add_to_ini(doc, "sampling", "tfs_z", sampling_settings_.tfs_z);
+    add_to_ini(doc, "sampling", "xtc_probability", sampling_settings_.xtc_probability);
+    add_to_ini(doc, "sampling", "xtc_threshold", sampling_settings_.xtc_threshold);
+    add_to_ini(doc, "sampling", "dry_multiplier", sampling_settings_.dry_multiplier);
+    add_to_ini(doc, "sampling", "dry_base", sampling_settings_.dry_base);
+    add_to_ini(doc, "sampling", "dry_allowed_length", sampling_settings_.dry_allowed_length);
+    add_to_ini(doc, "sampling", "dry_penalty_last_n", sampling_settings_.dry_penalty_last_n);
+    add_to_ini(doc, "sampling", "dynatemp_range", sampling_settings_.dynatemp_range);
+    add_to_ini(doc, "sampling", "dynatemp_exp", sampling_settings_.dynatemp_exp);
+    add_to_ini(doc, "sampling", "repeat_penalty", sampling_settings_.repeat_penalty);
+    add_to_ini(doc, "sampling", "presence_penalty", sampling_settings_.presence_penalty);
+    add_to_ini(doc, "sampling", "frequency_penalty", sampling_settings_.frequency_penalty);
+    add_to_ini(doc, "sampling", "repeat_last_n", sampling_settings_.repeat_last_n);
+    add_to_ini(doc, "sampling", "penalize_nl", sampling_settings_.penalize_nl);
+    add_to_ini(doc, "sampling", "ignore_eos", sampling_settings_.ignore_eos);
+    add_to_ini(doc, "sampling", "mirostat_mode", sampling_settings_.mirostat_mode);
+    add_to_ini(doc, "sampling", "mirostat_tau", sampling_settings_.mirostat_tau);
+    add_to_ini(doc, "sampling", "mirostat_eta", sampling_settings_.mirostat_eta);
+    add_to_ini(doc, "sampling", "samplers_order", sampling_settings_.samplers_order);
+    add_to_ini(doc, "sampling", "use_custom_sampler_order", sampling_settings_.use_custom_sampler_order);
+}
+
+void Settings::save_model_loading_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "model_loading", "model_path", model_loading_settings_.model_path);
+    add_to_ini(doc, "model_loading", "model_url", model_loading_settings_.model_url);
+    add_to_ini(doc, "model_loading", "hf_repo", model_loading_settings_.hf_repo);
+    add_to_ini(doc, "model_loading", "hf_file", model_loading_settings_.hf_file);
+    add_to_ini(doc, "model_loading", "hf_token", model_loading_settings_.hf_token);
+    add_to_ini(doc, "model_loading", "model_alias", model_loading_settings_.model_alias);
+    add_to_ini(doc, "model_loading", "model_draft", model_loading_settings_.model_draft);
+    add_to_ini(doc, "model_loading", "hf_repo_draft", model_loading_settings_.hf_repo_draft);
+    add_to_ini(doc, "model_loading", "draft_max", model_loading_settings_.draft_max);
+    add_to_ini(doc, "model_loading", "draft_min", model_loading_settings_.draft_min);
+    add_to_ini(doc, "model_loading", "draft_p_min", model_loading_settings_.draft_p_min);
+    add_to_ini(doc, "model_loading", "model_vocoder", model_loading_settings_.model_vocoder);
+    add_to_ini(doc, "model_loading", "hf_repo_vocoder", model_loading_settings_.hf_repo_vocoder);
+    add_to_ini(doc, "model_loading", "hf_file_vocoder", model_loading_settings_.hf_file_vocoder);
+    add_to_ini(doc, "model_loading", "lora_base", model_loading_settings_.lora_base);
+    add_to_ini(doc, "model_loading", "lora_init_without_apply", model_loading_settings_.lora_init_without_apply);
+    add_to_ini(doc, "model_loading", "mmproj", model_loading_settings_.mmproj);
+    add_to_ini(doc, "model_loading", "mmproj_url", model_loading_settings_.mmproj_url);
+    add_to_ini(doc, "model_loading", "no_mmproj", model_loading_settings_.no_mmproj);
+    add_to_ini(doc, "model_loading", "no_mmproj_offload", model_loading_settings_.no_mmproj_offload);
+    add_to_ini(doc, "model_loading", "check_tensors", model_loading_settings_.check_tensors);
+    add_to_ini(doc, "model_loading", "device", model_loading_settings_.device);
+    add_to_ini(doc, "model_loading", "device_draft", model_loading_settings_.device_draft);
+    add_to_ini(doc, "model_loading", "list_devices", model_loading_settings_.list_devices);
+}
+
+void Settings::save_gpu_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "gpu", "n_gpu_layers", gpu_settings_.n_gpu_layers);
+    add_to_ini(doc, "gpu", "n_gpu_layers_draft", gpu_settings_.n_gpu_layers_draft);
+    IniParser::set(doc, "gpu", "split_mode", gpu_settings_.get_split_mode_string());
+    add_to_ini(doc, "gpu", "tensor_split", gpu_settings_.tensor_split);
+    add_to_ini(doc, "gpu", "main_gpu", gpu_settings_.main_gpu);
+    add_to_ini(doc, "gpu", "no_op_offload", gpu_settings_.no_op_offload);
+    add_to_ini(doc, "gpu", "no_kv_offload", gpu_settings_.no_kv_offload);
+    add_to_ini(doc, "gpu", "no_warmup", gpu_settings_.no_warmup);
+    add_to_ini(doc, "gpu", "mlock", gpu_settings_.mlock);
+    add_to_ini(doc, "gpu", "no_mmap", gpu_settings_.no_mmap);
+    int flash_attn_val = 0;
+    switch (gpu_settings_.flash_attn) {
+        case GPUSettings::FlashAttention::Auto:     flash_attn_val = 0; break;
+        case GPUSettings::FlashAttention::Enabled:  flash_attn_val = 1; break;
+        default:                                    flash_attn_val = 2; break;
+    }
+    IniParser::set(doc, "gpu", "flash_attn", std::to_string(flash_attn_val));
+    add_to_ini(doc, "gpu", "defrag_thold", gpu_settings_.defrag_thold);
+}
+
+void Settings::save_cache_settings(IniParser::Document& doc) const {
+    IniParser::set(doc, "cache", "cache_type_k",
+                   CacheSettings::cache_type_to_string(cache_settings_.cache_type_k));
+    IniParser::set(doc, "cache", "cache_type_v",
+                   CacheSettings::cache_type_to_string(cache_settings_.cache_type_v));
+    IniParser::set(doc, "cache", "cache_type_k_draft",
+                   CacheSettings::cache_type_to_string(cache_settings_.cache_type_k_draft));
+    IniParser::set(doc, "cache", "cache_type_v_draft",
+                   CacheSettings::cache_type_to_string(cache_settings_.cache_type_v_draft));
+    add_to_ini(doc, "cache", "cache_prompt", cache_settings_.cache_prompt);
+    add_to_ini(doc, "cache", "cache_reuse", cache_settings_.cache_reuse);
+    add_to_ini(doc, "cache", "swa_full", cache_settings_.swa_full);
+    add_to_ini(doc, "cache", "no_context_shift", cache_settings_.no_context_shift);
+    add_to_ini(doc, "cache", "slot_save_path", cache_settings_.slot_save_path);
+    add_to_ini(doc, "cache", "slot_prompt_similarity", cache_settings_.slot_prompt_similarity);
+    add_to_ini(doc, "cache", "slots_endpoint_enabled", cache_settings_.slots_endpoint_enabled);
+}
+
+void Settings::save_rope_settings(IniParser::Document& doc) const {
+    IniParser::set(doc, "rope", "rope_scaling", rope_settings_.get_scaling_string());
+    add_to_ini(doc, "rope", "rope_scale", rope_settings_.rope_scale);
+    add_to_ini(doc, "rope", "rope_freq_base", rope_settings_.rope_freq_base);
+    add_to_ini(doc, "rope", "rope_freq_scale", rope_settings_.rope_freq_scale);
+    add_to_ini(doc, "rope", "yarn_orig_ctx", rope_settings_.yarn_orig_ctx);
+    add_to_ini(doc, "rope", "yarn_ext_factor", rope_settings_.yarn_ext_factor);
+    add_to_ini(doc, "rope", "yarn_attn_factor", rope_settings_.yarn_attn_factor);
+    add_to_ini(doc, "rope", "yarn_beta_slow", rope_settings_.yarn_beta_slow);
+    add_to_ini(doc, "rope", "yarn_beta_fast", rope_settings_.yarn_beta_fast);
+}
+
+void Settings::save_control_vector_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "control_vector", "control_vector_layer_start", control_vector_settings_.control_vector_layer_start);
+    add_to_ini(doc, "control_vector", "control_vector_layer_end", control_vector_settings_.control_vector_layer_end);
+}
+
+void Settings::save_server_runtime_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "server_runtime", "host", server_runtime_settings_.host);
+    add_to_ini(doc, "server_runtime", "port", server_runtime_settings_.port);
+    add_to_ini(doc, "server_runtime", "timeout", server_runtime_settings_.timeout);
+    add_to_ini(doc, "server_runtime", "api_prefix", server_runtime_settings_.api_prefix);
+    add_to_ini(doc, "server_runtime", "offline", server_runtime_settings_.offline);
+    add_to_ini(doc, "server_runtime", "threads_http", server_runtime_settings_.threads_http);
+    add_to_ini(doc, "server_runtime", "static_path", server_runtime_settings_.static_path);
+    add_to_ini(doc, "server_runtime", "no_webui", server_runtime_settings_.no_webui);
+    add_to_ini(doc, "server_runtime", "api_key_file", server_runtime_settings_.api_key_file);
+    add_to_ini(doc, "server_runtime", "ssl_key_file", server_runtime_settings_.ssl_key_file);
+    add_to_ini(doc, "server_runtime", "ssl_cert_file", server_runtime_settings_.ssl_cert_file);
+    add_to_ini(doc, "server_runtime", "embeddings_mode", server_runtime_settings_.embeddings_mode);
+    add_to_ini(doc, "server_runtime", "reranking_mode", server_runtime_settings_.reranking_mode);
+    add_to_ini(doc, "server_runtime", "metrics_enabled", server_runtime_settings_.metrics_enabled);
+    add_to_ini(doc, "server_runtime", "slot_save_path", server_runtime_settings_.slot_save_path);
+    add_to_ini(doc, "server_runtime", "n_parallel", server_runtime_settings_.n_parallel);
+    add_to_ini(doc, "server_runtime", "cache_type_k", server_runtime_settings_.cache_type_k);
+    add_to_ini(doc, "server_runtime", "cache_type_v", server_runtime_settings_.cache_type_v);
+    add_to_ini(doc, "server_runtime", "cache_reuse", server_runtime_settings_.cache_reuse);
+    add_to_ini(doc, "server_runtime", "log_disabled", server_runtime_settings_.log_disabled);
+    add_to_ini(doc, "server_runtime", "log_file", server_runtime_settings_.log_file);
+    add_to_ini(doc, "server_runtime", "log_colors", server_runtime_settings_.log_colors);
+    add_to_ini(doc, "server_runtime", "log_verbose", server_runtime_settings_.log_verbose);
+    add_to_ini(doc, "server_runtime", "log_verbosity", server_runtime_settings_.log_verbosity);
+    add_to_ini(doc, "server_runtime", "log_format", server_runtime_settings_.log_format);
+    add_to_ini(doc, "server_runtime", "log_prefix", server_runtime_settings_.log_prefix);
+    add_to_ini(doc, "server_runtime", "log_timestamps", server_runtime_settings_.log_timestamps);
+}
+
+void Settings::save_batch_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "batch", "batch_size", batch_settings_.batch_size);
+    add_to_ini(doc, "batch", "ubatch_size", batch_settings_.ubatch_size);
+    add_to_ini(doc, "batch", "ctx_size", batch_settings_.ctx_size);
+    add_to_ini(doc, "batch", "ctx_size_draft", batch_settings_.ctx_size_draft);
+    add_to_ini(doc, "batch", "threads", batch_settings_.threads);
+    add_to_ini(doc, "batch", "threads_batch", batch_settings_.threads_batch);
+    add_to_ini(doc, "batch", "cpu_mask", batch_settings_.cpu_mask);
+    add_to_ini(doc, "batch", "cpu_range", batch_settings_.cpu_range);
+    add_to_ini(doc, "batch", "cpu_strict", batch_settings_.cpu_strict);
+    add_to_ini(doc, "batch", "priority", batch_settings_.priority);
+    add_to_ini(doc, "batch", "poll_level", batch_settings_.poll_level);
+    add_to_ini(doc, "batch", "cpu_mask_batch", batch_settings_.cpu_mask_batch);
+    add_to_ini(doc, "batch", "cpu_range_batch", batch_settings_.cpu_range_batch);
+    add_to_ini(doc, "batch", "cpu_strict_batch", batch_settings_.cpu_strict_batch);
+    add_to_ini(doc, "batch", "priority_batch", batch_settings_.priority_batch);
+    add_to_ini(doc, "batch", "poll_batch", batch_settings_.poll_batch);
+    add_to_ini(doc, "batch", "cont_batching", batch_settings_.cont_batching);
+    add_to_ini(doc, "batch", "no_perf", batch_settings_.no_perf);
+}
+
+void Settings::save_grammar_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "grammar", "grammar", grammar_settings_.grammar);
+    add_to_ini(doc, "grammar", "grammar_file", grammar_settings_.grammar_file);
+    add_to_ini(doc, "grammar", "json_schema", grammar_settings_.json_schema);
+    add_to_ini(doc, "grammar", "json_schema_file", grammar_settings_.json_schema_file);
+    add_to_ini(doc, "grammar", "chat_template", grammar_settings_.chat_template);
+    add_to_ini(doc, "grammar", "chat_template_file", grammar_settings_.chat_template_file);
+    add_to_ini(doc, "grammar", "chat_template_kwargs", grammar_settings_.chat_template_kwargs);
+    add_to_ini(doc, "grammar", "use_jinja", grammar_settings_.use_jinja);
+    add_to_ini(doc, "grammar", "no_prefill_assistant", grammar_settings_.no_prefill_assistant);
+    add_to_ini(doc, "grammar", "system_prompt_file", grammar_settings_.system_prompt_file);
+    add_to_ini(doc, "grammar", "default_system_prompt", grammar_settings_.default_system_prompt);
+    std::string reasoning_format_str = "none";
+    if (grammar_settings_.reasoning_format == GrammarSettings::ReasoningFormat::Deepseek) {
+        reasoning_format_str = "deepseek";
+    }
+    IniParser::set(doc, "grammar", "reasoning_format", reasoning_format_str);
+    add_to_ini(doc, "grammar", "reasoning_budget", grammar_settings_.reasoning_budget);
+}
+
+void Settings::save_output_settings(IniParser::Document& doc) const {
+    add_to_ini(doc, "output", "n_predict", output_settings_.n_predict);
+    add_to_ini(doc, "output", "keep", output_settings_.keep);
+    add_to_ini(doc, "output", "special_tokens", output_settings_.special_tokens);
+    add_to_ini(doc, "output", "spm_infill", output_settings_.spm_infill);
+    add_to_ini(doc, "output", "verbose_prompt", output_settings_.verbose_prompt);
+    add_to_ini(doc, "output", "escape_sequences", output_settings_.escape_sequences);
+    add_to_ini(doc, "output", "tts_use_guide_tokens", output_settings_.tts_use_guide_tokens);
+    add_to_ini(doc, "output", "pooling_type", output_settings_.pooling_type);
+}
+
 bool Settings::save_to_ini(const std::string& file_path) const {
     using IniDoc = IniParser::Document;
     IniDoc doc;
 
-    bool result = IniParser::save(file_path, doc);
+    // Порядок секций соответствует load_from_ini()
+    save_display_settings(doc);
+    save_performance_settings(doc);
+    save_server_settings(doc);
+    save_chat_settings(doc);
+    save_file_settings(doc);
+    save_rag_settings(doc);
+    save_sampling_settings(doc);
+    save_model_loading_settings(doc);
+    save_gpu_settings(doc);
+    save_cache_settings(doc);
+    save_rope_settings(doc);
+    save_control_vector_settings(doc);
+    save_server_runtime_settings(doc);
+    save_batch_settings(doc);
+    save_grammar_settings(doc);
+    save_output_settings(doc);
+
+    static const char* kHeader =
+        "; Llama GUI settings (settings.ini)\n"
+        "; Приоритет загрузки: profiles > этот файл > значения по умолчанию\n";
+
+    bool result = IniParser::save(file_path, doc, kHeader);
     if (!result) {
         std::cerr << "Failed to save INI file: " << file_path << std::endl;
     }

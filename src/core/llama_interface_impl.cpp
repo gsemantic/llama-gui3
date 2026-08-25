@@ -44,6 +44,14 @@ bool impl::LlamaInterfaceImpl::initialize(const std::string& server_url)
     return is_server_healthy();
 }
 
+void impl::LlamaInterfaceImpl::apply_ssl_options(CURL* curl) const
+{
+    // verify_ssl=false (локальный сценарий по умолчанию) — самоподписанные
+    // сертификаты и https-прокси без CA не блокируют подключение.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, ssl_verify_ ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, ssl_verify_ ? 2L : 0L);
+}
+
 bool impl::LlamaInterfaceImpl::is_server_healthy() const
 {
     if (!curl_initialized_) {
@@ -66,6 +74,7 @@ bool impl::LlamaInterfaceImpl::is_server_healthy() const
     curl_easy_setopt(health_handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(health_handle, CURLOPT_FAILONERROR, 0L);
     curl_easy_setopt(health_handle, CURLOPT_WRITEFUNCTION, +[](char*, size_t, size_t, void*) -> size_t { return 0; });
+    apply_ssl_options(health_handle);
 
     CURLcode res = curl_easy_perform(health_handle);
 
@@ -165,6 +174,7 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        apply_ssl_options(curl);
 
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -291,6 +301,7 @@ std::future<ChatCompletionResponse> impl::LlamaInterfaceImpl::create_chat_comple
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)timeout_seconds_);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        apply_ssl_options(curl);
 
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -522,7 +533,7 @@ void impl::LlamaInterfaceImpl::initialize_curl()
     // Set default options
     curl_easy_setopt(curl_handle_, CURLOPT_TIMEOUT, timeout_seconds_);
     curl_easy_setopt(curl_handle_, CURLOPT_NOSIGNAL, 1L);
-    
+    apply_ssl_options(curl_handle_);
     if (!api_key_.empty()) {
         curl_easy_setopt(curl_handle_, CURLOPT_HTTPHEADER, 
             curl_slist_append(nullptr, 

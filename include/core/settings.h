@@ -90,7 +90,10 @@ struct ServerSettings {
     int connection_timeout = 30000; // миллисекунды
     int request_timeout = 60000;    // миллисекунды
     int max_retries = 3;
-    bool verify_ssl = true;
+    // По умолчанию выключено: приложение ориентировано на локальные сценарии
+    // (localhost/HTTP, самоподписанные сертификаты). Включайте для https://
+    // подключений к недоверенным сетям (см. вкладку Security).
+    bool verify_ssl = false;
     std::string auth_token = "";
 };
 
@@ -300,6 +303,24 @@ public:
     void load_batch_settings(const IniParser::Document& doc);
     void load_grammar_settings(const IniParser::Document& doc);
     void load_output_settings(const IniParser::Document& doc);
+
+    // Зеркальные save-функции: каждая секция/ключ соответствует load_* выше
+    void save_display_settings(IniParser::Document& doc) const;
+    void save_performance_settings(IniParser::Document& doc) const;
+    void save_server_settings(IniParser::Document& doc) const;
+    void save_chat_settings(IniParser::Document& doc) const;
+    void save_file_settings(IniParser::Document& doc) const;
+    void save_rag_settings(IniParser::Document& doc) const;
+    void save_sampling_settings(IniParser::Document& doc) const;
+    void save_model_loading_settings(IniParser::Document& doc) const;
+    void save_gpu_settings(IniParser::Document& doc) const;
+    void save_cache_settings(IniParser::Document& doc) const;
+    void save_rope_settings(IniParser::Document& doc) const;
+    void save_control_vector_settings(IniParser::Document& doc) const;
+    void save_server_runtime_settings(IniParser::Document& doc) const;
+    void save_batch_settings(IniParser::Document& doc) const;
+    void save_grammar_settings(IniParser::Document& doc) const;
+    void save_output_settings(IniParser::Document& doc) const;
 
     bool load_last_profile();
     bool delete_profile(const std::string& profile_name);
