@@ -125,6 +125,11 @@ public:
     bool is_audit_ui_mode() const { return audit_ui_mode_; }
     int runUiAudit();
 
+    // Живые состояния пунктов меню (check_func ↔ настройки).
+    // Пересборка меню (rebuildModernMenu при смене языка и т.п.) пересоздаёт
+    // элементы и стирает привязки — вызывать после КАЖДОГО построения меню.
+    void applyMenuToggleBindings();
+
     // Корректная остановка цикла из обработчика сигналов (SIGTERM/SIGINT):
     // сессия (__last_session__) сохраняется так же, как при закрытии окна.
     static void requestExternalStop() { external_stop_flag_.store(true); }

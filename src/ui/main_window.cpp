@@ -585,15 +585,8 @@ bool MainWindow::initialize(int width, int height) {
         std::cerr << "ERROR in connectSecondaryCommands(): " << e.what() << std::endl;
     }
 
-    // Живая галочка «Проверка SSL»: пункт меню отражает реальное состояние
-    // настройки (check_func вызывается каждый кадр из updateMenuStates())
-    if (AdvancedMenu* sec_menu = advanced_menu_system_.getMenuByKey("Security")) {
-        for (auto& item : sec_menu->items) {
-            if (item.command == "toggle_verify_ssl") {
-                item.check_func = [this]() { return settings_.server().verify_ssl; };
-            }
-        }
-    }
+    // Живые галочки пунктов меню (после регистрации команд)
+    applyMenuToggleBindings();
 
     // Register developer commands (Dear ImGui tools)
     try {
@@ -721,6 +714,8 @@ void MainWindow::run() {
         if (pending_language_change_) {
             advanced_menu_system_.rebuildModernMenu();
             ui_dirty_menu_ = true;
+            // Пересборка стёрла привязки check_func — восстанавливаем
+            applyMenuToggleBindings();
             // Локализованные заголовки окон изменились (TR(...) в ImGui::Begin),
             // иначе ImGui создал бы окна заново и сбросил их позиции/размеры.
             refreshLocalizedWindowNames();
@@ -734,6 +729,7 @@ void MainWindow::run() {
         // Process pending LlamaInterface reconnect (non-blocking, throttled)
         if (pending_reconnect_) {
             static uint32_t last_reconnect_attempt_ = 0;
+            static uint32_t reconnect_fail_count_ = 0;
             uint32_t now = SDL_GetTicks();
             if (now - last_reconnect_attempt_ > 2000) {  // Retry every 2 seconds max
                 last_reconnect_attempt_ = now;
@@ -744,9 +740,17 @@ void MainWindow::run() {
                 if (llama_interface_.initialize(settings_.get_server_url())) {
                     std::cout << "MainWindow: LlamaInterface connected successfully" << std::endl;
                     pending_reconnect_ = false;
+                    reconnect_fail_count_ = 0;
                     chat_interface_->set_server_ready(true);
                 } else {
-                    std::cout << "MainWindow: Server not ready yet, will retry in 2s" << std::endl;
+                    // Не спамим лог каждые 2 секунды: первая попытка и далее раз в ~30с
+                    ++reconnect_fail_count_;
+                    if (reconnect_fail_count_ == 1 || reconnect_fail_count_ % 15 == 0) {
+                        std::cout << "MainWindow: Server not ready yet ("
+                                  << settings_.get_server_url()
+                                  << "), retrying every 2s (attempt "
+                                  << reconnect_fail_count_ << ")" << std::endl;
+                    }
                 }
             }
         }
@@ -1159,6 +1163,18 @@ void MainWindow::show_settings_viewer() {
     // Show settings viewer dialog
     std::cout << "MainWindow: Opening Settings Viewer" << std::endl;
     show_settings_viewer_ = true;
+}
+
+void MainWindow::applyMenuToggleBindings() {
+    // «Проверка SSL» — чекбокс отражает реальное состояние настройки.
+    // check_func вызывается каждый кадр из updateMenuStates().
+    if (AdvancedMenu* sec_menu = advanced_menu_system_.getMenuByKey("Security")) {
+        for (auto& item : sec_menu->items) {
+            if (item.command == "toggle_verify_ssl") {
+                item.check_func = [this]() { return settings_.server().verify_ssl; };
+            }
+        }
+    }
 }
 
 void MainWindow::registerCommand(const std::string& name, std::unique_ptr<Command> command) {

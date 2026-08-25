@@ -636,6 +636,7 @@ void MainWindow::connectSecondaryCommands() {
         "reload_ui",
         [this]() {
             advanced_menu_system_.rebuildModernMenu();
+            applyMenuToggleBindings();
             force_ui_update_ = true;
             std::cout << "UI reloaded by user request" << std::endl;
         },
