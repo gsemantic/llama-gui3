@@ -53,6 +53,35 @@ target_link_libraries(test_dialog_manager PRIVATE managers)
 target_include_directories(test_dialog_manager PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME DialogManager COMMAND test_dialog_manager)
 
+# UI Auditor tests: регрессионная защита консистентности меню/команд
+# (битые ссылки, заглушки, дубли, сироты). Без рендера — только реестры.
+add_executable(test_ui_auditor core/test_ui_auditor.cpp)
+# Внутри libui циклические зависимости членов (advanced_menu_system ↔
+# window_manager ↔ grid_snapping ↔ main_window); группа позволяет ld
+# пересканировать архивы до полного разрешения без дублей членов.
+target_link_libraries(test_ui_auditor PRIVATE
+    "-Wl,--start-group"
+    ui core managers imgui_lib plugin_core
+    "-Wl,--end-group")
+target_compile_definitions(test_ui_auditor PRIVATE USE_IMGUI USE_SDL2 USE_OPENGL)
+target_include_directories(test_ui_auditor PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(SDL2_FOUND)
+    target_link_libraries(test_ui_auditor PRIVATE ${SDL2_LIBRARIES})
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_ui_auditor PRIVATE ${CMAKE_DL_LIBS})
+endif()
+# Члены ui ссылаются на OpenGL и бенчмарки
+target_link_libraries(test_ui_auditor PRIVATE GLEW::GLEW OpenGL::GL CURL::libcurl)
+if(ENABLE_LLAMA_BENCH)
+    target_sources(test_ui_auditor PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/bench/llama_bench_runner.cpp
+        ${CMAKE_SOURCE_DIR}/src/bench/llama_bench_parser.cpp
+        ${CMAKE_SOURCE_DIR}/src/bench/llama_bench_results.cpp
+        ${CMAKE_SOURCE_DIR}/src/bench/llama_bench_module.cpp)
+endif()
+add_test(NAME UiAuditor COMMAND test_ui_auditor)
+
 # Plugin loader tests (loads build/plugins/libhello_plugin.so via PluginManager)
 if(BUILD_PLUGINS)
     add_executable(test_plugin_loader core/test_plugin_loader.cpp)
@@ -81,6 +110,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_plugin_loader test_menu_restore
+    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_plugin_loader test_menu_restore test_ui_auditor
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

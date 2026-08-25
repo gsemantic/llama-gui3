@@ -35,6 +35,8 @@ BACKUP_INFO.txt
 # Executables
 llama-gui-core
 test_*
+!tests/**
+!**/tests/**
 
 # IDE
 .vscode/
