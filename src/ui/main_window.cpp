@@ -858,6 +858,10 @@ void MainWindow::run() {
         const int limit_fps = std::max(1, idle_mode ? perf.idle_fps : perf.target_fps);
         const Uint32 frame_budget_ms = static_cast<Uint32>(1000 / limit_fps);
         const Uint32 frame_elapsed_ms = frame_end_ms - frame_start_ms;
+        // Обновляем метрики производительности реальным временем кадра
+        if (performance_monitor_) {
+            performance_monitor_->updateFrameTime(static_cast<float>(frame_elapsed_ms));
+        }
         if (frame_elapsed_ms < frame_budget_ms) {
             SDL_Delay(frame_budget_ms - frame_elapsed_ms);
         }
@@ -1183,6 +1187,17 @@ void MainWindow::applyMenuToggleBindings() {
         for (auto& item : sec_menu->items) {
             if (item.command == "toggle_verify_ssl") {
                 item.check_func = [this]() { return settings_.server().verify_ssl; };
+            }
+        }
+    }
+
+    // «Оверлей производительности» — аналогично
+    if (AdvancedMenu* perf_menu = advanced_menu_system_.getMenuByKey("Performance")) {
+        for (auto& item : perf_menu->items) {
+            if (item.command == "toggle_performance") {
+                item.check_func = [this]() {
+                    return settings_.performance().show_performance_overlay;
+                };
             }
         }
     }
@@ -1551,6 +1566,11 @@ void MainWindow::render_ui() {
 
     // Developer tools (Dear ImGui окна: Metrics, Style Editor, Font Selector, Debug Log)
     renderDeveloperTools();
+
+    // Компактный оверлей FPS (настройка performance.show_performance_overlay)
+    if (settings_.performance().show_performance_overlay && performance_monitor_) {
+        performance_monitor_->renderOverlay();
+    }
 
     // Render main layout and status bar
     render_main_layout();

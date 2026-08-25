@@ -45,6 +45,29 @@ void PerformanceMonitor::updatePerformanceMetrics() {
     // TODO: Реализовать обновление метрик производительности
 }
 
+void PerformanceMonitor::renderOverlay() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Прибит к правому верхнему краю (под строкой меню), не перехватывает фокус
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 12.0f, 34.0f),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoMouseInputs;
+
+    if (ImGui::Begin("##perf_overlay", nullptr, flags)) {
+        // Цвет FPS по порогам: комфортно / терпимо / проблема
+        const ImVec4 fps_color = (fps_ >= 50.0f) ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                               : (fps_ >= 25.0f) ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f)
+                                                 : ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
+        ImGui::TextColored(fps_color, "FPS: %.1f", fps_);
+        ImGui::Text("Frame: %.2f ms", frame_time_);
+    }
+    ImGui::End();
+}
+
 void PerformanceMonitor::renderMetricsWindow() {
     if (!show_metrics_window_) {
         return;

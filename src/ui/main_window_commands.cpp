@@ -448,10 +448,16 @@ void MainWindow::connectSecondaryCommands() {
     // Performance
     // =========================================================================
 
-    // Оверлей производительности = реальное окно ImGui Metrics
+    // Оверлей производительности = компактный FPS/frame-time в углу экрана
+    // (состояние отражается чекбоксом меню через applyMenuToggleBindings)
     registerCommand("toggle_performance", CommandFactory::createFunctionalCommand(
         "toggle_performance",
-        [this]() { show_metrics_window_ = !show_metrics_window_; },
+        [this, save_active_profile]() {
+            bool& overlay = settings_.performance().show_performance_overlay;
+            overlay = !overlay;
+            save_active_profile();
+            std::cout << "Performance overlay: " << (overlay ? "ON" : "OFF") << std::endl;
+        },
         "Toggle performance overlay window", "", nullptr));
 
     registerCommand("toggle_vsync", CommandFactory::createFunctionalCommand(

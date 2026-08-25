@@ -29,6 +29,14 @@ public:
     void renderCommandManagerWindow();
     void renderWindowManagerWindow();
     void renderDeveloperTools();
+
+    /**
+     * @brief Компактный оверлей FPS/frame-time в правом верхнем углу.
+     *
+     * Показывается, когда включена настройка performance.show_performance_overlay.
+     * Вызывается каждый кадр из MainWindow::render_ui().
+     */
+    void renderOverlay();
     
     // Публичные флаги
     bool show_metrics_window_;

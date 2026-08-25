@@ -405,7 +405,6 @@ private:
     // UI state
     bool show_menu_bar_ = true;
     bool show_status_bar_ = true;
-    bool show_performance_overlay_ = false;
     bool compact_mode_ = false;
     bool is_fullscreen_ = false;
     bool show_demo_window_ = false;
