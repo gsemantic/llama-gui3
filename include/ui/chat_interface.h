@@ -253,6 +253,17 @@ private:
     bool auto_scroll_ = true;
     float scroll_to_message_id_ = -1.0f;
 
+    // Режим выделения части текста сообщения: сообщение selectable_message_index_
+    // из беседы selectable_conversation_id_ рендерится как readonly
+    // InputTextMultiline (выделение мышью + Ctrl+C). Остальные — TextWrapped,
+    // поэтому нагрузка не растёт: существует максимум один такой виджет.
+    int selectable_message_index_ = -1;
+    std::string selectable_conversation_id_;
+    std::vector<char> selectable_buffer_;  // Копия текста, заполняется при активации
+    bool selectable_focus_requested_ = false;  // Автофокус на кадр после активации
+    bool select_menu_open_prev_ = false;       // Контекстное меню было открыто в прошлом кадре
+    void exit_message_select_mode();
+
     PerformanceMetrics current_metrics_;
     void update_performance_metrics(const std::string& content, bool is_final);
     void render_performance_metrics();

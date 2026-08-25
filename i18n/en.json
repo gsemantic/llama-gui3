@@ -292,6 +292,8 @@
     "chat.processing_rag": "📄 Reading document...",
     "chat.stop": "Stop",
     "chat.copy_message": "Copy Entire Message",
+    "chat.select_text": "Select Text",
+    "chat.exit_select_mode": "Exit selection mode (Esc)",
     "chat.model_loading_tooltip": "Model is loading, sending is disabled...",
 
     "context.cut": "Cut",

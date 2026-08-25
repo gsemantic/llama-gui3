@@ -5,6 +5,7 @@
 #include "../include/core/state_manager.h"
 #include "../include/core/rag_manager.h"
 #include "../include/ui/localization_manager.h"
+#include "../external/imgui/imgui_internal.h"
 #include "imgui.h"
 #include <algorithm>
 #include <iostream>
@@ -118,6 +119,13 @@ void ChatInterface::render_message_list() {
     static const ImVec4 SYSTEM_COLOR(0.8f, 0.8f, 0.0f, 1.0f);
     static const ImVec4 DEFAULT_COLOR(0.0f, 0.0f, 0.0f, 1.0f);
 
+    // Режим выделения действителен только для активной беседы и существующего индекса
+    if (selectable_message_index_ >= 0 &&
+        (selectable_conversation_id_ != active_conversation->id ||
+         static_cast<size_t>(selectable_message_index_) >= active_conversation->messages.size())) {
+        exit_message_select_mode();
+    }
+
     static std::string cached_user_role, cached_assistant_role, cached_system_role;
     static bool roles_cached = false;
 
@@ -143,15 +151,114 @@ void ChatInterface::render_message_list() {
 
         ImGui::TextColored(message_color, "%s:", role_text.c_str());
 
-        // Рендеринг текста сообщения — TextWrapped, без child window
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-        ImGui::TextWrapped("%s", message.content.c_str());
-        ImGui::PopStyleColor();
-        ImGui::PopTextWrapPos();
+        const bool in_select_mode = (static_cast<int>(i) == selectable_message_index_);
+        bool render_as_selectable = in_select_mode;
+
+        if (in_select_mode) {
+            // Кнопка выхода из режима выделения на строке заголовка сообщения
+            ImGui::SameLine();
+            float close_btn_w = ImGui::CalcTextSize("×").x + ImGui::GetStyle().FramePadding.x * 2;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - close_btn_w);
+            if (ImGui::SmallButton(("×##exit_select_" + std::to_string(i)).c_str())) {
+                // Выходим ДО рендера поля: буфер будет очищен, поэтому в этом кадре
+                // рисуем обычный TextWrapped, а не InputTextMultiline с пустым буфером
+                exit_message_select_mode();
+                render_as_selectable = false;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", TRF("chat.exit_select_mode", "Exit selection mode"));
+            }
+        }
+
+        if (render_as_selectable) {
+            // Readonly InputTextMultiline: выделение мышью и Ctrl+C работают нативно.
+            // Экземпляр существует максимум один — нагрузка сопоставима с TextWrapped.
+            float wrap_width = ImGui::GetContentRegionAvail().x;
+            float text_height = ImGui::CalcTextSize(selectable_buffer_.data(), nullptr, false, wrap_width).y
+                              + ImGui::GetStyle().FramePadding.y * 2;
+            if (selectable_focus_requested_) {
+                ImGui::SetKeyboardFocusHere();
+                selectable_focus_requested_ = false;
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, message_color);
+            ImGui::InputTextMultiline(
+                ("##msg_select_" + std::to_string(i)).c_str(),
+                selectable_buffer_.data(),
+                selectable_buffer_.size(),
+                ImVec2(wrap_width, text_height),
+                ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_WordWrap |
+                ImGuiInputTextFlags_NoHorizontalScroll);
+            ImGui::PopStyleColor();
+
+            // Состояние поля фиксируем ДО меню: после EndPopup LastItemData
+            // указывает на последний пункт меню, а не на поле
+            const ImGuiID sel_id = ImGui::GetItemID();
+            const bool sel_field_active = ImGui::IsItemActive();
+
+            // Контекстное меню с ПРЯМЫМ копированием выделения из состояния поля —
+            // без эмуляции клавиш. Выделение читается даже у неактивного поля.
+            if (sel_id != 0 && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                ImGui::OpenPopup("##msg_select_menu");
+            }
+
+            // Выход по Esc — только когда контекстное меню не открыто
+            if (sel_field_active && !ImGui::IsPopupOpen("##msg_select_menu") &&
+                ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                exit_message_select_mode();
+            }
+
+            if (ImGui::BeginPopup("##msg_select_menu")) {
+                ImGuiInputTextState* sel_state = ImGui::GetInputTextState(sel_id);
+                const bool has_selection = sel_state && sel_state->HasSelection();
+
+                if (ImGui::MenuItem(TRF("context.copy", "Copy"), "Ctrl+C", false, has_selection)) {
+                    int sel_s = sel_state->GetSelectionStart();
+                    int sel_e = sel_state->GetSelectionEnd();
+                    if (sel_s > sel_e) { int t = sel_s; sel_s = sel_e; sel_e = t; }
+                    std::string selected_text(selectable_buffer_.data() + sel_s,
+                                              static_cast<size_t>(sel_e - sel_s));
+                    ImGui::SetClipboardText(selected_text.c_str());
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::MenuItem(TRF("chat.copy_message", "Copy Entire Message"))) {
+                    ImGui::SetClipboardText(message.content.c_str());
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::MenuItem(TRF("context.select_all", "Select All"), "Ctrl+A")) {
+                    if (sel_state) sel_state->SelectAll();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem(TRF("chat.exit_select_mode", "Exit selection mode (Esc)"))) {
+                    ImGui::CloseCurrentPopup();
+                    exit_message_select_mode();
+                }
+                ImGui::EndPopup();
+            }
+
+            // ВАЖНО: пока меню открыто, поле НЕ активируем — активация вызывает
+            // FocusWindow() на окне чата, а фокус вне попапа закрывает его
+            // (меню «мелькает»). Активность возвращаем полю ПОСЛЕ закрытия меню:
+            // TryToPreserveState восстанавливает курсор и выделение, выделение
+            // снова видно, работают нативные Ctrl+C / Ctrl+A.
+            const bool menu_open_now = ImGui::IsPopupOpen("##msg_select_menu");
+            if (select_menu_open_prev_ && !menu_open_now && selectable_message_index_ >= 0 &&
+                !selectable_focus_requested_) {
+                GImGui->NavNextActivateId = sel_id;
+                GImGui->NavNextActivateFlags = ImGuiActivateFlags_TryToPreserveState;
+            }
+            select_menu_open_prev_ = menu_open_now;
+        } else {
+            // Рендеринг текста сообщения — TextWrapped, без child window
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, message_color);
+            ImGui::TextWrapped("%s", message.content.c_str());
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+        }
 
         // Контекстное меню + Ctrl+C для копирования
-        if (ImGui::IsItemHovered()) {
+        if (!in_select_mode && ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 ImGui::OpenPopup(("copy_menu_" + std::to_string(i)).c_str());
             }
@@ -160,9 +267,16 @@ void ChatInterface::render_message_list() {
             }
         }
 
-        if (ImGui::BeginPopup(("copy_menu_" + std::to_string(i)).c_str())) {
+        if (!in_select_mode && ImGui::BeginPopup(("copy_menu_" + std::to_string(i)).c_str())) {
             if (ImGui::MenuItem(TRF("chat.copy_message", "Copy Entire Message"), "Ctrl+C")) {
                 ImGui::SetClipboardText(message.content.c_str());
+            }
+            if (ImGui::MenuItem(TRF("chat.select_text", "Select Text"))) {
+                selectable_buffer_.assign(message.content.begin(), message.content.end());
+                selectable_buffer_.push_back('\0');
+                selectable_conversation_id_ = active_conversation->id;
+                selectable_message_index_ = static_cast<int>(i);
+                selectable_focus_requested_ = true;
             }
             ImGui::EndPopup();
         }
@@ -222,6 +336,15 @@ void ChatInterface::render_message_list() {
     }
 
     ImGui::EndChild();
+}
+
+void ChatInterface::exit_message_select_mode() {
+    selectable_message_index_ = -1;
+    selectable_conversation_id_.clear();
+    selectable_buffer_.clear();
+    selectable_buffer_.shrink_to_fit();
+    selectable_focus_requested_ = false;
+    select_menu_open_prev_ = false;
 }
 
 void ChatInterface::render_typing_indicator() {

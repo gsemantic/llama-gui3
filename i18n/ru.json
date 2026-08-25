@@ -310,6 +310,8 @@
     "chat.processing_rag": "📄 Чтение документа...",
     "chat.stop": "Остановить",
     "chat.copy_message": "Копировать всё сообщение",
+    "chat.select_text": "Выделить текст",
+    "chat.exit_select_mode": "Выйти из режима выделения (Esc)",
     "chat.model_loading_tooltip": "Модель загружается, отправка заблокирована...",
 
     "context.cut": "Вырезать",
