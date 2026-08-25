@@ -5,6 +5,9 @@
 #include <vector>
 
 namespace llama_gui {
+namespace bench {
+class LlamaBenchResults;
+}
 namespace ui {
 
 /**
@@ -12,6 +15,8 @@ namespace ui {
  * @brief Вкладка для просмотра истории запусков бенчмарка
  *
  * Показывает историю всех запусков с возможностью фильтрации.
+ * Данные берутся из реального хранилища LlamaBenchResults
+ * (bench_results/history.json).
  */
 class HistoryTab : public BenchTabBase {
 public:
@@ -34,6 +39,10 @@ public:
     // Обработчики событий
     // =========================================================================
 
+    /** Источник данных (не владеющий указатель; должен переживать вкладку). */
+    void setResultsSource(bench::LlamaBenchResults* source);
+
+    /** Перезагрузить историю с диска (history.json). */
     void refreshResults();
 
 private:
@@ -44,8 +53,7 @@ private:
     void renderResultsTable();
 
 private:
-    // История запусков
-    std::vector<std::string> history_;
+    bench::LlamaBenchResults* results_source_ = nullptr;
 };
 
 } // namespace ui

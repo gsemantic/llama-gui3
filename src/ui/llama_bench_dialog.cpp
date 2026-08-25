@@ -80,6 +80,8 @@ LlamaBenchDialog::LlamaBenchDialog()
     pimpl_->compare_tab = std::make_unique<CompareProfilesTab>();
     pimpl_->results_tab = std::make_unique<ResultsTab>();
     pimpl_->history_tab = std::make_unique<HistoryTab>();
+    // Вкладка истории читает реальное хранилище результатов модуля
+    pimpl_->history_tab->setResultsSource(&pimpl_->bench_module.getResults());
 }
 
 LlamaBenchDialog::~LlamaBenchDialog() {
@@ -185,6 +187,9 @@ bool LlamaBenchDialog::initialize(const std::string& llama_bench_path,
         pimpl_->show_error_modal = true;
         return false;
     }
+
+    // Загрузить историю прошлых запусков (bench_results/history.json)
+    pimpl_->bench_module.getResults().loadFromHistory();
 
     // Настроить колбэки
     pimpl_->bench_module.setStatusCallback([this](const std::string& status) {
