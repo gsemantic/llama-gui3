@@ -316,6 +316,10 @@ bool MainWindow::initialize(int width, int height) {
         return false;
     }
     LOG_INFO("OpenGL контекст создан успешно");
+
+    // V-Sync из настроек (раньше настройка существовала, но не применялась)
+    applied_swap_interval_ = settings_.performance().enable_vsync ? 1 : 0;
+    SDL_GL_SetSwapInterval(applied_swap_interval_);
 #endif
 #endif
 
@@ -648,12 +652,16 @@ void MainWindow::run() {
     load_fonts_with_cyrillic();
 
     // Main loop
+    last_ui_activity_ms_ = SDL_GetTicks();
     while (is_running_) {
+        const Uint32 frame_start_ms = SDL_GetTicks();
 #ifdef USE_SDL2
         if (sdl_window_) {
             // Process SDL events: forward to both InputHandler AND ImGui
             SDL_Event event;
+            bool got_events = false;
             while (SDL_PollEvent(&event)) {
+                got_events = true;
                 input_handler_.handleSDLEvent(event);
                 if (sdl_window_ && gl_context_) {
                     ImGui_ImplSDL2_ProcessEvent(&event);
@@ -665,6 +673,10 @@ void MainWindow::run() {
                     event.window.windowID == SDL_GetWindowID(sdl_window_)) {
                     is_running_ = false;
                 }
+            }
+            // Любое событие ввода/окна выводит UI из idle-режима на полную частоту
+            if (got_events) {
+                last_ui_activity_ms_ = SDL_GetTicks();
             }
         }
 #endif
@@ -765,6 +777,37 @@ void MainWindow::run() {
 #ifdef USE_SDL2
         SDL_GL_SwapWindow(sdl_window_);
 #endif
+
+        // === Ограничение частоты кадров (target_fps / idle_fps) ===
+        // Ранее настройки существовали, но цикл рендерил без ограничений.
+        const auto& perf = settings_.performance();
+
+        // Runtime-переключение V-Sync из настроек
+#ifdef USE_OPENGL
+        if (gl_context_) {
+            const int want_interval = perf.enable_vsync ? 1 : 0;
+            if (want_interval != applied_swap_interval_) {
+                applied_swap_interval_ = want_interval;
+                SDL_GL_SetSwapInterval(want_interval);
+            }
+        }
+#endif
+
+        // Занятые состояния требуют полной частоты независимо от простоя мыши:
+        // стриминг ответа, загрузка модели, RAG-индексация
+        const bool ui_busy = (chat_interface_ && chat_interface_->is_streaming())
+                          || is_model_loading_.load()
+                          || (rag_interface_ && rag_interface_->is_indexing());
+
+        const Uint32 frame_end_ms = SDL_GetTicks();
+        const bool idle_mode = !ui_busy &&
+            (frame_end_ms - last_ui_activity_ms_ > static_cast<Uint32>(perf.idle_timeout_ms));
+        const int limit_fps = std::max(1, idle_mode ? perf.idle_fps : perf.target_fps);
+        const Uint32 frame_budget_ms = static_cast<Uint32>(1000 / limit_fps);
+        const Uint32 frame_elapsed_ms = frame_end_ms - frame_start_ms;
+        if (frame_elapsed_ms < frame_budget_ms) {
+            SDL_Delay(frame_budget_ms - frame_elapsed_ms);
+        }
     }
 
     // Сохраняем workspace ПОКА ImGui контекст ещё жив — иначе позиции/размеры окон недоступны

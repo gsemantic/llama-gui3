@@ -370,6 +370,10 @@ private:
     bool is_initialized_ = false;
     bool is_running_ = false;
 
+    // FPS limiting: время последнего события ввода (для перехода в idle_fps)
+    Uint32 last_ui_activity_ms_ = 0;
+    int applied_swap_interval_ = -1;  // Текущий применённый режим V-Sync (-1 = не применён)
+
     // Fullscreen state (saved before entering fullscreen)
     int pre_fullscreen_x_ = 0;
     int pre_fullscreen_y_ = 0;
