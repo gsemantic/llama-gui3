@@ -44,6 +44,7 @@
 #include "ui/rag_settings_dialog.h"
 #include "ui/settings_viewer_dialog.h"
 #include "ui/grid_snapping_dialog.h"
+#include "ui/menu_layout_editor_dialog.h"
 #include "ui/profile_manager_dialog.h"
 #include "ui/backup_manager_dialog.h"
 #ifdef ENABLE_LLAMA_BENCH
@@ -322,6 +323,7 @@ private:
     std::unique_ptr<RagSettingsDialog> rag_settings_dialog_;
     std::unique_ptr<SettingsViewerDialog> settings_viewer_dialog_;
     std::unique_ptr<GridSnappingDialog> grid_snapping_dialog_;
+    std::unique_ptr<MenuLayoutEditorDialog> menu_layout_editor_dialog_;
     std::unique_ptr<ProfileManagerDialog> profile_manager_dialog_;
     std::unique_ptr<BackupManagerDialog> backup_manager_dialog_;
     std::unique_ptr<QuickSettingsDialog> quick_settings_dialog_;
@@ -452,6 +454,7 @@ private:
     bool show_rag_settings_ = false;  // Флаг показа настроек RAG
     bool show_backup_manager_ = false;  // Флаг показа менеджера резервных копий
     bool show_grid_snapping_ = false;  // Флаг показа настроек сетки
+    bool show_menu_layout_editor_ = false;  // Флаг показа редактора раскладки меню
     bool show_settings_viewer_ = false;  // Флаг показа Settings Viewer
 #ifdef ENABLE_LLAMA_BENCH
     bool show_llama_bench_ = false;

@@ -63,6 +63,8 @@
     "menu.view.performance_overlay": "Performance Overlay",
     "menu.view.status_bar": "Status Bar",
     "menu.view.grid_snapping_settings": "Grid Snapping Settings...",
+    "menu.view.customize_menu": "Customize Menu...",
+    "menu.layout_editor.title": "Customize Menu",
 
     "menu.window.conversations": "Conversations",
     "menu.window.files": "Files",

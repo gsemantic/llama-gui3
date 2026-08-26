@@ -140,6 +140,20 @@ void MainWindow::connectAdditionalWindowCommands() {
             },
             "Grid Snapping", "", nullptr));
 
+        // Редактор пользовательской раскладки меню
+        registerCommand("show_menu_layout_editor", CommandFactory::createFunctionalCommand(
+            "show_menu_layout_editor",
+            [this]() {
+                show_menu_layout_editor_ = !show_menu_layout_editor_;
+                window_manager_.setWindowVisible("menu_layout_editor",
+                                                 show_menu_layout_editor_);
+                if (show_menu_layout_editor_) {
+                    menu_layout_editor_dialog_->show();
+                    window_coordinator_.bringToFront("menu_layout_editor");
+                }
+            },
+            "Customize Menu Layout", "", nullptr));
+
         // toggle_window_grid_snapping — используется меню Window (createWindowToggleItem)
         registerCommand("toggle_window_grid_snapping", CommandFactory::createFunctionalCommand(
             "toggle_window_grid_snapping",

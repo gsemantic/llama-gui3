@@ -225,6 +225,11 @@ std::unique_ptr<AdvancedMenu> AdvancedMenuSystem::createViewMenu() {
         TRF("menu.view.grid_snapping_settings", "Grid Snapping Settings..."),
         "show_grid_snapping_dialog", "", "Configure window grid snapping"));
 
+    // Редактор пользовательской раскладки меню (видимость, порядок, группы)
+    menu->items.push_back(AdvancedMenuItemFactory::createCommandItem(
+        TRF("menu.view.customize_menu", "Customize Menu..."),
+        "show_menu_layout_editor", "", "Customize menu visibility, order and groups"));
+
     return menu;
 }
 

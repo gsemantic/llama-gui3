@@ -93,6 +93,7 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     , rag_settings_dialog_(std::make_unique<RagSettingsDialog>(&settings_, this))
     , settings_viewer_dialog_(std::make_unique<SettingsViewerDialog>(settings_))
     , grid_snapping_dialog_(std::make_unique<GridSnappingDialog>())
+    , menu_layout_editor_dialog_(std::make_unique<MenuLayoutEditorDialog>())
     , profile_manager_dialog_(std::make_unique<ProfileManagerDialog>(config_manager_))
     , backup_manager_dialog_(std::make_unique<BackupManagerDialog>(config_manager_))
     , quick_settings_dialog_(std::make_unique<QuickSettingsDialog>(settings_))
@@ -110,6 +111,11 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     // Initialize advanced menu system
     advanced_menu_system_.initialize(command_manager_.get(), &window_manager_, &workspace_manager_);
     advanced_menu_system_.buildModernMenu();
+
+    // Редактор раскладки меню работает поверх системы меню
+    if (menu_layout_editor_dialog_) {
+        menu_layout_editor_dialog_->setMenuSystem(&advanced_menu_system_);
+    }
 
 #ifdef ENABLE_LLAMA_BENCH
     // Передаём server manager в диалог Llama Bench (для остановки/запуска сервера)
@@ -936,6 +942,7 @@ void MainWindow::initializeNewUISystem() {
     window_manager_.addWindow("settings_viewer", false, ImVec2(200, 100), ImVec2(400, 600));
     window_manager_.addWindow("status_bar", show_status_bar_);
     window_manager_.addWindow("grid_snapping", false, ImVec2(200, 100), ImVec2(400, 600));
+    window_manager_.addWindow("menu_layout_editor", false, ImVec2(220, 120), ImVec2(520, 640));
     window_manager_.addWindow("profile_manager", show_profile_manager_, ImVec2(200, 100), ImVec2(400, 600));
     window_manager_.addWindow("backup_manager", show_backup_manager_, ImVec2(200, 100), ImVec2(400, 600));
 
@@ -952,6 +959,7 @@ void MainWindow::initializeNewUISystem() {
     window_manager_.setImGuiName("settings_viewer", "Settings INI Viewer");
     window_manager_.setImGuiName("settings", "Settings");
     window_manager_.setImGuiName("grid_snapping", TR("grid_snapping.title"));
+    window_manager_.setImGuiName("menu_layout_editor", TR("menu.layout_editor.title"));
     window_manager_.setImGuiName("rag_settings", TR("rag_settings.title"));
 
     // Настройка сетки для позиционирования
@@ -1022,6 +1030,9 @@ void MainWindow::initializeNewUISystem() {
     window_coordinator_.registerWindow("grid_snapping", [this]() {
         if (grid_snapping_dialog_) grid_snapping_dialog_->render(&show_grid_snapping_);
     }, false, TR("grid_snapping.title"), &show_grid_snapping_);
+    window_coordinator_.registerWindow("menu_layout_editor", [this]() {
+        if (menu_layout_editor_dialog_) menu_layout_editor_dialog_->render(&show_menu_layout_editor_);
+    }, false, TR("menu.layout_editor.title"), &show_menu_layout_editor_);
     window_coordinator_.registerWindow("profile_manager", [this]() {
         if (profile_manager_dialog_) profile_manager_dialog_->render();
     }, true);
@@ -1122,7 +1133,7 @@ void MainWindow::refreshLocalizedWindowNames() {
 
     // Окна, чьи ImGui-имена локализованы через TR() (см. initializeNewUISystem)
     const char* localized_windows[] = {
-        "conversations", "files", "grid_snapping", "rag_settings"
+        "conversations", "files", "grid_snapping", "menu_layout_editor", "rag_settings"
     };
     for (const char* wm_name : localized_windows) {
         capture(wm_name);
@@ -1131,11 +1142,14 @@ void MainWindow::refreshLocalizedWindowNames() {
     window_manager_.setImGuiName("conversations", TR("conversations.title"));
     window_manager_.setImGuiName("files", TR("files.title"));
     window_manager_.setImGuiName("grid_snapping", TR("grid_snapping.title"));
+    window_manager_.setImGuiName("menu_layout_editor", TR("menu.layout_editor.title"));
     window_manager_.setImGuiName("rag_settings", TR("rag_settings.title"));
 
     window_coordinator_.updateWindowImguiName("conversations", TR("conversations.title"));
     window_coordinator_.updateWindowImguiName("files", TR("files.title"));
     window_coordinator_.updateWindowImguiName("grid_snapping", TR("grid_snapping.title"));
+    window_coordinator_.updateWindowImguiName("menu_layout_editor",
+                                              TR("menu.layout_editor.title"));
 }
 
 void MainWindow::showWindowByName(const std::string& window_name) {

@@ -6,6 +6,8 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace llama_gui {
 namespace ui {
@@ -19,11 +21,18 @@ void AdvancedMenuSystem::renderMainMenu() {
     if (main_menu_bar) {
         // Render all menus in order
         for (const auto& menu : menus_ordered_) {
-            if (menu && menu->enabled) {
-                if (ImGui::BeginMenu(menu->name.c_str())) {
-                    renderMenuItems(menu->items);
-                    ImGui::EndMenu();
-                }
+            if (!menu || !menu->enabled) continue;
+
+            // Стабильный ключ меню для пользовательской раскладки
+            // (плагины могут добавлять меню без menu_key — используем имя)
+            const std::string menu_key = !menu->menu_key.empty() ? menu->menu_key : menu->name;
+
+            // Скрытое пользователем меню не рендерим вовсе
+            if (menu_layout_manager_.isMenuHidden(menu_key)) continue;
+
+            if (ImGui::BeginMenu(menu->name.c_str())) {
+                renderMenuItems(menu_key, menu->items);
+                ImGui::EndMenu();
             }
         }
 
@@ -58,16 +67,35 @@ void AdvancedMenuSystem::renderLanguageSelector() {
 }
 
 void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& items) {
-    for (const auto& item : items) {
-        // Проверяем доступность команды для текущего workspace.
-        // Отключенные workspace команды скрываем, а заглушки (stubs) показываем серым.
-        if (workspace_manager_ && !item.command.empty()) {
-            if (!workspace_manager_->isCommandEnabled(item.command)) {
-                continue; // Скрываем элементы с отключенными командами
+    // Вызов без контекста меню: пользовательская раскладка не применяется
+    renderMenuItems(std::string(), items);
+}
+
+void AdvancedMenuSystem::renderMenuItems(const std::string& menu_key,
+                                         const std::vector<AdvancedMenuItem>& items) {
+    const MenuLayoutForMenu* layout =
+        menu_key.empty() ? nullptr : menu_layout_manager_.findMenuLayout(menu_key);
+    const bool use_entries = layout && !layout->entries.empty();
+
+    // Видимость пункта: отключенные workspace-команды скрываются,
+    // скрытые пользователем (раскладка) тоже
+    auto item_visible = [&](const AdvancedMenuItem& it) -> bool {
+        if (workspace_manager_ && !it.command.empty() &&
+            !workspace_manager_->isCommandEnabled(it.command)) {
+            return false;
+        }
+        if (layout) {
+            const std::string key = make_menu_item_key(it.command, it.name);
+            if (!key.empty() && menu_layout_manager_.isItemHidden(menu_key, key)) {
+                return false;
             }
         }
+        return true;
+    };
 
-        switch (item.type) {
+    // Отрисовка одного элемента (без управления разделителями)
+    auto draw_item = [&](const AdvancedMenuItem& it) {
+        switch (it.type) {
             case AdvancedMenuItemType::Separator:
                 ImGui::Separator();
                 break;
@@ -78,12 +106,12 @@ void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& it
                 // "RAG Search" у приложения и у плагина) давали бы ID collision.
                 // Часть после "##" не отображается, поэтому текст пункта не меняется.
                 const std::string label =
-                    item.command.empty() ? item.name : (item.name + "##" + item.command);
-                if (ImGui::MenuItem(label.c_str(), item.shortcut.c_str(), item.checked, item.enabled)) {
-                    if (item.callback) {
-                        item.callback();
-                    } else if (!item.command.empty() && command_manager_) {
-                        auto result = command_manager_->executeCommand(item.command);
+                    it.command.empty() ? it.name : (it.name + "##" + it.command);
+                if (ImGui::MenuItem(label.c_str(), it.shortcut.c_str(), it.checked, it.enabled)) {
+                    if (it.callback) {
+                        it.callback();
+                    } else if (!it.command.empty() && command_manager_) {
+                        auto result = command_manager_->executeCommand(it.command);
                         if (!result.success) {
                             std::cerr << "[AdvancedMenuSystem] Error: " << result.error << std::endl;
                         }
@@ -95,22 +123,20 @@ void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& it
             case AdvancedMenuItemType::Submenu: {
                 // Проверяем, есть ли в подменю хотя бы один видимый элемент
                 bool has_visible_items = false;
-                for (const auto& sub_item : item.submenu_items) {
+                for (const auto& sub_item : it.submenu_items) {
                     if (sub_item.type == AdvancedMenuItemType::Separator) {
                         continue;
                     }
-                    // Скрытые workspace команды не считаются видимыми
-                    if (workspace_manager_ && !sub_item.command.empty() &&
-                        !workspace_manager_->isCommandEnabled(sub_item.command)) {
+                    if (!item_visible(sub_item)) {
                         continue;
                     }
                     has_visible_items = true;
                     break;
                 }
-                
+
                 if (has_visible_items) {
-                    if (ImGui::BeginMenu(item.name.c_str(), item.enabled)) {
-                        renderMenuItems(item.submenu_items);
+                    if (ImGui::BeginMenu(it.name.c_str(), it.enabled)) {
+                        renderMenuItems(menu_key, it.submenu_items);
                         ImGui::EndMenu();
                     }
                 }
@@ -119,9 +145,102 @@ void AdvancedMenuSystem::renderMenuItems(const std::vector<AdvancedMenuItem>& it
         }
 
         // Show tooltip if available
-        if (ImGui::IsItemHovered() && !item.tooltip.empty()) {
-            ImGui::SetTooltip("%s", item.tooltip.c_str());
+        if (ImGui::IsItemHovered() && !it.tooltip.empty()) {
+            ImGui::SetTooltip("%s", it.tooltip.c_str());
         }
+    };
+
+    // ------------------------------------------------------------------
+    // Без записей порядка — прежнее поведение + фильтрация скрытых
+    // ------------------------------------------------------------------
+    if (!use_entries) {
+        for (const auto& it : items) {
+            if (it.type != AdvancedMenuItemType::Separator && !item_visible(it)) continue;
+            draw_item(it);
+        }
+        return;
+    }
+
+    // ------------------------------------------------------------------
+    // Режим раскладки: порядок из entries, группы как подменю,
+    // неупомянутые элементы идут в хвосте в исходном порядке
+    // ------------------------------------------------------------------
+    std::unordered_map<std::string, const AdvancedMenuItem*> by_key;
+    for (const auto& it : items) {
+        if (it.type == AdvancedMenuItemType::Separator) continue;
+        by_key[make_menu_item_key(it.command, it.name)] = &it;
+    }
+    std::unordered_set<const AdvancedMenuItem*> consumed;  // Позиция задана entries/группой
+
+    bool drawn_any = false;   // На текущем уровне что-то уже нарисовано
+    bool pending_sep = false; // Встречен разделитель — рисуем перед следующим элементом
+
+    auto sep_before_next = [&]() {
+        if (drawn_any && pending_sep) {
+            ImGui::Separator();
+        }
+        pending_sep = false;
+    };
+
+    auto draw_with_sep = [&](const AdvancedMenuItem& it) {
+        if (!item_visible(it)) return;
+        sep_before_next();
+        draw_item(it);
+        drawn_any = true;
+    };
+
+    auto draw_group = [&](const MenuLayoutGroup& group) {
+        // Пустая группа (всё скрыто или пункты исчезли) не рендерится
+        bool any_visible = false;
+        for (const auto& k : group.item_keys) {
+            auto found = by_key.find(k);
+            if (found != by_key.end() && item_visible(*found->second)) {
+                any_visible = true;
+                break;
+            }
+        }
+        if (!any_visible) return;
+
+        sep_before_next();
+        if (ImGui::BeginMenu(group.title.c_str())) {
+            for (const auto& k : group.item_keys) {
+                auto found = by_key.find(k);
+                if (found == by_key.end()) continue;
+                if (!item_visible(*found->second)) continue;
+                consumed.insert(found->second);
+                draw_item(*found->second);
+            }
+            ImGui::EndMenu();
+        }
+        drawn_any = true;
+    };
+
+    for (const auto& entry : layout->entries) {
+        if (entry.is_group) {
+            for (const auto& group : layout->groups) {
+                if (group.id == entry.key) {
+                    draw_group(group);
+                    break;
+                }
+            }
+        } else {
+            auto found = by_key.find(entry.key);
+            if (found != by_key.end()) {
+                consumed.insert(found->second);
+                draw_with_sep(*found->second);
+            }
+        }
+    }
+
+    // Хвост: элементы вне раскладки и исходные разделители между ними.
+    // Разделители схлопываются и не рисуются по краям списка.
+    for (const auto& it : items) {
+        if (it.type == AdvancedMenuItemType::Separator) {
+            if (drawn_any) pending_sep = true;
+            continue;
+        }
+        if (consumed.count(&it) > 0) continue;
+        draw_with_sep(it);
     }
 }
 

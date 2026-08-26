@@ -81,6 +81,8 @@
     "menu.view.performance_overlay": "Информация о производительности",
     "menu.view.status_bar": "Строка состояния",
     "menu.view.grid_snapping_settings": "Примагничивание по сетке...",
+    "menu.view.customize_menu": "Настроить меню...",
+    "menu.layout_editor.title": "Настройка меню",
 
     "menu.window.conversations": "Беседы",
     "menu.window.files": "Файлы",

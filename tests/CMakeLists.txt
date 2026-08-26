@@ -53,6 +53,13 @@ target_link_libraries(test_dialog_manager PRIVATE managers)
 target_include_directories(test_dialog_manager PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME DialogManager COMMAND test_dialog_manager)
 
+# Menu Layout Manager tests (модель раскладки и JSON, без рендера)
+add_executable(test_menu_layout core/test_menu_layout.cpp)
+target_sources(test_menu_layout PRIVATE ${CMAKE_SOURCE_DIR}/src/ui/menu_layout_manager.cpp)
+target_link_libraries(test_menu_layout PRIVATE nlohmann_json::nlohmann_json)
+target_include_directories(test_menu_layout PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME MenuLayout COMMAND test_menu_layout)
+
 # UI Auditor tests: регрессионная защита консистентности меню/команд
 # (битые ссылки, заглушки, дубли, сироты). Без рендера — только реестры.
 add_executable(test_ui_auditor core/test_ui_auditor.cpp)
@@ -110,6 +117,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_plugin_loader test_menu_restore test_ui_auditor
+    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_plugin_loader test_menu_restore test_ui_auditor
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

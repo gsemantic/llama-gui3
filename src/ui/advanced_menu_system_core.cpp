@@ -78,6 +78,11 @@ void AdvancedMenuSystem::initialize(CommandManager* command_manager, WindowManag
     command_manager_ = command_manager;
     window_manager_ = window_manager;
     workspace_manager_ = workspace_manager;
+
+    // Пользовательская раскладка меню: путь как у остальных конфигов,
+    // отсутствие файла (первый запуск) — не ошибка
+    menu_layout_manager_.setConfigPath(".config/llama-gui/menu_layout.json");
+    menu_layout_manager_.load();
 }
 
 void AdvancedMenuSystem::buildModernMenu() {
@@ -403,6 +408,9 @@ void AdvancedMenuSystem::updateMenuVisibilityForWorkspace(WorkspaceType type) {
 
     const auto& config = workspace_manager_->getCurrentWorkspace();
     std::cout << "[MENU] updateMenuVisibilityForWorkspace: " << config.name << std::endl;
+
+    // Раскладка меню применяется в рамках активного workspace
+    menu_layout_manager_.setActiveWorkspace(config.name);
 
     // Если workspace не инициализирован (нет ни одной конфигурации меню) —
     // показываем все меню. Иначе при пересборке меню (смена языка) все пункты

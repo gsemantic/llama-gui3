@@ -4,6 +4,7 @@
 #include "workspace_manager.h"
 #include "window_manager.h"
 #include "grid_snapping_system.h"
+#include "menu_layout_manager.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -151,6 +152,10 @@ public:
     void setWorkspaceManager(WorkspaceManager* workspace_manager);
     WorkspaceManager* getWorkspaceManager() const { return workspace_manager_; }
 
+    // Пользовательская раскладка меню (видимость, порядок, группы)
+    MenuLayoutManager& getMenuLayoutManager() { return menu_layout_manager_; }
+    const MenuLayoutManager& getMenuLayoutManager() const { return menu_layout_manager_; }
+
     // Проверка, что меню уже построены
     bool isMenuBuilt() const { return !menus_ordered_.empty(); }
 
@@ -178,6 +183,7 @@ private:
     WorkspaceManager* workspace_manager_ = nullptr;
     std::vector<std::unique_ptr<AdvancedMenu>> menus_ordered_;  // Упорядоченный список меню
     std::unordered_map<std::string, AdvancedMenu*> menus_map_;  // Быстрый поиск по имени
+    MenuLayoutManager menu_layout_manager_;  // Пользовательская раскладка (per-workspace)
     WorkspaceConfig current_workspace_;
     std::unordered_map<std::string, WorkspaceConfig> workspaces_;
     bool workspace_callback_registered_ = false;
@@ -187,6 +193,9 @@ private:
     void renderSubmenu(AdvancedMenu* submenu);
     void updateMenuItemState(AdvancedMenuItem& item);
     bool executeMenuItem(const AdvancedMenuItem& item);
+
+    // Рендер с учётом пользовательской раскладки (видимость, порядок, группы)
+    void renderMenuItems(const std::string& menu_key, const std::vector<AdvancedMenuItem>& items);
     
     // Обновление списка окон в меню "Window" (динамически из WindowManager)
     void refreshWindowMenu();
