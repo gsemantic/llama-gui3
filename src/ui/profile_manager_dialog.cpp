@@ -2,6 +2,9 @@
 #include "../include/ui/workspace_manager.h"
 #include "../external/imgui/imgui.h"
 #include <cstring>
+#include <ctime>
+#include <sstream>
+#include <iomanip>
 #include "../include/ui/input_text_context_menu.h"
 
 namespace llama_gui {
@@ -58,6 +61,9 @@ void ProfileManagerDialog::render() {
     // === Кнопки действий ===
     renderActionButtons();
 
+    // === Перенос настроек (экспорт/импорт снимка) ===
+    renderTransferSection();
+
     ImGui::Separator();
 
     // === Информация о текущем профиле ===
@@ -77,6 +83,8 @@ void ProfileManagerDialog::render() {
     renderDeleteConfirmDialog();
     renderCreateDialog();
     renderRenameDialog();
+    renderExportDialog();
+    renderImportDialog();
 
     ImGui::End();
 }
@@ -356,6 +364,179 @@ void ProfileManagerDialog::renderRenameDialog() {
         ImGui::SameLine();
         if (ImGui::Button("Отмена", ImVec2(100, 0))) {
             show_rename_dialog_ = false;
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+void ProfileManagerDialog::renderTransferSection() {
+    ImGui::Separator();
+    ImGui::Text("Перенос настроек (снимок в файл):");
+
+    float transfer_width = (ImGui::GetContentRegionAvail().x - 10) / 2;
+
+    if (ImGui::Button("Экспорт в файл...", ImVec2(transfer_width, 0))) {
+        export_include_secrets_ = false;
+        show_export_dialog_ = true;
+    }
+    ImGui::SetItemTooltip("Сохранить настройки и все профили\nв единый JSON-файл для другой машины");
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("Импорт из файла...", ImVec2(-1, 0))) {
+        std::string selected_path;
+        if (file_dialog_helper_.open_file_dialog_sync("Импорт настроек", selected_path, "json")) {
+            import_info_ = core::SettingsSnapshot::inspect_file(selected_path);
+            if (!import_info_.valid) {
+                showStatusMessage(import_info_.error);
+            } else {
+                import_file_path_ = selected_path;
+                import_include_secrets_ = import_info_.secrets_count > 0;
+                show_import_confirm_requested_ = true;
+            }
+        }
+    }
+    ImGui::SetItemTooltip("Загрузить настройки и профили из файла снимка");
+}
+
+void ProfileManagerDialog::renderExportDialog() {
+    if (!show_export_dialog_) return;
+
+    // Вызываем OpenPopup непосредственно перед BeginPopupModal - это критично!
+    ImGui::OpenPopup("Экспорт настроек в файл");
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Экспорт настроек в файл", &show_export_dialog_,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("В снимок войдут:");
+        ImGui::BulletText("текущие настройки");
+        ImGui::BulletText("все профили (%zu шт.)",
+                          config_manager_.listProfiles().size());
+        ImGui::Separator();
+
+        bool secrets = export_include_secrets_;
+        if (ImGui::Checkbox("Включить секреты", &secrets)) {
+            export_include_secrets_ = secrets;
+        }
+        ImGui::SetItemTooltip("API-ключи облаков (profiles/.env)\nи токен доступа к llama-серверу");
+        if (export_include_secrets_) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.6f, 0.0f, 1.0f));
+            ImGui::TextWrapped("! Файл будет содержать секреты.\n"
+                               "Не передавайте его по открытым каналам.");
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::TextDisabled("Секреты будут вычищены из настроек и профилей.");
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::Button("Выбрать файл и сохранить", ImVec2(200, 0))) {
+            // Имя файла по умолчанию: llama-gui-settings-YYYYMMDD_HHMM.json
+            std::time_t t = std::time(nullptr);
+            std::tm tm_local{};
+            localtime_r(&t, &tm_local);
+            std::stringstream ss;
+            ss << "llama-gui-settings-" << std::put_time(&tm_local, "%Y%m%d_%H%M") << ".json";
+
+            std::string selected_path;
+            if (file_dialog_helper_.save_file_dialog_sync("Экспорт настроек", ss.str(),
+                                                           selected_path, "json")) {
+                std::string error;
+                if (core::SettingsSnapshot::export_to_file(config_manager_, selected_path,
+                                                            export_include_secrets_, error)) {
+                    showStatusMessage("Снимок сохранён: " + selected_path +
+                                      (export_include_secrets_ ? " (с секретами)" : " (без секретов)"));
+                    show_export_dialog_ = false;
+                } else {
+                    showStatusMessage(error);
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Отмена", ImVec2(100, 0))) {
+            show_export_dialog_ = false;
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+void ProfileManagerDialog::renderImportDialog() {
+    if (!show_import_confirm_requested_) return;
+
+    // Вызываем OpenPopup непосредственно перед BeginPopupModal - это критично!
+    ImGui::OpenPopup("Импорт настроек из файла");
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Импорт настроек из файла", &show_import_confirm_requested_,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", import_file_path_.c_str());
+        ImGui::Separator();
+
+        ImGui::Text("Создан:      %s",
+                    import_info_.created_utc.empty() ? "(неизвестно)" : import_info_.created_utc.c_str());
+        ImGui::Text("Версия прил.: %s",
+                    import_info_.app_version.empty() ? "(неизвестно)" : import_info_.app_version.c_str());
+        ImGui::Text("Профилей:     %zu", import_info_.profile_names.size());
+        for (const auto& name : import_info_.profile_names) {
+            ImGui::BulletText("%s%s", name.c_str(),
+                              name == import_info_.active_profile ? "  (активный)" : "");
+        }
+
+        ImGui::Separator();
+
+        bool has_secrets = import_info_.secrets_count > 0;
+        bool secrets = import_include_secrets_;
+        if (!has_secrets) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Перенести секреты", &secrets)) {
+            import_include_secrets_ = secrets;
+        }
+        if (!has_secrets) {
+            ImGui::EndDisabled();
+            import_include_secrets_ = false;
+        }
+        if (has_secrets) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%zu)", import_info_.secrets_count);
+        }
+        if (!import_include_secrets_) {
+            ImGui::TextDisabled("Секреты из файла переноситься не будут.");
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::Button("Импортировать", ImVec2(140, 0))) {
+            std::string error;
+            int count = core::SettingsSnapshot::import_from_file(
+                import_file_path_, config_manager_, import_include_secrets_, error);
+            if (count < 0) {
+                showStatusMessage(error);
+            } else {
+                showStatusMessage("Импортировано профилей: " + std::to_string(count) +
+                                  (import_include_secrets_ && has_secrets
+                                       ? " (секреты перенесены)"
+                                       : ""));
+                // Обновляем выбор на активный профиль снимка
+                if (!import_info_.active_profile.empty()) {
+                    selected_profile_ = import_info_.active_profile;
+                    std::strncpy(profile_name_buffer_, selected_profile_.c_str(),
+                                 sizeof(profile_name_buffer_) - 1);
+                    // Перезагружаем макет/сессию как при обычной загрузке профиля
+                    if (profile_load_callback_) {
+                        profile_load_callback_(selected_profile_);
+                    }
+                }
+                show_import_confirm_requested_ = false;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Отмена", ImVec2(100, 0))) {
+            show_import_confirm_requested_ = false;
         }
 
         ImGui::EndPopup();

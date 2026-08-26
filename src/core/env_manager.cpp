@@ -128,6 +128,52 @@ void EnvManager::remove_key(const std::string& key_name,
     }
 }
 
+std::vector<std::pair<std::string, std::string>> EnvManager::read_all_keys(
+    const std::string& profiles_dir) {
+    std::vector<std::pair<std::string, std::string>> result;
+    std::ifstream file(get_env_path(profiles_dir));
+    if (!file.is_open()) return result;
+
+    auto trim = [](std::string s) {
+        s.erase(0, s.find_first_not_of(" \t\r\n"));
+        s.erase(s.find_last_not_of(" \t\r\n") + 1);
+        return s;
+    };
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        std::string key = trim(line.substr(0, eq));
+        std::string value = line.substr(eq + 1);
+
+        // Trim surrounding quotes from value (same as read_key)
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\''))) {
+            value = value.substr(1, value.size() - 2);
+        }
+        value = trim(value);
+
+        // Later duplicates win, matching write_key overwrite semantics
+        bool replaced = false;
+        for (auto& entry : result) {
+            if (entry.first == key) {
+                entry.second = value;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            result.emplace_back(key, value);
+        }
+    }
+    return result;
+}
+
 std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_name,
                                                     const std::string& endpoint_url) {
     // Each built-in provider gets a dedicated key slot so switching providers

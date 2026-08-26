@@ -4,6 +4,8 @@
 #include <vector>
 #include <functional>
 #include "../core/config_manager.h"
+#include "../core/settings_snapshot.h"
+#include "file_dialog_helper.h"
 #include "workspace_manager.h"
 
 namespace llama_gui {
@@ -59,6 +61,15 @@ private:
     bool show_create_dialog_ = false;
     bool show_delete_confirm_ = false;
     bool show_rename_dialog_ = false;
+    bool show_export_dialog_ = false;
+
+    // Перенос настроек (экспорт/импорт снимка)
+    FileDialogHelper file_dialog_helper_;
+    bool export_include_secrets_ = false;
+    bool show_import_confirm_requested_ = false;
+    std::string import_file_path_;
+    llama_gui::core::SettingsSnapshot::Info import_info_;  // полное имя: внутри namespace ui имя core:: перехватывается вложенным namespace из chat_interface.h
+    bool import_include_secrets_ = true;
 
     // Флаги для управления фокусом
     bool request_focus_create_dialog_ = false;
@@ -73,10 +84,13 @@ private:
 
     void renderProfileList();
     void renderActionButtons();
+    void renderTransferSection();
     void renderWorkspaceEditor();
     void renderCreateDialog();
     void renderDeleteConfirmDialog();
     void renderRenameDialog();
+    void renderExportDialog();
+    void renderImportDialog();
     void showStatusMessage(const std::string& message);
     void renderStatusMessage();
 };

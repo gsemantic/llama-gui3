@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace llama_gui {
 namespace core {
@@ -39,6 +41,14 @@ public:
      */
     static void remove_key(const std::string& key_name,
                            const std::string& profiles_dir = "profiles");
+
+    /**
+     * @brief Read all KEY=VALUE pairs from the .env file
+     *
+     * Skips empty lines and comments. Later duplicate keys win.
+     */
+    static std::vector<std::pair<std::string, std::string>> read_all_keys(
+        const std::string& profiles_dir = "profiles");
 
     /**
      * @brief Get the .env key name used to store the API key for a cloud provider

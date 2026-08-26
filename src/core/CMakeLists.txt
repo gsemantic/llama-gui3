@@ -92,6 +92,7 @@ set(CORE_SOURCES
     settings_model.cpp
     profile_manager.cpp
     settings_profiles.cpp
+    settings_snapshot.cpp
     settings_serialization_advanced.cpp
     settings_serialization_basic.cpp
     settings_serialization_server.cpp
