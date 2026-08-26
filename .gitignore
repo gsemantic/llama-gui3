@@ -24,6 +24,9 @@ BACKUP_INFO.txt
 *.tar.gz
 llama-gui-settings-*.json
 
+# Runtime-артефакт панели headless-браузера (пишет сюда скриншоты)
+headless_screenshot.png
+
 # Тестовые бинарники, собранные вручную внутрь tests/ (отрицание !tests/**
 # выше реинклюдит их вопреки правилу test_*)
 tests/test_rag_full_system
