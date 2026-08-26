@@ -8,9 +8,12 @@
 namespace llama_gui {
 namespace core {
 
+// ВАЖНО: поля инициализируются в порядке объявления (settings_ptr_, затем
+// owned_settings_), поэтому settings_ptr_ присваиваем в теле конструктора,
+// иначе он получит адрес ещё не созданного unique_ptr.
 ConfigManager::ConfigManager()
-    : owned_settings_(std::make_unique<Settings>())
-    , settings_ptr_(owned_settings_.get()) {
+    : owned_settings_(std::make_unique<Settings>()) {
+    settings_ptr_ = owned_settings_.get();
 }
 
 ConfigManager::~ConfigManager() {
