@@ -399,34 +399,36 @@ void render_settings_output(UiDeps& deps, Config& draft) {
         ImGui::TextDisabled("Если URL пуст — подставится заглавное изображение "
                             "из источника (og:image / enclosure), с alt = ключевое слово.");
 
-        // Учётные данные — только в .env, НЕ в настройках плагина.
-        static std::string wp_user, wp_pass;
-        static bool wp_loaded = false;
-        if (!wp_loaded) {
-            wp_user = dotenv_read(env_path, kNewsRewriterWpUser);
-            wp_pass = dotenv_read(env_path, kNewsRewriterWpPass);
-            wp_loaded = true;
-        }
+        // Учётные данные — в параметрах профиля (файлы профилей лежат в
+        // data_dir/news_rewriter/profiles, вне git). Пустые значения →
+        // fallback к общим ключам .env (старая конвенция).
+        std::string wp_user = draft.sink.params["username"].as_string();
         std::string old = wp_user;
         input_text("WP-пользователь", wp_user);
-        if (wp_user != old) dotenv_write(env_path, kNewsRewriterWpUser, wp_user);
-        old = wp_pass;
+        if (wp_user != old) draft.sink.params["username"] = wp_user;
+
+        std::string wp_pass = draft.sink.params["app_password"].as_string();
         char passbuf[2048];
         std::snprintf(passbuf, sizeof(passbuf), "%s", wp_pass.c_str());
         if (ImGui::InputText("Application Password",
                              passbuf, sizeof(passbuf),
                              ImGuiInputTextFlags_Password)) {
-            wp_pass = passbuf;
-            dotenv_write(env_path, kNewsRewriterWpPass, wp_pass);
+            draft.sink.params["app_password"] = std::string(passbuf);
         }
-        ImGui::TextDisabled("Логин/пароль хранятся в %s (вне settings.ini)",
-                            env_path.c_str());
+        ImGui::TextDisabled("Хранятся в JSON профиля (вне git). Если пусто — "
+                            "берутся из %s.", env_path.c_str());
 
         // Проверка связи с WP (аутентификация через /wp-json/wp/v2/users/me).
         static std::string check_result;
         static double check_time = 0.0;
         if (ImGui::Button("Проверить подключение")) {
-            check_result = wordpress_check_connection(site_url, wp_user, wp_pass);
+            // Проверяем теми же creds, что пойдут в публикацию:
+            // профиль → fallback на .env.
+            const std::string cu = wp_user.empty()
+                ? dotenv_read(env_path, kNewsRewriterWpUser) : wp_user;
+            const std::string cp = wp_pass.empty()
+                ? dotenv_read(env_path, kNewsRewriterWpPass) : wp_pass;
+            check_result = wordpress_check_connection(site_url, cu, cp);
             check_time = ImGui::GetTime();
         }
         if (check_time > 0.0) {
@@ -447,10 +449,6 @@ void render_settings_output(UiDeps& deps, Config& draft) {
         int rdelay = static_cast<int>(draft.sink.params["retry_delay_ms"].as_int(1000));
         if (ImGui::InputInt("Пауза между повторами, мс", &rdelay) && rdelay < 0) rdelay = 0;
         draft.sink.params["retry_delay_ms"] = static_cast<int64_t>(rdelay);
-
-        // Гарантируем, что секреты не попадут в settings.ini.
-        draft.sink.params["username"] = "";
-        draft.sink.params["app_password"] = "";
     }
 }
 

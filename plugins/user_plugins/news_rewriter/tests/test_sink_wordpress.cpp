@@ -451,9 +451,9 @@ REGISTER_TEST(test_wp_sink_success_uses_featured_media_and_source_link);
 REGISTER_TEST(test_wp_sink_fallback_inline_image_on_upload_failure);
 REGISTER_TEST(test_wp_sink_includes_original_date);
 
-// Секрет берётся из .env, а не из params (конвенция проекта: секреты вне
-// settings.ini). Проверяем, что в заголовке — creds из .env, а не из params.
-static void test_wp_sink_credentials_from_env() {
+// Учётные данные берутся из params профиля (приоритет); .env — общий
+// fallback для старых конфигураций без creds в профиле.
+static void test_wp_sink_credentials_params_priority() {
     const std::string dir = "./nr_wp_env_test";
     Storage storage;
     TEST_ASSERT_TRUE(storage.init(dir));
@@ -464,8 +464,32 @@ static void test_wp_sink_credentials_from_env() {
     MiniHttpServer srv;
     TEST_ASSERT_TRUE(srv.start(201, "{\"id\":9}"));
 
-    // В params — другие (ложные) creds; sink должен проигнорировать их.
+    // В params — creds профиля; sink должен использовать именно их.
     SinkConfig cfg = make_config(srv.base_url(), "paramsuser", "paramspass");
+    const auto sink = make_wordpress_sink(cfg, storage, nullptr);
+    TEST_ASSERT_TRUE(sink->write(make_article()));
+
+    const std::string req = srv.last_request();
+    const std::string expected = "Authorization: Basic " +
+                                 base64_encode("paramsuser:paramspass");
+    TEST_ASSERT(req.find(expected) != std::string::npos);
+    TEST_ASSERT(req.find(base64_encode("envuser:envpass")) ==
+                 std::string::npos);
+}
+
+// Пустые creds в профиле → fallback к .env.
+static void test_wp_sink_credentials_env_fallback() {
+    const std::string dir = "./nr_wp_env_test";
+    Storage storage;
+    TEST_ASSERT_TRUE(storage.init(dir));
+    const std::string env_path = storage.root() + "/.env";
+    dotenv_write(env_path, kNewsRewriterWpUser, "envuser");
+    dotenv_write(env_path, kNewsRewriterWpPass, "envpass");
+
+    MiniHttpServer srv;
+    TEST_ASSERT_TRUE(srv.start(201, "{\"id\":10}"));
+
+    SinkConfig cfg = make_config(srv.base_url(), "", "");
     const auto sink = make_wordpress_sink(cfg, storage, nullptr);
     TEST_ASSERT_TRUE(sink->write(make_article()));
 
@@ -473,11 +497,10 @@ static void test_wp_sink_credentials_from_env() {
     const std::string expected = "Authorization: Basic " +
                                  base64_encode("envuser:envpass");
     TEST_ASSERT(req.find(expected) != std::string::npos);
-    TEST_ASSERT(req.find(base64_encode("paramsuser:paramspass")) ==
-                 std::string::npos);
 }
 
-REGISTER_TEST(test_wp_sink_credentials_from_env);
+REGISTER_TEST(test_wp_sink_credentials_params_priority);
+REGISTER_TEST(test_wp_sink_credentials_env_fallback);
 
 // Phase 5/7: при наличии SEO-полей плагин шлёт namespace-ключи nr_seo_* и
 // оптимизированный slug в WordPress (без зависимости от Yoast/RankMath).

@@ -288,6 +288,27 @@ static void test_parse_taxonomy_trims_entries() {
     TEST_ASSERT_EQUAL(r.tags[0], "футбол");
 }
 
+// Многословные теги-«предложения» отбрасываются, краткие остаются.
+static void test_parse_taxonomy_drops_verbose_tags() {
+    const TaxonomyResult r = parse_taxonomy_response(
+        "{\"categories\":[\"Мир\"],"
+        "\"tags\":[\"Евросоюз\","
+        "\"Европейский союз объявил о новых санкциях\","
+        "\"саммит Евросоюза по вопросу расширения состава организации\"]}");
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_EQUAL(r.tags.size(), 1u);
+    TEST_ASSERT_EQUAL(r.tags[0], "Евросоюз");
+}
+
+// Число тегов ограничено (лишние отбрасываются, начиная с шестого).
+static void test_parse_taxonomy_caps_tag_count() {
+    const TaxonomyResult r = parse_taxonomy_response(
+        "{\"categories\":[],"
+        "\"tags\":[\"а\",\"б\",\"в\",\"г\",\"д\",\"е\",\"ж\"]}");
+    TEST_ASSERT_TRUE(r.ok);
+    TEST_ASSERT_EQUAL(r.tags.size(), 5u);
+}
+
 REGISTER_TEST(test_build_prompt_substitutions);
 REGISTER_TEST(test_validate_rewrite_wrong_script_rejected);
 REGISTER_TEST(test_validate_rewrite_refusal_rejected);
@@ -316,5 +337,7 @@ REGISTER_TEST(test_parse_taxonomy_handles_fences_and_text);
 REGISTER_TEST(test_parse_taxonomy_empty_is_error);
 REGISTER_TEST(test_parse_taxonomy_no_json_is_error);
 REGISTER_TEST(test_parse_taxonomy_trims_entries);
+REGISTER_TEST(test_parse_taxonomy_drops_verbose_tags);
+REGISTER_TEST(test_parse_taxonomy_caps_tag_count);
 
 } // namespace

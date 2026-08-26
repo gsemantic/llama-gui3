@@ -719,20 +719,12 @@ public:
     }
 
     bool write(const Article& article) override {
-        // Учётные данные: из .env (приоритет), иначе из params (fallback/тесты).
-        std::string user = dotenv_read(env_path_, kNewsRewriterWpUser);
-        if (user.empty()) user = username_;
-        std::string pass = dotenv_read(env_path_, kNewsRewriterWpPass);
-        if (pass.empty()) pass = app_password_;
-        {
-            std::string norm;
-            for (char c : pass) if (c != ' ') norm += c;
-            pass = norm;
-        }
-        if (site_url_.empty() || user.empty() || pass.empty()) {
+        // Учётные данные: из params профиля (приоритет), иначе из .env.
+        std::string user, pass;
+        if (!resolve_credentials(user, pass)) {
             if (log_) {
                 log_("WordPressSink: не заданы site_url/логин/пароль "
-                     "(проверьте " + env_path_ + " и параметры sink)");
+                     "(проверьте параметры sink и " + env_path_ + ")");
             }
             return false;
         }
@@ -1045,13 +1037,16 @@ public:
     }
 
 private:
-    // Считывает учётные данные (.env приоритет, иначе params) и нормализует
-    // app_password. Возвращает false, если заданы не все данные.
+    // Считывает учётные данные (params профиля приоритет, иначе общие ключи
+    // .env — fallback старых конфигураций) и нормализует app_password.
+    // Возвращает false, если заданы не все данные.
     bool resolve_credentials(std::string& user, std::string& pass) const {
-        user = dotenv_read(env_path_, kNewsRewriterWpUser);
-        if (user.empty()) user = username_;
-        pass = dotenv_read(env_path_, kNewsRewriterWpPass);
-        if (pass.empty()) pass = app_password_;
+        user = username_.empty()
+                   ? dotenv_read(env_path_, kNewsRewriterWpUser)
+                   : username_;
+        pass = app_password_.empty()
+                   ? dotenv_read(env_path_, kNewsRewriterWpPass)
+                   : app_password_;
         auto norm = [](std::string s) {
             std::string out;
             for (char c : s) if (c != ' ') out += c;

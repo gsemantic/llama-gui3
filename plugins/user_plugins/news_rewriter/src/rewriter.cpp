@@ -819,9 +819,13 @@ std::string build_taxonomy_role_prompt(const std::string& language) {
         "Внук», разделяя уровни русским « > ».\n"
         "- Поле «categories» — массив строк, каждая строка — ОДИН путь рубрики "
         "(уровни через « > »). Это иерархические разделы сайта.\n"
-        "- Поле «tags» — плоский массив строк: более конкретные ключевые слова "
-        "(персоны, организации, понятия), производные от рубрик и содержания "
-        "статьи. Не дублируй в тегах целые пути рубрик.\n"
+        "- Поле «tags» — плоский массив коротких меток-ключей: конкретные "
+        "ключевые слова (персоны, организации, понятия), производные от рубрик "
+        "и содержания статьи. Не дублируй в тегах целые пути рубрик.\n"
+        "- Каждый тег — КРАТКИЙ: 1-2 слова (максимум 30 символов), например "
+        "«Евросоюз», «саммит». НЕ пиши теги фразами, описаниями или целыми "
+        "предложениями. Не более 5 тегов на статью; если нечего добавить — "
+        "верни пустой массив.\n"
         "- Используй устоявшиеся русские названия разделов (напр. World → Мир, "
         "Politics → Политика, Technology → Технологии, Sports → Спорт).\n"
         "- Не добавляй лишних рубрик/тегов, которых нет в исходнике или в "
@@ -869,6 +873,27 @@ std::string trim_tax(const std::string& s) {
     }
     return out;
 }
+
+// Метка-тег должна быть кратким ключевым словом; LLM иногда вопреки промпту
+// выдаёт описательные фразы и целые предложения — такие отбрасываем.
+constexpr std::size_t kMaxTagChars = 32;
+constexpr std::size_t kMaxTagWords = 3;
+constexpr std::size_t kMaxTagsPerArticle = 5;
+
+bool tag_too_verbose(const std::string& t) {
+    if (t.size() > kMaxTagChars) return true;
+    std::size_t words = 0;
+    bool in_word = false;
+    for (char c : t) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            in_word = false;
+        } else if (!in_word) {
+            ++words;
+            in_word = true;
+        }
+    }
+    return words > kMaxTagWords;
+}
 } // namespace
 
 TaxonomyResult parse_taxonomy_response(const std::string& response) {
@@ -901,7 +926,9 @@ TaxonomyResult parse_taxonomy_response(const std::string& response) {
     if (tags.is_array()) {
         for (std::size_t i = 0; i < tags.size(); ++i) {
             std::string t = trim_tax(tags[i].as_string());
-            if (!t.empty()) result.tags.push_back(t);
+            if (t.empty() || tag_too_verbose(t)) continue;
+            if (result.tags.size() >= kMaxTagsPerArticle) break;
+            result.tags.push_back(t);
         }
     }
     if (result.categories.empty() && result.tags.empty()) {
