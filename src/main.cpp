@@ -384,6 +384,7 @@ int main(int argc, char* argv[]) {
             proxy_opts.auto_port = headless.auto_port;
             proxy_opts.endpoint_url = headless.endpoint_url;
             proxy_opts.api_key = headless.api_key;
+            proxy_opts.avoid_local_server_port = true;
             proxy_thread = start_cloud_proxy_in_thread(settings, proxy_opts, proxy_stop);
         }
 

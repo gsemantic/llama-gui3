@@ -18,6 +18,11 @@ struct CloudProxyOptions {
     std::string endpoint_url; // переопределить endpoint провайдера (для тестов/других провайдеров)
     std::string api_key;      // переопределить API-ключ (иначе из .env профиля)
     bool manage_curl = true;  // вызывать curl_global_init/cleanup (false при встраивании в GUI)
+    // GUI-режим (--proxy): если порт прокси совпадает с портом локального
+    // чат-сервера (settings.server().port), сдвинуть прокси на свободный порт.
+    // Без этого оба сервера занимают один порт (по разные семейства адресов),
+    // и health-проверки GUI попадают в прокси вместо llama-server.
+    bool avoid_local_server_port = false;
 };
 
 /**

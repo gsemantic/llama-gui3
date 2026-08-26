@@ -128,7 +128,8 @@ void send_all(int fd, const std::string& data) {
 }
 
 void send_response(int fd, int status, const std::string& content_type,
-                   const std::string& body, bool stream = false) {
+                   const std::string& body, bool stream = false,
+                   bool head_only = false) {
     std::string status_text = (status == 200) ? "OK"
                             : (status == 400) ? "Bad Request"
                             : (status == 404) ? "Not Found"
@@ -142,7 +143,8 @@ void send_response(int fd, int status, const std::string& content_type,
         head += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     }
     head += "Connection: close\r\n\r\n";
-    send_all(fd, head + body);
+    // На HEAD-запрос тело не отправляется (только заголовки с Content-Length)
+    send_all(fd, head_only ? head : head + body);
 }
 
 // ---- Пересылка через libcurl ----
@@ -499,8 +501,13 @@ void handle_connection(int fd, ProxyContext& ctx) {
     HttpRequest req;
     if (!read_request(fd, req)) { close(fd); return; }
 
-    if (req.method == "GET" && (req.path == "/health" || req.path == "/healthz")) {
-        send_response(fd, 200, "application/json", "{\"status\":\"ok\"}");
+    // HEAD обрабатывается как GET для служебных маршрутов:
+    // GUI проверяет здоровье сервера HEAD-запросом (CURLOPT_NOBODY)
+    const bool is_head = (req.method == "HEAD");
+    if ((req.method == "GET" || is_head) &&
+        (req.path == "/health" || req.path == "/healthz")) {
+        send_response(fd, 200, "application/json", "{\"status\":\"ok\"}",
+                      /*stream=*/false, is_head);
         close(fd);
         return;
     }
@@ -637,6 +644,25 @@ static int run_proxy_accept_loop(Settings& settings, CloudProxyOptions opts,
     if (host.empty()) host = "127.0.0.1";
     int port = opts.port > 0 ? opts.port : settings.server_runtime().port;
     if (port <= 0) port = 8081;
+
+    // GUI-режим (--proxy): локальный чат-сервер занимает settings.server().port.
+    // Если прокси получил тот же порт, llama-server сможет повиснуть только
+    // на другом семействе адресов (IPv6), и health-проверки GUI на
+    // http://localhost:<порт> будут попадать в прокси, а не в локальную модель
+    // (симптом: индикатор загрузки модели замирает, кнопка отправки неактивна).
+    if (opts.avoid_local_server_port && port == settings.server().port) {
+        int shifted = find_free_port(port + 1, host);
+        if (shifted > 0 && shifted != port) {
+            std::cout << "======================================================" << std::endl;
+            std::cout << "⚠️  Порт " << port << " совпадает с портом локального чат-сервера"
+                      << std::endl;
+            std::cout << "    Облачный прокси переезжает на порт " << shifted << std::endl;
+            std::cout << "    Endpoint для внешних клиентов: http://" << host << ":"
+                      << shifted << "/v1" << std::endl;
+            std::cout << "======================================================" << std::endl;
+            port = shifted;
+        }
+    }
 
     if (opts.auto_port || is_port_in_use(port, host)) {
         int free_port = find_free_port(port, host);
