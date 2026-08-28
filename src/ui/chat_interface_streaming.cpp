@@ -14,6 +14,7 @@ void ChatInterface::start_streaming() {
 
     // Reset streaming state
     streaming_active_ = true;
+    generation_stopped_ = false;
     current_stream_content_ = "";
 
     // Reset performance metrics for new streaming session
@@ -30,6 +31,11 @@ void ChatInterface::stop_streaming() {
     // Это предотвращает deadlock с callback'ом
     llama_interface_.stop_streaming_requests();
 
+    // Останавливаем облачную генерацию (OpenRouter), если она активна
+    if (active_cloud_client_) {
+        active_cloud_client_->abort_stream();
+    }
+
     // Теперь обновляем состояние UI
     std::lock_guard<std::mutex> lock(streaming_mutex_);
 
@@ -39,6 +45,7 @@ void ChatInterface::stop_streaming() {
     }
 
     streaming_active_ = false;
+    generation_stopped_ = true;
 
     // Store the partial content before clearing
     std::string final_content = current_stream_content_;

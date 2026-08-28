@@ -175,6 +175,23 @@ void ChatInterface::render_input_area() {
     }
 
     ImGui::SameLine();
+
+    // Кнопка "Остановить" — всегда видима, активна только во время генерации
+    bool stop_active = streaming_active_ || processing_rag_document_;
+    if (!stop_active) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(TRF("chat.stop", "Остановить"), ImVec2(100, 0))) {
+        stop_streaming();
+    }
+    if (!stop_active) {
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Остановить генерацию (активно во время ответа модели)");
+        }
+    }
+
+    ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(Ctrl+Enter)");
 
     ImGui::SameLine();
@@ -217,27 +234,19 @@ void ChatInterface::render_input_area() {
         }
     }
 
-    // Render performance metrics and stop button in one line
+    // Render performance metrics line
     if (streaming_active_ || processing_rag_document_ || current_metrics_.is_measuring || current_metrics_.response_time_seconds > 0) {
         ImGui::Spacing();
-        
+
+        // Индикатор чтения RAG-документа
+        if (processing_rag_document_) {
+            ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "📄 %s",
+                TRF("chat.processing_rag", "Reading document..."));
+            ImGui::SameLine();
+        }
+
         // Render performance metrics
         render_performance_metrics();
-        
-        ImGui::SameLine();
-        
-        // Render stop button during streaming/processing
-        if (streaming_active_ || processing_rag_document_) {
-            if (processing_rag_document_) {
-                ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "📄 %s",
-                    TRF("chat.processing_rag", "Reading document..."));
-                ImGui::SameLine();
-            }
-            
-            if (ImGui::Button(TRF("chat.stop", "Stop"), ImVec2(80, 0))) {
-                stop_streaming();
-            }
-        }
     }
 
     ImGui::EndChild();

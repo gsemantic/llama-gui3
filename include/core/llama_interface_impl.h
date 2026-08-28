@@ -71,7 +71,7 @@ struct SlotOperationResult {
 struct StreamingData {
     std::string buffer;
     StreamCallback callback;
-    bool completed = false;
+    std::atomic<bool> completed{false};
 };
 
 struct StreamingRequestData {
@@ -166,7 +166,7 @@ private:
     // Streaming request tracking
     std::atomic<bool> streaming_active_{false};
     std::mutex streaming_mutex_;
-    std::vector<std::unique_ptr<StreamingData>> active_streams_;
+    std::vector<std::shared_ptr<StreamingData>> active_streams_;
     
     // Async request tracking
     std::mutex responses_mutex_;

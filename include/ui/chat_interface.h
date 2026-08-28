@@ -8,6 +8,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include "core/llama_interface.h"
+#include "core/openrouter_client.h"
 #include "core/state_manager.h"
 #include "core/settings.h"
 #include "core/rag_manager.h"
@@ -191,6 +192,7 @@ private:
     char input_buffer_[4096];
     bool input_focused_ = false;
     bool streaming_active_ = false;
+    bool generation_stopped_ = false;       // Генерация прервана пользователем
     bool processing_rag_document_ = false;  // Флаг обработки RAG документа
     std::string current_stream_content_;
     std::string selected_text_; // For storing selected text from messages
@@ -227,6 +229,9 @@ private:
     StateManager& state_manager_;
     Settings& settings_;
     LlamaInterface& llama_interface_;
+    // Активный облачный клиент (для прерывания генерации кнопкой "Стоп").
+    // Устанавливается перед началом облачного стриминга, сбрасывается по завершении.
+    std::shared_ptr<llama_gui::core::OpenRouterClient> active_cloud_client_;
     llama_gui::core::ModelManager* model_manager_ = nullptr;  // Model manager access
     std::atomic<bool>* is_model_loading_ = nullptr;  // Флаг загрузки модели
     bool server_ready_ = false;  // Сервер готов и модель загружена

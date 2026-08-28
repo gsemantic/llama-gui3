@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "url_norm.h"
+
 namespace news_rewriter {
 
 // ============================================================================
@@ -157,7 +159,8 @@ HttpResponse HttpClient::get(const std::string& url, const NetworkConfig& cfg,
 
     WriteCtx ctx{&resp.body, max_bytes, false};
 
-    b.curl_easy_setopt(easy, kOptUrl, url.c_str());
+    const std::string req_url = normalize_url(url);
+    b.curl_easy_setopt(easy, kOptUrl, req_url.c_str());
     b.curl_easy_setopt(easy, kOptTimeout, static_cast<long>(cfg.timeout_seconds));
     b.curl_easy_setopt(easy, kOptConnectTimeout, static_cast<long>(cfg.timeout_seconds));
     b.curl_easy_setopt(easy, kOptFollowLocation, 1L);
@@ -228,7 +231,8 @@ HttpResponse HttpClient::get(const std::string& url, const NetworkConfig& cfg,
 
     WriteCtx ctx{&resp.body, max_bytes, false};
 
-    b.curl_easy_setopt(easy, kOptUrl, url.c_str());
+    const std::string req_url = normalize_url(url);
+    b.curl_easy_setopt(easy, kOptUrl, req_url.c_str());
     b.curl_easy_setopt(easy, kOptTimeout, static_cast<long>(cfg.timeout_seconds));
     b.curl_easy_setopt(easy, kOptConnectTimeout, static_cast<long>(cfg.timeout_seconds));
     b.curl_easy_setopt(easy, kOptFollowLocation, 1L);
@@ -293,7 +297,8 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body,
 
     WriteCtx ctx{&resp.body, max_bytes, false};
 
-    b.curl_easy_setopt(easy, kOptUrl, url.c_str());
+    const std::string req_url = normalize_url(url);
+    b.curl_easy_setopt(easy, kOptUrl, req_url.c_str());
     b.curl_easy_setopt(easy, kOptTimeout, static_cast<long>(cfg.timeout_seconds));
     b.curl_easy_setopt(easy, kOptConnectTimeout, static_cast<long>(cfg.timeout_seconds));
     b.curl_easy_setopt(easy, kOptFollowLocation, 1L);

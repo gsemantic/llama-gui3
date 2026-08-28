@@ -157,8 +157,17 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
 
     streaming_active_ = true;
 
+    // Зарегистрируем поток, чтобы stop_streaming_requests мог его прервать
+    auto stream_data = std::make_shared<StreamingData>();
+    stream_data->callback = callback;
+    stream_data->completed = false;
+    {
+        std::lock_guard<std::mutex> lock(streaming_mutex_);
+        active_streams_.push_back(stream_data);
+    }
+
     // Run streaming request in a separate thread to not block UI
-    std::thread([this, url, post_fields, callback]() {
+    std::thread([this, url, post_fields, stream_data, callback]() {
         CURL* curl = curl_easy_init();
         if (!curl) {
             std::cerr << "[LlamaInterface] Failed to init curl for streaming" << std::endl;
@@ -188,15 +197,37 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
         struct StreamContext {
             StreamCallback callback;
             std::string line_buffer;
+            std::shared_ptr<StreamingData> stream_data;
         };
 
         StreamContext ctx;
         ctx.callback = callback;
+        ctx.stream_data = stream_data;
+
+        // Progress-callback прерывает запрос ещё на этапе соединения (до данных)
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
+            +[](void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+                auto* sc = static_cast<StreamContext*>(clientp);
+                if (sc && sc->stream_data->completed.load()) {
+                    return 1; // Немедленно прервать transfer
+                }
+                return 0;
+            });
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
 
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
             +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
                 size_t total = size * nmemb;
                 auto* sc = static_cast<StreamContext*>(userdata);
+
+                // Если запрос остановлен пользователем — прерываем передачу,
+                // чтобы сервер перестал генерировать. Возврат значения,
+                // отличного от total, заставляет curl завершить transfer.
+                if (sc->stream_data->completed.load()) {
+                    return 0;
+                }
+
                 sc->line_buffer.append(ptr, total);
 
                 // Process complete SSE lines
@@ -224,17 +255,15 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
                     // Pass the raw JSON data to the callback
                     // (the caller's callback expects to parse it itself)
                     sc->callback(data, false);
+
+                    // Повторно проверяем флаг остановки после обработки чанка
+                    if (sc->stream_data->completed.load()) {
+                        return 0;
+                    }
                 }
                 return total;
             });
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
-
-        // Store curl handle so stop_streaming_requests can cancel it
-        {
-            std::lock_guard<std::mutex> lock(streaming_mutex_);
-            // We store the raw pointer temporarily for cancellation
-            // The thread owns the handle
-        }
 
         CURLcode res = curl_easy_perform(curl);
 
@@ -246,7 +275,19 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 
-        // Signal completion
+        // Снимаем регистрацию потока
+        {
+            std::lock_guard<std::mutex> lock(streaming_mutex_);
+            for (auto it = active_streams_.begin(); it != active_streams_.end(); ++it) {
+                if (it->get() == stream_data.get()) {
+                    active_streams_.erase(it);
+                    break;
+                }
+            }
+        }
+
+        // Signal completion (is_final). Если остановлено пользователем,
+        // ChatInterface сам добавит частичный ответ — здесь не дублируем.
         callback("", true);
         streaming_active_ = false;
     }).detach();

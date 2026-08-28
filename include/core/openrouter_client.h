@@ -39,6 +39,9 @@ public:
 
     void set_timeout(int timeout_ms);
 
+    /// Прервать активную стриминг-генерацию (по требованию пользователя).
+    void abort_stream();
+
     // Модели
     bool get_models_async(ModelsCallback callback);
     OpenRouterModelsResponse get_models();
@@ -63,6 +66,7 @@ private:
     OpenRouterHttpClient http_client_;
     OpenRouterModelParser model_parser_;
     OpenRouterRateLimiter rate_limiter_;
+    std::atomic<bool> aborted_{false};
 };
 
 } // namespace core

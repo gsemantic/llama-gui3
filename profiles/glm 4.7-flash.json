@@ -67,19 +67,29 @@
     "cloud_provider": {
         "context_length": 0,
         "enabled": true,
-        "endpoint_url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+        "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "free_models_only": false,
         "last_search_query": "",
-        "max_output_tokens": 8000,
-        "model_id": "Qwen3.5-397B-A17B",
-        "provider_name": "OVH AI Endpoints",
+        "max_output_tokens": 1024,
+        "model_id": "deepseek-v4-flash",
+        "provider_name": "Custom",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
             {
-                "endpoint_url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
-                "id": "Qwen3.5-397B-A17B",
-                "provider_name": "OVH AI Endpoints"
+                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "id": "deepseek-v4-flash",
+                "provider_name": "Custom"
+            },
+            {
+                "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
+                "id": "glm-5.3-flash",
+                "provider_name": "Zhipu (GLM)"
+            },
+            {
+                "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
+                "id": "glm-4.7-flash",
+                "provider_name": "Zhipu (GLM)"
             },
             {
                 "endpoint_url": "https://opencode.ai/zen/v1",
@@ -87,9 +97,9 @@
                 "provider_name": "OpenCode Zen"
             },
             {
-                "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
-                "id": "glm-4.7-flash",
-                "provider_name": "Zhipu (GLM)"
+                "endpoint_url": "https://opencode.ai/zen/v1",
+                "id": "hy3-free",
+                "provider_name": "OpenCode Zen"
             }
         ],
         "timeout_ms": 120000
@@ -99,7 +109,19 @@
     "control_vectors": [],
     "custom": {
         "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
-        "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_input_chars\":12000,\"max_words\":0,\"prompt_template\":\"Тебе дана РОВНО ОДНА новость (один материал). Перепиши её своими словами, сохранив все факты. НЕ делай обзор, сводку или дайджест и НЕ объединяй с другими материалами. Язык: {language}. Тон: {tone}.\\n\\nПравила:\\n- На входе — одна статья, на выходе — тоже РОВНО ОДНА переписанная статья (число рерайтов всегда равно числу оригиналов).\\n- Сохрани относящиеся к ЭТОЙ новости заголовок, дату и фото: они передаются отдельно и не входят в текст.\\n- Формат ответа: первая строка — переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"seo\":{\"combine_with_rewrite\":true,\"enabled\":true,\"prompt_template\":\"Ты — SEO-редактор. По переписанной новости верни ТОЛЬКО валидный JSON без пояснений и без markdown-разметки, в точности такого вида:\\n{\\\"focus_keyword\\\":\\\"...\\\",\\\"meta_description\\\":\\\"...\\\",\\\"seo_title\\\":\\\"...\\\"}\\nПравила:\\n- focus_keyword — ключевая фраза из текста, 2-4 слова, строго в нижнем регистре, на языке статьи;\\n- meta_description — одно предложение, 150-160 символов, без кавычек по краям, описывает суть новости;\\n- seo_title — до 60 символов, привлекательный, с ключевым словом в начале (может совпадать с заголовком).\\nОтвет строго JSON.\\n\\nЯзык: {language}\\nЗаголовок: {title}\\nТекст: {body}\"},\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/Alex/Desktop/rerait/\",\"params\":{\"api_key\":\"\",\"app_password\":\"\",\"author\":0,\"categories\":[1],\"excerpt\":\"\",\"featured_image\":\"\",\"max_retries\":5,\"post_type\":\"posts\",\"retry_delay_ms\":1000,\"site_url\":\"https://gsemantic.ru/\",\"slug\":\"\",\"status\":\"draft\",\"tags\":[],\"timeout_seconds\":20,\"url\":\"\",\"username\":\"\",\"verify_site_state\":true},\"type\":\"wordpress\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"preview\":true,\"type\":\"page\",\"url\":\"https://zebra-tv.ru/\"}]}"
+        "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_input_chars\":12000,\"max_words\":0,\"prompt_template\":\"Тебе дана РОВНО ОДНА новость (один материал). Перепиши её своими словами, сохранив все факты. НЕ делай обзор, сводку или дайджест и НЕ объединяй с другими материалами. Язык: {language}. Тон: {tone}.\\n\\nПравила:\\n- На входе — одна статья, на выходе — тоже РОВНО ОДНА переписанная статья (число рерайтов всегда равно числу оригиналов).\\n- Сохрани относящиеся к ЭТОЙ новости заголовок, дату и фото: они передаются отдельно и не входят в текст.\\n- Формат ответа: первая строка — переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"seo\":{\"combine_with_rewrite\":true,\"enabled\":true,\"prompt_template\":\"Ты — SEO-редактор. По переписанной новости верни ТОЛЬКО валидный JSON без пояснений и без markdown-разметки, в точности такого вида:\\n{\\\"focus_keyword\\\":\\\"...\\\",\\\"meta_description\\\":\\\"...\\\",\\\"seo_title\\\":\\\"...\\\"}\\nПравила:\\n- focus_keyword — ключевая фраза из текста, 2-4 слова, строго в нижнем регистре, на языке статьи;\\n- meta_description — одно предложение, 150-160 символов, без кавычек по краям, описывает суть новости;\\n- seo_title — до 60 символов, привлекательный, с ключевым словом в начале (может совпадать с заголовком).\\nОтвет строго JSON.\\n\\nЯзык: {language}\\nЗаголовок: {title}\\nТекст: {body}\"},\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/Alex/Desktop/rerait/\",\"params\":{\"api_key\":\"\",\"app_password\":\"\",\"author\":0,\"categories\":[1],\"excerpt\":\"\",\"featured_image\":\"\",\"max_retries\":5,\"post_type\":\"posts\",\"retry_delay_ms\":1000,\"site_url\":\"https://gsemantic.ru/\",\"slug\":\"\",\"status\":\"draft\",\"tags\":[],\"timeout_seconds\":20,\"url\":\"\",\"username\":\"\",\"verify_site_state\":true},\"type\":\"wordpress\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"preview\":true,\"type\":\"page\",\"url\":\"https://zebra-tv.ru/\"}]}",
+        "wp_coder.app_password": "\"\"",
+        "wp_coder.app_user": "\"\"",
+        "wp_coder.deploy_host": "\"\"",
+        "wp_coder.deploy_pass": "\"\"",
+        "wp_coder.deploy_port": "\"\"",
+        "wp_coder.deploy_proto": "\"rsync\"",
+        "wp_coder.deploy_remote_dir": "\"\"",
+        "wp_coder.deploy_user": "\"\"",
+        "wp_coder.local_url": "\"\"",
+        "wp_coder.php_bin": "\"php\"",
+        "wp_coder.project_dir": "\"\"",
+        "wp_coder.site_url": "\"\""
     },
     "display": {
         "auto_resize": true,
@@ -185,16 +207,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 524,
-            "avg_response_time_ms": 445.02,
-            "avg_tokens_generated": 96,
-            "avg_tokens_per_second": 25.3,
-            "first_used": "Sun Aug 23 23:50:26 2026",
-            "last_used": "Sun Aug 23 23:50:26 2026",
+            "avg_context_used": 463,
+            "avg_response_time_ms": 3031.63,
+            "avg_tokens_generated": 59,
+            "avg_tokens_per_second": 9.84,
+            "first_used": "Sat Aug 29 00:41:23 2026",
+            "last_used": "Sat Aug 29 00:41:23 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 42
+            "total_generations": 55
         }
     },
     "output": {
@@ -212,7 +234,7 @@
         "debug_mode": false,
         "enable_logging": true,
         "enable_smart_redraw": false,
-        "enable_vsync": true,
+        "enable_vsync": false,
         "idle_fps": 15,
         "idle_timeout_ms": 5000,
         "log_file_path": "llama-gui.log",
@@ -221,7 +243,7 @@
         "log_to_file": false,
         "performance_update_interval_ms": 250,
         "show_performance_overlay": false,
-        "target_fps": 60
+        "target_fps": 120
     },
     "rag": {
         "deep_analysis_auto_adjust_context_size": false,
@@ -300,7 +322,7 @@
         "max_retries": 3,
         "port": 8081,
         "request_timeout": 120000,
-        "verify_ssl": true
+        "verify_ssl": false
     },
     "server_runtime": {
         "api_key_file": "",

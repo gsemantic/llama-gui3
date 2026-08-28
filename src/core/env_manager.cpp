@@ -194,6 +194,9 @@ std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_
     bool is_ovh =
         provider_lower.find("ovh") != std::string::npos ||
         url_lower.find("kepler.ai.cloud.ovh.net") != std::string::npos;
+    bool is_qwen =
+        provider_lower.find("qwen") != std::string::npos ||
+        url_lower.find("dashscope") != std::string::npos;
 
     if (is_opencode_zen) {
         return "OPENCODE_ZEN_API_KEY";
@@ -206,6 +209,9 @@ std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_
     }
     if (is_ovh) {
         return "OVH_AI_API_KEY";
+    }
+    if (is_qwen) {
+        return "QWEN_API_KEY";
     }
 
     return "CLOUD_PROVIDER_API_KEY";

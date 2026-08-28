@@ -44,6 +44,11 @@ void OpenRouterClient::set_timeout(int timeout_ms) {
     http_client_.set_timeout(timeout_ms);
 }
 
+void OpenRouterClient::abort_stream() {
+    aborted_.store(true);
+    http_client_.abort_stream();
+}
+
 // ============================================================================
 // Получение моделей
 // ============================================================================
@@ -275,6 +280,11 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
     std::string last_error_message;
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        // Прерывание по требованию пользователя — выходим без повторов и фолбэков
+        if (aborted_.load()) {
+            return false;
+        }
+
         bool delivered_content = false;
         bool failed = false;
         bool retryable = false;
@@ -345,14 +355,20 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         int backoff_ms = kBaseBackoffMs * (1 << attempt) + (std::rand() % 500);
         std::cout << "[CloudClient] Попытка " << (attempt + 2) << "/" << kMaxAttempts
                   << " через " << backoff_ms << " мс" << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+        // Прерываемое ожидание: выходим по требованию пользователя ("Стоп")
+        for (int waited = 0; waited < backoff_ms && !aborted_.load(); waited += 100) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (aborted_.load()) {
+            return false;
+        }
     }
 
     // Фолбэк: некоторые провайдеры (например, OVH AI Endpoints для тяжёлых
     // моделей) отклоняют анонимные streaming-запросы сразу с 429, хотя обычный
     // запрос проходит. Если стриминг так и не дал контента — пробуем один раз
     // без stream и отдаём ответ одним куском.
-    if (!any_content_delivered) {
+    if (!any_content_delivered && !aborted_.load()) {
         std::cout << "[CloudClient] Streaming failed - retrying as non-streaming request" << std::endl;
         OpenRouterRequestParams fb = params;
         fb.stream = false;

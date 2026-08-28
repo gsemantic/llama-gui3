@@ -33,6 +33,7 @@ const std::vector<CloudServicesDialog::ProviderPreset>& CloudServicesDialog::get
         {"OpenCode Zen",     "https://opencode.ai/zen/v1",                     false},
         {"Pollinations",     "https://text.pollinations.ai/openai",            false},
         {"OVH AI Endpoints", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", false},
+        {"Qwen (DashScope)", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", true},
         {"Custom",           "",                                               true},
     };
     return presets;

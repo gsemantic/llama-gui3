@@ -10,24 +10,49 @@
 // Include tree-sitter API only in implementation
 #include <tree_sitter/api.h>
 
-// Tree-sitter language extern declarations
+// Tree-sitter language extern declarations.
+// Базовые языки (c/cpp/python/rust) всегда линкуются из deps/tree-sitter-*-src.
+// Web-языки (php/js/css/html) объявлены слабо: если грамматика не собрана
+// (нет исходников в deps/tree-sitter-<lang>-src), символ равен nullptr и язык
+// просто не регистрируется — RAG для него использует text-fallback. Позже
+// достаточно положить исходники грамматики в deps/, пересобрать, и AST-чанкинг
+// включится автоматически (см. CMakeLists.txt, TS_LANGUAGES).
 extern "C" {
     const TSLanguage *tree_sitter_c(void);
     const TSLanguage *tree_sitter_cpp(void);
     const TSLanguage *tree_sitter_python(void);
     const TSLanguage *tree_sitter_rust(void);
+
+    // Web/WordPress stack — weak, могут отсутствовать в рантайме.
+    const TSLanguage *tree_sitter_php(void)      __attribute__((weak));
+    const TSLanguage *tree_sitter_javascript(void) __attribute__((weak));
+    const TSLanguage *tree_sitter_css(void)      __attribute__((weak));
+    const TSLanguage *tree_sitter_html(void)     __attribute__((weak));
 }
 
 namespace llama_gui {
 namespace core {
 
-// Language to tree-sitter grammar mapping
-static const std::unordered_map<std::string, const TSLanguage* (*)()> language_grammars = {
-    {"c", tree_sitter_c},
-    {"cpp", tree_sitter_cpp},
-    {"python", tree_sitter_python},
-    {"rust", tree_sitter_rust},
-};
+// Language to tree-sitter grammar mapping (лениво, с фильтрацией null-символов).
+static const std::unordered_map<std::string, const TSLanguage* (*)()>& grammars() {
+    static std::unordered_map<std::string, const TSLanguage* (*)()> m;
+    static bool inited = false;
+    if (!inited) {
+        inited = true;
+        auto add = [&](const char* name, const TSLanguage* (*fn)(void)) {
+            if (fn) m[name] = fn;
+        };
+        add("c", tree_sitter_c);
+        add("cpp", tree_sitter_cpp);
+        add("python", tree_sitter_python);
+        add("rust", tree_sitter_rust);
+        add("php", tree_sitter_php);
+        add("javascript", tree_sitter_javascript);
+        add("css", tree_sitter_css);
+        add("html", tree_sitter_html);
+    }
+    return m;
+}
 
 // Node type names for code elements (only top-level definitions with bodies)
 static const std::vector<std::string> function_types = {
@@ -132,12 +157,12 @@ AstParser::AstParser() : impl_(std::make_unique<Impl>()) {}
 AstParser::~AstParser() = default;
 
 bool AstParser::is_available(const std::string& language) {
-    return language_grammars.find(language) != language_grammars.end();
+    return grammars().find(language) != grammars().end();
 }
 
 std::vector<std::string> AstParser::supported_languages() {
     std::vector<std::string> langs;
-    for (const auto& [lang, _] : language_grammars) {
+    for (const auto& [lang, _] : grammars()) {
         langs.push_back(lang);
     }
     return langs;
@@ -306,8 +331,8 @@ AstNode AstParser::parse_source(const std::string& source, const std::string& la
     root.type = "program";
     root.content = source;
 
-    auto it = language_grammars.find(language);
-    if (it == language_grammars.end()) {
+    auto it = grammars().find(language);
+    if (it == grammars().end()) {
         std::cerr << "[AST] No tree-sitter grammar for language: " << language << std::endl;
         return root;
     }

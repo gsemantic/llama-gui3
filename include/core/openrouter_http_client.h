@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <atomic>
 #include <curl/curl.h>
 
 namespace llama_gui {
@@ -38,6 +39,10 @@ public:
     std::string get_base_url() const { return base_url_; }
     std::string get_api_key() const { return api_key_; }
 
+    /// Прервать активный стриминг-запрос (вызывается по требованию пользователя).
+    void abort_stream() { aborted_.store(true); }
+    void reset_abort() { aborted_.store(false); }
+
     std::string make_request(const std::string& endpoint, const std::string& body = "");
 
     /// HTTP-код последнего ответа (0, если запрос не дошёл до сервера)
@@ -59,18 +64,22 @@ private:
         StreamCallback callback;
         std::string buffer;
         bool done = false;
+        std::atomic<bool>* aborted = nullptr;
     };
 
     std::string base_url_ = "https://openrouter.ai/api/v1";
     std::string api_key_;
     int timeout_ms_ = 30000;
     long last_http_code_ = 0;
+    std::atomic<bool> aborted_{false};
 
     std::string build_url(const std::string& endpoint);
     std::vector<std::string> get_request_headers() const;
 
     static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp);
     static size_t stream_write_callback(void* contents, size_t size, size_t nmemb, void* userp);
+    static int xferinfo_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
+                                 curl_off_t ultotal, curl_off_t ulnow);
 };
 
 } // namespace core

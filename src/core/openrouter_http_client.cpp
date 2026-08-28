@@ -52,6 +52,13 @@ size_t OpenRouterHttpClient::write_callback(void* contents, size_t size, size_t 
 size_t OpenRouterHttpClient::stream_write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t total_size = size * nmemb;
     auto* ctx = static_cast<StreamContext*>(userp);
+
+    // Прерывание по требованию пользователя: возвращаем значение,
+    // отличное от total_size, чтобы остановить передачу и генерацию на сервере.
+    if (ctx->aborted && ctx->aborted->load()) {
+        return 0;
+    }
+
     ctx->buffer.append(static_cast<char*>(contents), total_size);
 
     // Обрабатываем завершённые SSE-строки
@@ -83,8 +90,19 @@ size_t OpenRouterHttpClient::stream_write_callback(void* contents, size_t size, 
     return total_size;
 }
 
+int OpenRouterHttpClient::xferinfo_callback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    auto* ctx = static_cast<StreamContext*>(clientp);
+    // Возврат ненулевого значения немедленно прерывает transfer (connect/ожидание/данные).
+    if (ctx && ctx->aborted && ctx->aborted->load()) {
+        return 1;
+    }
+    return 0;
+}
+
 bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, const std::string& body, const StreamCallback& callback, int connect_timeout_ms) {
     if (!callback) return false;
+
+    aborted_.store(false);
 
     std::string url = build_url(endpoint);
 
@@ -103,6 +121,7 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
 
     StreamContext ctx;
     ctx.callback = callback;
+    ctx.aborted = &aborted_;
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -113,6 +132,12 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+
+    // Progress-callback позволяет прервать запрос ДО начала передачи данных
+    // (во время установки соединения, DNS, TLS), а не только при приёме чанков.
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 

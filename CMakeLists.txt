@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ============================================================================
 set(VERSION_MAJOR 0)
 set(VERSION_MINOR 1)
-set(VERSION_PATCH 85)
+set(VERSION_PATCH 86)
 set(VERSION_SUFFIX "alpha.2")
 set(VERSION_CODENAME "Archimedes")
 
@@ -95,7 +95,10 @@ endif()
 
 # Tree-sitter language modules (MVP: C, C++, Python, Rust)
 if(TREE_SITTER_FOUND)
-    set(TS_LANGUAGES c cpp python rust)
+    # MVP: C/C++/Python/Rust + web-стек для разработки (WordPress и пр.).
+    # php/javascript/css/html парсятся только если есть исходники грамматик
+    # в deps/tree-sitter-<lang>-src (иначе WARNING и text-fallback в RAG).
+    set(TS_LANGUAGES c cpp python rust php javascript css html)
     foreach(LANG ${TS_LANGUAGES})
         string(TOUPPER ${LANG} LANG_UPPER)
 

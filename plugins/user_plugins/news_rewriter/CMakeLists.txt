@@ -63,6 +63,7 @@ set(NEWS_REWRITER_CORE_SOURCES
     src/seo_analyzer.cpp
     src/seo_reformer.cpp
     src/translit.cpp
+    src/url_norm.cpp
 )
 
 add_library(news_rewriter_core STATIC ${NEWS_REWRITER_CORE_SOURCES})
@@ -118,6 +119,7 @@ if(BUILD_NEWS_REWRITER_TESTS)
         tests/test_seo_reformer.cpp
         tests/test_translit.cpp
         tests/test_seo_meta.cpp
+        tests/test_url_norm.cpp
     )
     target_include_directories(news_rewriter_tests PRIVATE ${NEWS_REWRITER_INCLUDES})
     target_link_libraries(news_rewriter_tests PRIVATE news_rewriter_core)

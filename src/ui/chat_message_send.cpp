@@ -495,6 +495,12 @@ void ChatInterface::send_message() {
                                 }
                             }
                             if (is_final) {
+                                // Если генерация была прервана пользователем,
+                                // частичный ответ уже добавлен в stop_streaming().
+                                // Не дублируем полный ответ.
+                                if (self->generation_stopped_) {
+                                    return;
+                                }
                                 std::string final_content;
                                 {
                                     std::lock_guard<std::mutex> lock(self->streaming_mutex_);
@@ -706,14 +712,15 @@ void ChatInterface::send_message_via_openrouter() {
 
     std::thread([this, api_key_copy, model_id_copy, endpoint_copy, timeout_copy, params,
                  conv_id, original_prompt, rag_prompt_cache, has_rag_ctx]() {
-        llama_gui::core::OpenRouterClient client(api_key_copy);
-        client.set_timeout(timeout_copy);
+        auto cloud_client = std::make_shared<llama_gui::core::OpenRouterClient>(api_key_copy);
+        cloud_client->set_timeout(timeout_copy);
         if (!endpoint_copy.empty()) {
-            client.set_base_url(endpoint_copy);
+            cloud_client->set_base_url(endpoint_copy);
         }
+        active_cloud_client_ = cloud_client;
 
         // Стриминговый колбэк: обновляет UI по мере поступления токенов
-        client.complete_streaming_async(params,
+        cloud_client->complete_streaming_async(params,
             [this, conv_id, original_prompt, rag_prompt_cache, has_rag_ctx, model_id_copy](
                 const std::string& token, bool is_done) {
                 try {
@@ -725,6 +732,11 @@ void ChatInterface::send_message_via_openrouter() {
                     }
 
                     if (is_done) {
+                        // Если генерация прервана пользователем — частичный
+                        // ответ уже добавлен в stop_streaming(), не дублируем.
+                        if (this->generation_stopped_) {
+                            return;
+                        }
                         std::string final_content;
                         if (!token.empty()) {
                             // Ошибка доставлена вместе с флагом завершения
@@ -749,6 +761,8 @@ void ChatInterface::send_message_via_openrouter() {
                     std::cerr << "Error in cloud streaming callback: " << e.what() << std::endl;
                     pending_responses_.push_back({"Error: " + std::string(e.what()), conv_id});
                 }
+                // Завершаем отслеживание облачного клиента (для кнопки "Стоп")
+                this->active_cloud_client_.reset();
             });
     }).detach();
 }
