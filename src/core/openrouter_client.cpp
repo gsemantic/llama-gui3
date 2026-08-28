@@ -255,8 +255,11 @@ OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestP
     return resp;
 }
 
-bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback) {
+bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback,
+                                                OpenRouterCompletionResponse* out_response) {
     if (!callback) return false;
+
+    OpenRouterCompletionResponse acc_usage;  // Аккумулятор usage (токены) за всю генерацию
 
     // Метод выполняется синхронно: поток должен предоставить вызывающий код.
     // (Запуск отдельного detached-потока здесь привёл бы к использованию после
@@ -291,7 +294,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         std::string error_message;
 
         http_client_.make_streaming_request("chat/completions", body,
-            [this, &callback, &delivered_content, &any_content_delivered, &failed, &retryable, &error_message](
+            [this, &callback, &delivered_content, &any_content_delivered, &failed, &retryable, &error_message, &acc_usage](
                 const std::string& data, bool is_error, bool is_done, bool is_retryable) {
                 if (is_done) {
                     if (is_error) {
@@ -333,6 +336,13 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                             }
                         }
                     }
+                    // Аккумулируем usage (обычно приходит в последнем чанке)
+                    if (json_chunk.contains("usage")) {
+                        const auto& u = json_chunk["usage"];
+                        if (u.contains("prompt_tokens"))     acc_usage.prompt_tokens     = u.value("prompt_tokens", 0);
+                        if (u.contains("completion_tokens")) acc_usage.completion_tokens = u.value("completion_tokens", 0);
+                        if (u.contains("total_tokens"))      acc_usage.total_tokens      = u.value("total_tokens", 0);
+                    }
                 } catch (const std::exception&) {
                     // Пропускаем повреждённый чанк
                 }
@@ -340,6 +350,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
             kConnectTimeoutsMs[attempt]);
 
         if (!failed) {
+            if (out_response) *out_response = acc_usage;
             return true;
         }
 
@@ -374,8 +385,12 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         fb.stream = false;
         OpenRouterCompletionResponse fallback = complete(fb);
         if (fallback.success && !fallback.content.empty()) {
+            acc_usage.prompt_tokens = fallback.prompt_tokens;
+            acc_usage.completion_tokens = fallback.completion_tokens;
+            acc_usage.total_tokens = fallback.total_tokens;
             callback(fallback.content, false);
             callback("", true);
+            if (out_response) *out_response = acc_usage;
             return true;
         }
         if (http_client_.last_http_code() == 429) {

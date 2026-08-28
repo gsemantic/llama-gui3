@@ -121,6 +121,11 @@ struct CloudProviderSettings {
     bool free_models_only = false;           // Показывать только бесплатные модели
     std::string last_search_query = "";      // Последний поисковый запрос
 
+    // Стоимость токенов (в USD за 1 000 000 токенов)
+    bool auto_price = true;                  // Автоподстановка цены из пресетов по имени модели
+    double price_input_per_1m = 0.0;         // Цена за 1M входных (prompt) токенов
+    double price_output_per_1m = 0.0;        // Цена за 1M выходных (completion) токенов
+
     // Автозаполнение
     std::vector<CloudRecentModel> recent_models;  // Недавние модели (с привязкой к провайдеру)
 };

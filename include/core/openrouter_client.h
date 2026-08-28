@@ -56,7 +56,8 @@ public:
 
     // Генерация текста
     OpenRouterCompletionResponse complete(const OpenRouterRequestParams& params);
-    bool complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback);
+    bool complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback,
+                                 OpenRouterCompletionResponse* out_response = nullptr);
 
     // API
     bool is_api_available();

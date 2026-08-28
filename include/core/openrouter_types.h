@@ -4,6 +4,8 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include <algorithm>
+#include <cctype>
 
 namespace llama_gui {
 namespace core {
@@ -174,6 +176,62 @@ struct OpenRouterResult {
         return {s, msg};
     }
 };
+
+/**
+ * @brief Пресеты цен (USD за 1 000 000 токенов) для популярных моделей.
+ *
+ * Используются при включённом "auto_price", если модель совпадает по имени.
+ * Цены ориентировочные (международные тарифы DashScope/DeepSeek) и могут
+ * меняться — их всегда можно переопределить вручную в настройках провайдера.
+ * Для бесплатных моделей цена = 0 (расход $0.00).
+ *
+ * @return true, если для model_id найден пресет цены.
+ */
+inline bool get_preset_price(const std::string& model_id,
+                             double& out_prompt_per_1m,
+                             double& out_completion_per_1m) {
+    struct Preset { std::string key; double in; double out; };
+    static const std::vector<Preset> presets = {
+        // --- Qwen (DashScope / Alibaba) ---
+        {"qwen-max",           1.60, 4.00},
+        {"qwen-plus",          0.40, 1.20},
+        {"qwen-turbo",         0.05, 0.15},
+        {"qwen3-max",          1.60, 4.00},
+        {"qwen3-plus",         0.40, 1.20},
+        {"qwen3-turbo",        0.05, 0.15},
+        {"qwen3-235b",         0.40, 1.20},
+        {"qwen3-32b",          0.10, 0.30},
+        {"qwen3-30b",          0.10, 0.30},
+        {"qwen3-14b",          0.07, 0.21},
+        {"qwen3-8b",           0.03, 0.09},
+        {"qwen2.5-72b",        0.40, 1.20},
+        {"qwen2.5-32b",        0.20, 0.60},
+        {"qwen2.5-14b",        0.10, 0.30},
+        {"qwen2.5-7b",         0.05, 0.15},
+        {"qwen-long",          0.20, 0.60},
+        {"qwen-vl",            0.40, 1.20},
+        // --- DeepSeek (через DashScope / напрямую) ---
+        {"deepseek-v3",        0.27, 1.10},
+        {"deepseek-chat",      0.27, 1.10},
+        {"deepseek-r1",        0.55, 2.19},
+        {"deepseek-reasoner",  0.55, 2.19},
+        {"deepseek-v4",        0.27, 1.10},
+        {"deepseek-v4-flash",  0.00, 0.00},   // часто бесплатно в рамках free tier
+        {"deepseek-lite",      0.07, 0.28},
+    };
+    std::string m = model_id;
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    for (const auto& p : presets) {
+        std::string key = p.key;
+        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+        if (m.find(key) != std::string::npos) {
+            out_prompt_per_1m = p.in;
+            out_completion_per_1m = p.out;
+            return true;
+        }
+    }
+    return false;
+}
 
 } // namespace core
 } // namespace llama_gui

@@ -290,6 +290,12 @@ private:
         int total_tokens_saved = 0;       // Сэкономлено токенов
         std::chrono::steady_clock::time_point session_start;
 
+        // Расход облачного провайдера (USD)
+        double total_cost_usd = 0.0;      // Накопленный расход за сессию
+        double last_cost_usd = 0.0;       // Расход последнего запроса
+        int last_prompt_tokens = 0;       // prompt_tokens последнего запроса
+        int last_completion_tokens = 0;   // completion_tokens последнего запроса
+
         double get_cache_hit_rate() const {
             if (total_requests == 0) return 0.0;
             return 100.0 * (prompt_cache_hits + rag_cache_hits) / total_requests;

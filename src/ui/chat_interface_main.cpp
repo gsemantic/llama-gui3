@@ -503,6 +503,10 @@ void ChatInterface::reset_cache_stats() {
     cache_stats_.rag_cache_hits = 0;
     cache_stats_.total_tokens_generated = 0;
     cache_stats_.total_tokens_saved = 0;
+    cache_stats_.total_cost_usd = 0.0;
+    cache_stats_.last_cost_usd = 0.0;
+    cache_stats_.last_prompt_tokens = 0;
+    cache_stats_.last_completion_tokens = 0;
     cache_stats_.session_start = std::chrono::steady_clock::now();
     
     std::cout << "[CACHE STATS] Reset all statistics" << std::endl;

@@ -50,6 +50,11 @@ private:
     int reasoning_budget_ = 0;       // Бюджет токенов на reasoning (0 = по умолчанию)
     bool show_api_key_ = false;
 
+    // Стоимость токенов (USD за 1M)
+    bool auto_price_ = true;             // Автоподстановка цены из пресетов по имени модели
+    double price_input_per_1m_ = 0.0;    // Цена за 1M входных токенов
+    double price_output_per_1m_ = 0.0;   // Цена за 1M выходных токенов
+
     // Saved state for change detection
     std::string saved_model_id_;
 

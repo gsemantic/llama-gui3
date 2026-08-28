@@ -71,11 +71,16 @@
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 1024,
-        "model_id": "deepseek-v4-flash",
-        "provider_name": "Custom",
+        "model_id": "qwen3.6-flash",
+        "provider_name": "Qwen (DashScope)",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
+            {
+                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "id": "qwen3.6-flash",
+                "provider_name": "Qwen (DashScope)"
+            },
             {
                 "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                 "id": "deepseek-v4-flash",
@@ -211,8 +216,8 @@
             "avg_response_time_ms": 3031.63,
             "avg_tokens_generated": 59,
             "avg_tokens_per_second": 9.84,
-            "first_used": "Sat Aug 29 00:41:23 2026",
-            "last_used": "Sat Aug 29 00:41:23 2026",
+            "first_used": "Sat Aug 29 01:16:56 2026",
+            "last_used": "Sat Aug 29 01:16:56 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,

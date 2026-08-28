@@ -1,5 +1,6 @@
 #include "../include/ui/cloud_services_dialog.h"
 #include "../include/core/env_manager.h"
+#include "../include/core/openrouter_types.h"
 #include "../include/ui/localization_manager.h"
 #include "../include/ui/input_text_context_menu.h"
 #include "../include/core/logger.h"
@@ -105,6 +106,9 @@ void CloudServicesDialog::load_from_settings() {
     max_output_tokens_ = cp.max_output_tokens;
     reasoning_enabled_ = cp.reasoning_enabled;
     reasoning_budget_ = cp.reasoning_budget;
+    auto_price_ = cp.auto_price;
+    price_input_per_1m_ = cp.price_input_per_1m;
+    price_output_per_1m_ = cp.price_output_per_1m;
     saved_model_id_ = cp.model_id;
     settings_modified_ = false;
     show_api_key_ = false;
@@ -121,6 +125,9 @@ void CloudServicesDialog::save_to_settings() {
     cp.max_output_tokens = max_output_tokens_ < 0 ? 0 : max_output_tokens_;
     cp.reasoning_enabled = reasoning_enabled_;
     cp.reasoning_budget = reasoning_budget_ < 0 ? 0 : reasoning_budget_;
+    cp.auto_price = auto_price_;
+    cp.price_input_per_1m = price_input_per_1m_ < 0 ? 0 : price_input_per_1m_;
+    cp.price_output_per_1m = price_output_per_1m_ < 0 ? 0 : price_output_per_1m_;
 
     // Обновляем/создаём запись недавней модели с ТЕКУЩИМ провайдером —
     // так старые записи без привязки (мигрированные из строк) получают её
@@ -794,6 +801,54 @@ void CloudServicesDialog::render() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Max tokens spent on reasoning (0 = provider/model default).\n"
                               "Only used when thinking is enabled.");
+        }
+
+        // Стоимость токенов (расход денег)
+        ImGui::Separator();
+        ImGui::Text("Cost (USD per 1M tokens):");
+        if (ImGui::Checkbox("Auto price (presets by model name)##auto_price", &auto_price_)) {
+            settings_modified_ = true;
+            // При включении авто — подтягиваем пресет для текущей модели
+            if (auto_price_) {
+                double pin = 0.0, pout = 0.0;
+                if (get_preset_price(model_id_buf_, pin, pout)) {
+                    price_input_per_1m_ = pin;
+                    price_output_per_1m_ = pout;
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Подставляет цену из встроенной таблицы по имени модели.\n"
+                              "Для бесплатных моделей цена = 0 (расход $0.00).");
+        }
+
+        if (auto_price_) {
+            // Показываем пресетную цену (только для чтения)
+            double pin = 0.0, pout = 0.0;
+            bool found = get_preset_price(model_id_buf_, pin, pout);
+            ImGui::Indent();
+            if (found) {
+                ImGui::Text("Input:  $%.2f / 1M", pin);
+                ImGui::Text("Output: $%.2f / 1M", pout);
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                                   "No preset for '%s' — set manual price below", model_id_buf_);
+                auto_price_ = false;  // Авто не сработало — переключаем на ручной ввод
+            }
+            ImGui::Unindent();
+        } else {
+            ImGui::Text("Input:");
+            ImGui::SameLine(120);
+            if (ImGui::InputDouble("##price_in", &price_input_per_1m_, 0.01, 0.5, "%.4f")) {
+                if (price_input_per_1m_ < 0) price_input_per_1m_ = 0;
+                settings_modified_ = true;
+            }
+            ImGui::Text("Output:");
+            ImGui::SameLine(120);
+            if (ImGui::InputDouble("##price_out", &price_output_per_1m_, 0.01, 0.5, "%.4f")) {
+                if (price_output_per_1m_ < 0) price_output_per_1m_ = 0;
+                settings_modified_ = true;
+            }
         }
 
         // Model list (if loaded)

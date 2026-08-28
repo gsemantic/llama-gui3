@@ -719,9 +719,12 @@ void ChatInterface::send_message_via_openrouter() {
         }
         active_cloud_client_ = cloud_client;
 
+        // Аккумулятор usage (реальные токены из ответа провайдера)
+        llama_gui::core::OpenRouterCompletionResponse cloud_usage;
+
         // Стриминговый колбэк: обновляет UI по мере поступления токенов
         cloud_client->complete_streaming_async(params,
-            [this, conv_id, original_prompt, rag_prompt_cache, has_rag_ctx, model_id_copy](
+            [this, conv_id, original_prompt, rag_prompt_cache, has_rag_ctx, model_id_copy, &cloud_usage](
                 const std::string& token, bool is_done) {
                 try {
                     if (!token.empty() && !is_done) {
@@ -752,6 +755,34 @@ void ChatInterface::send_message_via_openrouter() {
                         update_performance_metrics(final_content, true);
                         pending_responses_.push_back({final_content, conv_id});
 
+                        // Расход денег по реальному usage (токены × цена)
+                        {
+                            const auto& cp = settings_.cloud_provider();
+                            double in_price = cp.price_input_per_1m;
+                            double out_price = cp.price_output_per_1m;
+                            if (cp.auto_price) {
+                                double pin = 0.0, pout = 0.0;
+                                if (llama_gui::core::get_preset_price(cp.model_id, pin, pout)) {
+                                    in_price = pin;
+                                    out_price = pout;
+                                }
+                            }
+                            int pt = cloud_usage.prompt_tokens;
+                            int ct = cloud_usage.completion_tokens;
+                            if (pt == 0 && ct == 0) {
+                                // Реальный usage не пришёл — грубая оценка по длине
+                                ct = static_cast<int>(final_content.length() / 4);
+                            }
+                            double cost = (pt / 1e6) * in_price + (ct / 1e6) * out_price;
+                            cache_stats_.last_prompt_tokens = pt;
+                            cache_stats_.last_completion_tokens = ct;
+                            cache_stats_.last_cost_usd = cost;
+                            cache_stats_.total_cost_usd += cost;
+                            std::cout << "[CloudProvider] Расход: $" << cost
+                                      << " (in=" << pt << " out=" << ct
+                                      << " @" << in_price << "/" << out_price << " per 1M)" << std::endl;
+                        }
+
                         int estimated_tokens = static_cast<int>(final_content.length() / 4);
                         if (has_rag_ctx && rag_prompt_cache != original_prompt) {
                             update_rag_prompt_cache(rag_prompt_cache, final_content, estimated_tokens);
@@ -763,7 +794,7 @@ void ChatInterface::send_message_via_openrouter() {
                 }
                 // Завершаем отслеживание облачного клиента (для кнопки "Стоп")
                 this->active_cloud_client_.reset();
-            });
+            }, &cloud_usage);
     }).detach();
 }
 

@@ -375,11 +375,19 @@ void ChatInterface::render_performance_metrics() {
                               current_metrics_.total_context);
         } else {
             ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f),
-                              TRF("performance.completed_short_noctx", "✓ %d tok | %.1f tok/s | %ds | Context: %d"),
-                              current_metrics_.tokens_generated,
-                              current_metrics_.tokens_per_second,
-                              static_cast<int>(current_metrics_.response_time_seconds),
-                              current_metrics_.context_used);
+                               TRF("performance.completed_short_noctx", "✓ %d tok | %.1f tok/s | %ds | Context: %d"),
+                               current_metrics_.tokens_generated,
+                               current_metrics_.tokens_per_second,
+                               static_cast<int>(current_metrics_.response_time_seconds),
+                               current_metrics_.context_used);
+        }
+        // Расход облачного провайдера (USD)
+        if (settings_.cloud_provider().enabled &&
+            (cache_stats_.last_cost_usd > 0 || cache_stats_.total_cost_usd > 0)) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                               " | Cost: $%.4f (session: $%.4f)",
+                               cache_stats_.last_cost_usd, cache_stats_.total_cost_usd);
         }
     }
 }
@@ -433,6 +441,20 @@ void ChatInterface::render_cache_stats(bool* visible) {
     ImGui::SameLine();
     ImGui::Text(" | Saved: %d", cache_stats_.total_tokens_saved);
     
+    // Расход денег (облачный провайдер)
+    if (settings_.cloud_provider().enabled) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Cost (session): $%.4f", cache_stats_.total_cost_usd);
+        ImGui::SameLine();
+        ImGui::Text(" | Last: $%.4f", cache_stats_.last_cost_usd);
+        if (cache_stats_.last_prompt_tokens > 0 || cache_stats_.last_completion_tokens > 0) {
+            ImGui::Text("Last request tokens: in=%d out=%d (total %d)",
+                        cache_stats_.last_prompt_tokens,
+                        cache_stats_.last_completion_tokens,
+                        cache_stats_.last_prompt_tokens + cache_stats_.last_completion_tokens);
+        }
+    }
+
     // Время сессии
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - cache_stats_.session_start);

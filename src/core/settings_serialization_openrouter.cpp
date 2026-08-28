@@ -50,7 +50,10 @@ void Settings::serializeOpenRouterSettings(json& j) const {
         {"reasoning_enabled", openrouter_settings_.reasoning_enabled},
         {"reasoning_budget", openrouter_settings_.reasoning_budget},
         {"free_models_only", openrouter_settings_.free_models_only},
-        {"last_search_query", openrouter_settings_.last_search_query}
+        {"last_search_query", openrouter_settings_.last_search_query},
+        {"auto_price", openrouter_settings_.auto_price},
+        {"price_input_per_1m", openrouter_settings_.price_input_per_1m},
+        {"price_output_per_1m", openrouter_settings_.price_output_per_1m}
     };
     json recent = json::array();
     for (const auto& r : openrouter_settings_.recent_models) {
@@ -78,6 +81,9 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.reasoning_budget = o.value("reasoning_budget", 0);
         openrouter_settings_.free_models_only = o.value("free_models_only", false);
         openrouter_settings_.last_search_query = o.value("last_search_query", "");
+        openrouter_settings_.auto_price = o.value("auto_price", true);
+        openrouter_settings_.price_input_per_1m = o.value("price_input_per_1m", 0.0);
+        openrouter_settings_.price_output_per_1m = o.value("price_output_per_1m", 0.0);
         load_recent_models(o, openrouter_settings_.recent_models);
         return;
     }
