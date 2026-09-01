@@ -63,6 +63,18 @@ AgentCommandResult AgentCommands::execute(const std::string& command) {
         return handle_file_command(args);
     } else if (cmd == "code") {
         return handle_code_command(args);
+    } else if (cmd == "edit") {
+        return handle_edit_command(args);
+    } else if (cmd == "glob") {
+        return handle_glob_command(args);
+    } else if (cmd == "grep") {
+        return handle_grep_command(args);
+    } else if (cmd == "todo") {
+        return handle_todo_command(args);
+    } else if (cmd == "question") {
+        return handle_question_command(args);
+    } else if (cmd == "terminal") {
+        return handle_terminal_command(args);
     } else if (cmd == "agents") {
         return handle_agents_command(args);
     }
@@ -405,8 +417,319 @@ AgentCommandResult AgentCommands::handle_agents_command(
     return result;
 }
 
+AgentCommandResult AgentCommands::handle_edit_command(
+        const std::vector<std::string>& args) {
+    
+    AgentCommandResult result;
+    
+    if (args.size() < 3) {
+        result.success = false;
+        result.message = "Usage: /edit <file_path> <old_text> <new_text>";
+        return result;
+    }
+    
+    std::string file_path = args[0];
+    std::string old_text = args[1];
+    std::string new_text = args[2];
+    
+    if (!is_agent_available("edit_agent")) {
+        result.success = false;
+        result.message = "Edit agent not available";
+        return result;
+    }
+    
+    agents::AgentRequest request("edit_agent", "edit");
+    request.with_param("file_path", file_path);
+    request.with_param("old_text", old_text);
+    request.with_param("new_text", new_text);
+    
+    auto agent_result = registry_->execute(request);
+    
+    result.agent_name = "edit_agent";
+    result.action = "edit";
+    
+    if (agent_result.is_ok()) {
+        result.success = true;
+        result.data = agent_result.data();
+        result.message = "Edit completed";
+    } else {
+        result.success = false;
+        result.message = agent_result.message();
+    }
+    
+    return result;
+}
+
+AgentCommandResult AgentCommands::handle_glob_command(
+        const std::vector<std::string>& args) {
+    
+    AgentCommandResult result;
+    
+    if (args.empty()) {
+        result.success = false;
+        result.message = "Usage: /glob <pattern> [path]";
+        return result;
+    }
+    
+    std::string pattern = args[0];
+    std::string path = args.size() > 1 ? args[1] : ".";
+    
+    if (!is_agent_available("glob_agent")) {
+        result.success = false;
+        result.message = "Glob agent not available";
+        return result;
+    }
+    
+    agents::AgentRequest request("glob_agent", "glob");
+    request.with_param("pattern", pattern);
+    request.with_param("path", path);
+    
+    auto agent_result = registry_->execute(request);
+    
+    result.agent_name = "glob_agent";
+    result.action = "glob";
+    
+    if (agent_result.is_ok()) {
+        result.success = true;
+        result.data = agent_result.data();
+        auto count = agent_result.get<int>("count", 0);
+        result.message = "Found " + std::to_string(count) + " files";
+    } else {
+        result.success = false;
+        result.message = agent_result.message();
+    }
+    
+    return result;
+}
+
+AgentCommandResult AgentCommands::handle_grep_command(
+        const std::vector<std::string>& args) {
+    
+    AgentCommandResult result;
+    
+    if (args.empty()) {
+        result.success = false;
+        result.message = "Usage: /grep <pattern> [path] [include]";
+        return result;
+    }
+    
+    std::string pattern = args[0];
+    std::string path = args.size() > 1 ? args[1] : ".";
+    std::string include = args.size() > 2 ? args[2] : "";
+    
+    if (!is_agent_available("grep_agent")) {
+        result.success = false;
+        result.message = "Grep agent not available";
+        return result;
+    }
+    
+    agents::AgentRequest request("grep_agent", "grep");
+    request.with_param("pattern", pattern);
+    request.with_param("path", path);
+    if (!include.empty()) request.with_param("include", include);
+    
+    auto agent_result = registry_->execute(request);
+    
+    result.agent_name = "grep_agent";
+    result.action = "grep";
+    
+    if (agent_result.is_ok()) {
+        result.success = true;
+        result.data = agent_result.data();
+        auto total = agent_result.get<int>("total_matches", 0);
+        result.message = "Found " + std::to_string(total) + " matches";
+    } else {
+        result.success = false;
+        result.message = agent_result.message();
+    }
+    
+    return result;
+}
+
+AgentCommandResult AgentCommands::handle_todo_command(
+        const std::vector<std::string>& args) {
+    
+    AgentCommandResult result;
+    result.agent_name = "todowrite_agent";
+    
+    if (!is_agent_available("todowrite_agent")) {
+        result.success = false;
+        result.message = "todowrite_agent is not available";
+        return result;
+    }
+    
+    if (args.empty()) {
+        result.action = "get";
+        agents::AgentRequest req("todowrite_agent", "get");
+        auto agent_result = registry_->execute(req);
+        
+        if (agent_result.is_ok()) {
+            result.success = true;
+            result.data = agent_result.data();
+            result.message = agent_result.message();
+        } else {
+            result.success = false;
+            result.message = agent_result.message();
+        }
+        return result;
+    }
+    
+    std::string subcmd = args[0];
+    
+    if (subcmd == "set" && args.size() > 1) {
+        result.action = "set";
+        nlohmann::json items = nlohmann::json::array();
+        for (size_t i = 1; i < args.size(); ++i) {
+            items.push_back({{"content", args[i]}, {"status", "pending"}, {"priority", 0}});
+        }
+        agents::AgentRequest req("todowrite_agent", "set", {{"items", items}});
+        auto agent_result = registry_->execute(req);
+        
+        if (agent_result.is_ok()) {
+            result.success = true;
+            result.data = agent_result.data();
+            result.message = agent_result.message();
+        } else {
+            result.success = false;
+            result.message = agent_result.message();
+        }
+    } else if (subcmd == "get") {
+        result.action = "get";
+        agents::AgentRequest req("todowrite_agent", "get");
+        auto agent_result = registry_->execute(req);
+        
+        if (agent_result.is_ok()) {
+            result.success = true;
+            result.data = agent_result.data();
+            result.message = agent_result.message();
+        } else {
+            result.success = false;
+            result.message = agent_result.message();
+        }
+    } else if (subcmd == "update" && args.size() >= 3) {
+        result.action = "update";
+        int index = std::stoi(args[1]);
+        std::string status = args[2];
+        agents::AgentRequest req("todowrite_agent", "update", {
+            {"index", index}, {"status", status}
+        });
+        auto agent_result = registry_->execute(req);
+        
+        if (agent_result.is_ok()) {
+            result.success = true;
+            result.data = agent_result.data();
+            result.message = agent_result.message();
+        } else {
+            result.success = false;
+            result.message = agent_result.message();
+        }
+    } else if (subcmd == "clear") {
+        result.action = "clear";
+        agents::AgentRequest req("todowrite_agent", "clear");
+        auto agent_result = registry_->execute(req);
+        
+        if (agent_result.is_ok()) {
+            result.success = true;
+            result.data = agent_result.data();
+            result.message = agent_result.message();
+        } else {
+            result.success = false;
+            result.message = agent_result.message();
+        }
+    } else {
+        result.success = false;
+        result.message = "Usage: /todo [set|get|update|clear] [args]\n"
+                        "  /todo set item1 item2 ...  - Set new list\n"
+                        "  /todo get                  - Show list\n"
+                        "  /todo update <index> <status> - Update item\n"
+                        "  /todo clear                - Clear list";
+    }
+    
+    return result;
+}
+
+AgentCommandResult AgentCommands::handle_question_command(
+        const std::vector<std::string>& args) {
+
+    AgentCommandResult result;
+    result.agent_name = "question_agent";
+
+    if (!is_agent_available("question_agent")) {
+        result.success = false;
+        result.message = "question_agent is not available";
+        return result;
+    }
+
+    if (args.empty()) {
+        result.success = false;
+        result.message = "Usage: /question <текст вопроса>";
+        return result;
+    }
+
+    std::string question;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i) question += " ";
+        question += args[i];
+    }
+
+    agents::AgentRequest req("question_agent", "ask", {{"question", question}});
+    auto agent_result = registry_->execute(req);
+
+    result.action = "ask";
+    if (agent_result.is_ok()) {
+        result.success = true;
+        result.data = agent_result.data();
+        result.message = agent_result.get<std::string>("answer", "");
+    } else {
+        result.success = false;
+        result.message = agent_result.message();
+    }
+
+    return result;
+}
+
+AgentCommandResult AgentCommands::handle_terminal_command(
+        const std::vector<std::string>& args) {
+
+    AgentCommandResult result;
+    result.agent_name = "terminal_agent";
+
+    if (!is_agent_available("terminal_agent")) {
+        result.success = false;
+        result.message = "terminal_agent is not available";
+        return result;
+    }
+
+    if (args.empty()) {
+        result.success = false;
+        result.message = "Usage: /terminal <команда>";
+        return result;
+    }
+
+    std::string command;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i) command += " ";
+        command += args[i];
+    }
+
+    agents::AgentRequest req("terminal_agent", "execute", {{"command", command}});
+    auto agent_result = registry_->execute(req);
+
+    result.action = "execute";
+    if (agent_result.is_ok()) {
+        result.success = true;
+        result.data = agent_result.data();
+        result.message = agent_result.message();
+    } else {
+        result.success = false;
+        result.message = agent_result.message();
+    }
+
+    return result;
+}
+
 // ============================================================================
-// Вспомогательные функции
+// Helper functions
 // ============================================================================
 
 std::vector<std::string> AgentCommands::parse_arguments(const std::string& command) {

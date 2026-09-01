@@ -11,6 +11,22 @@
 #include "layout_controller.h"
 #include "input_handler.h"
 #include "core/logger.h"
+// Core agents
+#include "agents/file_agent.h"
+#include "agents/web_search_agent.h"
+#include "agents/terminal_agent.h"
+#include "agents/rag_agent.h"
+#include "agents/code_agent.h"
+#include "agents/summarization_agent.h"
+#include "agents/web_render_agent.h"
+// New tools (Phase 1)
+#include "agents/edit_agent.h"
+#include "agents/glob_agent.h"
+#include "agents/grep_agent.h"
+// Task tracking (Phase 3)
+#include "agents/todowrite_agent.h"
+// User interaction (Phase 3)
+#include "agents/question_agent.h"
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -1639,25 +1655,77 @@ std::string agent_executable_dir() {
 void MainWindow::initialize_agent_system() {
     agent_registry_.set_context(&agent_context_);
 
-    // Загрузка agent-плагинов (в т.ч. web_render_agent — headless-браузер/Chromium)
-    // из каталогов, зеркальных поиску LLaMA-плагинов: cwd/plugins/agents и
-    // <каталог exe>/plugins/agents.
-    const std::vector<std::string> candidate_dirs = {
-        "plugins/agents",
-        agent_executable_dir() + "/plugins/agents",
-    };
+    // Register core agents directly (compiled into the binary)
+    agent_registry_.register_agent(std::make_unique<agents::FileAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::WebSearchAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::TerminalAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::RagAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::CodeAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::SummarizationAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::WebRenderAgent>(), true);
+    // New tools (Phase 1)
+    agent_registry_.register_agent(std::make_unique<agents::EditAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::GlobAgent>(), true);
+    agent_registry_.register_agent(std::make_unique<agents::GrepAgent>(), true);
+    // Task tracking (Phase 3)
+    agent_registry_.register_agent(std::make_unique<agents::TodoWriteAgent>(), true);
+    // User interaction (Phase 3)
+    agent_registry_.register_agent(std::make_unique<agents::QuestionAgent>(), true);
 
-    int loaded = 0;
-    for (const auto& dir : candidate_dirs) {
-        std::error_code ec;
-        if (!std::filesystem::exists(dir, ec)) continue;
-        loaded += agent_plugin_loader_.load_plugins_from_directory(dir, &agent_registry_);
+    // Restrict file agents to the project directory (cwd by default)
+    agent_context_.set_project_root(std::filesystem::current_path().string());
+
+    // Wire up RagManager for RagAgent
+    auto* rag_agent = dynamic_cast<agents::RagAgent*>(agent_registry_.get_agent("rag_agent"));
+    if (rag_agent) {
+        rag_agent->set_rag_manager(rag_manager_.get());
     }
 
-    // Инициализация всех загруженных агентов контекстом выполнения.
+    // Wire up LLM completion for agents that need it (code_agent, summarization_agent, etc.)
+    agent_context_.set_llm_complete(
+        [this](const std::string& system_prompt, const std::string& user_prompt) -> std::string {
+            if (!llama_interface_.is_server_healthy()) return "";
+
+            llama_gui::core::ChatCompletionRequest request;
+            request.max_tokens = 2048;
+            request.temperature = 0.3f;
+            request.stream = false;
+
+            if (!system_prompt.empty()) {
+                request.messages.emplace_back(llama_gui::core::MessageRole::System, system_prompt);
+            }
+            request.messages.emplace_back(llama_gui::core::MessageRole::User, user_prompt);
+
+            try {
+                auto future = llama_interface_.create_chat_completion_async(request);
+                auto status = future.wait_for(std::chrono::seconds(120));
+                if (status == std::future_status::ready) {
+                    auto response = future.get();
+                    if (!response.choices.empty()) {
+                        return response.choices[0].message.content;
+                    }
+                }
+            } catch (...) {}
+            return "";
+        });
+
+    // Wire up QuestionAgent callback (show question in chat)
+    auto* question_agent = dynamic_cast<agents::QuestionAgent*>(
+        agent_registry_.get_agent("question_agent"));
+    if (question_agent) {
+        question_agent->set_question_callback(
+            [this](const std::string& question) -> std::string {
+                chat_interface_->add_assistant_message("❓ " + question);
+                // For now: return question text as acknowledgment.
+                // TODO: proper input dialog with blocking wait
+                return question;
+            });
+    }
+
+    // Initialize all registered agents with the execution context
     agent_registry_.initialize_all(&agent_context_);
 
-    // Интеграция с чатом: команды вида /agent <name> <action> [params].
+    // Chat integration: /agent <name> <action> [params] commands
     agent_chat_integration_ = std::make_unique<AgentChatIntegration>();
     if (agent_chat_integration_->initialize(&agent_registry_, &agent_context_)) {
         chat_interface_->set_agent_command_handler(
@@ -1674,9 +1742,8 @@ void MainWindow::initialize_agent_system() {
             });
     }
 
-    std::cout << "[MainWindow] Agent system: loaded " << loaded
-              << " agent plugin(s), registry has "
-              << agent_registry_.list_agents().size() << " agent(s)" << std::endl;
+    std::cout << "[MainWindow] Agent system: " << agent_registry_.list_agents().size()
+              << " core agent(s) registered" << std::endl;
 }
 
 void MainWindow::cleanup_opengl() {

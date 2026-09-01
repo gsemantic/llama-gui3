@@ -15,6 +15,15 @@ class IAgent;
 class AgentRegistry;
 
 /**
+ * @brief Callback type for LLM completion
+ *
+ * Takes a system prompt and user prompt, returns the LLM response text.
+ * Returns empty string on failure.
+ */
+using LlmCompleteFn = std::function<std::string(const std::string& system_prompt,
+                                                 const std::string& user_prompt)>;
+
+/**
  * @brief Контекст выполнения агента
  * 
  * Предоставляет агенту доступ к сервисам ядра и другим агентам.
@@ -142,6 +151,49 @@ public:
      * @brief Получение реестра агентов
      */
     AgentRegistry* get_registry() const;
+
+    /**
+     * @brief Установка callback для LLM completion
+     *
+     * Позволяет агентам вызывать LLM для генерации текста.
+     * Устанавливается из основного приложения при инициализации.
+     */
+    void set_llm_complete(LlmCompleteFn fn);
+
+    /**
+     * @brief Вызов LLM для completion
+     *
+     * @param system_prompt Системный промпт (роль/инструкции)
+     * @param user_prompt Пользовательский запрос
+     * @return Ответ LLM или пустая строка при ошибке
+     */
+    std::string llm_complete(const std::string& system_prompt,
+                             const std::string& user_prompt);
+
+    /**
+     * @brief Проверка доступности LLM
+     */
+    bool has_llm() const;
+
+    /**
+     * @brief Установка корневой директории проекта
+     *
+     * Ограничивает работу файловых агентов этой директорией.
+     * Агенты будут блокировать операции за её пределами.
+     */
+    void set_project_root(const std::string& root);
+
+    /**
+     * @brief Получение корневой директории проекта
+     */
+    std::string get_project_root() const;
+
+    /**
+     * @brief Проверка, находится ли путь внутри проекта
+     *
+     * Нормализует пути и проверяет, что resolved_path начинается с project_root.
+     */
+    bool is_within_project(const std::string& path) const;
 
 private:
     class Impl;

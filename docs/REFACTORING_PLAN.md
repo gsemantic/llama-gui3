@@ -1,7 +1,7 @@
 # План рефакторинга Llama GUI
 
-**Дата актуализации:** 2026-08-25
-**Статус:** Этапы 1-8 завершены; Этап 9 «UI Quality» завершён (2026-08-25)
+**Дата актуализации:** 2026-09-01
+**Статус:** Этапы 1-10 завершены
 
 ---
 
@@ -475,6 +475,27 @@ git log --follow --oneline -- src/ui/main_window.cpp
 
 ---
 
+## Этап 10: Система агентов (инструментов) для ядра
+
+**Дата:** 2026-09-01
+**Статус:** ✅ Завершён
+
+### Суть
+Вынос инструментов из плагина `wp_coder` в ядро приложения. Создана универсальная система из 12 агентов с единой архитектурой (IAgent), регистрацией через AgentRegistry и командами `/...` в чате.
+
+### Что сделано
+- 12 агентов: file, edit, glob, grep, code, terminal, rag, web_search, web_render, summarization, todowrite, question
+- 12 команд чата: `/file`, `/edit`, `/glob`, `/grep`, `/code`, `/terminal`, `/rag`, `/search`, `/summarize`, `/todo`, `/question`, `/agents`
+- Агенты компилируются статически (удалён PluginLoader)
+- LLM-интеграция: `code_agent` и `summarization_agent` вызывают LLM через `context->llm_complete()`
+- Безопасность: `project_root` restriction — файловые агенты блокируют доступ за пределы проекта
+- Облачный режим: команды `/...` перехватываются даже при облачном провайдере
+
+### Документация
+Полный план: `docs/AGENT_TOOLS_PLAN.md`
+
+---
+
 ## Процесс проверки после каждого этапа
 
 ### Шаг 1: Проверка TODO/FIXME
@@ -683,7 +704,7 @@ llama-gui/
 
 ## Продолжение работы: с чего начать
 
-### Текущее состояние (обновлено 2026-07-18)
+### Текущее состояние (обновлено 2026-09-01)
 
 | Этап | Статус | Файлы |
 |------|--------|-------|
@@ -695,17 +716,16 @@ llama-gui/
 | 6. managers/ | ✅ Готово | 10 forwarding headers |
 | 7. Unit Tests | ✅ Готово | 24 теста, 3 файла |
 | 8. CI/CD | ✅ Готово | GitHub Actions + локальный CI |
+| 9. UI Quality | ✅ Готово | Аудит UI, персистентность, меню |
+| 10. Agent System | ✅ Готово | 12 агентов, 12 команд, безопасность |
 
-### Следующий шаг: Этап 5 — Разбиение крупных классов core
+### Все этапы завершены
 
-**Приоритет:** 🟡 HIGH
-
-**Файлы для разбиения:**
-1. `openrouter_client.cpp` (790 строк) → OpenRouterHttpClient + OpenRouterModelCache + OpenRouterRateLimiter
-2. `rag_manager_deep_analysis.cpp` (777 строк) → RagDeepSearchManager + RagHybridSearchManager + RagIndexBuilder
-
-**После Этапа 5 — следующий приоритет:**
-- **Этап 6:** Заполнить `include/managers/` заголовками
+| Приоритет | Описание |
+|---|---|
+| 🟢 MEDIUM | Тесты для новых агентов (edit, glob, grep, todowrite, question) |
+| 🟢 MEDIUM | UI-виджет для todowrite/question (отдельная панель) |
+| 🟢 LOW | Улучшение question_agent (блокирующий UI-диалог вместо echo) |
 
 ### Файловая структура MainWindow после Этапа 3
 

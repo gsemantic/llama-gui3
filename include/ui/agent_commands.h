@@ -87,8 +87,32 @@ public:
     AgentCommandResult handle_code_command(const std::vector<std::string>& args);
 
     /**
-     * @brief Обработка команды /agents
+     * @brief Обработка команды /edit
      */
+    AgentCommandResult handle_edit_command(const std::vector<std::string>& args);
+
+    /**
+     * @brief Обработка команды /glob
+     */
+    AgentCommandResult handle_glob_command(const std::vector<std::string>& args);
+
+    /**
+     * @brief Обработка команды /grep
+     */
+    AgentCommandResult handle_grep_command(const std::vector<std::string>& args);
+
+    AgentCommandResult handle_todo_command(const std::vector<std::string>& args);
+
+    /**
+     * @brief Обработка команды /question
+     */
+    AgentCommandResult handle_question_command(const std::vector<std::string>& args);
+
+    /**
+     * @brief Обработка команды /terminal
+     */
+    AgentCommandResult handle_terminal_command(const std::vector<std::string>& args);
+
     AgentCommandResult handle_agents_command(const std::vector<std::string>& args);
 
     /**

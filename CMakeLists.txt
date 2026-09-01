@@ -191,7 +191,6 @@ set(SOURCES
     src/main.cpp
     src/agents/agent_context.cpp
     src/agents/agent_registry.cpp
-    src/agents/plugin_loader.cpp
     src/agents/security_manager.cpp
     src/agents/sandbox.cpp
     src/agents/agent_logger.cpp
@@ -291,13 +290,18 @@ set(HEADERS
     include/agents/agent_capabilities.h
     include/agents/agent_context.h
     include/agents/agent_registry.h
-    include/agents/plugin_c_api.h
-    include/agents/plugin_loader.h
     include/agents/agents.h
     include/agents/security_manager.h
     include/agents/sandbox.h
     include/agents/agent_logger.h
     include/agents/agent_config.h
+    include/agents/file_agent.h
+    include/agents/web_search_agent.h
+    include/agents/terminal_agent.h
+    include/agents/rag_agent.h
+    include/agents/code_agent.h
+    include/agents/summarization_agent.h
+    include/agents/web_render_agent.h
     include/bench/bench_types.h
     include/bench/bench_common.h
     include/bench/llama_bench_runner.h
@@ -343,11 +347,26 @@ endif()
 set(AGENT_SOURCES
     src/agents/agent_context.cpp
     src/agents/agent_registry.cpp
-    src/agents/plugin_loader.cpp
     src/agents/security_manager.cpp
     src/agents/sandbox.cpp
     src/agents/agent_logger.cpp
     src/agents/agent_config.cpp
+    # Core agents (migrated from plugins/agents/official/)
+    src/agents/file_agent.cpp
+    src/agents/web_search_agent.cpp
+    src/agents/terminal_agent.cpp
+    src/agents/rag_agent.cpp
+    src/agents/code_agent.cpp
+    src/agents/summarization_agent.cpp
+    src/agents/web_render_agent.cpp
+    # New tools (Phase 1)
+    src/agents/edit_agent.cpp
+    src/agents/glob_agent.cpp
+    src/agents/grep_agent.cpp
+    # Task tracking (Phase 3)
+    src/agents/todowrite_agent.cpp
+    # User interaction (Phase 3)
+    src/agents/question_agent.cpp
 )
 
 set(AGENT_HEADERS
@@ -358,24 +377,33 @@ set(AGENT_HEADERS
     include/agents/agent_capabilities.h
     include/agents/agent_context.h
     include/agents/agent_registry.h
-    include/agents/plugin_c_api.h
-    include/agents/plugin_loader.h
     include/agents/agents.h
     include/agents/security_manager.h
     include/agents/sandbox.h
     include/agents/agent_logger.h
     include/agents/agent_config.h
+    # Core agents (migrated from plugins/agents/official/)
+    include/agents/file_agent.h
+    include/agents/web_search_agent.h
+    include/agents/terminal_agent.h
+    include/agents/rag_agent.h
+    include/agents/code_agent.h
+    include/agents/summarization_agent.h
+    include/agents/web_render_agent.h
+    # New tools (Phase 1)
+    include/agents/edit_agent.h
+    include/agents/glob_agent.h
+    include/agents/grep_agent.h
+    # Task tracking (Phase 3)
+    include/agents/todowrite_agent.h
+    # User interaction (Phase 3)
+    include/agents/question_agent.h
 )
 
 # Создаём статическую библиотеку ядра агентов
 add_library(agent_core STATIC ${AGENT_SOURCES} ${AGENT_HEADERS})
 target_include_directories(agent_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(agent_core PRIVATE nlohmann_json::nlohmann_json headless_browser)
-
-# Добавляем dl для динамической загрузки на Linux
-if(UNIX AND NOT APPLE)
-    target_link_libraries(agent_core PRIVATE ${CMAKE_DL_LIBS})
-endif()
 
 # ============================================================================
 # Create the main executable with all sources

@@ -12,7 +12,7 @@ namespace agents {
 class AgentContext::Impl {
 public:
     std::atomic<bool> cancelled{false};
-    int timeout_ms = 30000;  // 30 секунд по умолчанию
+    int timeout_ms = 30000;  // 30 seconds default
     std::chrono::steady_clock::time_point start_time;
     
     mutable std::mutex state_mutex;
@@ -20,8 +20,10 @@ public:
     
     std::string plugins_dir = "plugins";
     std::string data_dir = "data/agents";
+    std::string project_root;
     
     AgentRegistry* registry = nullptr;
+    LlmCompleteFn llm_complete_fn;
     
     Impl() : start_time(std::chrono::steady_clock::now()) {}
 };
@@ -150,6 +152,51 @@ void AgentContext::set_registry(AgentRegistry* registry) {
 
 AgentRegistry* AgentContext::get_registry() const {
     return impl_->registry;
+}
+
+void AgentContext::set_llm_complete(LlmCompleteFn fn) {
+    impl_->llm_complete_fn = std::move(fn);
+}
+
+std::string AgentContext::llm_complete(const std::string& system_prompt,
+                                       const std::string& user_prompt) {
+    if (!impl_->llm_complete_fn) {
+        return "";
+    }
+    return impl_->llm_complete_fn(system_prompt, user_prompt);
+}
+
+bool AgentContext::has_llm() const {
+    return static_cast<bool>(impl_->llm_complete_fn);
+}
+
+void AgentContext::set_project_root(const std::string& root) {
+    impl_->project_root = root;
+}
+
+std::string AgentContext::get_project_root() const {
+    return impl_->project_root;
+}
+
+bool AgentContext::is_within_project(const std::string& path) const {
+    if (impl_->project_root.empty()) return true;  // no restriction
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path abs = fs::absolute(path, ec);
+    if (ec) return false;
+
+    fs::path root = fs::absolute(impl_->project_root, ec);
+    if (ec) return false;
+
+    // Check if abs starts with root
+    auto root_it = root.begin();
+    auto abs_it = abs.begin();
+    for (; root_it != root.end(); ++root_it, ++abs_it) {
+        if (abs_it == abs.end()) return false;
+        if (*root_it != *abs_it) return false;
+    }
+    return true;
 }
 
 } // namespace agents

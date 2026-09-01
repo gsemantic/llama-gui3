@@ -577,6 +577,14 @@ void ChatInterface::send_message_via_openrouter() {
         return;
     }
 
+    // Перехват команд агентов (даже в облачном режиме)
+    if (agent_command_handler_ && !message_content.empty() &&
+            message_content.front() == '/') {
+        if (agent_command_handler_(message_content)) {
+            return;
+        }
+    }
+
     // === RAG обработка для облачной модели ===
     std::string final_message_content = message_content;
     bool has_rag_context = false;
