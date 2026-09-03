@@ -62,6 +62,7 @@ struct WpCoderState {
     std::string deploy_port;
     std::string deploy_remote_dir;    // полный путь на сервере
     std::string wp_local_url;         // локальный сайт для проверки (http://localhost:8080)
+    std::string agent_system_prompt;  // пользовательский промпт агента (пустой = kSystemPrompt)
     /* Навыки (skills) и ролевой режим. */
     std::vector<Skill> skills;                // загруженные навыки
     std::vector<std::string> active_skills;  // имена включённых в промпт
@@ -104,9 +105,19 @@ std::string tool_run(const std::string& tool,
                      const std::string& arg_url);
 
 /* --- agent.cpp --- */
+extern const char* kSystemPrompt;  // системный промпт агента
 void agent_start();      // запуск worker-потока (из ll_plugin_init)
 void agent_stop();       // остановка (из ll_plugin_shutdown)
 void agent_submit(const std::string& prompt); // постановка задачи в очередь
+
+/* Разбор wp_action-блока (используется в agent.cpp и plugin_main.cpp). */
+struct Action {
+    std::string tool, path, root, query, pattern, content, cli, url;
+    int k = 6;
+};
+std::string extract_action(const std::string& text, std::string& rest);
+bool parse_action(const std::string& block, Action& a);
+void push_event(AgentEvent::Kind k, const std::string& text);
 
 /* Вспомки настроек (храним как JSON-строку: "\"value\""). */
 std::string setting_get_str(const std::string& key, const std::string& def);

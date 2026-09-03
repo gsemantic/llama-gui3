@@ -2,6 +2,7 @@
 #include "../include/ui/rag_interface.h"
 #include "../include/ui/window_coordinator.h"
 #include "../include/ui/window_manager.h"
+#include "../include/plugins/plugin_manager.h"
 #include "../include/core/state_manager.h"
 #include "../include/core/rag_manager.h"
 #include "../include/ui/localization_manager.h"
@@ -48,6 +49,22 @@ void ChatInterface::render(bool* visible) {
     }
 
     render_message_list();
+
+    // Agent mode selector (if plugin modes are registered)
+    render_agent_mode_selector();
+
+    // Agent mode extras (plan mode, skills, etc.)
+    if (active_agent_mode_index_ >= 0 && plugin_manager_) {
+        auto modes = plugin_manager_->get_agent_modes();
+        if (active_agent_mode_index_ < (int)modes.size()) {
+            const auto& m = modes[active_agent_mode_index_];
+            if (m.mode->render_extras) {
+                ImGui::Separator();
+                m.mode->render_extras(m.host, m.mode->user_data);
+            }
+        }
+    }
+
     render_input_area();
 
     // Render RAG mini indicator AFTER all content (overlay in top-right corner)

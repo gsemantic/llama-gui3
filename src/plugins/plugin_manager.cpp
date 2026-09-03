@@ -65,6 +65,13 @@ public:
     std::vector<std::unique_ptr<LoadedPlugin>> plugins;
     std::unordered_map<std::string, std::string> kv_store;
     bool initialized = false;
+
+    /* Зарегистрированные режимы агентов (плагинов). */
+    struct RegisteredAgentMode {
+        LlamaPluginAgentMode mode;
+        LlamaPluginHost* host;
+    };
+    std::vector<RegisteredAgentMode> agent_modes;
 };
 
 namespace {
@@ -455,12 +462,15 @@ namespace {
 // system_prompt — явная роль/инструкции (промпт-роль). Передаётся как системное
 // сообщение РОВНО ОДИН раз; плагин шлёт его один раз на обход, а не дублирует в
 // каждом item-запросе. Пустой system_prompt == старое поведение (llm_complete).
+// force_cloud — пропустить локальный сервер и сразу идти в облако (когда агент
+// работает с облачной моделью и не должен фоллбэкить на локальную).
 int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
                                      const std::string& system_prompt,
-                                     const char* prompt, char** out_response) {
+                                     const char* prompt, char** out_response,
+                                     bool force_cloud = false) {
     auto* li = pd->manager->subsystems.llama_interface;
 
-    if (li && li->is_server_healthy()) {
+    if (!force_cloud && li && li->is_server_healthy()) {
         try {
             core::ChatCompletionRequest req;
             req.model = "local";
@@ -552,16 +562,39 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
 int host_llm_complete(LlamaPluginHost* host, const char* prompt, char** out_response) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !prompt || !out_response) return 0;
-    return host_llm_complete_local_or_cloud(host, pd, std::string(), prompt, out_response);
+
+    bool force_cloud = false;
+    auto* settings = pd->manager->subsystems.settings;
+    if (settings) {
+        const auto& cp = settings->cloud_provider();
+        if (cp.enabled && !cp.model_id.empty()) {
+            force_cloud = true;
+        }
+    }
+
+    return host_llm_complete_local_or_cloud(host, pd, std::string(), prompt, out_response, force_cloud);
 }
 
 int host_llm_complete_ex(LlamaPluginHost* host, const char* system_prompt,
                          const char* user_prompt, char** out_response) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !user_prompt || !out_response) return 0;
+
+    // Если облачный провайдер настроен — отправляем запрос напрямую в облако,
+    // чтобы модель получила system_prompt с описанием инструментов агента,
+    // а не шла через локальный сервер (который может не поддерживать протокол).
+    bool force_cloud = false;
+    auto* settings = pd->manager->subsystems.settings;
+    if (settings) {
+        const auto& cp = settings->cloud_provider();
+        if (cp.enabled && !cp.model_id.empty()) {
+            force_cloud = true;
+        }
+    }
+
     return host_llm_complete_local_or_cloud(
         host, pd, system_prompt ? std::string(system_prompt) : std::string(),
-        user_prompt, out_response);
+        user_prompt, out_response, force_cloud);
 }
 
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
@@ -657,6 +690,41 @@ void host_free_float_array(LlamaPluginHost*, float* arr) {
     free(arr);
 }
 
+LlamaPluginAgentMode* host_agent_mode_register(LlamaPluginHost* host,
+                                                const LlamaPluginAgentMode* mode) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !mode || !mode->name || !mode->display_name) return nullptr;
+    /* Проверка уникальности имени. */
+    for (const auto& am : pd->manager->agent_modes) {
+        if (am.mode.name == std::string(mode->name)) return nullptr;
+    }
+    PluginImpl::RegisteredAgentMode ram;
+    ram.mode = *mode;
+    ram.host = host;
+    pd->manager->agent_modes.push_back(std::move(ram));
+    return &pd->manager->agent_modes.back().mode;
+}
+
+void host_agent_mode_unregister(LlamaPluginHost* host, LlamaPluginAgentMode* mode) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !mode) return;
+    auto& modes = pd->manager->agent_modes;
+    for (auto it = modes.begin(); it != modes.end(); ++it) {
+        if (&it->mode == mode) {
+            modes.erase(it);
+            return;
+        }
+    }
+}
+
+void host_agent_mode_push_event(LlamaPluginHost* host, const char* event_text) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !event_text) return;
+    auto* ci = pd->manager->subsystems.chat_interface;
+    if (!ci) return;
+    ci->add_assistant_message(event_text);
+}
+
 const char* host_app_version() {
     static const std::string version = core::getVersionFull();
     return version.c_str();
@@ -710,6 +778,10 @@ const LlamaHostApi& host_api_table() {
 
         a.free_string = host_free_string;
         a.free_float_array = host_free_float_array;
+
+        a.agent_mode_register = host_agent_mode_register;
+        a.agent_mode_unregister = host_agent_mode_unregister;
+        a.agent_mode_push_event = host_agent_mode_push_event;
         return a;
     }();
     return api;
@@ -981,12 +1053,15 @@ bool PluginManager::load_plugin_file(const std::string& path) {
             impl_->subsystems.window_manager
                 ? impl_->subsystems.window_manager->getImGuiName(wm_name)
                 : std::string();
+        // render_always=true: координатор проверяет isWindowVisible(name), но
+        // окна плагина зарегистрированы под другими именами (wp_coder_project и т.д.).
+        // render_fn сам проверяет видимость каждого окна через window_is_visible.
         impl_->subsystems.window_coordinator->registerWindow(
             wm_name,
             [p = plugin.get()]() {
                 if (p && p->render_fn) p->render_fn();
             },
-            false, imgui_name, nullptr);
+            true, imgui_name, nullptr);
         plugin->rendered_by_coordinator = true;
     }
 
@@ -1108,6 +1183,16 @@ bool PluginManager::is_plugin_loaded(const std::string& name) const {
         if (up->info.name == name) return true;
     }
     return false;
+}
+
+std::vector<PluginManager::AgentModeInfo> PluginManager::get_agent_modes() const {
+    std::vector<AgentModeInfo> result;
+    if (!impl_) return result;
+    result.reserve(impl_->agent_modes.size());
+    for (const auto& am : impl_->agent_modes) {
+        result.push_back({&am.mode, am.host});
+    }
+    return result;
 }
 
 } // namespace plugin

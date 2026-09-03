@@ -1633,6 +1633,11 @@ void MainWindow::initializePlugins() {
     subsystems.plugins_dir = "plugins";
 
     plugin_manager_->initialize(subsystems);
+
+    // Передаём plugin_manager в ChatInterface для поддержки режимов агентов
+    if (chat_interface_ && plugin_manager_) {
+        chat_interface_->set_plugin_manager(plugin_manager_.get());
+    }
 }
 
 namespace {

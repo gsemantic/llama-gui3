@@ -3,9 +3,12 @@
 #include "../include/ui/localization_manager.h"
 #include "../include/ui/file_dialog_helper.h"
 #include "../include/ui/file_dialog_manager.h"
+#include "../include/plugins/plugin_manager.h"
 #include "imgui.h"
 #include <iostream>
 #include <algorithm>
+#include <thread>
+#include <functional>
 
 namespace llama_gui {
 namespace ui {
@@ -279,6 +282,88 @@ void ChatInterface::render_attachments() {
     }
 
     ImGui::Spacing();
+}
+
+void ChatInterface::render_agent_mode_selector() {
+    if (!plugin_manager_) return;
+    auto modes = plugin_manager_->get_agent_modes();
+    if (modes.empty()) return;
+
+    ImGui::Separator();
+    ImGui::Text("Режим:");
+    ImGui::SameLine();
+
+    // Строим список для Combo: "Normal\0WP Agent\0..."
+    std::vector<std::string> names;
+    names.push_back("Normal");
+    for (const auto& m : modes) {
+        names.push_back(m.mode->display_name ? m.mode->display_name : m.mode->name);
+    }
+
+    // Формируем buffer для ImGui::Combo (разделённый \0)
+    std::string combo_buf;
+    for (const auto& n : names) {
+        combo_buf += n;
+        combo_buf += '\0';
+    }
+    combo_buf += '\0';
+
+    int idx = active_agent_mode_index_ + 1; // 0=Normal, 1+=plugin modes
+    if (ImGui::Combo("##agent_mode", &idx, combo_buf.c_str())) {
+        active_agent_mode_index_ = idx - 1;
+    }
+    ImGui::SameLine();
+    if (active_agent_mode_index_ >= 0) {
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s",
+            names[idx].c_str());
+    } else {
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Local LLM");
+    }
+}
+
+void ChatInterface::send_message_to_agent(const std::string& message) {
+    std::cerr << "[Chat] send_message_to_agent called, agent_mode=" << active_agent_mode_index_ << std::endl;
+    if (!plugin_manager_ || active_agent_mode_index_ < 0) return;
+    auto modes = plugin_manager_->get_agent_modes();
+    if (active_agent_mode_index_ >= (int)modes.size()) return;
+
+    const auto& m = modes[active_agent_mode_index_];
+    if (!m.mode->on_message) return;
+
+    // Добавляем сообщение пользователя в чат
+    add_user_message(message);
+
+    // Получаем ID активной конверсации для доставки ответа агента
+    std::string conv_id;
+    {
+        auto all_convs = state_manager_.get_all_conversations();
+        for (auto* conv : all_convs) {
+            if (conv->is_active) {
+                conv_id = conv->id;
+                break;
+            }
+        }
+    }
+
+    // Копируем данные для фонового потока (modes — локальный vector)
+    LlamaPluginHost* host = m.host;
+    std::function<char*(LlamaPluginHost*, const char*, void*)> on_msg = m.mode->on_message;
+    void* user_data = m.mode->user_data;
+    // free_string ищем через host_api_table() — он доступен из plugin_manager.cpp
+    // но здесь используем простой free(), т.к. host_free_string = free(str)
+    auto free_fn = [](char* p) { if (p) free(p); };
+
+    std::thread([this, host, on_msg, user_data, message, free_fn, conv_id]() {
+        char* response = on_msg(host, message.c_str(), user_data);
+        if (response) {
+            std::string resp_str = response;
+            free_fn(response);
+            {
+                std::lock_guard<std::mutex> lk(pending_responses_mutex_);
+                pending_responses_.push_back({resp_str, conv_id});
+            }
+        }
+    }).detach();
 }
 
 } // namespace ui

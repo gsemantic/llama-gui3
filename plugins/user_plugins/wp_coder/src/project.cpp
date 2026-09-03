@@ -36,6 +36,7 @@ void project_load_settings() {
     g_state.deploy_port      = setting_get_str("wp_coder.deploy_port", "");
     g_state.deploy_remote_dir= setting_get_str("wp_coder.deploy_remote_dir", "");
     g_state.wp_local_url    = setting_get_str("wp_coder.local_url", "");
+    g_state.agent_system_prompt = setting_get_str("wp_coder.agent_system_prompt", kSystemPrompt);
 }
 
 void project_save_settings() {
@@ -51,6 +52,7 @@ void project_save_settings() {
     setting_set_str("wp_coder.deploy_port", g_state.deploy_port);
     setting_set_str("wp_coder.deploy_remote_dir", g_state.deploy_remote_dir);
     setting_set_str("wp_coder.local_url", g_state.wp_local_url);
+    setting_set_str("wp_coder.agent_system_prompt", g_state.agent_system_prompt);
 }
 
 void skills_load() {

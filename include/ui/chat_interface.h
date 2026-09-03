@@ -19,6 +19,7 @@
 struct ImGuiInputTextCallbackData;
 namespace llama_gui { namespace core { class ModelManager; } }
 namespace llama_gui { namespace ui { class RagInterface; class FileDialogManager; } }
+namespace llama_gui { namespace plugin { class PluginManager; } }
 
 namespace llama_gui {
 namespace ui {
@@ -120,6 +121,7 @@ public:
     }
     bool is_rag_enabled() const { return rag_enabled_; }
     void set_window_manager(class WindowManager* wm) { window_manager_ = wm; }
+    void set_plugin_manager(class llama_gui::plugin::PluginManager* pm) { plugin_manager_ = pm; }
     std::string process_with_rag(const std::string& user_input, bool use_cache = true);
     void cache_current_interaction(const std::string& query, const std::string& response);
 
@@ -177,9 +179,11 @@ private:
     void render_attachments();
     void render_typing_indicator();
     void render_rag_mini_indicator();
+    void render_agent_mode_selector();
 
     void send_message();
     void send_message_via_openrouter();
+    void send_message_to_agent(const std::string& message);
     void clear_input();
     void scroll_to_bottom();
     void process_pending_responses();
@@ -248,6 +252,10 @@ private:
 
     // Window manager for dock support
     class WindowManager* window_manager_ = nullptr;
+
+    // Plugin manager (for agent modes)
+    class llama_gui::plugin::PluginManager* plugin_manager_ = nullptr;
+    int active_agent_mode_index_ = -1;  // -1 = Normal, >=0 = plugin agent mode
 
     // Context extension components
     llama_gui::core::ContextMonitor context_monitor_;

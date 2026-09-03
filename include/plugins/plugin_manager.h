@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "plugins/plugin_api.h"
 
 // ============================================================================
 // PluginManager — хост системы плагинов llama-gui.
@@ -110,6 +111,13 @@ public:
 
     std::vector<PluginInfo> list_plugins() const;
     bool is_plugin_loaded(const std::string& name) const;
+
+    /* Зарегистрированные режимы агентов (для интеграции с ChatInterface). */
+    struct AgentModeInfo {
+        const LlamaPluginAgentMode* mode;
+        LlamaPluginHost* host;
+    };
+    std::vector<AgentModeInfo> get_agent_modes() const;
 
 private:
     bool load_plugin_file(const std::string& path);

@@ -43,6 +43,7 @@ typedef struct LlamaPlugin LlamaPlugin;
 typedef struct LlamaPluginMenu LlamaPluginMenu;       /* хендл добавленного меню */
 typedef struct LlamaPluginCommand LlamaPluginCommand; /* хендл зарегистрированной команды */
 typedef struct LlamaPluginWindow LlamaPluginWindow;   /* хендл зарегистрированного окна */
+typedef struct LlamaPluginAgentMode LlamaPluginAgentMode; /* хендл зарегистрированного режима агента */
 
 /* Уровни логирования */
 enum {
@@ -56,6 +57,29 @@ enum {
 typedef void (*LlamaPluginCallback)(void* user_data);
 
 typedef struct LlamaHostApi LlamaHostApi;
+
+/*
+ * Режим агента плагина. Плагин регистрирует режим, и он появляется
+ * в селекторе режимов основного чата. Когда режим активен, сообщения
+ * пользователя перенаправляются в on_message вместо LLM.
+ */
+typedef struct LlamaPluginAgentMode {
+    const char* name;           /* уникальное имя [a-z0-9_-] */
+    const char* display_name;   /* отображаемое имя в UI */
+    /*
+     * Обработчик сообщений пользователя.
+     * Возвращает текст-ответ (выделяется хостом, освобождается через free_string).
+     * Может вызываться из фонового потока — не рисовать ImGui внутри.
+     */
+    char* (*on_message)(LlamaPluginHost* host, const char* user_message, void* user_data);
+    /*
+     * Рендер дополнительного UI под лентой сообщений.
+     * Вызывается каждый кадр из render() чата когда режим активен.
+     * Рисовать ImGui внутри.
+     */
+    void (*render_extras)(LlamaPluginHost* host, void* user_data);
+    void* user_data;
+} LlamaPluginAgentMode;
 
 /*
  * Таблица функций хоста. Плагин получает её в ll_plugin_init и может
@@ -151,6 +175,16 @@ struct LlamaHostApi {
        (обратная совместимость по offsetof при старом хосте). */
     int (*llm_complete_ex)(LlamaPluginHost* host, const char* system_prompt,
                            const char* user_prompt, char** out_response);
+
+    /* --- Режимы агентов (плагин-интеграция в основной чат) --- */
+    /* Регистрация режима агента. Возвращает хендл или NULL при ошибке.
+       Режим появляется в селекторе режимов чата. */
+    LlamaPluginAgentMode* (*agent_mode_register)(LlamaPluginHost* host,
+                                                 const LlamaPluginAgentMode* mode);
+    /* Удаление режима. */
+    void (*agent_mode_unregister)(LlamaPluginHost* host, LlamaPluginAgentMode* mode);
+    /* Отправка события из плагина в чат (отображается как сообщение ассистента). */
+    void (*agent_mode_push_event)(LlamaPluginHost* host, const char* event_text);
 };
 
 /* Информация о плагине (возвращается ll_plugin_info, статична) */

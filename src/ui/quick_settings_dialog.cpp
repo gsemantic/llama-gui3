@@ -164,17 +164,26 @@ void QuickSettingsDialog::render_chat_tab() {
 
     auto& chat = settings_.chat();
 
-    // System Prompt
+    // System Prompt (используется в Normal mode — напрямую в облако без агента)
+    ImGui::Text("System Prompt (Normal mode):");
     static char system_prompt_buf[1024];
-    strncpy(system_prompt_buf, chat.default_system_prompt.c_str(), sizeof(system_prompt_buf) - 1);
-    system_prompt_buf[sizeof(system_prompt_buf) - 1] = '\0';
+    static bool sp_initialized = false;
+    if (!sp_initialized) {
+        std::string val = chat.default_system_prompt.empty()
+            ? "You are a helpful assistant."
+            : chat.default_system_prompt;
+        strncpy(system_prompt_buf, val.c_str(), sizeof(system_prompt_buf) - 1);
+        system_prompt_buf[sizeof(system_prompt_buf) - 1] = '\0';
+        sp_initialized = true;
+    }
 
-    if (ImGui::InputTextMultiline("System Prompt", system_prompt_buf, sizeof(system_prompt_buf), 
+    if (ImGui::InputTextMultiline("##system_prompt", system_prompt_buf, sizeof(system_prompt_buf),
                                    ImVec2(-FLT_MIN, 80.0f))) {
         chat.default_system_prompt = system_prompt_buf;
         settings_modified_ = true;
     }
     InputTextContextMenu();
+    ImGui::TextDisabled("Промпт для прямого облачного режима (без WP Agent). По умолчанию: 'You are a helpful assistant.'");
 
     ImGui::Separator();
 

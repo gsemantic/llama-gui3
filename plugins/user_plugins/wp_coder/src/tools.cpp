@@ -235,6 +235,114 @@ std::string list_skills() {
     return s.str();
 }
 
+/* git_status: статус git-репозитория в корне проекта. */
+std::string git_status() {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    std::string cmd = "cd \"" + g_state.project_dir + "\" && git status --short 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить git status";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    if (out.empty()) return "[git status: чисто — нет изменений]";
+    return "[git status]:\n" + out;
+}
+
+/* git_diff: разница между рабочей директорией и HEAD. */
+std::string git_diff(const std::string& path) {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    std::string cmd = "cd \"" + g_state.project_dir + "\" && git diff";
+    if (!path.empty()) cmd += " -- " + path;
+    cmd += " 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить git diff";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    return out.empty() ? "[git diff: нет изменений]" : "[git diff]:\n" + out;
+}
+
+/* git_log: последние N коммитов. */
+std::string git_log(int n) {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    if (n <= 0) n = 10;
+    std::string cmd = "cd \"" + g_state.project_dir + "\" && git log --oneline -" 
+                      + std::to_string(n) + " 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить git log";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    return out.empty() ? "[git log: нет коммитов]" : "[git log]:\n" + out;
+}
+
+/* git_commit: создание коммита с сообщением. */
+std::string git_commit(const std::string& message) {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    if (message.empty()) return "[ошибка] пустое сообщение коммита";
+    std::string cmd = "cd \"" + g_state.project_dir + "\" && git add -A && git commit -m \""
+                      + message + "\" 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить git commit";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    return "[git commit]: " + (out.empty() ? "успешно" : out);
+}
+
+/* wp_db: выполнение SQL-запроса через wp db. */
+std::string wp_db(const std::string& query) {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    if (query.empty()) return "[ошибка] пустой SQL-запрос";
+    std::string cmd = "wp --path=\"" + g_state.project_dir + "\" db query \""
+                      + query + "\" --no-color 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить wp db query";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    return out.empty() ? "[wp db query: нет вывода]" : out;
+}
+
+/* wp_media: список медиафайлов через wp media list. */
+std::string wp_media(int count) {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    if (count <= 0) count = 20;
+    std::string cmd = "wp --path=\"" + g_state.project_dir + "\" media list --posts_per_page="
+                      + std::to_string(count) + " --no-color 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить wp media list";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    return out.empty() ? "[wp media list: нет медиафайлов]" : out;
+}
+
+/* wp_option: чтение опции WordPress. */
+std::string wp_option(const std::string& name) {
+    if (g_state.project_dir.empty()) return "[ошибка] не задан project_dir";
+    if (name.empty()) return "[ошибка] пустое имя опции";
+    std::string cmd = "wp --path=\"" + g_state.project_dir + "\" option get \""
+                      + name + "\" --no-color 2>&1";
+    FILE* f = popen(cmd.c_str(), "r");
+    if (!f) return "[ошибка] не удалось запустить wp option get";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    pclose(f);
+    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    return out.empty() ? "[wp option get: опция не найдена]" : out;
+}
+
 std::string rag_index(const std::string& root) {
     std::string base = root.empty() ? g_state.project_dir : root;
     if (base.empty()) return "[ошибка] не задан корень индексации (project_dir / root)";
@@ -302,6 +410,215 @@ std::string repo_map(const std::string& root) {
         out << "\n";
     }
     return out.str();
+}
+
+/* run_capture: запуск команды, возврат stdout + статус. */
+bool run_capture(const std::string& cmd, std::string& out, int& exit_code) {
+    std::string full = cmd + " 2>&1";
+    FILE* f = popen(full.c_str(), "r");
+    if (!f) { out = "[ошибка] не удалось запустить: " + cmd; exit_code = -1; return false; }
+    char buf[4096];
+    out.clear();
+    while (fgets(buf, sizeof(buf), f)) out += buf;
+    exit_code = pclose(f);
+    return exit_code == 0;
+}
+
+/* wp_check_deps: проверка зависимостей для WordPress. */
+std::string wp_check_deps() {
+    std::stringstream s;
+    s << "[Проверка зависимостей WordPress]\n\n";
+    int ok = 0, fail = 0, warn = 0;
+
+    auto check = [&](const std::string& name, const std::string& cmd, const std::string& hint) {
+        std::string out; int rc;
+        bool found = run_capture(cmd, out, rc) && !out.empty();
+        if (found) {
+            s << "✅ " << name << ": " << out.substr(0, out.find('\n')) << "\n";
+            ok++;
+        } else {
+            s << "❌ " << name << ": НЕ НАЙДЕН\n   Установка: " << hint << "\n";
+            fail++;
+        }
+    };
+
+    check("PHP CLI", "php -v", "sudo apt install php-cli php-mysql php-xml php-mbstring php-curl php-zip php-gd");
+    check("MySQL/MariaDB", "mariadb --version || mysql --version", "sudo apt install mariadb-server");
+    check("WP-CLI", "wp --info --allow-root 2>/dev/null | head -1", "curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && sudo mv wp-cli.phar /usr/local/bin/wp && sudo chmod +x /usr/local/bin/wp");
+    check("Git", "git --version", "sudo apt install git");
+    check("Apache2", "apache2 -v 2>/dev/null | head -1", "sudo apt install apache2");
+    check("curl", "curl --version | head -1", "sudo apt install curl");
+
+    /* Проверяем модули PHP */
+    s << "\n[Модули PHP]\n";
+    std::string php_out; int php_rc;
+    run_capture("php -m", php_out, php_rc);
+    auto check_mod = [&](const std::string& mod) {
+        if (php_out.find(mod) != std::string::npos) {
+            s << "  ✅ " << mod << "\n"; ok++;
+        } else {
+            s << "  ❌ " << mod << " — НУЖЕН (sudo apt install php-" + mod + ")\n"; fail++;
+        }
+    };
+    check_mod("mysqli");
+    check_mod("xml");
+    check_mod("mbstring");
+    check_mod("curl");
+    check_mod("zip");
+    check_mod("gd");
+
+    /* Проверяем статус сервисов */
+    s << "\n[Сервисы]\n";
+    {
+        std::string out; int rc;
+        run_capture("systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null", out, rc);
+        bool db_running = (out.find("active") != std::string::npos);
+        s << (db_running ? "✅" : "⚠️") << " MariaDB/MySQL: " << (db_running ? "запущен" : "не запущен (sudo systemctl start mariadb)") << "\n";
+        if (db_running) ok++; else warn++;
+    }
+    {
+        std::string out; int rc;
+        run_capture("systemctl is-active apache2 2>/dev/null", out, rc);
+        bool web_running = (out.find("active") != std::string::npos);
+        s << (web_running ? "✅" : "⚠️") << " Apache2: " << (web_running ? "запущен" : "не запущен (sudo systemctl start apache2)") << "\n";
+        if (web_running) ok++; else warn++;
+    }
+
+    s << "\n[Итого]✅ " << ok << " OK | ❌ " << fail << " ошибок | ⚠️ " << warn << " предупреждений\n";
+    if (fail > 0) {
+        s << "\nДля установки всех зависимостей:\n";
+        s << "sudo apt install php-cli php-mysql php-xml php-mbstring php-curl php-zip php-gd mariadb-server apache2 git curl\n";
+    }
+    return s.str();
+}
+
+/* wp_create_site: создание нового WordPress сайта с нуля. */
+std::string wp_create_site(const std::string& site_name_in, const std::string& db_name_in,
+                            const std::string& db_user_in, const std::string& db_pass_in,
+                            const std::string& site_url_in) {
+    if (site_name_in.empty())
+        return "[ошибка] укажи имя сайта (напр. 'my-site')";
+    std::string site_name = site_name_in;
+    std::string db_name = db_name_in.empty() ? "wp_" + site_name : db_name_in;
+    std::string db_user = db_user_in.empty() ? "wp_" + site_name : db_user_in;
+    std::string db_pass = db_pass_in.empty() ? "pass_" + site_name : db_pass_in;
+    std::string site_url = site_url_in;
+
+    std::string docroot = "/var/www/" + site_name;
+    std::stringstream s;
+    s << "[Создание WordPress-сайта: " << site_name << "]\n\n";
+    int step = 0;
+
+    auto run_step = [&](const std::string& desc, const std::string& cmd) {
+        s << ++step << ". " << desc << "... ";
+        std::string out; int rc;
+        bool ok = run_capture(cmd, out, rc);
+        if (ok) {
+            s << "✅\n";
+        } else {
+            s << "❌\n   Ошибка: " << out.substr(0, 500) << "\n";
+            return false;
+        }
+        return true;
+    };
+
+    /* 1. Создание директории */
+    if (!run_step("Создание директории " + docroot,
+                   "sudo mkdir -p " + docroot + " && sudo chown -R www-data:www-data " + docroot))
+        return s.str();
+
+    /* 2. Создание БД */
+    {
+        std::string create_db = "sudo mariadb -e \"CREATE DATABASE IF NOT EXISTS `" + db_name
+            + "`; CREATE USER IF NOT EXISTS '" + db_user + "'@'localhost' IDENTIFIED BY '" + db_pass
+            + "'; GRANT ALL ON `" + db_name + "`.* TO '" + db_user + "'@'localhost'; FLUSH PRIVILEGES;\"";
+        if (!run_step("Создание БД " + db_name, create_db))
+            return s.str();
+    }
+
+    /* 3. Скачивание WordPress */
+    if (!run_step("Скачивание WordPress",
+                   "sudo -u www-data wp core download --path=" + docroot + " --locale=ru_RU --allow-root"))
+        return s.str();
+
+    /* 4. Конфигурация wp-config.php */
+    {
+        std::string wp_config = "sudo -u www-data wp config create --path=" + docroot
+            + " --dbname=" + db_name + " --dbuser=" + db_user + " --dbpass=" + db_pass
+            + " --allow-root 2>&1";
+        if (!run_step("Создание wp-config.php", wp_config))
+            return s.str();
+    }
+
+    /* 5. Установка WordPress */
+    {
+        std::string url = site_url.empty() ? "http://" + site_name + ".localhost" : site_url;
+        std::string install = "sudo -u www-data wp core install --path=" + docroot
+            + " --url=" + url + " --title=\"" + site_name
+            + "\" --admin_user=admin --admin_password=admin --admin_email=admin@" + site_name
+            + ".local --skip-email --allow-root 2>&1";
+        if (!run_step("Установка WordPress", install))
+            return s.str();
+    }
+
+    /* 6. Настройка Apache VirtualHost */
+    {
+        std::string vhost = "<VirtualHost *:80>\n"
+            "    ServerName " + site_name + ".localhost\n"
+            "    DocumentRoot " + docroot + "\n"
+            "    <Directory " + docroot + ">\n"
+            "        AllowOverride All\n"
+            "        Require all granted\n"
+            "    </Directory>\n"
+            "    ErrorLog ${APACHE_LOG_DIR}/" + site_name + "_error.log\n"
+            "    CustomLog ${APACHE_LOG_DIR}/" + site_name + "_access.log combined\n"
+            "</VirtualHost>\n";
+        std::string cmd = "echo '" + vhost + "' | sudo tee /etc/apache2/sites-available/" + site_name + ".conf > /dev/null";
+        if (!run_step("Создание Apache VirtualHost", cmd))
+            return s.str();
+    }
+
+    /* 7. Активация сайта */
+    if (!run_step("Активация сайта (a2ensite)",
+                   "sudo a2ensite " + site_name + ".conf"))
+        return s.str();
+
+    /* 8. Включение mod_rewrite */
+    {
+        std::string out2; int rc2;
+        run_capture("sudo a2enmod rewrite", out2, rc2); // может уже быть включён
+    }
+
+    /* 9. Перезагрузка Apache */
+    if (!run_step("Перезагрузка Apache",
+                   "sudo systemctl reload apache2"))
+        return s.str();
+
+    /* 10. Добавление записи в /etc/hosts (если .localhost) */
+    {
+        std::string hosts_entry = "127.0.0.1 " + site_name + ".localhost";
+        std::string check_hosts = "grep -q '" + site_name + ".localhost' /etc/hosts";
+        std::string out; int rc;
+        run_capture(check_hosts, out, rc);
+        if (rc != 0) {
+            run_capture("echo '" + hosts_entry + "' | sudo tee -a /etc/hosts > /dev/null", out, rc);
+            s << ++step << ". Добавление " + hosts_entry + " в /etc/hosts... ✅\n";
+        }
+    }
+
+    g_state.project_dir = docroot;
+    project_save_settings();
+
+    s << "\n" << std::string(50, '=') << "\n";
+    s << "✅ Готово! WordPress-сайт создан.\n\n";
+    s << "Директория:   " << docroot << "\n";
+    s << "URL:          " << (site_url.empty() ? "http://" + site_name + ".localhost" : site_url) << "\n";
+    s << "Админка:      " << (site_url.empty() ? "http://" + site_name + ".localhost" : site_url) + "/wp-admin/\n";
+    s << "Логин:        admin\n";
+    s << "Пароль:       admin\n";
+    s << "БД:           " << db_name << " (user: " << db_user << ", pass: " << db_pass << ")\n";
+    s << "\nТеперь можно работать через агента!";
+    return s.str();
 }
 
 } // namespace
@@ -374,6 +691,33 @@ std::string tool_run(const std::string& tool,
     }
     if (tool == "list_skills") {
         return list_skills();
+    }
+    if (tool == "git_status") {
+        return git_status();
+    }
+    if (tool == "git_diff") {
+        return git_diff(arg_path);
+    }
+    if (tool == "git_log") {
+        return git_log(arg_k);
+    }
+    if (tool == "git_commit") {
+        return git_commit(arg_query);
+    }
+    if (tool == "wp_db") {
+        return wp_db(arg_query);
+    }
+    if (tool == "wp_media") {
+        return wp_media(arg_k);
+    }
+    if (tool == "wp_option") {
+        return wp_option(arg_query);
+    }
+    if (tool == "wp_check_deps") {
+        return wp_check_deps();
+    }
+    if (tool == "wp_create_site") {
+        return wp_create_site(arg_query, arg_pattern, arg_content, arg_cli, arg_url);
     }
     return "[ошибка] неизвестный инструмент: " + tool;
 }

@@ -31,83 +31,59 @@ void setting_set_str(const std::string& key, const std::string& value) {
  *   ```
  * Для write_file контент между CONTENT_BEGIN / CONTENT_END.
  */
-namespace {
 
 const char* kSystemPrompt =
-    "Ты — AI-кодер для WordPress (темы, плагины, хуки, REST, опции). "
-    "Работаешь с локальным сайтом на диске. Когда нужно прочитать/изменить файл, "
-    "найти хук или проверить синтаксис — используй инструменты. "
-    "Доступные инструменты (выводи РОВНО один блок ```wp_action ... ``` за раз):\n"
-    "  TOOL: read_file        PATH: <отн. путь>\n"
-    "  TOOL: write_file       PATH: <отн. путь>\n"
-    "      CONTENT_BEGIN\n<полное содержимое файла>\nCONTENT_END\n"
-    "  TOOL: grep_hooks       ROOT: <отн. каталог, опц.>  PATTERN: <regex по имени хука, опц.>\n"
-    "  TOOL: php_lint         PATH: <отн. путь>\n"
-    "  TOOL: wp_cli           CLI: <аргументы wp-cli, напр. 'plugin list'>\n"
-    "  TOOL: headless_render  URL: <http(s)-адрес страницы для проверки DOM>\n"
-    "  TOOL: rag_index        ROOT: <отн. каталог, опц.>      (проиндексировать php в RAG)\n"
-    "  TOOL: rag_query        QUERY: <запрос>  K: <число, опц.>\n"
-    "  TOOL: repo_map         ROOT: <отн. каталог, опц.>      (компактный обзор проекта)\n"
-    "  TOOL: wp_rest          QUERY: <эндпоинт wp/v2, напр. 'posts?per_page=3'>\n"
-    "  TOOL: validate         (php -l по всему проекту, ловит синтаксис)\n"
-    "  TOOL: verify           (авто-проверка: php -l + HTTP-статус + рендер лок. сайта)\n"
-    "  TOOL: deploy           (пуш на хостер: rsync или внешний deploy.sh)\n"
-    "  TOOL: list_skills      (показать доступные навыки)\n"
-    "Пути — относительно корня проекта. После каждого вызова тебе вернут RESULT, "
-    "анализируй его и продолжай, пока не дашь финальный ответ без блока wp_action.";
+    "Ты — AI-ассистент для работы с WordPress-проектом.\n\n"
+    "## ПРОТОКОЛ ВЫЗОВА ИНСТРУМЕНТОВ\n\n"
+    "У тебя есть инструменты. Чтобы вызвать инструмент — выведи блок:\n\n"
+    "```\nwp_action\nTOOL: имя\nПARAM: значение\n```\n\n"
+    "Приложение выполнит команду и вернёт RESULT. Ты НЕ выполняешь сам.\n\n"
+    "ПРИМЕРЫ:\n\n"
+    "Пользователь: «Покажи содержимое wp-config.php»\n"
+    "Твой ответ:\n"
+    "```\nwp_action\nTOOL: read_file\nPATH: wp-config.php\n```\n\n"
+    "Пользователь: «Проверь зависимости»\n"
+    "Твой ответ:\n"
+    "```\nwp_action\nTOOL: wp_check_deps\n```\n\n"
+    "Пользователь: «Какие хуки в functions.php?»\n"
+    "Твой ответ:\n"
+    "```\nwp_action\nTOOL: grep_hooks\nROOT: wp-content/themes\n```\n\n"
+    "ВАЖНО: ВСЕ пути — ОТНОСИТЕЛЬНЫЕ корня проекта (указан в [КОРНЕВОЙ КАТАЛОГ]).\n"
+    "Не используй абсолютные пути — приложение разрешит их автоматически.\n\n"
+    "ПРАВИЛА:\n"
+    "- РОВНО ОДИН wp_action блок за сообщение\n"
+    "- Не пиши «нет доступа» — инструменты работают через wp_action\n"
+    "- После получения RESULT — анализируй и продолжай\n"
+    "- Когда готово — текстовый ответ БЕЗ wp_action\n\n"
+    "## ИНСТРУМЕНТЫ\n\n"
+    "read_file     — чтение файла              PATH: <путь>\n"
+    "write_file    — запись файла              PATH: <путь> CONTENT_BEGIN ... CONTENT_END\n"
+    "grep_hooks    — поиск хуков WP            ROOT: <каталог> PATTERN: <regex>\n"
+    "php_lint      — проверка синтаксиса PHP   PATH: <путь>\n"
+    "wp_cli        — команда wp-cli            CLI: <аргументы>\n"
+    "repo_map      — обзор структуры проекта   ROOT: <каталог>\n"
+    "validate      — php -l по всему проекту\n"
+    "verify        — проверка (php -l + HTTP + рендер)\n"
+    "git_status    — статус git\n"
+    "git_diff      — разница с HEAD            PATH: <путь>\n"
+    "git_log       — история коммитов          K: <число>\n"
+    "git_commit    — коммит                    QUERY: <сообщение>\n"
+    "wp_db         — SQL-запрос                QUERY: <SQL>\n"
+    "wp_media      — список медиа              K: <число>\n"
+    "wp_option     — опция WordPress           QUERY: <имя опции>\n"
+    "wp_check_deps — проверка зависимостей (системная команда)\n"
+    "wp_create_site — создание WP-сайта        QUERY: <имя_сайта>\n"
+    "wp_rest       — REST API                  QUERY: <эндпоинт>\n"
+    "rag_index     — индексация в RAG          ROOT: <каталог>\n"
+    "rag_query     — поиск в RAG               QUERY: <запрос> K: <число>\n"
+    "deploy        — деплой на хостер\n"
+    "list_skills   — список навыков\n\n"
+    "Пути — относительно корня проекта. АБСОЛЮТНЫЕ пути (/home/...) тоже работают.\n"
+    "Ты можешь читать и изменять файлы ЛЮБОЙ части файловой системы,\n"
+    "если пользователь об этом просит. Указывай полный путь.\n"
+    "При работе с Git соблюдай правила из навыка wp_git.";
 
-void push_event(AgentEvent::Kind k, const std::string& text) {
-    std::lock_guard<std::mutex> lk(g_state.mtx);
-    g_state.events.push_back({k, text});
-    if (g_state.events.size() > 500) g_state.events.pop_front();
-}
-
-std::string extract_action(const std::string& text, std::string& rest) {
-    rest = text;
-    size_t a = text.find("```wp_action");
-    if (a == std::string::npos) return "";
-    size_t body = text.find('\n', a);
-    if (body == std::string::npos) return "";
-    size_t b = text.find("```", body);
-    if (b == std::string::npos) return "";
-    std::string block = text.substr(body + 1, b - body - 1);
-    rest = text.substr(0, a) + text.substr(b + 3);
-    return block;
-}
-
-/* Разбор блока wp_action в поля. */
-struct Action {
-    std::string tool, path, root, query, pattern, content, cli, url;
-    int k = 6;
-};
-
-bool parse_action(const std::string& block, Action& a) {
-    std::istringstream iss(block);
-    std::string line;
-    bool in_content = false;
-    while (std::getline(iss, line)) {
-        if (in_content) {
-            if (line == "CONTENT_END") in_content = false;
-            else a.content += line + "\n";
-            continue;
-        }
-        size_t c = line.find(':');
-        if (c == std::string::npos) continue;
-        std::string key = line.substr(0, c);
-        std::string val = line.substr(c + 1);
-        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(0, 1);
-        if (key == "TOOL") a.tool = val;
-        else if (key == "PATH") a.path = val;
-        else if (key == "ROOT") a.root = val;
-        else if (key == "QUERY") a.query = val;
-        else if (key == "PATTERN") a.pattern = val;
-        else if (key == "CLI") a.cli = val;
-        else if (key == "URL") a.url = val;
-        else if (key == "K") a.k = atoi(val.c_str());
-        else if (key == "CONTENT_BEGIN") in_content = true;
-    }
-    return !a.tool.empty();
-}
+namespace {
 
 void run_task(const std::string& task) {
     {
@@ -130,10 +106,19 @@ void run_task(const std::string& task) {
 
     std::string user = task;
     for (int step = 0; step < 12; ++step) {
-        /* Собираем системный промпт: база + активные навыки + режим. */
-        std::string sys = kSystemPrompt;
+        /* Собираем системный промпт: пользовательский или базовый + корень + навыки + режим. */
+        std::string sys = g_state.agent_system_prompt.empty()
+            ? std::string(kSystemPrompt)
+            : g_state.agent_system_prompt;
         {
             std::lock_guard<std::mutex> lk(g_state.mtx);
+            if (!g_state.project_dir.empty()) {
+                sys += "\n\n## КОРНЕВОЙ КАТАЛОГ ПРОЕКТА\n"
+                       "Корень: " + g_state.project_dir + "\n"
+                       "Все пути в инструментах — относительно этого каталога.\n"
+                       "Если пользователь указывает относительный путь — "
+                       "он разрешается относительно корня автоматически.";
+            }
             for (const auto& name : g_state.active_skills) {
                 for (const auto& sk : g_state.skills) {
                     if (sk.name == name) {
@@ -202,6 +187,75 @@ void worker_main() {
 }
 
 } // namespace
+
+void push_event(AgentEvent::Kind k, const std::string& text) {
+    std::lock_guard<std::mutex> lk(g_state.mtx);
+    g_state.events.push_back({k, text});
+    if (g_state.events.size() > 500) g_state.events.pop_front();
+}
+
+std::string extract_action(const std::string& text, std::string& rest) {
+    rest = text;
+    // Пробуем два формата: ```wp_action и просто ``` (модели иногда опускают язык)
+    size_t a = text.find("```wp_action");
+    if (a == std::string::npos) {
+        a = text.find("```\nwp_action");
+        if (a == std::string::npos) {
+            // Пробуем найти純 ``` без языка, но с wp_action в теле
+            a = text.find("```");
+            if (a == std::string::npos) return "";
+            size_t body_check = text.find('\n', a);
+            if (body_check == std::string::npos) return "";
+            // Проверяем, что после ``` идёт wp_action
+            size_t wp = text.find("wp_action", body_check + 1);
+            size_t close = text.find("```", body_check + 1);
+            if (wp == std::string::npos || (close != std::string::npos && wp > close)) return "";
+        }
+    }
+    size_t body = text.find('\n', a);
+    if (body == std::string::npos) return "";
+    size_t b = text.find("```", body);
+    if (b == std::string::npos) return "";
+    std::string block = text.substr(body + 1, b - body - 1);
+    rest = text.substr(0, a) + text.substr(b + 3);
+    return block;
+}
+
+bool parse_action(const std::string& block, Action& a) {
+    std::istringstream iss(block);
+    std::string line;
+    bool in_content = false;
+    while (std::getline(iss, line)) {
+        if (in_content) {
+            if (line.find("CONTENT_END") != std::string::npos) { in_content = false; continue; }
+            if (!a.content.empty()) a.content += '\n';
+            a.content += line;
+            continue;
+        }
+        auto pos = line.find(':');
+        if (pos == std::string::npos) continue;
+        std::string key = line.substr(0, pos);
+        std::string val = line.substr(pos + 1);
+        /* trim */
+        auto trim = [](std::string& s) {
+            while (!s.empty() && s.back() == '\r') s.pop_back();
+            size_t b = s.find_first_not_of(" \t");
+            size_t e = s.find_last_not_of(" \t");
+            s = (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
+        };
+        trim(key); trim(val);
+        if (key == "TOOL") a.tool = val;
+        else if (key == "PATH") a.path = val;
+        else if (key == "ROOT") a.root = val;
+        else if (key == "QUERY") a.query = val;
+        else if (key == "PATTERN") a.pattern = val;
+        else if (key == "CLI") a.cli = val;
+        else if (key == "URL") a.url = val;
+        else if (key == "K") a.k = atoi(val.c_str());
+        else if (key == "CONTENT_BEGIN") in_content = true;
+    }
+    return !a.tool.empty();
+}
 
 void agent_start() {
     g_state.worker = std::thread(worker_main);

@@ -1,10 +1,10 @@
 # wp_coder — прогресс разработки (AI-кодер для WordPress)
 
-> Статус на 2026-08-26. Плагин собран (`build/plugins/libwp_coder.so`) и задеплоен
+> Статус на 2026-09-02. Плагин собран (`build/plugins/libwp_coder.so`) и задеплоен
 > рядом с исполняемым файлом (`build/plugins/wp_coder.json`). Загружается автоматически
-> при старте `build/llama-gui-core` (меню **WordPress**).
+> при старте `build/llama-gui-core` (меню **WordPress**). Добавлена Git-интеграция.
 
-## Что реализовано (план выполнен по Фазам 0–5)
+## Что реализовано (план выполнен по Фазам 0–8)
 
 | Фаза | Содержание | Статус |
 |---|---|---|
@@ -14,15 +14,18 @@
 | 3 | Удалённый WP + деплой: `wp_rest` (app_password Basic-auth), `validate` (`php -l`), `deploy` (rsync или внешний `deploy.sh`) | ✅ |
 | 4 | Безопасность правок: план-режим (правки не применяются сразу, список с «Применить»/«Отклонить») | ✅ |
 | 5 | Навыки (skills, как в opencode), ролевые режимы Code/Research/Review, `verify` (php -l + HTTP-статус + рендер лок. сайта) | ✅ |
+| 6 | Git-интеграция: `git_status`, `git_diff`, `git_log`, `git_commit`, окно «Git» в UI, навык `wp_git` | ✅ |
+| 7 | Улучшение UI: окно «Файлы» с деревом файлов, фильтрацией и быстрыми действиями | ✅ |
+| 8 | Расширение инструментов: `wp_db` (SQL-запросы), `wp_media` (медиафайлы), `wp_option` (опции WP), навыки `wp_database` и `wp_media` | ✅ |
 
 ## Архитектура (файлы в `plugins/user_plugins/wp_coder/`)
 
 - `src/wp_coder.h` — состояние `WpCoderState`, структуры `AgentEvent`/`PendingWrite`/`Skill`, прототипы.
-- `src/plugin_main.cpp` — `ll_plugin_init/render/shutdown`, меню, окна ImGui, UI «Проект»/«Агент».
+- `src/plugin_main.cpp` — `ll_plugin_init/render/shutdown`, меню, окна ImGui, UI «Проект»/«Агент»/«Git»/«Файлы».
 - `src/agent.cpp` — worker-поток: системный промпт + цикл `llm_complete_ex` → парсинг блока `wp_action` → `tool_run` → RESULT обратно в модель (до 12 шагов). Настройки `setting_get/set_str`.
 - `src/tools.cpp` — реализация инструментов (см. список ниже) + `pending_apply/pending_discard`.
 - `src/project.cpp` — `project_load/save_settings`, `project_detect_php`, `project_resolve`, `skills_load` (читает `*.md` из `<data_dir>/wp_coder/skills` и `skills/`).
-- `skills/wp_hook.md`, `wp_theme.md`, `wp_plugin_boilerplate.md` — поставляемые навыки.
+- `skills/wp_hook.md`, `wp_theme.md`, `wp_plugin_boilerplate.md`, `wp_git.md`, `wp_database.md`, `wp_media.md` — поставляемые навыки.
 - `CMakeLists.txt`, `plugin.json`.
 
 ### Протокол инструментов (запомнить для правок агента)
@@ -36,7 +39,8 @@ PATH: wp-content/themes/x/functions.php
 Поля: `TOOL`, `PATH`, `ROOT`, `QUERY`, `PATTERN`, `K`, `CLI`, `URL`, и `CONTENT_BEGIN … CONTENT_END` для `write_file`.
 Доступные `TOOL`: `read_file`, `write_file`, `grep_hooks`, `php_lint`, `wp_cli`,
 `headless_render`, `rag_index`, `rag_query`, `repo_map`, `wp_rest`, `validate`,
-`verify`, `deploy`, `list_skills`.
+`verify`, `deploy`, `list_skills`, `git_status`, `git_diff`, `git_log`, `git_commit`,
+`wp_db`, `wp_media`, `wp_option`.
 
 ### Потокобезопасность
 `llm_complete_ex`/`rag_*` дёргаются из worker-потока; UI (`ll_plugin_render`) только
@@ -81,6 +85,10 @@ cp plugins/user_plugins/wp_coder/plugin.json build/plugins/wp_coder.json
    сравнение headless-DOM до/после правки.
 7. **Навыки пользователя** — писать `.md` в `<data_dir>/wp_coder/skills` (путь подскажет
    `path_data_dir` хоста).
+8. **Предпросмотр файлов** — добавить возможность просмотра содержимого файла перед записью.
+9. **История изменений** — интеграция с git для отслеживания изменений в реальном времени.
+10. **Автодополнение путей** — добавить автодополнение путей к файлам при вводе в поля ввода.
+11. **Экспорт/импорт настроек** — возможность сохранения/загрузки конфигурации проекта.
 
 ## Ключевые ограничения среды (зафиксировано)
 - При разработке GitHub кратковременно был недоступен → сначала только `-fsyntax-only`;

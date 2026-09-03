@@ -112,6 +112,26 @@ void SettingsDialog::render_server_settings() {
 void SettingsDialog::render_chat_settings() {
     auto& chat_settings = settings_.chat();
 
+    // System Prompt (Normal mode — прямой облачный режим без агента)
+    ImGui::Text("System Prompt (Normal mode):");
+    static char system_prompt_buf[1024];
+    static bool sp_initialized = false;
+    if (!sp_initialized) {
+        std::string val = chat_settings.default_system_prompt.empty()
+            ? "You are a helpful assistant."
+            : chat_settings.default_system_prompt;
+        strncpy(system_prompt_buf, val.c_str(), sizeof(system_prompt_buf) - 1);
+        system_prompt_buf[sizeof(system_prompt_buf) - 1] = '\0';
+        sp_initialized = true;
+    }
+
+    if (ImGui::InputTextMultiline("##system_prompt", system_prompt_buf, sizeof(system_prompt_buf),
+                                   ImVec2(-FLT_MIN, 80.0f))) {
+        chat_settings.default_system_prompt = system_prompt_buf;
+    }
+    ImGui::TextDisabled("Промпт для прямого облачного режима (без WP Agent). По умолчанию: 'You are a helpful assistant.'");
+    ImGui::Separator();
+
     ImGui::Text(TR("chat.generation"));
     ImGui::Separator();
 

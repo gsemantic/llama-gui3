@@ -77,8 +77,23 @@ void ChatInterface::add_assistant_message(const std::string& content) {
 }
 
 void ChatInterface::send_message() {
+    std::cerr << "[Chat] send_message: agent_mode=" << active_agent_mode_index_
+              << " cloud=" << (settings_.cloud_provider().enabled ? "on" : "off")
+              << " model=" << settings_.cloud_provider().model_id << std::endl;
+    // Проверка: если активен режим агента плагина — перенаправляем
+    // (ДО проверки облачного провайдера, т.к. агент сам вызывает llm_complete_ex,
+    //  который автоматически делает cloud fallback через host_llm_complete_local_or_cloud)
+    if (active_agent_mode_index_ >= 0) {
+        std::cerr << "[Chat] -> agent mode path" << std::endl;
+        std::string msg(input_buffer_);
+        clear_input();
+        send_message_to_agent(msg);
+        return;
+    }
+
     // Проверка: если включен облачный провайдер - используем его
     if (settings_.cloud_provider().enabled && !settings_.cloud_provider().model_id.empty()) {
+        std::cerr << "[Chat] -> cloud provider path" << std::endl;
         send_message_via_openrouter();
         return;
     }
