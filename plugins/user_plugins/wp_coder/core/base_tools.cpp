@@ -1,6 +1,7 @@
 #include "base_tools.h"
 #include "tools_registry.h"
 #include "engine.h"
+#include "security.h"
 
 #include <fstream>
 #include <sstream>
@@ -188,6 +189,10 @@ void register_base_tools() {
                    + " (" + std::to_string(a.content.size()) + " байт)";
         }
         std::string abs = resolve_path(a.path);
+        if (!security::is_path_safe(a.path))
+            return "[запрещено] небезопасный путь: " + a.path;
+        if (!security::is_path_not_dangerous(abs))
+            return "[запрещено] запись запрещена в: " + abs;
         std::ofstream f(abs, std::ios::binary);
         if (!f) return "[ошибка] не удалось записать: " + abs;
         f << a.content;
@@ -256,16 +261,11 @@ void register_base_tools() {
     /* exec_command: запуск shell-команды. */
     reg.register_tool("exec_command", [](const ToolArgs& a) -> std::string {
         if (a.cli.empty()) return "[ошибка] пустая команда (CLI)";
-        /* Базовая проверка на опасные команды. */
-        std::string cmd = a.cli;
-        std::vector<std::string> blocked = {"rm -rf /", "mkfs", "dd if=", "> /dev/sda"};
-        for (const auto& b : blocked) {
-            if (cmd.find(b) != std::string::npos)
-                return "[запрещено] опасная команда: " + b;
-        }
-        std::string full = cmd + " 2>&1";
+        if (!security::is_command_allowed(a.cli))
+            return "[запрещено] команда заблокирована политикой безопасности";
+        std::string full = a.cli + " 2>&1";
         FILE* f = popen(full.c_str(), "r");
-        if (!f) return "[ошибка] не удалось запустить: " + cmd;
+        if (!f) return "[ошибка] не удалось запустить: " + a.cli;
         char buf[4096];
         std::string out;
         while (fgets(buf, sizeof(buf), f)) out += buf;

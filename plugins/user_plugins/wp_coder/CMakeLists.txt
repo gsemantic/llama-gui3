@@ -23,6 +23,7 @@ set(CORE_SOURCES
     core/base_tools.cpp
     core/git_tools.cpp
     core/project.cpp
+    core/security.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -99,6 +100,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_skills_manager.cpp
         tests/test_engine.cpp
         tests/test_module_api.cpp
+        tests/test_security.cpp
     )
     target_include_directories(wp_coder_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
