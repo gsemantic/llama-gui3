@@ -256,6 +256,21 @@ void render_all_windows() {
 void render_extras() {
     auto& st = engine_state();
 
+    /* Индикатор статуса агента. */
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        if (st.running) {
+            float t = (float)ImGui::GetTime();
+            const char spinner[] = "|/-\\";
+            int idx = (int)(t * 4.0f) % 4;
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                "%c Агент работает...", spinner[idx]);
+        } else if (st.waiting_for_permission) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
+                "! Ожидание разрешения доступа");
+        }
+    }
+
     /* План-режим. */
     {
         std::lock_guard<std::mutex> lk(st.mtx);
