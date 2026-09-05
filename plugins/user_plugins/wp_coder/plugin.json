@@ -1,11 +1,11 @@
 {
     "name": "wp_coder",
-    "version": "0.1.0",
-    "description": "AI-кодер для WordPress: темы, плагины, хуки, RAG, локалхост→деплой (MVP)",
+    "version": "0.2.0",
+    "description": "AI-кодер с модульной архитектурой: WordPress, Python, ...",
     "author": "llama-gui",
     "api_version": "1.0.0",
     "permissions": ["rag_access", "llm_access", "chat_access", "filesystem_read", "filesystem_write", "execution", "network"],
-    "capabilities": ["code_generation", "wordpress", "rag", "ui_window", "agent"],
+    "capabilities": ["code_generation", "wordpress", "python", "rag", "ui_window", "agent", "modules"],
     "min_llama_gui_version": "0.1.60",
     "platforms": ["linux", "windows", "macos"]
 }

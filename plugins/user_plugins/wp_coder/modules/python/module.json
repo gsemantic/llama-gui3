@@ -1,0 +1,16 @@
+{
+    "name": "python",
+    "version": "0.1.0",
+    "description": "Модуль Python: Django, Flask, FastAPI, pip, pytest, venv",
+    "author": "llama-gui",
+    "type": "module",
+    "parent_plugin": "wp_coder",
+    "capabilities": ["python", "django", "flask", "fastapi", "pytest"],
+    "tools": [
+        "python_run", "pip_install", "django_manage", "pytest_run",
+        "venv_create", "python_lint"
+    ],
+    "skills": [
+        "python_django", "python_flask", "python_fastapi", "python_project"
+    ]
+}

@@ -1,0 +1,18 @@
+{
+    "name": "wordpress",
+    "version": "0.1.0",
+    "description": "Модуль WordPress: темы, плагины, хуки, WP-CLI, REST API, деплой",
+    "author": "llama-gui",
+    "type": "module",
+    "parent_plugin": "wp_coder",
+    "capabilities": ["wordpress", "wp_cli", "wp_rest", "wp_db", "deploy"],
+    "tools": [
+        "wp_cli", "wp_db", "wp_media", "wp_option", "wp_rest",
+        "wp_create_site", "wp_check_deps", "deploy", "verify",
+        "php_lint", "headless_render"
+    ],
+    "skills": [
+        "wp_theme", "wp_hook", "wp_database", "wp_media",
+        "wp_plugin_boilerplate", "wp_git"
+    ]
+}
