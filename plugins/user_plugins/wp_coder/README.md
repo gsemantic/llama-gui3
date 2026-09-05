@@ -1,143 +1,67 @@
-# WP Coder — AI-кодер для WordPress
+# AI Coder — Модульная архитектура
 
-## Описание
+Плагин `wp_coder` — это полноценный AI-кодер с модульной архитектурой.
+WordPress является одним из модулей. Другие модули (Python, DevOps и т.д.)
+подключаются аналогично.
 
-WP Coder — это плагин для Llama GUI, который позволяет использовать AI для разработки, редактирования и администрирования WordPress сайтов.
-
-## Возможности
-
-- **Генерация кода** — создание плагинов, тем, хуков
-- **Редактирование** — безопасное редактирование файлов с план-режимом
-- **Администрирование** — управление WordPress через wp-cli
-- **Интеграция с Git** — контроль версий для проектов
-- **RAG-индексация** — поиск по проиндексированному коду
-- **Деплой** — автоматическая публикация на хостере
-
-## Быстрый старт
-
-1. Соберите плагин:
-```bash
-cmake --build build --target wp_coder
-```
-
-2. Скопируйте конфигурацию:
-```bash
-cp plugins/user_plugins/wp_coder/plugin.json build/plugins/wp_coder.json
-```
-
-3. Запустите GUI:
-```bash
-./run_gui.sh
-```
-
-4. Настройте проект в меню **WordPress → Проект**
-
-## Структура плагина
+## Архитектура
 
 ```
 wp_coder/
-├── src/
-│   ├── wp_coder.h          # Основные структуры данных
-│   ├── plugin_main.cpp     # UI и точка входа
-│   ├── agent.cpp           # AI-агент с ReAct-циклом
-│   ├── tools.cpp           # Реализация инструментов
-│   └── project.cpp         # Управление проектом
-├── skills/
-│   ├── wp_hook.md          # Навык: хуки WordPress
-│   ├── wp_theme.md         # Навык: темы WordPress
-│   ├── wp_plugin_boilerplate.md # Навык: плагины
-│   ├── wp_git.md           # Навык: Git
-│   ├── wp_database.md      # Навык: БД
-│   └── wp_media.md         # Навык: медиафайлы
-├── CMakeLists.txt
-├── plugin.json
-├── PROGRESS.md             # Прогресс разработки
-├── USAGE.md                # Руководство пользователя
-├── IMPROVEMENTS.md         # Список улучшений
-├── README.md               # Этот файл
-├── CHANGELOG.md            # История изменений
-├── SUMMARY.md              # Итоговая сводка
-├── FINAL_REPORT.md         # Финальный отчет
-└── CONCLUSION.md           # Заключение
+├── core/                          # Универсальное ядро
+│   ├── module_api.h/cpp           # Интерфейс модулей + ModuleRegistry
+│   ├── engine.h/cpp               # ReAct-движок (доменно-независимый)
+│   ├── tools_registry.h/cpp       # Динамический реестр инструментов
+│   ├── skills_manager.h/cpp       # Менеджер навыков
+│   ├── security.h/cpp             # Безопасность (path validation, blocked commands)
+│   ├── base_tools.h/cpp           # read/write, search_replace, repo_map, grep
+│   ├── git_tools.h/cpp            # git status/diff/log/commit
+│   ├── project.h/cpp              # Настройки проекта
+│   └── prompts.h                  # Базовый системный промпт
+├── modules/
+│   ├── wordpress/                 # WP-специализация (12 инструментов, 6 навыков)
+│   ├── python/                    # Python (6 инструментов, 4 навыка)
+│   └── devops/                    # DevOps (11 инструментов, 3 навыка)
+├── ui/                            # Модульный интерфейс
+│   └── coder_window.h/cpp         # Окна: Проект, Модули, Инструменты
+├── tests/                         # Unit-тесты (36 тестов)
+└── src/plugin_main.cpp            # Точка входа плагина
 ```
 
-## Инструменты
+## Модули
 
-### Базовые
-- `read_file` — чтение файла
-- `write_file` — запись файла
-- `grep_hooks` — поиск хуков
-- `php_lint` — проверка синтаксиса
+| Модуль | Инструменты | Навыки |
+|--------|-------------|--------|
+| **WordPress** | wp_cli, wp_db, wp_media, wp_option, wp_rest, wp_create_site, wp_check_deps, deploy, verify, php_lint, headless_render, validate | wp_theme, wp_hook, wp_database, wp_media, wp_plugin_boilerplate, wp_git |
+| **Python** | python_run, pip_install, django_manage, pytest_run, venv_create, python_lint | python_django, python_flask, python_fastapi, python_project |
+| **DevOps** | docker_build/run/ps/logs, systemd_status/restart, nginx_test/reload, cron_list/add, ssh_exec | devops_docker, devops_systemd, devops_nginx |
 
-### WordPress
-- `wp_cli` — команды wp-cli
-- `wp_rest` — REST API запросы
-- `wp_db` — SQL-запросы
-- `wp_media` — медиафайлы
-- `wp_option` — опции WordPress
+## Как это работает
 
-### Разработка
-- `repo_map` — обзор проекта
-- `rag_index` — индексация в RAG
-- `rag_query` — поиск по RAG
-- `validate` — проверка всех файлов
-- `verify` — полная проверка
+1. При запуске плагин регистрирует модули через `ModuleRegistry`
+2. Каждый модуль регистрирует свои инструменты в `ToolsRegistry`
+3. Движок (Engine) собирает системный промпт: базовый + модульные промпты + навыки
+4. Агент (ReAct-цикл) вызывает инструменты через `ToolsRegistry::run()`
+5. Результаты отображаются в UI через `AgentEvent` ленту
 
-### Git
-- `git_status` — статус репозитория
-- `git_diff` — разница с HEAD
-- `git_log` — история коммитов
-- `git_commit` — создание коммита
+## Сборка
 
-### Системные
-- `list_skills` — список навыков
-- `deploy` — деплой на хостер
-
-## Навыки
-
-Плагин включает готовые навыки:
-- **wp_hook** — правила использования хуков
-- **wp_theme** — работа с темами
-- **wp_plugin_boilerplate** — каркас плагина
-- **wp_git** — работа с Git
-- **wp_database** — работа с БД
-- **wp_media** — работа с медиафайлами
-
-### Создание своих навыков
-
-Создайте `.md` файл в `<data_dir>/wp_coder/skills/`:
-
-```markdown
-# my_skill
-Описание: краткое описание навыка
-Текст инструкции...
+```bash
+cd build_modular
+cmake ../plugins/user_plugins/wp_coder
+cmake --build .
 ```
 
-## Режимы работы
+## Тесты
 
-1. **Code** — полный доступ ко всем инструментам
-2. **Research** — только чтение
-3. **Review** — после правок автоматически запускает verify
+```bash
+cd build_modular
+./tests/wp_coder_tests
+```
 
-## Горячие клавиши
+## Статистика
 
-- **Ctrl+Shift+W** — окно «Проект»
-- **Ctrl+Shift+E** — окно «Агент»
-- **Ctrl+Shift+G** — окно «Git»
-- **Ctrl+Shift+F** — окно «Файлы»
-
-## Требования
-
-- Llama GUI 0.1.60+
-- PHP CLI (для проверки синтаксиса)
-- wp-cli (для команд WordPress)
-- Git (для интеграции с версиями)
-- Chromium (для headless-рендера, опционально)
-
-## Лицензия
-
-MIT License
-
-## Автор
-
-llama-gui project
+- **Инструментов**: 29 (12 WP + 6 Python + 11 DevOps)
+- **Навыков**: 13 (6 WP + 4 Python + 3 DevOps)
+- **Тестов**: 36 (все PASS)
+- **Размер .so**: ~5 МБ
