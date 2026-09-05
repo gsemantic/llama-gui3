@@ -44,8 +44,8 @@ static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_messa
     auto& eng = coder::engine();
     eng.submit(user_message);
 
-    /* Агент работает в worker-потоке. Ждём результат. */
-    std::string response = eng.wait_response(120000);
+    /* Агент работает в worker-потоке. Ждём результат (до 5 минут). */
+    std::string response = eng.wait_response(300000);
 
     char* out = (char*)malloc(response.size() + 1);
     if (out) memcpy(out, response.c_str(), response.size() + 1);

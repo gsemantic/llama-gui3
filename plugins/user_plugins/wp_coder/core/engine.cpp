@@ -185,11 +185,18 @@ void Engine::run_task(const std::string& task) {
             std::string result = ToolsRegistry::instance().run(act.tool, args);
             push_event(AgentEvent::Tool, act.tool + " -> " + result);
 
-            /* Если tool_run запросил разрешение — выходим, ждём решение. */
+            /* Если tool_run запросил разрешение — сигналим и ждём решение. */
             {
                 std::lock_guard<std::mutex> lk(state_.mtx);
                 if (state_.waiting_for_permission) {
                     push_event(AgentEvent::Status, "Ожидание разрешения...");
+                    if (!state_.waiting_for_permission)
+                        state_.running = false;
+                    state_.last_response = full_response.empty()
+                        ? "Ожидание разрешения доступа..."
+                        : full_response;
+                    state_.response_ready = true;
+                    state_.response_cv.notify_all();
                     return;
                 }
             }
