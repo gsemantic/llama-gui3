@@ -13,6 +13,35 @@ bool is_path_safe(const std::string& path) {
     return true;
 }
 
+bool is_project_dir_valid(const std::string& project_dir) {
+    if (project_dir.empty()) return true; /* Пустой = не задан, проверка не нужна. */
+    /* Запрещаем корень ФС и критические директории. */
+    static const std::vector<std::string> forbidden = {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/proc",
+        "/root",
+        "/sbin",
+        "/sys",
+        "/usr",
+        "/var",
+    };
+    std::string normalized = project_dir;
+    while (!normalized.empty() && normalized.back() == '/')
+        normalized.pop_back();
+    if (normalized.empty()) normalized = "/";
+    for (const auto& f : forbidden) {
+        if (normalized == f) return false;
+    }
+    return true;
+}
+
 bool is_path_not_dangerous(const std::string& abs_path) {
     /* Не разрешаем запись в критические системные директории. */
     static const std::vector<std::string> forbidden = {

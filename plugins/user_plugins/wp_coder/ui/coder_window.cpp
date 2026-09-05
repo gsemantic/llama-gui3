@@ -4,6 +4,7 @@
 #include "../core/skills_manager.h"
 #include "../core/module_api.h"
 #include "../core/project.h"
+#include "../core/security.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -82,19 +83,28 @@ static void render_project() {
     ImGui::InputText("##projdir", s_project_dir, sizeof(s_project_dir));
     ImGui::SameLine();
     if (ImGui::Button("Сохранить##dir")) {
-        st.project_dir = s_project_dir;
-        st.php_bin = s_php_bin;
-        st.wp_site_url = s_site_url;
-        st.wp_app_user = s_app_user;
-        st.wp_app_password = s_app_password;
-        st.deploy_proto = s_deploy_proto;
-        st.deploy_host = s_deploy_host;
-        st.deploy_user = s_deploy_user;
-        st.deploy_pass = s_deploy_pass;
-        st.deploy_port = s_deploy_port;
-        st.deploy_remote_dir = s_deploy_remote;
-        st.wp_local_url = s_local_url;
-        engine().save_settings();
+        if (!coder::security::is_project_dir_valid(s_project_dir)) {
+            /* Путь запрещён — не сохраняем. */
+        } else {
+            st.project_dir = s_project_dir;
+            st.php_bin = s_php_bin;
+            st.wp_site_url = s_site_url;
+            st.wp_app_user = s_app_user;
+            st.wp_app_password = s_app_password;
+            st.deploy_proto = s_deploy_proto;
+            st.deploy_host = s_deploy_host;
+            st.deploy_user = s_deploy_user;
+            st.deploy_pass = s_deploy_pass;
+            st.deploy_port = s_deploy_port;
+            st.deploy_remote_dir = s_deploy_remote;
+            st.wp_local_url = s_local_url;
+            engine().save_settings();
+        }
+    }
+    /* Предупреждение о небезопасном пути. */
+    if (!coder::security::is_project_dir_valid(s_project_dir) && s_project_dir[0] != '\0') {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+            "! Небезопасный путь — выберите подкаталог проекта");
     }
 
     ImGui::Text("php-cli:");

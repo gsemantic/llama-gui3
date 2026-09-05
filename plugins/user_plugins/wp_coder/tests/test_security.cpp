@@ -56,3 +56,29 @@ TEST(security_shell_escape_quotes) {
 TEST(security_shell_escape_empty) {
     ASSERT_EQ(shell_escape(""), std::string("''"));
 }
+
+TEST(security_project_dir_root) {
+    ASSERT_FALSE(is_project_dir_valid("/"));
+}
+
+TEST(security_project_dir_etc) {
+    ASSERT_FALSE(is_project_dir_valid("/etc"));
+}
+
+TEST(security_project_dir_usr) {
+    ASSERT_FALSE(is_project_dir_valid("/usr"));
+}
+
+TEST(security_project_dir_var) {
+    ASSERT_FALSE(is_project_dir_valid("/var"));
+}
+
+TEST(security_project_dir_valid) {
+    ASSERT_TRUE(is_project_dir_valid("/home/user/project"));
+    ASSERT_TRUE(is_project_dir_valid("/var/www/mysite"));
+    ASSERT_TRUE(is_project_dir_valid("/tmp/test"));
+}
+
+TEST(security_project_dir_empty) {
+    ASSERT_TRUE(is_project_dir_valid(""));
+}

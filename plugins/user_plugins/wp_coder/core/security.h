@@ -15,7 +15,10 @@ namespace security {
 /* Проверка path traversal: путь не должен содержать ".." после нормализации. */
 bool is_path_safe(const std::string& path);
 
-/* Проверка: путь не является絕對но опасным (symlink на /etc/passwd и т.п.). */
+/* Проверка: project_dir не является корнем ФС. */
+bool is_project_dir_valid(const std::string& project_dir);
+
+/* Проверка: путь не является опасным (symlink на /etc/passwd и т.п.). */
 bool is_path_not_dangerous(const std::string& abs_path);
 
 /* Список запрещённых шаблонов для exec_command. */
