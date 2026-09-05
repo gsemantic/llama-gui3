@@ -23,6 +23,7 @@
 /* Модули. */
 #include "modules/wordpress/wp_module.h"
 #include "modules/python/python_module.h"
+#include "modules/devops/devops_module.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -157,6 +158,7 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     /* 1. Регистрируем модули. */
     coder::wp::register_module();
     coder::python::register_module();
+    coder::devops::register_module();
 
     /* 2. Инициализируем движок. */
     coder::HostCallbacks cb;

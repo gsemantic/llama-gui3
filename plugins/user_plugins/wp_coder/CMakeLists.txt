@@ -32,6 +32,8 @@ set(MODULE_SOURCES
     modules/wordpress/wp_tools.cpp
     modules/python/python_module.cpp
     modules/python/python_tools.cpp
+    modules/devops/devops_module.cpp
+    modules/devops/devops_tools.cpp
 )
 
 # --- Исходники UI ---

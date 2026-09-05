@@ -1,11 +1,11 @@
 {
     "name": "wp_coder",
-    "version": "0.2.0",
-    "description": "AI-кодер с модульной архитектурой: WordPress, Python, ...",
+    "version": "0.3.0",
+    "description": "AI-кодер с модульной архитектурой: WordPress, Python, DevOps",
     "author": "llama-gui",
     "api_version": "1.0.0",
     "permissions": ["rag_access", "llm_access", "chat_access", "filesystem_read", "filesystem_write", "execution", "network"],
-    "capabilities": ["code_generation", "wordpress", "python", "rag", "ui_window", "agent", "modules"],
+    "capabilities": ["code_generation", "wordpress", "python", "devops", "rag", "ui_window", "agent", "modules"],
     "min_llama_gui_version": "0.1.60",
     "platforms": ["linux", "windows", "macos"]
 }

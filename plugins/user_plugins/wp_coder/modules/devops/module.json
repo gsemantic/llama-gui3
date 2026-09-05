@@ -1,0 +1,19 @@
+{
+    "name": "devops",
+    "version": "0.1.0",
+    "description": "Модуль DevOps: Docker, systemd, Nginx, cron, SSH",
+    "author": "llama-gui",
+    "type": "module",
+    "parent_plugin": "wp_coder",
+    "capabilities": ["devops", "docker", "systemd", "nginx", "cron"],
+    "tools": [
+        "docker_build", "docker_run", "docker_ps", "docker_logs",
+        "systemd_status", "systemd_restart",
+        "nginx_test", "nginx_reload",
+        "cron_list", "cron_add",
+        "ssh_exec"
+    ],
+    "skills": [
+        "devops_docker", "devops_systemd", "devops_nginx"
+    ]
+}
