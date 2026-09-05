@@ -83,6 +83,18 @@ static void render_project() {
     ImGui::SameLine();
     if (ImGui::Button("Сохранить##dir")) {
         st.project_dir = s_project_dir;
+        st.php_bin = s_php_bin;
+        st.wp_site_url = s_site_url;
+        st.wp_app_user = s_app_user;
+        st.wp_app_password = s_app_password;
+        st.deploy_proto = s_deploy_proto;
+        st.deploy_host = s_deploy_host;
+        st.deploy_user = s_deploy_user;
+        st.deploy_pass = s_deploy_pass;
+        st.deploy_port = s_deploy_port;
+        st.deploy_remote_dir = s_deploy_remote;
+        st.wp_local_url = s_local_url;
+        engine().save_settings();
     }
 
     ImGui::Text("php-cli:");
@@ -116,14 +128,33 @@ static void render_project() {
     if (ImGui::InputTextMultiline("##agent_prompt", s_agent_prompt, sizeof(s_agent_prompt),
                                   ImVec2(-FLT_MIN, 80))) {
         st.agent_system_prompt = s_agent_prompt;
+        engine().save_settings();
     }
     if (ImGui::Button("Сбросить промпт")) {
         st.agent_system_prompt.clear();
         s_agent_prompt[0] = '\0';
+        engine().save_settings();
     }
 
     ImGui::Separator();
     ImGui::TextDisabled("Корень: %s", st.project_dir.c_str());
+
+    ImGui::Spacing();
+    if (ImGui::Button("Сохранить все настройки")) {
+        st.project_dir = s_project_dir;
+        st.php_bin = s_php_bin;
+        st.wp_site_url = s_site_url;
+        st.wp_app_user = s_app_user;
+        st.wp_app_password = s_app_password;
+        st.deploy_proto = s_deploy_proto;
+        st.deploy_host = s_deploy_host;
+        st.deploy_user = s_deploy_user;
+        st.deploy_pass = s_deploy_pass;
+        st.deploy_port = s_deploy_port;
+        st.deploy_remote_dir = s_deploy_remote;
+        st.wp_local_url = s_local_url;
+        engine().save_settings();
+    }
 
     ImGui::End();
 }
@@ -146,6 +177,7 @@ static void render_modules() {
         bool active = (st.active_module == mod->name);
         if (ImGui::RadioButton(mod->display_name, active)) {
             st.active_module = mod->name;
+            engine().save_settings();
         }
         ImGui::SameLine();
         ImGui::TextDisabled("%s", mod->description);

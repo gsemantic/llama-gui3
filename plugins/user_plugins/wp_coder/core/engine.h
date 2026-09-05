@@ -169,6 +169,9 @@ public:
     void permission_allow_always(const std::string& path);
     void permission_reject(const std::string& path);
 
+    /* Настройки. */
+    void save_settings();
+
 private:
     EngineState state_;
     HostCallbacks cb_;
@@ -176,9 +179,8 @@ private:
     void run_task(const std::string& task);
     void worker_main();
 
-    /* Загрузка/сохранение настроек. */
+    /* Загрузка настроек. */
     void load_settings();
-    void save_settings();
 
     /* Проверка доступа к файлу за пределами проекта. */
     std::string check_external_permission(const std::string& abs_path);
