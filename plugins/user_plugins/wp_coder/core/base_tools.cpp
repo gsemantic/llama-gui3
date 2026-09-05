@@ -206,6 +206,73 @@ void register_base_tools() {
     reg.register_tool("list_skills", [](const ToolArgs& a) -> std::string {
         return base_list_skills();
     }, "Список навыков");
+
+    /* search_replace: поиск и замена текста в файле (diff-based edit). */
+    reg.register_tool("search_replace", [](const ToolArgs& a) -> std::string {
+        std::string abs = resolve_path(a.path);
+        std::ifstream fin(abs, std::ios::binary);
+        if (!fin) return "[ошибка] не удалось открыть файл: " + abs;
+        std::string content((std::istreambuf_iterator<char>(fin)),
+                            std::istreambuf_iterator<char>());
+        fin.close();
+
+        /* a.query = что искать, a.content = на что заменять. */
+        if (a.query.empty()) return "[ошибка] пустой поисковый запрос (QUERY)";
+        size_t pos = content.find(a.query);
+        if (pos == std::string::npos)
+            return "[search_replace] текст не найден в " + abs;
+
+        /* Проверяем уникальность. */
+        size_t count = 0;
+        size_t search_from = 0;
+        while ((pos = content.find(a.query, search_from)) != std::string::npos) {
+            count++;
+            search_from = pos + 1;
+        }
+        if (count > 1)
+            return "[search_replace] НАЙДЕНО " + std::to_string(count)
+                   + " ВХОЖДЕНИЙ. Уточни запрос (добавь контекст вокруг замены).";
+
+        /* Одно вхождение — заменяем. */
+        pos = content.find(a.query);
+        content.replace(pos, a.query.size(), a.content);
+
+        if (engine_state().plan_mode) {
+            std::lock_guard<std::mutex> lk(engine_state().mtx);
+            engine_state().pending.push_back({a.path, content});
+            return "[предложено] " + abs + " (search_replace, "
+                   + std::to_string(a.query.size()) + " -> "
+                   + std::to_string(a.content.size()) + " байт)";
+        }
+
+        std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
+        if (!fout) return "[ошибка] не удалось записать: " + abs;
+        fout << content;
+        fout.close();
+        return "[search_replace] " + abs + ": заменено " + std::to_string(a.query.size())
+               + " -> " + std::to_string(a.content.size()) + " байт";
+    }, "Поиск и замена текста в файле");
+
+    /* exec_command: запуск shell-команды. */
+    reg.register_tool("exec_command", [](const ToolArgs& a) -> std::string {
+        if (a.cli.empty()) return "[ошибка] пустая команда (CLI)";
+        /* Базовая проверка на опасные команды. */
+        std::string cmd = a.cli;
+        std::vector<std::string> blocked = {"rm -rf /", "mkfs", "dd if=", "> /dev/sda"};
+        for (const auto& b : blocked) {
+            if (cmd.find(b) != std::string::npos)
+                return "[запрещено] опасная команда: " + b;
+        }
+        std::string full = cmd + " 2>&1";
+        FILE* f = popen(full.c_str(), "r");
+        if (!f) return "[ошибка] не удалось запустить: " + cmd;
+        char buf[4096];
+        std::string out;
+        while (fgets(buf, sizeof(buf), f)) out += buf;
+        pclose(f);
+        if (out.size() > 10000) { out.resize(10000); out += "\n...[обрезано]"; }
+        return out.empty() ? "[exec: нет вывода]" : out;
+    }, "Запуск shell-команды");
 }
 
 void register_rag_tools() {
@@ -216,11 +283,10 @@ void register_rag_tools() {
         if (base.empty()) return "[ошибка] не задан корень индексации";
         std::vector<std::string> files;
         walk_php(base, files);
-        const auto& cb = Engine::instance().state(); // access for callbacks
+        const auto& cb = Engine::instance().callbacks();
         int ok = 0;
         for (const auto& fp : files) {
-            /* Используем простой вызов через extern callback. */
-            ++ok; // TODO: интегрировать с host RAG API
+            if (cb.rag_process_document && cb.rag_process_document(fp)) ++ok;
         }
         std::stringstream s;
         s << "[проиндексировано " << ok << "/" << files.size() << " php-файлов в RAG]";
@@ -228,8 +294,11 @@ void register_rag_tools() {
     }, "Индексация в RAG");
 
     reg.register_tool("rag_query", [](const ToolArgs& a) -> std::string {
-        /* TODO: интегрировать с host RAG API через Engine callbacks. */
-        return "[rag_query] TODO: интеграция с host RAG API";
+        const auto& cb = Engine::instance().callbacks();
+        if (!cb.rag_build_prompt) return "[ошибка] RAG не доступен";
+        std::string result = cb.rag_build_prompt(a.query, a.k, "");
+        if (result.empty()) return "[RAG: пусто — проект не проиндексирован]";
+        return result;
     }, "Поиск в RAG");
 }
 

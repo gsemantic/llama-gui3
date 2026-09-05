@@ -41,7 +41,7 @@ set(UI_SOURCES
 
 # --- Точка входа плагина ---
 set(PLUGIN_MAIN
-    src/plugin_main_new.cpp
+    src/plugin_main.cpp
 )
 
 add_library(wp_coder SHARED

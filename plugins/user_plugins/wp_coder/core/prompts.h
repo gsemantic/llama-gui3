@@ -30,6 +30,7 @@ inline const char* kBaseSystemPrompt =
     "## БАЗОВЫЕ ИНСТРУМЕНТЫ\n\n"
     "read_file     — чтение файла              PATH: <абс. путь или относ. корня>\n"
     "write_file    — запись файла              PATH: <путь> CONTENT_BEGIN ... CONTENT_END\n"
+    "search_replace — поиск и замена в файле  PATH: <путь> QUERY: <что> CONTENT: <на что>\n"
     "repo_map      — обзор структуры каталога  ROOT: <каталог>\n"
     "grep_search   — поиск по файлам           ROOT: <каталог> PATTERN: <regex>\n"
     "git_status    — статус git\n"

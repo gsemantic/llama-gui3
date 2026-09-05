@@ -107,7 +107,9 @@ struct HostCallbacks {
 
     /* RAG. */
     std::function<bool(const std::string& path)> rag_process_document;
-    std::function<std::string(const std::string& query, int k)> rag_build_prompt;
+    std::function<std::string(const std::string& query, int k,
+                              const std::string& path_filter)> rag_build_prompt;
+    std::function<int()> rag_index_count;
 };
 
 class Engine {
@@ -129,6 +131,9 @@ public:
     /* Доступ к состоянию. */
     EngineState& state() { return state_; }
     const EngineState& state() const { return state_; }
+
+    /* Доступ к callbacks хоста (для инструментов). */
+    const HostCallbacks& callbacks() const { return cb_; }
 
     /* Управление событиями. */
     void push_event(AgentEvent::Kind k, const std::string& text);

@@ -3,8 +3,8 @@
 /*
  * base_tools.h — Базовые инструменты AI-кодера (общие для всех модулей).
  *
- * read_file, write_file, repo_map, grep_search, rag_index, rag_query,
- * validate, verify, list_skills.
+ * read_file, write_file, search_replace, repo_map, grep_search,
+ * rag_index, rag_query, list_skills.
  */
 
 #include "module_api.h"
