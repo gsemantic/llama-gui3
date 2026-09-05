@@ -43,8 +43,22 @@ void Engine::submit(const std::string& prompt) {
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.inbox.push(prompt);
+        state_.response_ready = false;
+        state_.last_response.clear();
         state_.cv.notify_all();
     }
+}
+
+std::string Engine::wait_response(int timeout_ms) {
+    std::unique_lock<std::mutex> lk(state_.mtx);
+    state_.response_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] {
+        return state_.response_ready || state_.shutting_down;
+    });
+    if (state_.response_ready) {
+        state_.response_ready = false;
+        return std::move(state_.last_response);
+    }
+    return "[ошибка] таймаут ожидания ответа агента";
 }
 
 /* ======================================================================
@@ -105,16 +119,20 @@ std::string Engine::build_system_prompt() const {
  * ====================================================================== */
 
 void Engine::run_task(const std::string& task) {
+    std::string full_response;
+
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.running = true;
+        state_.last_response.clear();
+        state_.response_ready = false;
     }
     push_event(AgentEvent::Status, "Задача: " + task);
 
     if (!cb_.llm_is_connected || !cb_.llm_is_connected()) {
         push_event(AgentEvent::Error, "[ошибка] LLM не подключён");
-        state_.running = false;
-        return;
+        full_response = "[ошибка] LLM не подключён";
+        goto done;
     }
 
     {
@@ -122,59 +140,66 @@ void Engine::run_task(const std::string& task) {
         state_.last_agent_task = task;
     }
 
-    std::string user = task;
-    for (int step = 0; step < 12; ++step) {
-        std::string sys = build_system_prompt();
+    {
+        std::string user = task;
+        for (int step = 0; step < 12; ++step) {
+            std::string sys = build_system_prompt();
 
-        std::string resp;
-        if (!cb_.llm_complete || !cb_.llm_complete(sys, user, resp)) {
-            push_event(AgentEvent::Error, "[ошибка] LLM не ответил");
-            break;
-        }
-
-        std::string rest;
-        std::string block = extract_action(resp, rest);
-        if (!rest.empty()) push_event(AgentEvent::Assistant, rest);
-
-        if (block.empty()) {
-            push_event(AgentEvent::Status, "Готово (финальный ответ).");
-            break;
-        }
-
-        Action act;
-        if (!parse_action(block, act)) {
-            push_event(AgentEvent::Error, "[ошибка разбора wp_action] блок:\n" + block);
-            break;
-        }
-
-        ToolArgs args;
-        args.path = act.path;
-        args.root = act.root;
-        args.query = act.query;
-        args.pattern = act.pattern;
-        args.content = act.content;
-        args.cli = act.cli;
-        args.url = act.url;
-        args.k = act.k;
-
-        std::string result = ToolsRegistry::instance().run(act.tool, args);
-        push_event(AgentEvent::Tool, act.tool + " -> " + result);
-
-        /* Если tool_run запросил разрешение — выходим, ждём решение. */
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            if (state_.waiting_for_permission) {
-                push_event(AgentEvent::Status, "Ожидание разрешения...");
-                return;
+            std::string resp;
+            if (!cb_.llm_complete || !cb_.llm_complete(sys, user, resp)) {
+                push_event(AgentEvent::Error, "[ошибка] LLM не ответил");
+                full_response = "[ошибка] LLM не ответил";
+                break;
             }
-        }
 
-        user = "RESULT [" + act.tool + "]:\n" + result;
+            std::string rest;
+            std::string block = extract_action(resp, rest);
+            if (!rest.empty()) {
+                if (!full_response.empty()) full_response += "\n\n";
+                full_response += rest;
+                push_event(AgentEvent::Assistant, rest);
+            }
+
+            if (block.empty()) {
+                push_event(AgentEvent::Status, "Готово (финальный ответ).");
+                break;
+            }
+
+            Action act;
+            if (!parse_action(block, act)) {
+                push_event(AgentEvent::Error, "[ошибка разбора wp_action] блок:\n" + block);
+                full_response += "\n\n[ошибка разбора wp_action]";
+                break;
+            }
+
+            ToolArgs args;
+            args.path = act.path;
+            args.root = act.root;
+            args.query = act.query;
+            args.pattern = act.pattern;
+            args.content = act.content;
+            args.cli = act.cli;
+            args.url = act.url;
+            args.k = act.k;
+
+            std::string result = ToolsRegistry::instance().run(act.tool, args);
+            push_event(AgentEvent::Tool, act.tool + " -> " + result);
+
+            /* Если tool_run запросил разрешение — выходим, ждём решение. */
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                if (state_.waiting_for_permission) {
+                    push_event(AgentEvent::Status, "Ожидание разрешения...");
+                    return;
+                }
+            }
+
+            user = "RESULT [" + act.tool + "]:\n" + result;
+        }
     }
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        /* Убираем временный путь "один раз". */
         if (!state_.once_path.empty()) {
             auto& v = state_.allowed_external_paths;
             for (auto it = v.begin(); it != v.end(); ) {
@@ -183,8 +208,16 @@ void Engine::run_task(const std::string& task) {
             }
             state_.once_path.clear();
         }
+    }
+
+done:
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
         if (!state_.waiting_for_permission)
             state_.running = false;
+        state_.last_response = full_response.empty() ? "(пустой ответ)" : full_response;
+        state_.response_ready = true;
+        state_.response_cv.notify_all();
     }
 }
 

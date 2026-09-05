@@ -44,86 +44,11 @@ static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_messa
     auto& eng = coder::engine();
     eng.submit(user_message);
 
-    /* Блокирующее ожидание результата (для agent mode в основном чате).
-     * В реальном коде стоит сделать async, но для MVP — блокируемся. */
-    /* Просто запускаем задачу и ждём первый финальный ответ. */
-    std::string task = user_message;
-    std::string full_response;
+    /* Агент работает в worker-потоке. Ждём результат. */
+    std::string response = eng.wait_response(120000);
 
-    {
-        std::lock_guard<std::mutex> lk(eng.state().mtx);
-        eng.state().last_agent_task = user_message;
-    }
-
-    /* Сборка промпта. */
-    std::string sys_prompt = eng.build_system_prompt();
-
-    for (int step = 0; step < 12; ++step) {
-        if (!g_api || !g_host) break;
-        if (g_api->llm_is_connected(g_host) != 1) {
-            full_response = "[ошибка] LLM не подключён";
-            break;
-        }
-
-        char* response = nullptr;
-        int rc = g_api->llm_complete_ex(g_host, sys_prompt.c_str(), task.c_str(), &response);
-        if (rc != 1 || !response) {
-            full_response = "[ошибка] LLM не ответил";
-            break;
-        }
-        std::string resp(response);
-        g_api->free_string(g_host, response);
-
-        std::string rest;
-        std::string block = coder::Engine::extract_action(resp, rest);
-        if (!rest.empty()) {
-            if (!full_response.empty()) full_response += "\n\n";
-            full_response += rest;
-        }
-        if (block.empty()) break;
-
-        coder::Engine::Action act;
-        if (!coder::Engine::parse_action(block, act)) {
-            full_response += "\n\n[ошибка разбора wp_action]";
-            break;
-        }
-
-        coder::ToolArgs args;
-        args.path = act.path;
-        args.root = act.root;
-        args.query = act.query;
-        args.pattern = act.pattern;
-        args.content = act.content;
-        args.cli = act.cli;
-        args.url = act.url;
-        args.k = act.k;
-
-        std::string result = coder::ToolsRegistry::instance().run(act.tool, args);
-
-        /* Проверка разрешения. */
-        {
-            std::unique_lock<std::mutex> lk(eng.state().mtx);
-            if (eng.state().waiting_for_permission) {
-                eng.state().waiting_in_sync = true;
-                eng.state().permission_cv.wait(lk, [&eng] {
-                    return !eng.state().waiting_for_permission;
-                });
-                eng.state().waiting_in_sync = false;
-                lk.unlock();
-                if (eng.state().last_agent_task.empty()) {
-                    full_response += "\n\nДоступ отклонён.";
-                    break;
-                }
-                result = coder::ToolsRegistry::instance().run(act.tool, args);
-            }
-        }
-
-        task = "RESULT [" + act.tool + "]:\n" + result;
-    }
-
-    if (full_response.empty()) full_response = "(пустой ответ)";
-    char* out = (char*)malloc(full_response.size() + 1);
-    if (out) memcpy(out, full_response.c_str(), full_response.size() + 1);
+    char* out = (char*)malloc(response.size() + 1);
+    if (out) memcpy(out, response.c_str(), response.size() + 1);
     return out;
 }
 

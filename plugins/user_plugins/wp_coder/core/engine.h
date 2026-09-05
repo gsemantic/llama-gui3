@@ -78,6 +78,11 @@ struct EngineState {
     std::vector<PendingWrite> pending;
     std::string last_agent_task;
 
+    /* Результат последнего ответа агента (для async mode). */
+    std::string last_response;
+    bool response_ready = false;
+    std::condition_variable response_cv;
+
     /* Разрешения на доступ к файлам. */
     std::vector<std::string> allowed_external_paths;
     std::string pending_permission_path;
@@ -127,6 +132,9 @@ public:
 
     /* Постановка задачи в очередь. */
     void submit(const std::string& prompt);
+
+    /* Ожидание готового ответа агента (timeout в мс). */
+    std::string wait_response(int timeout_ms = 120000);
 
     /* Доступ к состоянию. */
     EngineState& state() { return state_; }
