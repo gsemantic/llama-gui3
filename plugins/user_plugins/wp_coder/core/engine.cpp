@@ -89,19 +89,19 @@ std::string Engine::build_system_prompt() const {
         }
     }
 
-    /* 3. Промпты активного модуля. */
+    /* 3. Промпт только выбранного модуля. */
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        const auto& modules = ModuleRegistry::instance().modules();
-        for (const auto* mod : modules) {
-            /* Если задан active_module — только он. Иначе — все. */
-            if (!state_.active_module.empty() && state_.active_module != mod->name)
-                continue;
-            if (mod->get_system_prompt) {
-                const char* p = mod->get_system_prompt();
-                if (p && p[0]) {
-                    sys += "\n\n";
-                    sys += p;
+        if (!state_.active_module.empty()) {
+            const auto& modules = ModuleRegistry::instance().modules();
+            for (const auto* mod : modules) {
+                if (state_.active_module == mod->name && mod->get_system_prompt) {
+                    const char* p = mod->get_system_prompt();
+                    if (p && p[0]) {
+                        sys += "\n\n";
+                        sys += p;
+                    }
+                    break;
                 }
             }
         }
