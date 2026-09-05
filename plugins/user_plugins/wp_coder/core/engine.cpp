@@ -51,9 +51,15 @@ void Engine::submit(const std::string& prompt) {
 
 std::string Engine::wait_response(int timeout_ms) {
     std::unique_lock<std::mutex> lk(state_.mtx);
-    state_.response_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] {
-        return state_.response_ready || state_.shutting_down;
-    });
+    if (timeout_ms > 0) {
+        state_.response_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] {
+            return state_.response_ready || state_.shutting_down;
+        });
+    } else {
+        state_.response_cv.wait(lk, [this] {
+            return state_.response_ready || state_.shutting_down;
+        });
+    }
     if (state_.response_ready) {
         state_.response_ready = false;
         return std::move(state_.last_response);
@@ -120,6 +126,7 @@ std::string Engine::build_system_prompt() const {
 
 void Engine::run_task(const std::string& task) {
     std::string full_response;
+    auto start_time = std::chrono::steady_clock::now();
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -223,6 +230,13 @@ done:
         if (!state_.waiting_for_permission)
             state_.running = false;
         state_.last_response = full_response.empty() ? "(пустой ответ)" : full_response;
+        /* Метрики. */
+        auto end_time = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        state_.last_response_time = duration.count() / 1000.0;
+        state_.last_tokens_generated = std::max(1, (int)(full_response.size() / 4));
+        state_.last_tokens_per_second = state_.last_response_time > 0
+            ? state_.last_tokens_generated / state_.last_response_time : 0;
         state_.response_ready = true;
         state_.response_cv.notify_all();
     }

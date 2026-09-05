@@ -42,6 +42,11 @@ struct EngineState {
     std::condition_variable permission_cv;
     bool waiting_in_sync = false;
 
+    /* Метрики последнего ответа. */
+    double last_response_time = 0;
+    int last_tokens_generated = 0;
+    double last_tokens_per_second = 0;
+
     /* Проект. */
     std::string project_dir;
     std::string php_bin;

@@ -268,6 +268,12 @@ void render_extras() {
         } else if (st.waiting_for_permission) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
                 "! Ожидание разрешения доступа");
+        } else if (st.last_response_time > 0) {
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f),
+                "| %d tok | %.1f tok/s | %ds",
+                st.last_tokens_generated,
+                st.last_tokens_per_second,
+                (int)st.last_response_time);
         }
     }
 
