@@ -293,6 +293,9 @@ create_backup() {
         --include="*/" \
         --include="*.cpp" \
         --include="*.h" \
+        --include="*.json" \
+        --include="*.md" \
+        --include="*.txt" \
         --exclude="test_*" \
         --exclude=".env" \
         --exclude="*.log" \
