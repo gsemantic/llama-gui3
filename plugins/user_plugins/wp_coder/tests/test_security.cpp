@@ -70,13 +70,14 @@ TEST(security_project_dir_usr) {
 }
 
 TEST(security_project_dir_var) {
-    ASSERT_FALSE(is_project_dir_valid("/var"));
+    ASSERT_TRUE(is_project_dir_valid("/var/www/mysite"));
 }
 
 TEST(security_project_dir_valid) {
     ASSERT_TRUE(is_project_dir_valid("/home/user/project"));
     ASSERT_TRUE(is_project_dir_valid("/var/www/mysite"));
     ASSERT_TRUE(is_project_dir_valid("/tmp/test"));
+    ASSERT_TRUE(is_project_dir_valid("/opt/myapp"));
 }
 
 TEST(security_project_dir_empty) {

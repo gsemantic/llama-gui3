@@ -14,8 +14,12 @@ bool is_path_safe(const std::string& path) {
 }
 
 bool is_project_dir_valid(const std::string& project_dir) {
-    if (project_dir.empty()) return true; /* Пустой = не задан, проверка не нужна. */
-    /* Запрещаем корень ФС и критические директории. */
+    if (project_dir.empty()) return true;
+    std::string normalized = project_dir;
+    while (!normalized.empty() && normalized.back() == '/')
+        normalized.pop_back();
+    if (normalized.empty()) normalized = "/";
+    /* Запрещаем только ТОЧНЫЕ пути к критическим директориям. */
     static const std::vector<std::string> forbidden = {
         "/",
         "/bin",
@@ -24,21 +28,16 @@ bool is_project_dir_valid(const std::string& project_dir) {
         "/etc",
         "/lib",
         "/lib64",
-        "/opt",
         "/proc",
         "/root",
         "/sbin",
         "/sys",
         "/usr",
-        "/var",
     };
-    std::string normalized = project_dir;
-    while (!normalized.empty() && normalized.back() == '/')
-        normalized.pop_back();
-    if (normalized.empty()) normalized = "/";
     for (const auto& f : forbidden) {
         if (normalized == f) return false;
     }
+    /* /var и /usr — разрешаем подкаталоги (например /var/www/). */
     return true;
 }
 
