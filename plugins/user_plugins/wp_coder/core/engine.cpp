@@ -237,12 +237,17 @@ bool Engine::parse_action(const std::string& block, Action& a) {
     std::string line;
     bool in_content = false;
     while (std::getline(iss, line)) {
+        /* trim trailing \r */
+        while (!line.empty() && line.back() == '\r') line.pop_back();
+
         if (in_content) {
             if (line.find("CONTENT_END") != std::string::npos) { in_content = false; continue; }
             if (!a.content.empty()) a.content += '\n';
             a.content += line;
             continue;
         }
+        /* Проверяем CONTENT_BEGIN без двоеточия. */
+        if (line.find("CONTENT_BEGIN") != std::string::npos) { in_content = true; continue; }
         auto pos = line.find(':');
         if (pos == std::string::npos) continue;
         std::string key = line.substr(0, pos);

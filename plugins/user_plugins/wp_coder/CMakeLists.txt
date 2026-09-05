@@ -1,9 +1,8 @@
 # wp_coder — AI-кодер с модульной архитектурой.
-# WordPress — один из модулей. Другие модули подключаются аналогично.
 #
 # Структура:
 #   core/       — универсальное ядро (движок, реестр инструментов, навыки)
-#   modules/    — доменные модули (wordpress, python, ...)
+#   modules/    — доменные модули (wordpress, python, devops)
 #   ui/         — модульный интерфейс (окна, настройки)
 #   src/        — точка входа плагина (plugin_main)
 
@@ -15,7 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 
-# --- Исходники ядра ---
+# --- Ядро (статическая библиотека — переиспользуется плагином и тестами) ---
 set(CORE_SOURCES
     core/engine.cpp
     core/tools_registry.cpp
@@ -26,7 +25,15 @@ set(CORE_SOURCES
     core/project.cpp
 )
 
-# --- Исходники модулей ---
+add_library(wp_coder_core STATIC ${CORE_SOURCES})
+target_include_directories(wp_coder_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_ROOT}/include
+)
+set_target_properties(wp_coder_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(wp_coder_core PRIVATE -Wall -Wextra)
+
+# --- Модули ---
 set(MODULE_SOURCES
     modules/wordpress/wp_module.cpp
     modules/wordpress/wp_tools.cpp
@@ -36,21 +43,16 @@ set(MODULE_SOURCES
     modules/devops/devops_tools.cpp
 )
 
-# --- Исходники UI ---
+# --- UI ---
 set(UI_SOURCES
     ui/coder_window.cpp
 )
 
-# --- Точка входа плагина ---
-set(PLUGIN_MAIN
-    src/plugin_main.cpp
-)
-
+# --- Плагин (.so) ---
 add_library(wp_coder SHARED
-    ${CORE_SOURCES}
     ${MODULE_SOURCES}
     ${UI_SOURCES}
-    ${PLUGIN_MAIN}
+    src/plugin_main.cpp
 )
 
 target_include_directories(wp_coder PRIVATE
@@ -62,9 +64,10 @@ target_include_directories(wp_coder PRIVATE
     ${PROJECT_ROOT}/libs/headless_browser/include
 )
 
-# Каталог навыков.
 target_compile_definitions(wp_coder PRIVATE
     WP_CODER_SKILLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/skills")
+
+target_link_libraries(wp_coder PRIVATE wp_coder_core)
 
 # headless_browser (опционально).
 if(NOT TARGET headless_browser)
@@ -85,5 +88,25 @@ set_target_properties(wp_coder PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
     POSITION_INDEPENDENT_CODE ON
 )
-
 target_compile_options(wp_coder PRIVATE -Wall -Wextra)
+
+# --- Тесты ---
+option(WP_CODER_BUILD_TESTS "Build wp_coder unit tests" ON)
+if(WP_CODER_BUILD_TESTS)
+    add_executable(wp_coder_tests
+        tests/test_main.cpp
+        tests/test_tools_registry.cpp
+        tests/test_skills_manager.cpp
+        tests/test_engine.cpp
+        tests/test_module_api.cpp
+    )
+    target_include_directories(wp_coder_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_ROOT}/include
+    )
+    target_link_libraries(wp_coder_tests PRIVATE wp_coder_core)
+    target_compile_options(wp_coder_tests PRIVATE -Wall -Wextra)
+    set_target_properties(wp_coder_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+endif()
