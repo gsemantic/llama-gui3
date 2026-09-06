@@ -126,6 +126,10 @@ struct CloudProviderSettings {
     double price_input_per_1m = 0.0;         // Цена за 1M входных (prompt) токенов
     double price_output_per_1m = 0.0;        // Цена за 1M выходных (completion) токенов
 
+    // Прокси (Tor / SOCKS5)
+    bool use_tor = false;                        // Направлять запросы через Tor (SOCKS5)
+    std::string socks5_proxy_host = "127.0.0.1:9050"; // Адрес SOCKS5-прокси (по умолчанию Tor)
+
     // Автозаполнение
     std::vector<CloudRecentModel> recent_models;  // Недавние модели (с привязкой к провайдеру)
 };

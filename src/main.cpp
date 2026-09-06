@@ -312,9 +312,10 @@ int main(int argc, char* argv[]) {
                 CloudProxyOptions proxy_opts;
                 proxy_opts.host = headless.host;
                 proxy_opts.port = headless.port;
-                proxy_opts.auto_port = headless.auto_port;
+                proxy_opts.auto_port = headless.auto_port || true;
                 proxy_opts.endpoint_url = headless.endpoint_url;
                 proxy_opts.api_key = headless.api_key;
+                proxy_opts.avoid_local_server_port = true;
                 return run_cloud_proxy(settings, proxy_opts);
             }
 
@@ -373,15 +374,18 @@ int main(int argc, char* argv[]) {
 
         std::cout << "" << std::endl;
 
-        // Облачный прокси в фоне (--proxy): endpoint для внешних клиентов
+        // Облачный прокси в фоне: endpoint для внешних клиентов (qwen, openai-compatible)
+        // Запускается если: --proxy флаг ИЛИ облачный провайдер включён в настройках
         std::atomic<bool> proxy_stop{false};
         std::thread proxy_thread;
-        if (headless.gui_proxy) {
-            LOG_INFO("Запуск облачного прокси в фоне (--proxy)...");
+        bool cloud_enabled = settings.cloud_provider().enabled &&
+                             !settings.cloud_provider().endpoint_url.empty();
+        if (headless.gui_proxy || cloud_enabled) {
+            LOG_INFO("Запуск облачного прокси в фоне...");
             CloudProxyOptions proxy_opts;
             proxy_opts.host = headless.host;
             proxy_opts.port = headless.port;
-            proxy_opts.auto_port = headless.auto_port;
+            proxy_opts.auto_port = headless.auto_port || cloud_enabled;
             proxy_opts.endpoint_url = headless.endpoint_url;
             proxy_opts.api_key = headless.api_key;
             proxy_opts.avoid_local_server_port = true;

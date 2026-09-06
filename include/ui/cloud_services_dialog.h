@@ -3,6 +3,7 @@
 #include "../core/openrouter_types.h"
 #include "../core/openrouter_client.h"
 #include "../core/settings.h"
+#include "../core/tor_bridge_manager.h"
 #include <imgui.h>
 #include <vector>
 #include <string>
@@ -49,6 +50,23 @@ private:
     bool reasoning_enabled_ = false;  // Режим размышлений/thinking
     int reasoning_budget_ = 0;       // Бюджет токенов на reasoning (0 = по умолчанию)
     bool show_api_key_ = false;
+
+    // Прокси (Tor / SOCKS5)
+    bool use_tor_ = false;
+    char socks5_proxy_host_buf_[256] = "127.0.0.1:9050";
+
+    // Tor Bridge Manager
+    std::vector<llama_gui::core::TorBridgeManager::BridgeInfo> current_bridges_;
+    bool bridges_loading_ = false;
+    bool bridges_validating_ = false;
+    bool tor_restarting_ = false;
+    std::thread bridges_thread_;
+    std::thread validate_thread_;
+    std::atomic<bool> bridges_cancelled_{false};
+    std::string bridge_fetch_status_;
+    std::string bridge_validate_status_;
+    int bridges_valid_count_ = 0;
+    int bridges_total_count_ = 0;
 
     // Стоимость токенов (USD за 1M)
     bool auto_price_ = true;             // Автоподстановка цены из пресетов по имени модели

@@ -23,6 +23,10 @@ void OpenRouterHttpClient::set_timeout(int timeout_ms) {
     timeout_ms_ = timeout_ms;
 }
 
+void OpenRouterHttpClient::set_proxy(const std::string& proxy_url) {
+    proxy_ = proxy_url;
+}
+
 std::string OpenRouterHttpClient::build_url(const std::string& endpoint) {
     return base_url_ + "/" + endpoint;
 }
@@ -141,6 +145,12 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
+    // SOCKS5-прокси (Tor и т.п.)
+    if (!proxy_.empty()) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy_.c_str());
+        curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+    }
+
     std::cout << "[CloudClient] POST " << url << " (streaming)" << std::endl;
 
     CURLcode res = curl_easy_perform(curl);
@@ -209,6 +219,12 @@ std::string OpenRouterHttpClient::make_request(const std::string& endpoint, cons
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+
+    // SOCKS5-прокси (Tor и т.п.)
+    if (!proxy_.empty()) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy_.c_str());
+        curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+    }
 
     if (!body.empty()) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);

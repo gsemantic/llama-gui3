@@ -31,6 +31,7 @@ const std::vector<CloudServicesDialog::ProviderPreset>& CloudServicesDialog::get
     static const std::vector<ProviderPreset> presets = {
         // requires_key=false — публичные эндпоинты, проверены и работают без API-ключа
         {"Zhipu (GLM)",      "https://open.bigmodel.cn/api/paas/v4",           true},
+        {"OpenRouter",       "https://openrouter.ai/api/v1",                   true},
         {"OpenCode Zen",     "https://opencode.ai/zen/v1",                     false},
         {"Pollinations",     "https://text.pollinations.ai/openai",            false},
         {"OVH AI Endpoints", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", false},
@@ -49,8 +50,15 @@ CloudServicesDialog::CloudServicesDialog(llama_gui::core::Settings& settings)
 
 CloudServicesDialog::~CloudServicesDialog() {
     models_load_cancelled_ = true;
+    bridges_cancelled_ = true;
     if (models_load_thread_.joinable()) {
         models_load_thread_.join();
+    }
+    if (bridges_thread_.joinable()) {
+        bridges_thread_.join();
+    }
+    if (validate_thread_.joinable()) {
+        validate_thread_.join();
     }
     check_cancelled_ = true;
     if (check_thread_.joinable()) {
@@ -109,6 +117,9 @@ void CloudServicesDialog::load_from_settings() {
     auto_price_ = cp.auto_price;
     price_input_per_1m_ = cp.price_input_per_1m;
     price_output_per_1m_ = cp.price_output_per_1m;
+    use_tor_ = cp.use_tor;
+    std::strncpy(socks5_proxy_host_buf_, cp.socks5_proxy_host.c_str(), sizeof(socks5_proxy_host_buf_) - 1);
+    socks5_proxy_host_buf_[sizeof(socks5_proxy_host_buf_) - 1] = '\0';
     saved_model_id_ = cp.model_id;
     settings_modified_ = false;
     show_api_key_ = false;
@@ -128,6 +139,8 @@ void CloudServicesDialog::save_to_settings() {
     cp.auto_price = auto_price_;
     cp.price_input_per_1m = price_input_per_1m_ < 0 ? 0 : price_input_per_1m_;
     cp.price_output_per_1m = price_output_per_1m_ < 0 ? 0 : price_output_per_1m_;
+    cp.use_tor = use_tor_;
+    cp.socks5_proxy_host = socks5_proxy_host_buf_;
 
     // Обновляем/создаём запись недавней модели с ТЕКУЩИМ провайдером —
     // так старые записи без привязки (мигрированные из строк) получают её
@@ -186,6 +199,10 @@ void CloudServicesDialog::fetch_models() {
 
     std::string url = endpoint_url_buf_;
     std::string key = api_key_buf_;
+    std::string proxy_url;
+    if (use_tor_ && socks5_proxy_host_buf_[0] != '\0') {
+        proxy_url = std::string("socks5h://") + socks5_proxy_host_buf_;
+    }
 
     if (url.empty()) return;
 
@@ -204,7 +221,7 @@ void CloudServicesDialog::fetch_models() {
         models_load_thread_.join();
     }
 
-    models_load_thread_ = std::thread([this, url, key]() {
+    models_load_thread_ = std::thread([this, url, key, proxy_url]() {
         constexpr int kMaxAttempts = 3;
 
         std::string response;
@@ -227,6 +244,8 @@ void CloudServicesDialog::fetch_models() {
                 headers = curl_slist_append(headers, ("Authorization: Bearer " + key).c_str());
             }
             headers = curl_slist_append(headers, "Content-Type: application/json");
+            headers = curl_slist_append(headers, "HTTP-Referer: https://github.com/llama-gui");
+            headers = curl_slist_append(headers, "X-Title: llama-gui");
 
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -237,6 +256,11 @@ void CloudServicesDialog::fetch_models() {
             curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
             curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
                              timeout_ms_ > 0 && timeout_ms_ < 15000 ? timeout_ms_ : 15000);
+
+            if (!proxy_url.empty()) {
+                curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
+                curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+            }
 
             res = curl_easy_perform(curl);
             http_code = 0;
@@ -363,9 +387,13 @@ void CloudServicesDialog::start_model_checks() {
     const std::string key = api_key_buf_;
     const int timeout = timeout_ms_ > 0 ? timeout_ms_ : 60000;
     const std::vector<std::string> models = model_list_;
+    std::string proxy_url;
+    if (use_tor_ && socks5_proxy_host_buf_[0] != '\0') {
+        proxy_url = std::string("socks5h://") + socks5_proxy_host_buf_;
+    }
 
     checking_ = true;
-    check_thread_ = std::thread([this, url, key, timeout, models]() {
+    check_thread_ = std::thread([this, url, key, timeout, models, proxy_url]() {
         constexpr int kProbeMaxTokens = 8;
         constexpr int kPauseMs = 700;
 
@@ -404,6 +432,8 @@ void CloudServicesDialog::start_model_checks() {
                 }
                 struct curl_slist* headers = nullptr;
                 headers = curl_slist_append(headers, "Content-Type: application/json");
+                headers = curl_slist_append(headers, "HTTP-Referer: https://github.com/llama-gui");
+                headers = curl_slist_append(headers, "X-Title: llama-gui");
                 if (with_auth && !key.empty()) {
                     headers = curl_slist_append(headers, ("Authorization: Bearer " + key).c_str());
                 }
@@ -418,6 +448,11 @@ void CloudServicesDialog::start_model_checks() {
                                  timeout > 0 && timeout < 15000 ? timeout : 15000L);
                 curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
                 curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+                if (!proxy_url.empty()) {
+                    curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
+                    curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+                }
 
                 cres = curl_easy_perform(curl);
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -801,6 +836,133 @@ void CloudServicesDialog::render() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Max tokens spent on reasoning (0 = provider/model default).\n"
                               "Only used when thinking is enabled.");
+        }
+
+        // Прокси (Tor / SOCKS5)
+        ImGui::Separator();
+        ImGui::Text("Proxy (Tor):");
+        ImGui::SameLine(120);
+        if (ImGui::Checkbox("Route through Tor##use_tor", &use_tor_)) {
+            settings_modified_ = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Route all cloud API requests through Tor (SOCKS5 proxy).\n"
+                              "Requires Tor running on the specified address (default: 127.0.0.1:9050).\n"
+                              "Uses socks5h:// for DNS resolution through Tor as well.");
+        }
+        if (use_tor_) {
+            ImGui::Text("SOCKS5 host:");
+            ImGui::SameLine(120);
+            if (ImGui::InputText("##socks5_host", socks5_proxy_host_buf_, sizeof(socks5_proxy_host_buf_))) {
+                settings_modified_ = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Tor SOCKS5 proxy address (default: 127.0.0.1:9050).\n"
+                                  "Change if Tor listens on a different port or address.");
+            }
+
+            // Tor Bridge Management
+            ImGui::Separator();
+            ImGui::Text("Tor Bridges:");
+
+            // Текущие мосты
+            if (!current_bridges_.empty()) {
+                ImGui::Text("Current bridges (%d):", (int)current_bridges_.size());
+                for (size_t i = 0; i < current_bridges_.size(); i++) {
+                    const auto& b = current_bridges_[i];
+                    std::string label = b.transport + " " + b.address;
+                    if (b.valid) {
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "%s", label.c_str());
+                    } else if (b.latency_ms > 0) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", label.c_str());
+                    } else {
+                        ImGui::Text("  %s", label.c_str());
+                    }
+                }
+            } else if (!bridges_loading_) {
+                ImGui::TextDisabled("No bridges loaded");
+            }
+
+            // Кнопки управления
+            if (bridges_loading_) {
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Loading bridges...");
+                if (ImGui::SmallButton("Cancel##bridge_load")) {
+                    bridges_cancelled_ = true;
+                }
+            } else if (bridges_validating_) {
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
+                                   "Validating bridges... %d/%d",
+                                   bridges_valid_count_, bridges_total_count_);
+                if (ImGui::SmallButton("Cancel##bridge_val")) {
+                    bridges_cancelled_ = true;
+                }
+            } else {
+                if (ImGui::SmallButton("Fetch New Bridges")) {
+                    bridges_loading_ = true;
+                    bridges_cancelled_ = false;
+                    bridge_fetch_status_ = "";
+                    bridges_thread_ = std::thread([this]() {
+                        llama_gui::core::TorBridgeManager mgr;
+                        auto new_bridges = mgr.fetch_bridges("obfs4", 5);
+                        if (!bridges_cancelled_ && !new_bridges.empty()) {
+                            current_bridges_ = std::move(new_bridges);
+                            bridge_fetch_status_ = "Fetched " + std::to_string(current_bridges_.size()) + " bridges";
+                        } else if (bridges_cancelled_) {
+                            bridge_fetch_status_ = "Cancelled";
+                        } else {
+                            bridge_fetch_status_ = "Failed to fetch bridges (is Tor running?)";
+                        }
+                        bridges_loading_ = false;
+                    });
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Validate All") && !current_bridges_.empty()) {
+                    bridges_validating_ = true;
+                    bridges_cancelled_ = false;
+                    bridges_valid_count_ = 0;
+                    bridges_total_count_ = current_bridges_.size();
+                    validate_thread_ = std::thread([this]() {
+                        llama_gui::core::TorBridgeManager mgr;
+                        mgr.validate_all_bridges(current_bridges_, "https://api.ipify.org", 10000,
+                            [this](int cur, int total) {
+                                bridges_valid_count_ = cur;
+                                bridges_total_count_ = total;
+                            });
+                        bridges_validating_ = false;
+                    });
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Apply Bridges") && !current_bridges_.empty()) {
+                    // Отфильтровываем только валидные мосты
+                    std::vector<llama_gui::core::TorBridgeManager::BridgeInfo> valid_bridges;
+                    for (const auto& b : current_bridges_) {
+                        if (b.valid) valid_bridges.push_back(b);
+                    }
+                    if (!valid_bridges.empty()) {
+                        llama_gui::core::TorBridgeManager mgr;
+                        if (mgr.write_bridges_to_torrc(valid_bridges)) {
+                            tor_restarting_ = true;
+                            std::thread([this]() {
+                                llama_gui::core::TorBridgeManager mgr;
+                                mgr.restart_tor();
+                                tor_restarting_ = false;
+                            }).detach();
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Read Current")) {
+                    llama_gui::core::TorBridgeManager mgr;
+                    current_bridges_ = mgr.read_bridges_from_torrc();
+                }
+
+                if (!bridge_fetch_status_.empty()) {
+                    ImGui::TextDisabled("%s", bridge_fetch_status_.c_str());
+                }
+                if (tor_restarting_) {
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Restarting Tor...");
+                }
+            }
         }
 
         // Стоимость токенов (расход денег)

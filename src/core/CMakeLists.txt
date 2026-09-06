@@ -74,6 +74,7 @@ set(CORE_SOURCES
     embedding_proxy.cpp
     embedding_server.cpp
     env_manager.cpp
+    tor_bridge_manager.cpp
     file_dialog_filters.cpp
     ini_section_parser.cpp
     kv_cache_api_impl.cpp

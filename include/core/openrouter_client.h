@@ -39,6 +39,8 @@ public:
 
     void set_timeout(int timeout_ms);
 
+    void set_proxy(const std::string& proxy_url);
+
     /// Прервать активную стриминг-генерацию (по требованию пользователя).
     void abort_stream();
 

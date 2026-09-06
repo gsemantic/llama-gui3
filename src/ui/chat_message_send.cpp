@@ -666,6 +666,9 @@ void ChatInterface::send_message_via_openrouter() {
     if (!cp.endpoint_url.empty()) {
         client.set_base_url(cp.endpoint_url);
     }
+    if (cp.use_tor && !cp.socks5_proxy_host.empty()) {
+        client.set_proxy("socks5h://" + cp.socks5_proxy_host);
+    }
     
     // Формируем параметры запроса
     llama_gui::core::OpenRouterRequestParams params;
@@ -730,15 +733,21 @@ void ChatInterface::send_message_via_openrouter() {
     std::string original_prompt = message_content;
     std::string rag_prompt_cache = final_message_content;
     bool has_rag_ctx = has_rag_context;
+    bool use_tor_copy = cp.use_tor;
+    std::string socks5_host_copy = cp.socks5_proxy_host;
 
     params.stream = true;
 
     std::thread([this, api_key_copy, model_id_copy, endpoint_copy, timeout_copy, params,
-                 conv_id, original_prompt, rag_prompt_cache, has_rag_ctx]() {
+                 conv_id, original_prompt, rag_prompt_cache, has_rag_ctx,
+                 use_tor_copy, socks5_host_copy]() {
         auto cloud_client = std::make_shared<llama_gui::core::OpenRouterClient>(api_key_copy);
         cloud_client->set_timeout(timeout_copy);
         if (!endpoint_copy.empty()) {
             cloud_client->set_base_url(endpoint_copy);
+        }
+        if (use_tor_copy && !socks5_host_copy.empty()) {
+            cloud_client->set_proxy("socks5h://" + socks5_host_copy);
         }
         active_cloud_client_ = cloud_client;
 

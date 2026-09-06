@@ -215,7 +215,8 @@ size_t stream_write_cb(void* ptr, size_t size, size_t nmemb, void* userp) {
 
 // Обычный запрос (не-стриминг). Возвращает HTTP-статус апстрима (0 = ошибка curl)
 int forward_collect(const std::string& url, const std::vector<std::string>& headers,
-                    const std::string& body, std::string& out_body) {
+                    const std::string& body, std::string& out_body,
+                    const std::string& proxy_url = "") {
     CURL* curl = curl_easy_init();
     if (!curl) return 0;
     CollectCtx ctx;
@@ -233,6 +234,11 @@ int forward_collect(const std::string& url, const std::vector<std::string>& head
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
+    if (!proxy_url.empty()) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+    }
+
     CURLcode res = curl_easy_perform(curl);
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -245,7 +251,8 @@ int forward_collect(const std::string& url, const std::vector<std::string>& head
 
 // Стриминговый запрос: SSE пишется напрямую клиенту
 int forward_stream(const std::string& url, const std::vector<std::string>& headers,
-                   const std::string& body, int client_fd) {
+                   const std::string& body, int client_fd,
+                   const std::string& proxy_url = "") {
     CURL* curl = curl_easy_init();
     if (!curl) return 0;
     StreamCtx ctx{client_fd, false};
@@ -264,6 +271,11 @@ int forward_stream(const std::string& url, const std::vector<std::string>& heade
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+
+    if (!proxy_url.empty()) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+    }
 
     CURLcode res = curl_easy_perform(curl);
     long code = 0;
@@ -378,9 +390,11 @@ void apply_defaults(Settings& settings, nlohmann::json& req) {
     bool has_model = req.contains("model") && !req["model"].is_null() &&
                      req["model"].is_string() && !req["model"].get<std::string>().empty();
     if (has_model) {
-        // qwen cli и подобные клиенты шлют плейсхолдер "local" — заменяем на модель провайдера
+        // qwen cli и подобные клиенты шлют плейсхолдер — заменяем на модель провайдера
         std::string m = req["model"].get<std::string>();
-        if (m == "local" || m == "default" || m == "gpt-4o" || m == "gpt-4o-mini") {
+        if (m == "local" || m == "default" || m == "cloud-model" ||
+            m == "gpt-4o" || m == "gpt-4o-mini" ||
+            m == "llama-gui-cloud") {
             req["model"] = cp.model_id;
         }
     } else {
@@ -469,6 +483,15 @@ struct ProxyContext {
         std::string key_name = EnvManager::cloud_provider_api_key_name(cp.provider_name,
                                                                        cp.endpoint_url);
         return EnvManager::read_key(key_name, settings.get_profiles_directory());
+    }
+
+    // SOCKS5-прокси (Tor): настройки провайдера
+    std::string proxy_url() const {
+        const auto& cp = settings.cloud_provider();
+        if (cp.use_tor && !cp.socks5_proxy_host.empty()) {
+            return "socks5h://" + cp.socks5_proxy_host;
+        }
+        return "";
     }
 
     // Инициализация RAG из живых настроек (вызывать под rag_mutex)
@@ -583,14 +606,16 @@ void handle_connection(int fd, ProxyContext& ctx) {
         headers.push_back("X-Title: llama-gui-cloud-proxy");
 
         std::string url = build_upstream_url(ctx.endpoint_url(), "chat/completions");
-        std::cout << "[CloudProxy] -> " << url << (want_stream ? " (stream)" : "") << std::endl;
+        std::string proxy = ctx.proxy_url();
+        std::cout << "[CloudProxy] -> " << url << (want_stream ? " (stream)" : "")
+                  << (proxy.empty() ? "" : " [via " + proxy + "]") << std::endl;
 
         if (want_stream) {
             send_response(fd, 200, "text/event-stream", "", /*stream=*/true);
-            forward_stream(url, headers, body, fd);
+            forward_stream(url, headers, body, fd, proxy);
         } else {
             std::string out_body;
-            int code = forward_collect(url, headers, body, out_body);
+            int code = forward_collect(url, headers, body, out_body, proxy);
             if (code <= 0) {
                 send_response(fd, 502, "application/json",
                               "{\"error\":{\"message\":\"upstream request failed\"}}");
@@ -612,8 +637,9 @@ void handle_connection(int fd, ProxyContext& ctx) {
         headers.push_back("X-Title: llama-gui-cloud-proxy");
 
         std::string out_body;
+        std::string proxy = ctx.proxy_url();
         int code = forward_collect(build_upstream_url(ctx.endpoint_url(), "embeddings"),
-                                   headers, req.body, out_body);
+                                   headers, req.body, out_body, proxy);
         if (code <= 0) {
             send_response(fd, 502, "application/json",
                           "{\"error\":{\"message\":\"upstream failed\"}}");
@@ -642,27 +668,10 @@ static int run_proxy_accept_loop(Settings& settings, CloudProxyOptions opts,
 
     std::string host = opts.host.empty() ? settings.server_runtime().host : opts.host;
     if (host.empty()) host = "127.0.0.1";
-    int port = opts.port > 0 ? opts.port : settings.server_runtime().port;
-    if (port <= 0) port = 8081;
-
-    // GUI-режим (--proxy): локальный чат-сервер занимает settings.server().port.
-    // Если прокси получил тот же порт, llama-server сможет повиснуть только
-    // на другом семействе адресов (IPv6), и health-проверки GUI на
-    // http://localhost:<порт> будут попадать в прокси, а не в локальную модель
-    // (симптом: индикатор загрузки модели замирает, кнопка отправки неактивна).
-    if (opts.avoid_local_server_port && port == settings.server().port) {
-        int shifted = find_free_port(port + 1, host);
-        if (shifted > 0 && shifted != port) {
-            std::cout << "======================================================" << std::endl;
-            std::cout << "⚠️  Порт " << port << " совпадает с портом локального чат-сервера"
-                      << std::endl;
-            std::cout << "    Облачный прокси переезжает на порт " << shifted << std::endl;
-            std::cout << "    Endpoint для внешних клиентов: http://" << host << ":"
-                      << shifted << "/v1" << std::endl;
-            std::cout << "======================================================" << std::endl;
-            port = shifted;
-        }
-    }
+    // Прокси НЕ использует server_runtime.port — он общий с llama-server.
+    // Дефолт: server.port + 4 (8085), затем ищем свободный.
+    int port = opts.port > 0 ? opts.port : settings.server().port + 4;
+    if (port <= 0) port = 8085;
 
     if (opts.auto_port || is_port_in_use(port, host)) {
         int free_port = find_free_port(port, host);

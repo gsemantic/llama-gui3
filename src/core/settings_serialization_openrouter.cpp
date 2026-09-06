@@ -53,7 +53,9 @@ void Settings::serializeOpenRouterSettings(json& j) const {
         {"last_search_query", openrouter_settings_.last_search_query},
         {"auto_price", openrouter_settings_.auto_price},
         {"price_input_per_1m", openrouter_settings_.price_input_per_1m},
-        {"price_output_per_1m", openrouter_settings_.price_output_per_1m}
+        {"price_output_per_1m", openrouter_settings_.price_output_per_1m},
+        {"use_tor", openrouter_settings_.use_tor},
+        {"socks5_proxy_host", openrouter_settings_.socks5_proxy_host}
     };
     json recent = json::array();
     for (const auto& r : openrouter_settings_.recent_models) {
@@ -84,6 +86,8 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.auto_price = o.value("auto_price", true);
         openrouter_settings_.price_input_per_1m = o.value("price_input_per_1m", 0.0);
         openrouter_settings_.price_output_per_1m = o.value("price_output_per_1m", 0.0);
+        openrouter_settings_.use_tor = o.value("use_tor", false);
+        openrouter_settings_.socks5_proxy_host = o.value("socks5_proxy_host", "127.0.0.1:9050");
         load_recent_models(o, openrouter_settings_.recent_models);
         return;
     }

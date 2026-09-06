@@ -35,9 +35,11 @@ public:
     void set_base_url(const std::string& url);
     void set_api_key(const std::string& api_key);
     void set_timeout(int timeout_ms);
+    void set_proxy(const std::string& proxy_url);  // e.g. "socks5h://127.0.0.1:9050"
 
     std::string get_base_url() const { return base_url_; }
     std::string get_api_key() const { return api_key_; }
+    std::string get_proxy() const { return proxy_; }
 
     /// Прервать активный стриминг-запрос (вызывается по требованию пользователя).
     void abort_stream() { aborted_.store(true); }
@@ -69,6 +71,7 @@ private:
 
     std::string base_url_ = "https://openrouter.ai/api/v1";
     std::string api_key_;
+    std::string proxy_;
     int timeout_ms_ = 30000;
     long last_http_code_ = 0;
     std::atomic<bool> aborted_{false};

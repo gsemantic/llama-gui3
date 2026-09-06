@@ -197,12 +197,18 @@ std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_
     bool is_qwen =
         provider_lower.find("qwen") != std::string::npos ||
         url_lower.find("dashscope") != std::string::npos;
+    bool is_openrouter =
+        provider_lower.find("openrouter") != std::string::npos ||
+        url_lower.find("openrouter.ai") != std::string::npos;
 
     if (is_opencode_zen) {
         return "OPENCODE_ZEN_API_KEY";
     }
     if (is_zhipu) {
         return "ZHIPU_GLM_API_KEY";
+    }
+    if (is_openrouter) {
+        return "OPENROUTER_API_KEY";
     }
     if (is_pollinations) {
         return "POLLINATIONS_API_KEY";

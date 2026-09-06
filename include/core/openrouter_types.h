@@ -218,6 +218,24 @@ inline bool get_preset_price(const std::string& model_id,
         {"deepseek-v4",        0.27, 1.10},
         {"deepseek-v4-flash",  0.00, 0.00},   // часто бесплатно в рамках free tier
         {"deepseek-lite",      0.07, 0.28},
+        // --- OpenRouter (aggregator) ---
+        {"openrouter/auto",    0.00, 0.00},
+        {"meta-llama/llama-3.1-8b-instruct", 0.05, 0.08},
+        {"meta-llama/llama-3.1-70b-instruct", 0.52, 0.75},
+        {"meta-llama/llama-3.1-405b-instruct", 2.00, 3.00},
+        {"google/gemma-2-9b-it", 0.03, 0.06},
+        {"google/gemma-2-27b-it", 0.15, 0.30},
+        {"mistralai/mistral-7b-instruct", 0.05, 0.10},
+        {"mistralai/mixtral-8x7b-instruct", 0.30, 0.60},
+        {"mistralai/mixtral-8x22b-instruct", 0.60, 1.20},
+        {"anthropic/claude-3.5-sonnet", 3.00, 15.00},
+        {"anthropic/claude-3-haiku", 0.25, 1.25},
+        {"openai/gpt-4o-mini", 0.15, 0.60},
+        {"openai/gpt-4o", 2.50, 10.00},
+        {"nousresearch/hermes-3-llama-3.1-405b", 2.00, 3.00},
+        {"cognitivecomputations/dolphin-2.9.1-llama-3-70b", 0.52, 0.75},
+        {"qwen/qwen-2.5-72b-instruct", 0.40, 1.20},
+        {"qwen/qwen-2-72b-instruct", 0.40, 1.20},
     };
     std::string m = model_id;
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);

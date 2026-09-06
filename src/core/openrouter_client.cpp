@@ -109,6 +109,10 @@ void OpenRouterClient::set_timeout(int timeout_ms) {
     http_client_.set_timeout(timeout_ms);
 }
 
+void OpenRouterClient::set_proxy(const std::string& proxy_url) {
+    http_client_.set_proxy(proxy_url);
+}
+
 void OpenRouterClient::abort_stream() {
     aborted_.store(true);
     http_client_.abort_stream();
