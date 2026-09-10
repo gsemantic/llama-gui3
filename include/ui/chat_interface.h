@@ -173,6 +173,9 @@ public:
     // Settings access
     const Settings& get_settings() const { return settings_; }
 
+    /* Установить режим агента по имени (для команд/CLI без GUI). */
+    void set_active_agent_mode(const std::string& name);
+
 private:
     void render_message_list();
     void render_input_area();

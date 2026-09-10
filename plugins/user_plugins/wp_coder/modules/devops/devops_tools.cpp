@@ -121,9 +121,9 @@ static const char* kNginxSkill =
 
 std::vector<Skill> get_devops_skills() {
     return {
-        {"devops_docker", "Docker best practices", kDockerSkill},
-        {"devops_systemd", "systemd service management", kSystemdSkill},
-        {"devops_nginx", "Nginx конфигурация", kNginxSkill}
+        {"devops_docker", "Docker best practices", kDockerSkill, "devops"},
+        {"devops_systemd", "systemd service management", kSystemdSkill, "devops"},
+        {"devops_nginx", "Nginx конфигурация", kNginxSkill, "devops"}
     };
 }
 

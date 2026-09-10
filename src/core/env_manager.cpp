@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <vector>
 #include <algorithm>
+#include <cctype>
 
 namespace llama_gui {
 namespace core {
@@ -200,9 +201,16 @@ std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_
     bool is_openrouter =
         provider_lower.find("openrouter") != std::string::npos ||
         url_lower.find("openrouter.ai") != std::string::npos;
+    bool is_alibaba_token_plan =
+        provider_lower.find("alibaba token plan") != std::string::npos ||
+        provider_lower.find("alibaba-token-plan") != std::string::npos ||
+        url_lower.find("token-plan.ap-southeast-1.maas.aliyuncs.com") != std::string::npos;
 
     if (is_opencode_zen) {
         return "OPENCODE_ZEN_API_KEY";
+    }
+    if (is_alibaba_token_plan) {
+        return "ALIBABA_TOKEN_PLAN_API_KEY";
     }
     if (is_zhipu) {
         return "ZHIPU_GLM_API_KEY";
@@ -218,6 +226,24 @@ std::string EnvManager::cloud_provider_api_key_name(const std::string& provider_
     }
     if (is_qwen) {
         return "QWEN_API_KEY";
+    }
+
+    // Custom-провайдер, сохранённый под своим именем, получает собственный слот
+    // API-ключа, чтобы несколько Custom-соединений не делили один ключ.
+    if (!provider_name.empty() && provider_lower != "custom") {
+        std::string slug;
+        bool usable = false;
+        for (char c : provider_name) {
+            if (std::isalnum(static_cast<unsigned char>(c))) {
+                slug += std::toupper(static_cast<unsigned char>(c));
+                usable = true;
+            } else if (c == ' ' || c == '-' || c == '_') {
+                slug += '_';
+            }
+        }
+        if (usable) {
+            return "CUSTOM_CLOUD_API_KEY_" + slug;
+        }
     }
 
     return "CLOUD_PROVIDER_API_KEY";

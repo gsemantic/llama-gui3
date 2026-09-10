@@ -67,7 +67,7 @@ void my_init() {
 std::vector<ToolInfo> my_get_tools() { return {}; }
 
 std::vector<Skill> my_get_skills() {
-    return {{"my_skill", "Описание навыка", "Тело навыка"}};
+    return {{"my_skill", "Описание навыка", "Тело навыка", "my_module"}};
 }
 
 const char* my_get_system_prompt() {

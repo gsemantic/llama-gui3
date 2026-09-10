@@ -23,6 +23,9 @@ public:
     /* Загрузка навыков из модулей + файлов .md. */
     void load();
 
+    /* Установить активный модуль и обновить активные навыки. */
+    void set_module(const std::string& module_name);
+
     /* Обновить список активных навыков. */
     void set_active(const std::vector<std::string>& names);
     void toggle(const std::string& name, bool on);
@@ -40,11 +43,12 @@ public:
     const Skill* find(const std::string& name) const;
 
     /* Загрузка навыков из каталога .md файлов (внешний вызов). */
-    void load_from_directory(const std::string& dir);
+    void load_from_directory(const std::string& dir, const std::string& module_name = "");
 
 private:
     std::vector<Skill> skills_;
     std::vector<std::string> active_;
+    std::string active_module_;
 };
 
 } // namespace coder

@@ -36,7 +36,7 @@ void SkillsManager::load() {
      * через load_from_directory() — здесь только объединяем. */
 }
 
-void SkillsManager::load_from_directory(const std::string& dir) {
+void SkillsManager::load_from_directory(const std::string& dir, const std::string& module_name) {
     std::error_code ec;
     if (!fs::exists(dir, ec)) return;
 
@@ -92,7 +92,18 @@ void SkillsManager::load_from_directory(const std::string& dir) {
             if (s.name == sk.name) { exists = true; break; }
         }
         if (!exists) {
+            sk.module_name = module_name;
             skills_.push_back(std::move(sk));
+        }
+    }
+}
+
+void SkillsManager::set_module(const std::string& module_name) {
+    active_module_ = module_name;
+    active_.clear();
+    for (const auto& sk : skills_) {
+        if (sk.module_name == module_name) {
+            active_.push_back(sk.name);
         }
     }
 }
@@ -119,11 +130,18 @@ const std::vector<std::string>& SkillsManager::active_skills() const {
 }
 
 std::string SkillsManager::build_skills_prompt() const {
-    std::string result;
+    /* Только имена и описания активно включённых навыков. Полные тела навыков
+     * НЕ инжектируются в промпт — они тяжёлые и оплачиваются на каждом шаге.
+     * Модель подгружает нужный навык через инструмент skill_detail. */
+    if (active_.empty()) return "";
+    std::string result = "\n\n## АКТИВНЫЕ НАВЫКИ\n"
+                         "(подробная инструкция — через skill_detail QUERY: <имя>)\n";
     for (const auto& name : active_) {
         for (const auto& sk : skills_) {
             if (sk.name == name) {
-                result += "\n\n[НАВЫК: " + sk.name + "]\n" + sk.body;
+                result += "- " + sk.name;
+                if (!sk.description.empty()) result += " — " + sk.description;
+                result += "\n";
                 break;
             }
         }

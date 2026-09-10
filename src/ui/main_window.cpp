@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "chat_interface.h"
 #include "headless_browser_panel.h"
 #include "advanced_menu_system.h"
 #include "command.h"
@@ -1243,6 +1244,10 @@ void MainWindow::registerCommand(const std::string& name, std::unique_ptr<Comman
 
 void MainWindow::set_title(const std::string& title) {
     title_ = title;
+}
+
+void MainWindow::set_agent_mode(const std::string& name) {
+    if (chat_interface_) chat_interface_->set_active_agent_mode(name);
 }
 
 void MainWindow::set_size(int width, int height) {

@@ -57,8 +57,9 @@ TEST(skills_manager_build_prompt) {
     mgr.toggle("test_skill_b", true);
 
     std::string prompt = mgr.build_skills_prompt();
+    /* Промпт содержит только имя и описание (тело выгружается через skill_detail). */
     ASSERT_TRUE(prompt.find("test_skill_b") != std::string::npos);
-    ASSERT_TRUE(prompt.find("Body B") != std::string::npos);
+    ASSERT_TRUE(prompt.find("Body B") == std::string::npos);
 
     mgr.toggle("test_skill_b", false);
 }

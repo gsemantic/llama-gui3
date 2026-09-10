@@ -375,6 +375,10 @@ std::future<ChatCompletionResponse> impl::LlamaInterfaceImpl::create_chat_comple
                         response.choices[0].finish_reason = choice.value("finish_reason", "stop");
                     }
                 }
+                /* usage: {"prompt_tokens":N,"completion_tokens":N} — для честных метрик. */
+                if (j.contains("usage") && j["usage"].is_object()) {
+                    response.usage = j["usage"];
+                }
             } catch (const std::exception& e) {
                 std::cerr << "[LlamaInterface] JSON parse error: " << e.what() << std::endl;
             }

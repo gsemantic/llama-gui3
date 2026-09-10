@@ -98,6 +98,7 @@ static void render_project() {
             st.deploy_port = s_deploy_port;
             st.deploy_remote_dir = s_deploy_remote;
             st.wp_local_url = s_local_url;
+            engine().invalidate_prompt_cache();
             engine().save_settings();
         }
     }
@@ -138,11 +139,13 @@ static void render_project() {
     if (ImGui::InputTextMultiline("##agent_prompt", s_agent_prompt, sizeof(s_agent_prompt),
                                   ImVec2(-FLT_MIN, 80))) {
         st.agent_system_prompt = s_agent_prompt;
+        engine().invalidate_prompt_cache();
         engine().save_settings();
     }
     if (ImGui::Button("Сбросить промпт")) {
         st.agent_system_prompt.clear();
         s_agent_prompt[0] = '\0';
+        engine().invalidate_prompt_cache();
         engine().save_settings();
     }
 
@@ -163,6 +166,7 @@ static void render_project() {
         st.deploy_port = s_deploy_port;
         st.deploy_remote_dir = s_deploy_remote;
         st.wp_local_url = s_local_url;
+        engine().invalidate_prompt_cache();
         engine().save_settings();
     }
 
@@ -187,6 +191,8 @@ static void render_modules() {
         bool active = (st.active_module == mod->name);
         if (ImGui::RadioButton(mod->display_name, active)) {
             st.active_module = mod->name;
+            SkillsManager::instance().set_module(mod->name);
+            engine().invalidate_prompt_cache();
             engine().save_settings();
         }
         ImGui::SameLine();
@@ -266,7 +272,7 @@ void render_all_windows() {
 void render_extras() {
     auto& st = engine_state();
 
-    /* Индикатор статуса агента. */
+/* Индикатор статуса агента + кнопка Стоп. */
     {
         std::lock_guard<std::mutex> lk(st.mtx);
         if (st.running) {
@@ -275,15 +281,22 @@ void render_extras() {
             int idx = (int)(t * 4.0f) % 4;
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
                 "%c Агент работает...", spinner[idx]);
+            if ( ImGui::Button("Стоп", {-1, 0}) ) {
+                engine().request_abort();
+            }
         } else if (st.waiting_for_permission) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
                 "! Ожидание разрешения доступа");
         } else if (st.last_response_time > 0) {
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f),
-                "| %d tok | %.1f tok/s | %ds",
+            char stats[160];
+            std::snprintf(stats, sizeof(stats),
+                "%d tok | %.1f tok/s | %ds (LLM %.1fs) | %d steps",
                 st.last_tokens_generated,
                 st.last_tokens_per_second,
-                (int)st.last_response_time);
+                (int)st.last_response_time,
+                (int)st.llm_total_time,
+                st.steps);
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "%s", stats);
         }
     }
 
@@ -298,7 +311,10 @@ void render_extras() {
     /* Режим агента. */
     const char* modes[] = {"Code", "Research", "Review"};
     int m = st.mode;
-    if (ImGui::Combo("Режим", &m, modes, 3)) st.mode = m;
+    if (ImGui::Combo("Режим", &m, modes, 3)) {
+        st.mode = m;
+        engine().invalidate_prompt_cache();
+    }
 
     /* Навыки. */
     {
@@ -311,6 +327,7 @@ void render_extras() {
                                         skills[i].name) != SkillsManager::instance().active_skills().end();
                     if (ImGui::Checkbox(("##sk" + std::to_string(i)).c_str(), &on)) {
                         SkillsManager::instance().toggle(skills[i].name, on);
+                        engine().invalidate_prompt_cache();
                     }
                     ImGui::SameLine();
                     ImGui::Text("%s", skills[i].name.c_str());

@@ -2,6 +2,7 @@
 #include "tools_registry.h"
 #include "engine.h"
 #include "security.h"
+#include "shell.h"
 
 #include <fstream>
 #include <sstream>
@@ -15,8 +16,14 @@ namespace coder {
 
 namespace {
 
-const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
-                                            "wp-includes", "wp-admin"};
+const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor"};
+
+/* Лимиты вывода — результат инструмента попадает в следующий запрос к LLM,
+ * поэтому его размер напрямую определяет скорость и стоимость префилля. */
+constexpr size_t kMaxToolOutput = 12000;   // байт на результат инструмента
+constexpr size_t kMaxGrepMatches = 200;    // строк совпадений
+constexpr size_t kReadFileChars = 12000;   // байт на read_file
+constexpr size_t kMaxSymFile = 40;         // символов в файле для repo_map
 
 void walk_php(const fs::path& root, std::vector<std::string>& out, size_t limit = 4000) {
     if (!fs::exists(root)) return;
@@ -60,17 +67,37 @@ void walk_all(const fs::path& root, std::vector<std::string>& out, size_t limit 
     }
 }
 
-std::string read_text_file(const std::string& path, size_t max_chars = 60000) {
+/* Чтение файла с ограничением размера и пропуском первых skip_lines строк. */
+std::string read_text_file(const std::string& path, size_t max_chars, size_t skip_lines) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return "[ошибка] не удалось открыть файл: " + path;
-    std::stringstream ss;
-    ss << f.rdbuf();
-    std::string s = ss.str();
-    if (s.size() > max_chars) {
-        s.resize(max_chars);
-        s += "\n...[обрезано]";
+
+    std::string out;
+    out.reserve(std::min<size_t>(max_chars, 65536));
+    size_t line = 0;
+    std::string ln;
+    while (std::getline(f, ln)) {
+        if (line++ < skip_lines) continue;
+        if (out.size() + ln.size() + 1 > max_chars) {
+            size_t room = max_chars - out.size();
+            if (out.size() < max_chars) {
+                out.append(ln, 0, room);
+                out += "\n";
+            }
+            break;
+        }
+        out += ln;
+        out += '\n';
     }
-    return s;
+    return out;
+}
+
+/* Проверка доступа к пути за пределами корня проекта.
+ * Если возвращает непустую строку — это сообщение об отказе (и движок
+ * уже перевёл агента в режим ожидания разрешения пользователя). */
+std::string guard_permission(const std::string& abs_path) {
+    auto& eng = engine();
+    return eng.check_external_permission(abs_path);
 }
 
 /* Разрешить относительный путь относительно корня проекта. */
@@ -85,17 +112,27 @@ std::string resolve_path(const std::string& rel) {
     return p;
 }
 
-/* grep_search: поиск по файлам с использованием regex. */
+/* grep_search: поиск по файлам — НАСТОЯЩЕЕ регулярное выражение (ECMAScript). */
 std::string base_grep(const std::string& root, const std::string& pattern) {
+    if (pattern.empty())
+        return "[ошибка] пустой PATTERN — укажи регулярное выражение";
+
+    std::regex re;
+    try {
+        re = std::regex(pattern, std::regex::ECMAScript);
+    } catch (const std::regex_error& e) {
+        std::string err = e.what();
+        return "[ошибка] невалидное регулярное выражение '" + pattern + "': "
+               + err + ". Исправь PATTERN, не повторяй тот же самый.";
+    }
+
     std::string base = root.empty() ? engine_state().project_dir : root;
+    if (base.empty()) return "[ошибка] не задан ROOT и не задан project_dir";
+    if (!fs::exists(base) || !fs::is_directory(base))
+        return "[ошибка] каталог не существует: " + base;
+
     std::vector<std::string> files;
     walk_all(base, files, 2000);
-
-    std::regex pat_re;
-    bool have_pat = !pattern.empty();
-    if (have_pat) {
-        try { pat_re = std::regex(pattern); } catch (...) { have_pat = false; }
-    }
 
     std::stringstream out;
     size_t found = 0;
@@ -106,10 +143,16 @@ std::string base_grep(const std::string& root, const std::string& pattern) {
         size_t ln = 0;
         while (std::getline(f, line)) {
             ++ln;
-            if (have_pat) {
-                if (std::regex_search(line, pat_re)) {
-                    out << fp << ":" << ln << "  " << line << "\n";
-                    ++found;
+            std::smatch m;
+            if (std::regex_search(line, m, re)) {
+                out << fp << ":" << ln << "  " << line << "\n";
+                if (out.str().size() >= kMaxToolOutput) {
+                    out << "\n[вывод обрезан по лимиту]";
+                    return out.str();
+                }
+                if (++found >= kMaxGrepMatches) {
+                    out << "\n[найдено совпадений: >= " << found << " — лимит вывода]";
+                    return out.str();
                 }
             }
         }
@@ -118,19 +161,32 @@ std::string base_grep(const std::string& root, const std::string& pattern) {
     return out.str();
 }
 
-/* repo_map: компактный обзор каталога. */
+/* repo_map: компактный обзор каталога (с кэшем на текущую задачу — B2). */
 std::string base_repo_map(const std::string& root) {
     std::string base = root.empty() ? engine_state().project_dir : root;
+    if (base.empty()) return "[ошибка] не задан ROOT и не задан project_dir";
+
+    /* Кэш: если за эту задачу то же корень уже обозревали — возвращаем готовое. */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        if (engine_state().repo_map_cache_root == base &&
+            !engine_state().repo_map_cache_result.empty()) {
+            return engine_state().repo_map_cache_result +
+                   "\n[repo_map: из кэша задачи]";
+        }
+    }
+
     std::vector<std::string> files;
     walk_all(base, files, 1500);
     if (files.empty()) return "[repo_map: файлы не найдены в " + base + "]";
 
-    std::regex fn_re(R"((?:function|class)\s+([a-zA-Z_][a-zA-Z0-9_]*))");
-    std::regex hook_re(R"((add_action|add_filter|add_shortcode)\s*\(\s*['"]([^'"]+)['"])");
-
     std::stringstream out;
     out << "[repo_map] " << files.size() << " файлов:\n";
     for (const auto& fp : files) {
+        if (out.str().size() >= kMaxToolOutput) {
+            out << "...\n[repo_map: вывод обрезан]";
+            break;
+        }
         std::string rel = fp;
         if (!base.empty() && rel.rfind(base, 0) == 0)
             rel = rel.substr(base.size() + 1);
@@ -138,12 +194,40 @@ std::string base_repo_map(const std::string& root) {
         if (!f) continue;
         std::string line;
         std::vector<std::string> syms;
-        while (std::getline(f, line)) {
-            std::smatch m;
-            if (std::regex_search(line, m, fn_re) && syms.size() < 40)
-                syms.push_back("f:" + m[1].str());
-            else if (std::regex_search(line, m, hook_re) && syms.size() < 40)
-                syms.push_back("h:" + m[2].str());
+        while (std::getline(f, line) && syms.size() < kMaxSymFile) {
+            size_t kw = std::string::npos;
+            if ((kw = line.find("function ")) != std::string::npos) {
+                size_t start = kw + 9;
+                size_t end = start;
+                while (end < line.size() && (std::isalnum(line[end]) || line[end] == '_'))
+                    ++end;
+                if (end > start)
+                    syms.push_back("f:" + line.substr(start, end - start));
+            } else if ((kw = line.find("class ")) != std::string::npos) {
+                size_t start = kw + 6;
+                size_t end = start;
+                while (end < line.size() && (std::isalnum(line[end]) || line[end] == '_'))
+                    ++end;
+                if (end > start)
+                    syms.push_back("c:" + line.substr(start, end - start));
+            }
+            if (syms.size() < kMaxSymFile) {
+                const char* hooks[] = {"add_action", "add_filter", "add_shortcode"};
+                for (const char* hook : hooks) {
+                    size_t hk = line.find(hook);
+                    if (hk == std::string::npos) continue;
+                    size_t lp = line.find('(', hk);
+                    if (lp == std::string::npos) continue;
+                    size_t q1 = line.find('\'', lp + 1);
+                    if (q1 == std::string::npos) q1 = line.find('"', lp + 1);
+                    if (q1 == std::string::npos) continue;
+                    char q = line[q1];
+                    size_t q2 = line.find(q, q1 + 1);
+                    if (q2 == std::string::npos) continue;
+                    syms.push_back("h:" + line.substr(q1 + 1, q2 - q1 - 1));
+                    break;
+                }
+            }
         }
         out << "  " << rel;
         if (!syms.empty()) {
@@ -156,7 +240,13 @@ std::string base_repo_map(const std::string& root) {
         }
         out << "\n";
     }
-    return out.str();
+    std::string result = out.str();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().repo_map_cache_root = base;
+        engine_state().repo_map_cache_result = result;
+    }
+    return result;
 }
 
 /* list_skills: имена и описания доступных навыков. */
@@ -164,10 +254,27 @@ std::string base_list_skills() {
     const auto& skills = SkillsManager::instance().all_skills();
     if (skills.empty()) return "[навыков нет]";
     std::stringstream s;
-    s << "[навыки " << skills.size() << "]:\n";
+    s << "[навыков " << skills.size() << "]:\n";
     for (const auto& sk : skills)
         s << "  " << sk.name << " — " << sk.description << "\n";
     return s.str();
+}
+
+/* skill_detail: полный текст навыка по имени. */
+std::string base_skill_detail(const std::string& name) {
+    if (name.empty()) return "[ошибка] укажи имя навыка (QUERY)";
+    const Skill* sk = SkillsManager::instance().find(name);
+    if (!sk) {
+        std::stringstream s;
+        s << "[ошибка] навык '" << name << "' не найден. Доступные навыки:\n";
+        const auto& skills = SkillsManager::instance().all_skills();
+        for (const auto& s2 : skills)
+            s << "  " << s2.name << " — " << s2.description << "\n";
+        return s.str();
+    }
+    if (sk->body.empty())
+        return "[" + sk->name + " — нет подробной инструкции]";
+    return "### НАВЫК: " + sk->name + "\n" + sk->body;
 }
 
 } // anonymous namespace
@@ -177,22 +284,33 @@ void register_base_tools() {
 
     reg.register_tool("read_file", [](const ToolArgs& a) -> std::string {
         std::string abs = resolve_path(a.path);
-        return read_text_file(abs);
+        std::string perm = guard_permission(abs);
+        if (!perm.empty()) return perm;
+        size_t skip = (a.k > 1) ? static_cast<size_t>(a.k - 1) : 0;
+        std::string content = read_text_file(abs, kReadFileChars, skip);
+        std::stringstream hdr;
+        hdr << "# read: " << abs;
+        if (skip > 0) hdr << " (строки с " << skip + 1 << ")";
+        if (content.size() >= kReadFileChars)
+            hdr << " [обрезано по лимиту — читай с нужной строки через K]";
+        return hdr.str() + "\n" + content;
     }, "Чтение файла");
 
     reg.register_tool("write_file", [](const ToolArgs& a) -> std::string {
         auto& st = engine_state();
+        std::string abs = resolve_path(a.path);
         if (st.plan_mode) {
             std::lock_guard<std::mutex> lk(st.mtx);
             st.pending.push_back({a.path, a.content});
-            return "[предложено, НЕ применено] " + a.path
+            return "[предложено, НЕ применено] " + abs
                    + " (" + std::to_string(a.content.size()) + " байт)";
         }
-        std::string abs = resolve_path(a.path);
         if (!security::is_path_safe(a.path))
             return "[запрещено] небезопасный путь: " + a.path;
         if (!security::is_path_not_dangerous(abs))
             return "[запрещено] запись запрещена в: " + abs;
+        std::string perm = guard_permission(abs);
+        if (!perm.empty()) return perm;
         std::ofstream f(abs, std::ios::binary);
         if (!f) return "[ошибка] не удалось записать: " + abs;
         f << a.content;
@@ -206,11 +324,15 @@ void register_base_tools() {
 
     reg.register_tool("grep_search", [](const ToolArgs& a) -> std::string {
         return base_grep(a.root, a.pattern);
-    }, "Поиск по файлам");
+    }, "Поиск по файлам (регулярное выражение)");
 
-    reg.register_tool("list_skills", [](const ToolArgs& a) -> std::string {
+    reg.register_tool("list_skills", [](const ToolArgs&) -> std::string {
         return base_list_skills();
     }, "Список навыков");
+
+    reg.register_tool("skill_detail", [](const ToolArgs& a) -> std::string {
+        return base_skill_detail(a.query);
+    }, "Полный текст навыка");
 
     /* search_replace: поиск и замена текста в файле (diff-based edit). */
     reg.register_tool("search_replace", [](const ToolArgs& a) -> std::string {
@@ -221,13 +343,11 @@ void register_base_tools() {
                             std::istreambuf_iterator<char>());
         fin.close();
 
-        /* a.query = что искать, a.content = на что заменять. */
         if (a.query.empty()) return "[ошибка] пустой поисковый запрос (QUERY)";
         size_t pos = content.find(a.query);
         if (pos == std::string::npos)
             return "[search_replace] текст не найден в " + abs;
 
-        /* Проверяем уникальность. */
         size_t count = 0;
         size_t search_from = 0;
         while ((pos = content.find(a.query, search_from)) != std::string::npos) {
@@ -238,7 +358,6 @@ void register_base_tools() {
             return "[search_replace] НАЙДЕНО " + std::to_string(count)
                    + " ВХОЖДЕНИЙ. Уточни запрос (добавь контекст вокруг замены).";
 
-        /* Одно вхождение — заменяем. */
         pos = content.find(a.query);
         content.replace(pos, a.query.size(), a.content);
 
@@ -250,6 +369,9 @@ void register_base_tools() {
                    + std::to_string(a.content.size()) + " байт)";
         }
 
+        std::string perm = guard_permission(abs);
+        if (!perm.empty()) return perm;
+
         std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
         if (!fout) return "[ошибка] не удалось записать: " + abs;
         fout << content;
@@ -258,20 +380,13 @@ void register_base_tools() {
                + " -> " + std::to_string(a.content.size()) + " байт";
     }, "Поиск и замена текста в файле");
 
-    /* exec_command: запуск shell-команды. */
+    /* exec_command: запуск shell-команды с таймаутом. */
     reg.register_tool("exec_command", [](const ToolArgs& a) -> std::string {
         if (a.cli.empty()) return "[ошибка] пустая команда (CLI)";
         if (!security::is_command_allowed(a.cli))
             return "[запрещено] команда заблокирована политикой безопасности";
-        std::string full = a.cli + " 2>&1";
-        FILE* f = popen(full.c_str(), "r");
-        if (!f) return "[ошибка] не удалось запустить: " + a.cli;
-        char buf[4096];
-        std::string out;
-        while (fgets(buf, sizeof(buf), f)) out += buf;
-        pclose(f);
-        if (out.size() > 10000) { out.resize(10000); out += "\n...[обрезано]"; }
-        return out.empty() ? "[exec: нет вывода]" : out;
+        std::string out = shell::run_capture(a.cli, 60);
+        return out.empty() ? "[exec: нет вывода]" : shell::cap(out, kMaxToolOutput);
     }, "Запуск shell-команды");
 }
 
@@ -298,7 +413,7 @@ void register_rag_tools() {
         if (!cb.rag_build_prompt) return "[ошибка] RAG не доступен";
         std::string result = cb.rag_build_prompt(a.query, a.k, "");
         if (result.empty()) return "[RAG: пусто — проект не проиндексирован]";
-        return result;
+        return shell::cap(result, kMaxToolOutput);
     }, "Поиск в RAG");
 }
 

@@ -143,10 +143,10 @@ static const char* kPythonProjectSkill =
 
 std::vector<Skill> get_python_skills() {
     return {
-        {"python_django", "Django best practices", kDjangoSkill},
-        {"python_flask", "Flask best practices", kFlaskSkill},
-        {"python_fastapi", "FastAPI best practices", kFastapiSkill},
-        {"python_project", "Структура Python-проекта", kPythonProjectSkill}
+        {"python_django", "Django best practices", kDjangoSkill, "python"},
+        {"python_flask", "Flask best practices", kFlaskSkill, "python"},
+        {"python_fastapi", "FastAPI best practices", kFastapiSkill, "python"},
+        {"python_project", "Структура Python-проекта", kPythonProjectSkill, "python"}
     };
 }
 

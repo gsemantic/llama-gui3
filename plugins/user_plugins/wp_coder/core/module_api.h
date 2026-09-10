@@ -50,6 +50,7 @@ struct Skill {
     std::string name;
     std::string description;
     std::string body;         // текст инструкции, инжектируемый в промпт
+    std::string module_name;  // имя модуля-владельца (для фильтрации)
 };
 
 /* --- Интерфейс модуля --- */

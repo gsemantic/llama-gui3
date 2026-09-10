@@ -104,6 +104,23 @@ struct CloudRecentModel {
 };
 
 /**
+ * @brief Пользовательское (Custom) облачное соединение, сохранённое под именем.
+ *
+ * Позволяет хранить несколько Custom-провайдеров в диалоге облаков:
+ * пользователь вводит endpoint/model/API-ключ и сохраняет соединение под новым
+ * именем (как пресет). Хранится в профиле в секции cloud_provider.
+ */
+struct CloudSavedProvider {
+    std::string name;            // Имя соединения (e.g. "VPS GPU Server")
+    std::string endpoint_url;    // Base URL
+    std::string model_id;        // Выбранная модель (id)
+    int timeout_ms = 60000;      // Таймаут запросов
+    int max_output_tokens = 0;   // Лимит токенов вывода (0 = не ограничено)
+    bool use_tor = false;        // Прокси (Tor)
+    std::string socks5_proxy_host = "127.0.0.1:9050";
+};
+
+/**
  * @brief Настройки облачного провайдера (OpenAI-совместимый)
  *
  * API ключ хранится в .env файле, не здесь.
@@ -132,6 +149,9 @@ struct CloudProviderSettings {
 
     // Автозаполнение
     std::vector<CloudRecentModel> recent_models;  // Недавние модели (с привязкой к провайдеру)
+
+    // Пользовательские Custom-соединения, сохранённые под именем
+    std::vector<CloudSavedProvider> saved_providers;
 };
 
 // Backward compatibility alias

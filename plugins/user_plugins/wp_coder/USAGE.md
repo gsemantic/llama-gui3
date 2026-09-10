@@ -1,108 +1,86 @@
-# WP Coder — Использование
+# wp_coder — Использование
 
 ## Быстрый старт
 
-1. **Настройка проекта:**
-   - Откройте меню **WordPress → Проект** (Ctrl+Shift+W)
-   - Укажите корень локального WordPress (например, `/var/www/html`)
-   - Настройте php-cli (обычно авто-определяется)
-   - Задайте URL локального сайта для проверки
+1. **Запуск с агентом ai_coder:**
+   ```bash
+   env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
+   ```
+   Флаг `--agent=ai_coder` переключает чат приложения на плагинный ReAct-агент.
+   Если локальный LLM-сервер ещё не запущен — поднимите его (например `llama-server`).
 
-2. **Запуск агента:**
-   - Откройте меню **WordPress → Агент** (Ctrl+Shift+E)
-   - Введите задачу в поле ввода
-   - Нажмите «Отправить» или Enter
+2. **Настройка проекта** — меню **AI Coder → Проект** (`Ctrl+Shift+W`):
+   - Корень проекта (например `/var/www/html`)
+   - URL локального сайта для `verify`/`headless_render`
+   - Путь к php-cli (обычно автоопределяется)
+   - Нажмите «Сохранить все настройки»
 
-3. **Примеры задач:**
-   - `Создай плагин для формы обратной связи`
-   - `Найди все хуки в теме`
-   - `Проверь синтаксис всех PHP-файлов`
-   - `Обнови WordPress до последней версии`
+3. **Выбор модуля** — меню **AI Coder → Модули** (`Ctrl+Shift+M`):
+   - WordPress / Python / DevOps
+   - От выбора зависят доступные инструменты и навыки в системном промпте
 
-## Инструменты
+4. **Отправка задачи** — введите текст в поле чата и нажмите Enter.
+   Прогресс виден в реальном времени (шаги агента форвардятся в чат через `chat_event`).
+   Метрики шага: `%d tok | %.1f tok/s | %ds (LLM %.1fs) | %d steps`.
+   Кнопка «Стоп» прерывает текущую задачу.
 
-### Базовые
-- `read_file` — чтение файла
-- `write_file` — запись файла (с план-режимом)
-- `grep_hooks` — поиск хуков WordPress
-- `php_lint` — проверка синтаксиса PHP
+5. **Разрешения** — при доступе к файлам вне проекта появится запрос:
+   «Разрешить (один раз)» / «Разрешить (всегда)» / «Отклонить».
 
-### WordPress
-- `wp_cli` — выполнение команд wp-cli
-- `wp_rest` — запросы к REST API
-- `wp_db` — SQL-запросы через wp db
-- `wp_media` — работа с медиафайлами
-- `wp_option` — чтение опций WordPress
+## Инструменты по группам
 
-### Разработка
-- `repo_map` — обзор проекта
-- `rag_index` — индексация в RAG
-- `rag_query` — поиск по проиндексированным документам
-- `validate` — проверка всех PHP-файлов
-- `verify` — полная проверка (синтаксис + HTTP + рендер)
+### Базовые (core)
+- `read_file` / `write_file` / `search_replace` — работа с файлами (с капом вывода 12 Кб)
+- `grep_search` — regex-поиск (лимит 200 совпадений)
+- `repo_map` — компактный обзор структуры проекта (кэшируется на задачу)
+- `exec_command` — выполнение команды (timeout 60, проверка blocked-команд)
+- `list_skills` / `skill_detail` — ленивая загрузка тел навыков
+- `rag_index` / `rag_query` — индексация и поиск по документам
 
 ### Git
-- `git_status` — статус репозитория
-- `git_diff` — разница с HEAD
-- `git_log` — история коммитов
-- `git_commit` — создание коммита
+- `git_status`, `git_diff`, `git_log`, `git_commit`
 
-### Системные
-- `list_skills` — список доступных навыков
-- `deploy` — деплой на хостер
+### WordPress
+- `wp_cli`, `wp_db`, `wp_media`, `wp_option`, `wp_rest`, `wp_create_site`,
+  `wp_check_deps`, `deploy`, `verify`, `php_lint`, `headless_render`, `validate`
 
-## Навыки (Skills)
+### Python
+- `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint`
 
-Плагин включает готовые навыки:
-- `wp_hook` — правила использования хуков
-- `wp_theme` — работа с темами
-- `wp_plugin_boilerplate` — каркас плагина
-- `wp_git` — работа с Git
-- `wp_database` — работа с БД
-- `wp_media` — работа с медиафайлами
+### DevOps
+- `docker_build`, `docker_run`, `docker_ps`, `docker_logs`,
+  `systemd_status`, `systemd_restart`, `nginx_test`, `nginx_reload`,
+  `cron_list`, `cron_add`, `ssh_exec`
 
-### Создание своих навыков
-Создайте `.md` файл в `<data_dir>/wp_coder/skills/`:
-```markdown
-# my_skill
-Описание: краткое описание навыка
-Текст инструкции...
-```
+## Навыки
 
-## Режимы работы
+Inline-навыки модулей (тела не в промпте — подгружаются через `skill_detail`):
 
-1. **Code** — полный доступ ко всем инструментам
-2. **Research** — только чтение, запрещены write_file и deploy
-3. **Review** — после правок автоматически запускает verify
+| Модуль | Навыки |
+|--------|--------|
+| WordPress | `wp_theme`, `wp_hook`, `wp_database`, `wp_media`, `wp_plugin_boilerplate`, `wp_git` |
+| Python | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
+| DevOps | `devops_docker`, `devops_systemd`, `devops_nginx` |
 
-## План-режим
+Внешний навык из `skills/`: `wp_setup.md` (настройка окружения WordPress).
 
-Включите «План-режим» для безопасного редактирования:
-- Агент предлагает правки, но не применяет их
-- Вы видите список предложенных изменений
-- Применяйте или отклоняйте каждую правку вручную
+### Свои навыки
+Положите `.md` в каталог данных: `<data_dir>/wp_coder/skills/my_skill.md`.
+Формат: первая строка `# Имя`, вторая — описание, далее — тело инструкции.
+При совпадении имени с inline-навыком модуля inline имеет приоритет.
 
-## Горячие клавиши
+## Режимы
 
-- **Ctrl+Shift+W** — окно «Проект»
-- **Ctrl+Shift+E** — окно «Агент»
-- **Ctrl+Shift+G** — окно «Git»
-- **Ctrl+Shift+F** — окно «Файлы»
+- **Code** — полный доступ ко всем инструментам
+- **Research** — только чтение (нет `write_file` и `deploy`)
+- **Review** — после правок автоматически запускает `verify`
 
-## Деплой
+## Окна
 
-### rsync (рекомендуется)
-Настройте в окне «Проект»:
-- Proto: `rsync`
-- Host: `example.com`
-- User: `username`
-- Remote dir: `/var/www/html`
+| Окно | Горячая клавиша |
+|------|-----------------|
+| Проект | `Ctrl+Shift+W` |
+| Модули | `Ctrl+Shift+M` |
+| Инструменты | `Ctrl+Shift+T` |
 
-### ftp/sftp
-Создайте `deploy.sh` в корне проекта по образцу:
-```bash
-#!/bin/bash
-sshpass -p "password" sftp user@host <<EOF
-put -r ./ /var/www/html/
-EOF
-```
+В окне «Инструменты» показан список зарегистрированных инструментов выбранного модуля.

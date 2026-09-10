@@ -40,6 +40,16 @@ std::vector<std::string> ToolsRegistry::list_tools() const {
     return names;
 }
 
+std::string ToolsRegistry::join_tools() const {
+    std::vector<std::string> names = list_tools();
+    std::string s;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i) s += ", ";
+        s += names[i];
+    }
+    return s;
+}
+
 void ToolsRegistry::clear() {
     tools_.clear();
 }

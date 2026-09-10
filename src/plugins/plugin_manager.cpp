@@ -597,6 +597,163 @@ int host_llm_complete_ex(LlamaPluginHost* host, const char* system_prompt,
         user_prompt, out_response, force_cloud);
 }
 
+/*
+ * host_llm_chat_messages — multi-turn chat completion.
+ *
+ * messages_json: JSON-массив [{"role":"system"|"user"|"assistant","content":"..."}].
+ * Возвращает malloc'd JSON:
+ *   {"ok":1,"content":"...","finish_reason":"stop","prompt_tokens":N,"completion_tokens":N}
+ * или nullptr при ошибке.
+ *
+ * Локальный путь: parse → ChatCompletionRequest → create_chat_completion_async
+ *   → response.usage (usage поле уже парсится в llama_interface_impl.cpp).
+ * Облачный путь: parse → OpenRouterRequestParams.messages → complete()
+ *   → resp.prompt_tokens/completion_tokens.
+ */
+char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
+                             const char* messages_json) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !messages_json) return nullptr;
+
+    using json = nlohmann::json;
+    std::vector<core::ChatMessage> msgs;
+    try {
+        json parsed = json::parse(messages_json);
+        if (!parsed.is_array()) return nullptr;
+        for (const auto& m : parsed) {
+            if (!m.is_object()) continue;
+            std::string role = m.value("role", "");
+            std::string content = m.value("content", "");
+            core::MessageRole mr;
+            if (role == "assistant")      mr = core::MessageRole::Assistant;
+            else if (role == "system")    mr = core::MessageRole::System;
+            else                          mr = core::MessageRole::User;
+            msgs.push_back(core::ChatMessage(mr, content));
+        }
+    } catch (...) {
+        return nullptr;
+    }
+    if (msgs.empty()) return nullptr;
+
+    auto* li = pd->manager->subsystems.llama_interface;
+    auto* settings = pd->manager->subsystems.settings;
+
+    bool force_cloud = false;
+    if (settings) {
+        const auto& cp = settings->cloud_provider();
+        if (cp.enabled && !cp.model_id.empty()) force_cloud = true;
+    }
+
+    int prompt_tokens = 0;
+    int completion_tokens = 0;
+    std::string content;
+    std::string finish_reason = "stop";
+    bool ok = false;
+
+    /* --- Локальный сервер --- */
+    if (!force_cloud && li && li->is_server_healthy()) {
+        try {
+            core::ChatCompletionRequest req;
+            req.model = "local";
+            req.stream = false;
+            if (system_prompt && system_prompt[0])
+                req.messages.emplace_back(core::MessageRole::System, system_prompt);
+            for (const auto& m : msgs) req.messages.push_back(m);
+            auto future = li->create_chat_completion_async(req);
+            auto response = future.get();
+            std::cerr << "[llm_chat_messages] LOCAL model=" << response.model
+                      << " choices=" << response.choices.size()
+                      << " finish=" << (response.choices.empty() ? "" : response.choices[0].finish_reason)
+                      << " content_len=" << (response.choices.empty() ? 0 : (int)response.choices[0].message.content.size())
+                      << " usage=" << (response.usage.is_object() ? response.usage.dump() : "none")
+                      << std::endl;
+            if (!response.choices.empty()) {
+                content = response.choices[0].message.content;
+                finish_reason = response.choices[0].finish_reason.empty()
+                    ? "stop" : response.choices[0].finish_reason;
+                ok = !content.empty() || finish_reason == "stop";
+                if (response.usage.is_object()) {
+                    prompt_tokens = response.usage.value("prompt_tokens", 0);
+                    completion_tokens = response.usage.value("completion_tokens", 0);
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[llm_chat_messages] LOCAL exception: " << e.what() << std::endl;
+            ok = false;
+        }
+    }
+    if (!ok && settings) {
+        const auto& cp = settings->cloud_provider();
+        if (cp.enabled && !cp.model_id.empty()) {
+            const std::string key_name =
+                core::EnvManager::cloud_provider_api_key_name(cp.provider_name, cp.endpoint_url);
+            const std::string api_key =
+                core::EnvManager::read_key(key_name, settings->get_profiles_directory());
+            if (!api_key.empty()) {
+                core::OpenRouterClient client(api_key);
+                client.set_timeout(cp.timeout_ms);
+                if (!cp.endpoint_url.empty()) client.set_base_url(cp.endpoint_url);
+
+                core::OpenRouterRequestParams params;
+                params.model = cp.model_id;
+                params.max_tokens = cp.max_output_tokens;
+                params.temperature = settings->chat().temperature;
+                params.top_p = settings->chat().top_p;
+                params.stream = false;
+
+                if (system_prompt && system_prompt[0]) {
+                    core::OpenRouterRequestParams::Message sys;
+                    sys.role = "system";
+                    sys.content = system_prompt;
+                    params.messages.push_back(std::move(sys));
+                }
+                for (const auto& m : msgs) {
+                    core::OpenRouterRequestParams::Message out;
+                    switch (m.role) {
+                        case core::MessageRole::Assistant: out.role = "assistant"; break;
+                        case core::MessageRole::System:   out.role = "system";   break;
+                        default:                          out.role = "user";     break;
+                    }
+                    out.content = m.content;
+                    params.messages.push_back(std::move(out));
+                }
+
+                try {
+                    auto response = client.complete(params);
+                    std::cerr << "[llm_chat_messages] CLOUD success=" << response.success
+                              << " model=" << response.model
+                              << " content_len=" << response.content.size()
+                              << " finish=" << response.finish_reason
+                              << " error=" << response.error
+                              << std::endl;
+                    if (response.success && !response.content.empty()) {
+                        content = response.content;
+                        finish_reason = response.finish_reason.empty()
+                            ? "stop" : response.finish_reason;
+                        prompt_tokens = response.prompt_tokens;
+                        completion_tokens = response.completion_tokens;
+                        ok = true;
+                    } else if (!response.error.empty()) {
+                        content = response.error;
+                        finish_reason = "error";
+                    }
+                } catch (...) {}
+            }
+        }
+    }
+
+    if (!ok) return nullptr;
+
+    json out;
+    out["ok"] = 1;
+    out["content"] = content;
+    out["finish_reason"] = finish_reason;
+    out["prompt_tokens"] = prompt_tokens;
+    out["completion_tokens"] = completion_tokens;
+    std::string s = out.dump();
+    return strdup(s.c_str());
+}
+
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
                       const char* path_filter) {
     auto* pd = to_pd(host);
@@ -765,6 +922,7 @@ const LlamaHostApi& host_api_table() {
         a.llm_is_connected = host_llm_is_connected;
         a.llm_complete = host_llm_complete;
         a.llm_complete_ex = host_llm_complete_ex;
+        a.llm_chat_messages = host_llm_chat_messages;
 
         a.rag_search = host_rag_search;
         a.rag_process_document = host_rag_process_document;
@@ -955,17 +1113,23 @@ bool PluginManager::initialize(const PluginSubsystems& subsystems) {
 }
 
 bool PluginManager::load_plugin_file(const std::string& path) {
+    std::cerr << "[PluginManager] Loading " << path << " ..." << std::endl;
     DL_HANDLE handle = DL_LOAD(path.c_str());
     if (!handle) {
         std::cerr << "[PluginManager] Failed to load " << path << ": " << DL_ERR() << std::endl;
         return false;
     }
+    std::cerr << "[PluginManager] dlopen OK: " << path << std::endl;
 
     auto api_version_fn = reinterpret_cast<const char* (*)()>(DL_SYM(handle, "ll_plugin_api_version"));
     auto info_fn = reinterpret_cast<const LlamaPluginInfo* (*)()>(DL_SYM(handle, "ll_plugin_info"));
     auto init_fn = reinterpret_cast<int (*)(LlamaPluginHost*, const LlamaHostApi*)>(DL_SYM(handle, "ll_plugin_init"));
     auto render_fn = reinterpret_cast<void (*)()>(DL_SYM(handle, "ll_plugin_render"));
     auto shutdown_fn = reinterpret_cast<void (*)()>(DL_SYM(handle, "ll_plugin_shutdown"));
+
+    std::cerr << "[PluginManager] exports: api=" << (void*)api_version_fn
+              << " info=" << (void*)info_fn
+              << " init=" << (void*)init_fn << std::endl;
 
     if (!api_version_fn || !info_fn || !init_fn) {
         std::cerr << "[PluginManager] Missing required exports in " << path << std::endl;
@@ -974,6 +1138,8 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     }
 
     const char* plugin_api_version = api_version_fn();
+    std::cerr << "[PluginManager] plugin api_version='" << (plugin_api_version ? plugin_api_version : "null")
+              << "' host='" << LLAMA_PLUGIN_API_VERSION << "'" << std::endl;
     if (!plugin_api_version || std::string(plugin_api_version) != LLAMA_PLUGIN_API_VERSION) {
         std::cerr << "[PluginManager] API version mismatch for " << path
                   << " (plugin: " << (plugin_api_version ? plugin_api_version : "?")
@@ -983,6 +1149,8 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     }
 
     const LlamaPluginInfo* info = info_fn();
+    std::cerr << "[PluginManager] info: name='" << (info ? info->name : "null")
+              << "' version='" << (info ? info->version : "null") << "'" << std::endl;
     if (!info || !info->name || !*info->name) {
         std::cerr << "[PluginManager] Invalid plugin info from " << path << std::endl;
         DL_CLOSE(handle);
@@ -1031,6 +1199,7 @@ bool PluginManager::load_plugin_file(const std::string& path) {
 
     const int rc = plugin->init_fn(
         reinterpret_cast<LlamaPluginHost*>(plugin->host_data), &host_api_table());
+    std::cerr << "[PluginManager] init_fn returned " << rc << " for " << plugin->info.name << std::endl;
     if (rc != 0) {
         std::cerr << "[PluginManager] Plugin " << plugin->info.name
                   << " failed to initialize (code " << rc << ")" << std::endl;

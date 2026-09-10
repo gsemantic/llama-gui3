@@ -29,7 +29,9 @@
 #include "plugins/plugin_api.h"
 
 #include <cstdio>
+#include <cctype>
 #include <cstring>
+#include <cstddef>
 #include <iostream>
 
 /* Глобальные хендлы хоста. */
@@ -40,12 +42,15 @@ const LlamaHostApi* g_api = nullptr;
 
 static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_message, void* user_data) {
     if (!user_message || !user_message[0]) return nullptr;
+    std::cerr << "[wp_coder] agent_mode_on_message: " << user_message << std::endl;
 
     auto& eng = coder::engine();
     eng.submit(user_message);
 
-    /* Агент работает в worker-потоке. Ждём результат (бесконечно). */
-    std::string response = eng.wait_response(0);
+    /* Агент работает в worker-потоке. Ждём результат (таймаут 5 минут). */
+    std::string response = eng.wait_response(300000);
+    std::cerr << "[wp_coder] agent_mode_on_message response_len=" << response.size()
+              << " head=" << response.substr(0, 120) << std::endl;
 
     char* out = (char*)malloc(response.size() + 1);
     if (out) memcpy(out, response.c_str(), response.size() + 1);
@@ -58,6 +63,30 @@ static void agent_mode_render_extras(LlamaPluginHost* host, void* user_data) {
 }
 
 /* --- Экспортируемые функции плагина --- */
+
+/* Минимальный JSON-эскейпер (без nlohmann в плагине). */
+static std::string json_escape(const std::string& s) {
+    std::string r;
+    r.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  r += "\\\""; break;
+            case '\\': r += "\\\\"; break;
+            case '\n': r += "\\n"; break;
+            case '\r': r += "\\r"; break;
+            case '\t': r += "\\t"; break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    r += buf;
+                } else {
+                    r += c;
+                }
+        }
+    }
+    return r;
+}
 
 extern "C" {
 
@@ -76,6 +105,11 @@ LLAMA_PLUGIN_EXPORT const LlamaPluginInfo* ll_plugin_info(void) {
 }
 
 LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi* api) {
+    std::cerr << "[wp_coder] ll_plugin_init: host=" << (void*)host
+              << " api=" << (void*)api
+              << " agent_mode_register=" << (void*)(api ? api->agent_mode_register : nullptr)
+              << " llm_chat_messages=" << (void*)(api ? api->llm_chat_messages : nullptr)
+              << std::endl;
     if (!host || !api) return 1;
     g_host = host;
     g_api = api;
@@ -90,8 +124,8 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     cb.llm_is_connected = []() -> bool {
         return g_api && g_api->llm_is_connected(g_host) == 1;
     };
-    cb.llm_complete = [](const std::string& sys, const std::string& user,
-                         std::string& resp) -> bool {
+cb.llm_complete = [](const std::string& sys, const std::string& user,
+                          std::string& resp) -> bool {
         if (!g_api || !g_host) return false;
         char* r = nullptr;
         int rc = g_api->llm_complete_ex(g_host, sys.c_str(), user.c_str(), &r);
@@ -99,6 +133,100 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         resp = r;
         g_api->free_string(g_host, r);
         return true;
+    };
+    /* Multi-turn: парсим JSON от llm_chat_messages (ok/content/usage).
+     * Fallback на llm_complete_ex при старом хосте без llm_chat_messages. */
+    cb.llm_chat = [cb](const std::string& sys_prompt,
+                     const std::vector<coder::ChatMsg>& messages,
+                     coder::LlmReply& out) -> bool {
+        if (!g_api || !g_host) return false;
+
+        /* Проверяем, поддерживает ли хост llm_chat_messages (по size). */
+        bool has_chat = false;
+        if (g_api->size >= offsetof(LlamaHostApi, llm_chat_messages) +
+                              sizeof(decltype(g_api->llm_chat_messages)))
+            has_chat = g_api->llm_chat_messages != nullptr;
+
+        if (has_chat) {
+            /* Собираем JSON-массив сообщений. */
+            std::string json = "[";
+            for (size_t i = 0; i < messages.size(); ++i) {
+                if (i) json += ",";
+                json += "{\"role\":\"" + messages[i].role + "\",\"content\":\"" +
+                        json_escape(messages[i].content) + "\"}";
+            }
+            json += "]";
+            char* raw = g_api->llm_chat_messages(g_host,
+                sys_prompt.empty() ? nullptr : sys_prompt.c_str(), json.c_str());
+            if (!raw) return false;
+            std::string resp(raw);
+            g_api->free_string(g_host, raw);
+
+            /* Парсим {"ok":1,"content":"...","finish_reason":"...","prompt_tokens":N,"completion_tokens":N}. */
+            auto find_str = [](const std::string& s, const char* key) -> std::string {
+                std::string pat = std::string("\"") + key + "\":\"";
+                size_t p = s.find(pat);
+                if (p == std::string::npos) return "";
+                p += pat.size();
+                size_t e = p;
+                while (e < s.size() && s[e] != '"') {
+                    if (s[e] == '\\' && e + 1 < s.size()) e += 2;
+                    else ++e;
+                }
+                std::string v = s.substr(p, e - p);
+                std::string r;
+                for (size_t i = 0; i < v.size(); ++i) {
+                    if (v[i] == '\\' && i + 1 < v.size()) {
+                        switch (v[i + 1]) {
+                            case 'n': r += '\n'; i++; break;
+                            case 't': r += '\t'; i++; break;
+                            case 'r': r += '\r'; i++; break;
+                            case '"': r += '"'; i++; break;
+                            case '\\': r += '\\'; i++; break;
+                            default: r += v[i]; break;
+                        }
+                    } else r += v[i];
+                }
+                return r;
+            };
+            auto find_int = [](const std::string& s, const char* key) -> int {
+                std::string pat = std::string("\"") + key + "\":";
+                size_t p = s.find(pat);
+                if (p == std::string::npos) return 0;
+                p += pat.size();
+                int n = 0;
+                while (p < s.size() && std::isdigit((unsigned char)s[p])) {
+                    n = n * 10 + (s[p] - '0'); ++p;
+                }
+                return n;
+            };
+            if (find_int(resp, "ok") != 1) return false;
+            out.content = find_str(resp, "content");
+            out.finish_reason = find_str(resp, "finish_reason");
+            if (out.finish_reason.empty()) out.finish_reason = "stop";
+            out.prompt_tokens = find_int(resp, "prompt_tokens");
+            out.completion_tokens = find_int(resp, "completion_tokens");
+            return true;
+        }
+
+        /* Fallback: одногилый (старый хост без llm_chat_messages). */
+        std::string last_user;
+        for (const auto& m : messages)
+            if (m.role == "user") last_user = m.content;
+        std::string resp;
+        if (!cb.llm_complete || !cb.llm_complete(sys_prompt, last_user, resp))
+            return false;
+        out.content = resp;
+        out.finish_reason = "stop";
+        out.prompt_tokens = 0;
+        out.completion_tokens = 0;
+        return true;
+    };
+
+    /* Прогресс в чат приложения (agent_mode_push_event). */
+    cb.chat_event = [](const std::string& event) {
+        if (!g_api || !g_host) return;
+        g_api->agent_mode_push_event(g_host, event.c_str());
     };
     cb.path_data_dir = []() -> std::string {
         if (!g_api || !g_host) return "";
@@ -156,7 +284,7 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
 
     /* 5. Загружаем навыки (из модулей + .md файлов). */
     coder::SkillsManager::instance().load();
-    /* Загружаем .md файлы из каталога плагина. */
+    /* Загружаем .md файлы из каталога плагина (внешние — без привязки к модулю). */
     {
         const char* d = api->path_data_dir(host);
         if (d) {
@@ -164,9 +292,16 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
             coder::SkillsManager::instance().load_from_directory(skills_dir);
         }
     }
-    /* Каталог плагина (рядом с .so). */
+    /* Каталог плагина (рядом с .so) — WP-навыки. */
     coder::SkillsManager::instance().load_from_directory(
-        std::string(WP_CODER_SKILLS_DIR));
+        std::string(WP_CODER_SKILLS_DIR), "wordpress");
+
+    /* Активируем навыки выбранного модуля. */
+    {
+        const auto& st = coder::engine().state();
+        if (!st.active_module.empty())
+            coder::SkillsManager::instance().set_module(st.active_module);
+    }
 
     /* 6. Регистрируем UI. */
     coder::ui::init_windows();
@@ -178,7 +313,11 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     agent_mode.on_message = agent_mode_on_message;
     agent_mode.render_extras = agent_mode_render_extras;
     agent_mode.user_data = nullptr;
+    std::cerr << "[wp_coder] registering agent_mode: api=" << (void*)api
+              << " agent_mode_register=" << (void*)(api ? api->agent_mode_register : nullptr)
+              << " host=" << (void*)host << std::endl;
     api->agent_mode_register(host, &agent_mode);
+    std::cerr << "[wp_coder] agent_mode registered: " << agent_mode.name << std::endl;
 
     /* 8. Запускаем worker-поток движка. */
     coder::engine().start();

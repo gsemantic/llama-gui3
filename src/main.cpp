@@ -96,6 +96,7 @@ struct HeadlessOptions {
     std::string profile;
     std::string endpoint_url; // cloud: переопределить endpoint провайдера
     std::string api_key;      // cloud: переопределить API-ключ
+    std::string agent_mode;   // GUI: переключить режим агента (имя плагинного агента)
 };
 
 static std::atomic<bool> g_stop_requested{false};
@@ -260,6 +261,8 @@ int main(int argc, char* argv[]) {
             headless.endpoint_url = arg.substr(11);
         } else if (arg.find("--api-key=") == 0) {
             headless.api_key = arg.substr(10);
+        } else if (arg.find("--agent=") == 0) {
+            headless.agent_mode = arg.substr(8);
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else if (arg.find("--url=") == 0) {
@@ -403,6 +406,11 @@ int main(int argc, char* argv[]) {
             }
             if (main_window.initialize(0, 0)) { // 0,0 означает автоопределение размера
                 LOG_INFO("MainWindow инициализирован");
+
+                // Переключаем плагинный режим агента (если задан --agent=NAME).
+                if (!headless.agent_mode.empty()) {
+                    main_window.set_agent_mode(headless.agent_mode);
+                }
 
                 // Режим аудита: отчёт и выход без входа в рендер-цикл.
                 // Код выхода: 0 - чисто, 2 - найдены ошибки (для CI).

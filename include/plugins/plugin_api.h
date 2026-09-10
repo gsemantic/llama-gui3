@@ -185,6 +185,16 @@ struct LlamaHostApi {
     void (*agent_mode_unregister)(LlamaPluginHost* host, LlamaPluginAgentMode* mode);
     /* Отправка события из плагина в чат (отображается как сообщение ассистента). */
     void (*agent_mode_push_event)(LlamaPluginHost* host, const char* event_text);
+
+    /*
+     * Multi-turn chat completion. Принимает системный промпт и историю диалога
+     * в виде JSON-массива: [{"role":"system"|"user"|"assistant","content":"..."}, ...].
+     * Возвращает malloc'd JSON: {"ok":1,"content":"...","finish_reason":"stop",
+     * "prompt_tokens":N,"completion_tokens":N} или nullptr при ошибке.
+     * Поля добавлены в КОНЕЦ структуры — обратная совместимость по offsetof.
+     */
+    char* (*llm_chat_messages)(LlamaPluginHost* host, const char* system_prompt,
+                               const char* messages_json);
 };
 
 /* Информация о плагине (возвращается ll_plugin_info, статична) */

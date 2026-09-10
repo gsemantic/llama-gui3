@@ -36,6 +36,7 @@ const std::vector<CloudServicesDialog::ProviderPreset>& CloudServicesDialog::get
         {"Pollinations",     "https://text.pollinations.ai/openai",            false},
         {"OVH AI Endpoints", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", false},
         {"Qwen (DashScope)", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", true},
+        {"Alibaba Token Plan", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", true},
         {"Custom",           "",                                               true},
     };
     return presets;
@@ -189,6 +190,85 @@ void CloudServicesDialog::check_model_changed() {
         if (recent.size() > 10) recent.resize(10);
         saved_model_id_ = current_model;
     }
+}
+
+// ============================================================================
+// Saved connections (Custom-провайдеры, сохранённые под именем)
+// ============================================================================
+bool CloudServicesDialog::load_saved_provider(const llama_gui::core::CloudSavedProvider& sp) {
+    if (sp.name.empty() || sp.endpoint_url.empty()) return false;
+
+    std::strncpy(provider_name_buf_, sp.name.c_str(), sizeof(provider_name_buf_) - 1);
+    provider_name_buf_[sizeof(provider_name_buf_) - 1] = '\0';
+    std::strncpy(endpoint_url_buf_, sp.endpoint_url.c_str(), sizeof(endpoint_url_buf_) - 1);
+    endpoint_url_buf_[sizeof(endpoint_url_buf_) - 1] = '\0';
+    std::strncpy(model_id_buf_, sp.model_id.c_str(), sizeof(model_id_buf_) - 1);
+    model_id_buf_[sizeof(model_id_buf_) - 1] = '\0';
+    timeout_ms_ = sp.timeout_ms > 0 ? sp.timeout_ms : 60000;
+    max_output_tokens_ = sp.max_output_tokens;
+    use_tor_ = sp.use_tor;
+    std::strncpy(socks5_proxy_host_buf_, sp.socks5_proxy_host.c_str(), sizeof(socks5_proxy_host_buf_) - 1);
+    socks5_proxy_host_buf_[sizeof(socks5_proxy_host_buf_) - 1] = '\0';
+
+    // Подтягиваем ключ из слота этого соединения
+    std::string key = read_provider_key(sp.name, sp.endpoint_url);
+    std::strncpy(api_key_buf_, key.c_str(), sizeof(api_key_buf_) - 1);
+    api_key_buf_[sizeof(api_key_buf_) - 1] = '\0';
+
+    models_loaded_ = false; // Invalidate model list on provider change
+    settings_modified_ = true;
+    saved_model_id_ = sp.model_id;
+    return true;
+}
+
+void CloudServicesDialog::save_provider_as() {
+    std::string name = save_as_name_buf_;
+    // Trim
+    size_t b = name.find_first_not_of(" \t\r\n");
+    if (b != std::string::npos) name = name.substr(b);
+    size_t e = name.find_last_not_of(" \t\r\n");
+    if (e != std::string::npos) name = name.substr(0, e + 1);
+
+    if (name.empty()) {
+        save_as_status_ = "Enter a name first";
+        return;
+    }
+    if (std::string(endpoint_url_buf_).empty()) {
+        save_as_status_ = "Endpoint URL is required";
+        return;
+    }
+
+    auto& cp = settings_.cloud_provider();
+    // Обновляем при совпадении имени, иначе добавляем новое
+    auto it = std::find_if(cp.saved_providers.begin(), cp.saved_providers.end(),
+        [&name](const llama_gui::core::CloudSavedProvider& s) { return s.name == name; });
+
+    llama_gui::core::CloudSavedProvider sp;
+    sp.name = name;
+    sp.endpoint_url = endpoint_url_buf_;
+    sp.model_id = model_id_buf_;
+    sp.timeout_ms = timeout_ms_ > 0 ? timeout_ms_ : 60000;
+    sp.max_output_tokens = max_output_tokens_;
+    sp.use_tor = use_tor_;
+    sp.socks5_proxy_host = socks5_proxy_host_buf_;
+
+    if (it != cp.saved_providers.end()) {
+        *it = sp;
+    } else {
+        cp.saved_providers.push_back(sp);
+    }
+
+    // Сохраняем API-ключ в слот этого соединения
+    std::string key_name = llama_gui::core::EnvManager::cloud_provider_api_key_name(name, endpoint_url_buf_);
+    if (api_key_buf_[0] != '\0') {
+        llama_gui::core::EnvManager::write_key(key_name, api_key_buf_, settings_.get_profiles_directory());
+    }
+
+    // Переключаемся на только что сохранённое соединение
+    if (!load_saved_provider(sp)) return;
+
+    save_as_name_buf_[0] = '\0';
+    save_as_status_ = "Saved connection: " + name;
 }
 
 // ============================================================================
@@ -666,23 +746,29 @@ void CloudServicesDialog::render() {
 
         ImGui::Separator();
 
-        // Provider dropdown
+        // Provider dropdown (presets + saved Custom-соединения)
         ImGui::Text("Provider:");
         ImGui::SameLine(120);
         {
-            int current_idx = -1;
             const auto& presets = get_presets();
-            for (int i = 0; i < (int)presets.size(); i++) {
-                if (std::string(provider_name_buf_) == presets[i].name) {
-                    current_idx = i;
-                    break;
-                }
+            const auto& saved = cp.saved_providers;
+
+            // Combo items: presets, затем сохранённые Custom-соединения
+            std::vector<std::string> names;
+            for (const auto& p : presets) names.push_back(p.name);
+            int saved_base = (int)names.size();
+            for (const auto& s : saved) names.push_back(s.name);
+
+            int current_idx = -1;
+            std::string cur(provider_name_buf_);
+            for (int i = 0; i < (int)names.size(); i++) {
+                if (cur == names[i]) { current_idx = i; break; }
             }
             if (current_idx < 0) current_idx = (int)presets.size() - 1;
 
             std::string items;
-            for (const auto& p : presets) {
-                items += p.name;
+            for (const auto& n : names) {
+                items += n;
                 items += '\0';
             }
             items += '\0';
@@ -713,6 +799,9 @@ void CloudServicesDialog::render() {
                     }
                     models_loaded_ = false; // Invalidate model list on provider change
                     settings_modified_ = true;
+                } else if (current_idx >= saved_base && current_idx < (int)names.size()) {
+                    // Выбрано сохранённое Custom-соединение
+                    load_saved_provider(saved[current_idx - saved_base]);
                 }
             }
         }
@@ -795,6 +884,52 @@ void CloudServicesDialog::render() {
             ImGui::SetTooltip("Send a tiny test request to each model and show\n"
                               "which ones actually answer (latency / HTTP error).\n"
                               "\"Load Models\" first. Sequential to respect rate limits.");
+        }
+
+        // Save-As: сохранить текущее Custom-соединение под новым именем
+        ImGui::Separator();
+        ImGui::Text("Save connection as:");
+        ImGui::SameLine(120);
+        ImGui::PushItemWidth(220);
+        ImGui::InputText("##save_as_name", save_as_name_buf_, sizeof(save_as_name_buf_));
+        ImGui::PopItemWidth();
+        InputTextContextMenu();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Save As##provider")) {
+            save_provider_as();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Save the current Custom endpoint/API key/model\n"
+                              "under a new named connection so you can switch\n"
+                              "back to it later from the Provider dropdown.");
+        }
+        if (!save_as_status_.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", save_as_status_.c_str());
+        }
+
+        // Saved connections list (with delete)
+        if (!cp.saved_providers.empty()) {
+            ImGui::Text("Saved connections:");
+            for (size_t i = 0; i < cp.saved_providers.size(); i++) {
+                const auto& sp = cp.saved_providers[i];
+                bool is_active = (std::string(provider_name_buf_) == sp.name);
+                std::string label = sp.name + "  (" + sp.endpoint_url + ")";
+                if (ImGui::RadioButton(label.c_str(), is_active)) {
+                    load_saved_provider(sp);
+                }
+                ImGui::SameLine();
+                std::string del_label = "X##del_saved_" + std::to_string(i);
+                if (ImGui::SmallButton(del_label.c_str())) {
+                    cp.saved_providers.erase(cp.saved_providers.begin() + i);
+                    settings_modified_ = true;
+                    if (is_active) {
+                        model_id_buf_[0] = '\0';
+                    }
+                    break;
+                }
+            }
+            ImGui::Separator();
         }
 
         // Timeout

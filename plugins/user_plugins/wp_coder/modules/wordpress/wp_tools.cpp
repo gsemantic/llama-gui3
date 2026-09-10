@@ -2,6 +2,7 @@
 #include "../../core/tools_registry.h"
 #include "../../core/engine.h"
 #include "../../core/skills_manager.h"
+#include "../../core/shell.h"
 
 #include <fstream>
 #include <sstream>
@@ -17,27 +18,8 @@ namespace wp {
 
 namespace {
 
-std::string run_capture(const std::string& cmd) {
-    std::string full = cmd + " 2>&1";
-    FILE* f = popen(full.c_str(), "r");
-    if (!f) return "[ошибка] не удалось запустить: " + cmd;
-    char buf[4096];
-    std::string out;
-    while (fgets(buf, sizeof(buf), f)) out += buf;
-    pclose(f);
-    return out;
-}
-
-bool run_capture_status(const std::string& cmd, std::string& out, int& exit_code) {
-    std::string full = cmd + " 2>&1";
-    FILE* f = popen(full.c_str(), "r");
-    if (!f) { out = "[ошибка] не удалось запустить: " + cmd; exit_code = -1; return false; }
-    char buf[4096];
-    out.clear();
-    while (fgets(buf, sizeof(buf), f)) out += buf;
-    exit_code = pclose(f);
-    return exit_code == 0;
-}
+/* Ограничение вывода инструментов модуля. */
+constexpr size_t kWpMaxOutput = 8000;
 
 const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
                                             "wp-includes", "wp-admin"};
@@ -63,14 +45,29 @@ void walk_php(const fs::path& root, std::vector<std::string>& out, size_t limit 
     }
 }
 
-/* ===== WP-CLI ===== */
+/* Безопасный идентификатор для имён сайта/БД/пользователя (без инъекций). */
+std::string sanitize_ident(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    for (char c : s) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
+            r += c;
+    }
+    return r;
+}
+
+/* ===== WP-CLI =====
+ * args — набор аргументов wp-cli от модели. Многоаргументную строку нельзя
+ * безопасно обернуть в один qoute, поэтому выполняем как есть, но с таймаутом
+ * и лимитом вывода. */
 std::string wp_cli(const std::string& args) {
     const auto& st = engine_state();
     if (args.empty()) return "[ошибка] пустая команда wp-cli";
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
-    std::string cmd = "wp --path=\"" + st.project_dir + "\" " + args + " --no-color 2>&1";
-    std::string out = run_capture(cmd);
-    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir) + " "
+                      + args + " --no-color";
+    std::string out = shell::run_capture(cmd, 60);
+    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
     return out.empty() ? "[wp-cli: нет вывода]" : out;
 }
 
@@ -79,10 +76,10 @@ std::string wp_db(const std::string& query) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
     if (query.empty()) return "[ошибка] пустой SQL-запрос";
-    std::string cmd = "wp --path=\"" + st.project_dir + "\" db query \""
-                      + query + "\" --no-color 2>&1";
-    std::string out = run_capture(cmd);
-    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
+                      + " db query " + shell::shell_quote(query) + " --no-color";
+    std::string out = shell::run_capture(cmd, 60);
+    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
     return out.empty() ? "[wp db query: нет вывода]" : out;
 }
 
@@ -91,10 +88,11 @@ std::string wp_media(int count) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
     if (count <= 0) count = 20;
-    std::string cmd = "wp --path=\"" + st.project_dir + "\" media list --posts_per_page="
-                      + std::to_string(count) + " --no-color 2>&1";
-    std::string out = run_capture(cmd);
-    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
+                      + " media list --posts_per_page=" + std::to_string(count)
+                      + " --no-color";
+    std::string out = shell::run_capture(cmd, 60);
+    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
     return out.empty() ? "[wp media list: нет медиафайлов]" : out;
 }
 
@@ -103,10 +101,10 @@ std::string wp_option(const std::string& name) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
     if (name.empty()) return "[ошибка] пустое имя опции";
-    std::string cmd = "wp --path=\"" + st.project_dir + "\" option get \""
-                      + name + "\" --no-color 2>&1";
-    std::string out = run_capture(cmd);
-    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
+                      + " option get " + shell::shell_quote(name) + " --no-color";
+    std::string out = shell::run_capture(cmd, 60);
+    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
     return out.empty() ? "[wp option get: опция не найдена]" : out;
 }
 
@@ -118,10 +116,10 @@ std::string wp_rest(const std::string& ep) {
     std::string url = st.wp_site_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
     url += "/wp-json/wp/v2/" + ep;
-    std::string cmd = "curl -s -m 30 --fail -u \""
-        + st.wp_app_user + ":" + st.wp_app_password + "\" \"" + url + "\"";
-    std::string out = run_capture(cmd);
-    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
+    std::string cmd = "curl -s -m 30 --fail -u " + shell::shell_quote(st.wp_app_user + ":" + st.wp_app_password)
+                      + " " + shell::shell_quote(url);
+    std::string out = shell::run_capture(cmd, 40);
+    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
     return out.empty() ? "[wp_rest: пустой ответ]" : out;
 }
 
@@ -133,7 +131,7 @@ std::string wp_check_deps() {
 
     auto check = [&](const std::string& name, const std::string& cmd, const std::string& hint) {
         std::string out; int rc;
-        bool found = run_capture_status(cmd, out, rc) && !out.empty();
+        bool found = shell::run_capture_status(cmd, out, rc, 30) && !out.empty();
         if (found) {
             s << "OK " << name << ": " << out.substr(0, out.find('\n')) << "\n";
             ok++;
@@ -152,7 +150,7 @@ std::string wp_check_deps() {
 
     s << "\n[Модули PHP]\n";
     std::string php_out; int php_rc;
-    run_capture_status("php -m", php_out, php_rc);
+    shell::run_capture_status("php -m", php_out, php_rc, 30);
     auto check_mod = [&](const std::string& mod) {
         if (php_out.find(mod) != std::string::npos) { s << "  OK " << mod << "\n"; ok++; }
         else { s << "  FAIL " << mod << " — НУЖЕН (sudo apt install php-" + mod + ")\n"; fail++; }
@@ -163,14 +161,14 @@ std::string wp_check_deps() {
     s << "\n[Сервисы]\n";
     {
         std::string out; int rc;
-        run_capture_status("systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null", out, rc);
+        shell::run_capture_status("systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null", out, rc, 30);
         bool db_running = (out.find("active") != std::string::npos);
         s << (db_running ? "OK" : "WARN") << " MariaDB/MySQL: " << (db_running ? "запущен" : "не запущен") << "\n";
         if (db_running) ok++; else warn++;
     }
     {
         std::string out; int rc;
-        run_capture_status("systemctl is-active apache2 2>/dev/null", out, rc);
+        shell::run_capture_status("systemctl is-active apache2 2>/dev/null", out, rc, 30);
         bool web_running = (out.find("active") != std::string::npos);
         s << (web_running ? "OK" : "WARN") << " Apache2: " << (web_running ? "запущен" : "не запущен") << "\n";
         if (web_running) ok++; else warn++;
@@ -181,12 +179,13 @@ std::string wp_check_deps() {
 }
 
 /* ===== wp_create_site ===== */
-std::string wp_create_site(const std::string& site_name, const std::string& db_name_in,
+std::string wp_create_site(const std::string& site_name_in, const std::string& db_name_in,
                             const std::string& db_user_in, const std::string& db_pass_in,
                             const std::string& site_url) {
-    if (site_name.empty()) return "[ошибка] укажи имя сайта";
-    std::string db_name = db_name_in.empty() ? "wp_" + site_name : db_name_in;
-    std::string db_user = db_user_in.empty() ? "wp_" + site_name : db_user_in;
+    std::string site_name = sanitize_ident(site_name_in);
+    if (site_name.empty()) return "[ошибка] укажи имя сайта (латиницей)";
+    std::string db_name = sanitize_ident(db_name_in.empty() ? "wp_" + site_name : db_name_in);
+    std::string db_user = sanitize_ident(db_user_in.empty() ? "wp_" + site_name : db_user_in);
     std::string db_pass = db_pass_in.empty() ? "pass_" + site_name : db_pass_in;
     std::string docroot = "/var/www/" + site_name;
 
@@ -197,7 +196,7 @@ std::string wp_create_site(const std::string& site_name, const std::string& db_n
     auto run_step = [&](const std::string& desc, const std::string& cmd) {
         s << ++step << ". " << desc << "... ";
         std::string out; int rc;
-        bool ok = run_capture_status(cmd, out, rc);
+        bool ok = shell::run_capture_status(cmd, out, rc, 120);
         s << (ok ? "OK" : "FAIL: " + out.substr(0, 500)) << "\n";
         return ok;
     };
@@ -223,8 +222,8 @@ std::string wp_create_site(const std::string& site_name, const std::string& db_n
     {
         std::string url = site_url.empty() ? "http://" + site_name + ".localhost" : site_url;
         std::string install = "sudo -u www-data wp core install --path=" + docroot
-            + " --url=" + url + " --title=\"" + site_name
-            + "\" --admin_user=admin --admin_password=admin --admin_email=admin@" + site_name
+            + " --url=" + url + " --title=" + shell::shell_quote(site_name)
+            + " --admin_user=admin --admin_password=admin --admin_email=admin@" + site_name
             + ".local --skip-email --allow-root 2>&1";
         if (!run_step("Установка WordPress", install)) return s.str();
     }
@@ -244,9 +243,9 @@ std::string wp_create_site(const std::string& site_name, const std::string& db_n
 std::string php_lint(const std::string& path) {
     const auto& st = engine_state();
     if (st.php_bin.empty()) return "[ошибка] php-cli не найден";
-    std::string cmd = st.php_bin + " -l \"" + path + "\"";
-    std::string out = run_capture(cmd);
-    return out.empty() ? "[php -l: нет ошибок]" : out;
+    std::string cmd = st.php_bin + " -l " + shell::shell_quote(path);
+    std::string out = shell::run_capture(cmd, 60);
+    return out.empty() ? "[php -l: нет ошибок]" : shell::cap(out, 4000);
 }
 
 /* ===== validate ===== */
@@ -255,6 +254,9 @@ std::string validate() {
     std::vector<std::string> files;
     walk_php(st.project_dir, files);
     if (files.empty()) return "[validate: php-файлы не найдены]";
+    const size_t kMaxFiles = 200;
+    bool truncated = files.size() > kMaxFiles;
+    if (truncated) files.resize(kMaxFiles);
     size_t bad = 0;
     std::stringstream out;
     for (const auto& fp : files) {
@@ -265,7 +267,8 @@ std::string validate() {
             out << fp << ":\n" << r << "\n";
         }
     }
-    out << "[validate: проверено " << files.size() << " файлов, ошибок: " << bad << "]";
+    out << "[validate: проверено " << files.size() << " файлов"
+        << (truncated ? " (лимит 200)" : "") << ", ошибок: " << bad << "]";
     return out.str();
 }
 
@@ -280,15 +283,16 @@ std::string deploy() {
             ? st.deploy_host
             : (st.deploy_user + "@" + st.deploy_host);
         std::string cmd = "rsync -az --delete --exclude=wp-config.php --exclude=.git --exclude=node_modules "
-            "\"" + st.project_dir + "/\" \"" + target + ":" + st.deploy_remote_dir + "/\"";
-        std::string out = run_capture(cmd);
-        return "[deploy rsync] " + (out.empty() ? "успешно" : out);
+            + shell::shell_quote(st.project_dir + "/") + " "
+            + shell::shell_quote(target + ":" + st.deploy_remote_dir + "/");
+        std::string out = shell::run_capture(cmd, 300);
+        return "[deploy rsync] " + (out.empty() ? "успешно" : shell::cap(out, 4000));
     }
     fs::path script = fs::path(st.project_dir) / "deploy.sh";
     if (!fs::exists(script))
         return "[ошибка] proto=" + st.deploy_proto + ", но нет " + script.string();
-    std::string out = run_capture("\"" + script.string() + "\"");
-    return "[deploy " + st.deploy_proto + "] " + (out.empty() ? "успешно" : out);
+    std::string out = shell::run_capture(shell::shell_quote(script.string()), 300);
+    return "[deploy " + st.deploy_proto + "] " + (out.empty() ? "успешно" : shell::cap(out, 4000));
 }
 
 /* ===== verify ===== */
@@ -297,8 +301,8 @@ std::string verify() {
     std::stringstream out;
     out << validate() << "\n";
     if (!st.wp_local_url.empty()) {
-        std::string curl = "curl -s -o /dev/null -m 20 -w '%{http_code}' \"" + st.wp_local_url + "\"";
-        std::string code = run_capture(curl);
+        std::string curl = "curl -s -o /dev/null -m 20 -w '%{http_code}' " + shell::shell_quote(st.wp_local_url);
+        std::string code = shell::run_capture(curl, 30);
         out << "[HTTP " << (code.empty() ? "?" : code) << "] " << st.wp_local_url << "\n";
     } else {
         out << "[verify: wp_local_url не задан]\n";
@@ -310,7 +314,6 @@ std::string verify() {
 /* ===== headless_render ===== */
 std::string headless_render(const std::string& url) {
     if (url.empty()) return "[ошибка] пустой URL";
-    /* Попытка использовать headless_browser если доступен. */
     return "[headless_render] " + url + " (headless browser integration)";
 }
 
@@ -413,7 +416,7 @@ static const char* kWpPluginBoilerplateSkill =
     "Описание: структура плагина WordPress\n"
     "- Минимальный плагин: один PHP-файл с комментарием в шапке (Plugin Name, Description, Version).\n"
     "- Хуки: register_activation_hook / register_deactivation_hook.\n"
-    "- Для_Options API: register_setting / add_settings_section / add_settings_field.\n"
+    "- Для Options API: register_setting / add_settings_section / add_settings_field.\n"
     "- Админка: add_menu_page / add_submenu_page.\n"
     "- Не забывай nonce: wp_verify_nonce / wp_create_nonce.\n"
     "- Текстуризация: esc_html(), esc_attr(), esc_url(), sanitize_text_field().";
@@ -428,12 +431,12 @@ static const char* kWpGitSkill =
 
 std::vector<Skill> get_wp_skills() {
     return {
-        {"wp_theme", "Иерархия шаблонов и безопасная вёрстка темы", kWpThemeSkill},
-        {"wp_hook", "Правильные хуки WordPress (action/filter/shortcode)", kWpHookSkill},
-        {"wp_database", "Работа с базой данных WordPress через wp-cli", kWpDatabaseSkill},
-        {"wp_media", "Работа с медиафайлами WordPress", kWpMediaSkill},
-        {"wp_plugin_boilerplate", "Структура плагина WordPress", kWpPluginBoilerplateSkill},
-        {"wp_git", "Git для WordPress-проектов", kWpGitSkill}
+        {"wp_theme", "Иерархия шаблонов и безопасная вёрстка темы", kWpThemeSkill, "wordpress"},
+        {"wp_hook", "Правильные хуки WordPress (action/filter/shortcode)", kWpHookSkill, "wordpress"},
+        {"wp_database", "Работа с базой данных WordPress через wp-cli", kWpDatabaseSkill, "wordpress"},
+        {"wp_media", "Работа с медиафайлами WordPress", kWpMediaSkill, "wordpress"},
+        {"wp_plugin_boilerplate", "Структура плагина WordPress", kWpPluginBoilerplateSkill, "wordpress"},
+        {"wp_git", "Git для WordPress-проектов", kWpGitSkill, "wordpress"}
     };
 }
 

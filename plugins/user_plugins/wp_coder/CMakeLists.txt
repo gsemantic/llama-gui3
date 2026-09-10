@@ -24,6 +24,8 @@ set(CORE_SOURCES
     core/git_tools.cpp
     core/project.cpp
     core/security.cpp
+    core/tool_protocol.cpp
+    core/agent_components.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})

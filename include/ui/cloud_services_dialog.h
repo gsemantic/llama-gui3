@@ -76,6 +76,10 @@ private:
     // Saved state for change detection
     std::string saved_model_id_;
 
+    // Save-As (сохранение Custom-соединения под новым именем)
+    char save_as_name_buf_[256] = "";
+    std::string save_as_status_;
+
     // Model list
     std::vector<std::string> model_list_;
     std::vector<std::string> filtered_models_;
@@ -89,6 +93,10 @@ private:
     void load_from_settings();
     void save_to_settings();
     void check_model_changed();
+
+    // Saved connections (Custom-провайдеры, сохранённые под именем)
+    bool load_saved_provider(const llama_gui::core::CloudSavedProvider& sp);
+    void save_provider_as();
 
     // Model list
     void fetch_models();
