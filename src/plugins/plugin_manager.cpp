@@ -511,7 +511,7 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
 
     core::OpenRouterRequestParams params;
     params.model = cp.model_id;
-    params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (см. build_completion_body)
+    params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (из профиля UI)
     params.temperature = settings->chat().temperature;
     params.top_p = settings->chat().top_p;
     params.stream = false;
@@ -696,7 +696,7 @@ char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
 
                 core::OpenRouterRequestParams params;
                 params.model = cp.model_id;
-                params.max_tokens = cp.max_output_tokens;
+                params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (из профиля UI)
                 params.temperature = settings->chat().temperature;
                 params.top_p = settings->chat().top_p;
                 params.stream = false;
@@ -879,7 +879,12 @@ void host_agent_mode_push_event(LlamaPluginHost* host, const char* event_text) {
     if (!pd || !pd->manager || !event_text) return;
     auto* ci = pd->manager->subsystems.chat_interface;
     if (!ci) return;
-    ci->add_assistant_message(event_text);
+    /* НЕ вызываем add_assistant_message напрямую — мы в фоновом потоке
+     * агента, а add_assistant_message модифицирует UI-состояние (conversations,
+     * messages, cache). Прямой вызов вызывает гонку с UI-потоком → deadlock/freeze.
+     * Вместо этого ставим в pending_responses_, который обрабатывается
+     * на следующем кадре UI-потоком через process_pending_responses(). */
+    ci->enqueue_pending_response(std::string(event_text));
 }
 
 const char* host_app_version() {

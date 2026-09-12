@@ -103,18 +103,21 @@ std::string Engine::build_system_prompt() const {
     if (!state_.prompt_dirty && !state_.cached_system_prompt.empty())
         return state_.cached_system_prompt;
 
-    std::string sys = state_.agent_system_prompt.empty()
-        ? std::string(kBaseSystemPrompt)
-        : state_.agent_system_prompt;
-
+    /* project_dir — ПЕРВЫМ, чтобы модель точно увидела корень проекта.
+     * Даже при длинном кастомном промпте эта информация не потеряется. */
+    std::string sys;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         if (!state_.project_dir.empty()) {
-            sys += "\n\n## КОРНЕВОЙ КАТАЛОГ ПРОЕКТА\n"
-                   "Корень: " + state_.project_dir + "\n"
-                   "Все пути в инструментах — относительно этого каталога.\n";
+            sys = "## КОРНЕВОЙ КАТАЛОГ ПРОЕКТА\n"
+                  "Корень: " + state_.project_dir + "\n"
+                  "Все пути в инструментах — относительно этого каталога.\n\n";
         }
     }
+
+    sys += state_.agent_system_prompt.empty()
+        ? std::string(kBaseSystemPrompt)
+        : state_.agent_system_prompt;
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -219,6 +222,7 @@ void Engine::permission_allow_always(const std::string& path) {
             json += "\"" + state_.allowed_external_paths[i] + "\"";
         }
     }
+    json += "]";
     if (cb_.settings_set) cb_.settings_set("wp_coder.allowed_external_paths", json);
 }
 
@@ -289,6 +293,10 @@ static void setting_set(const HostCallbacks& cb, const std::string& key, const s
 
 void Engine::load_settings() {
     state_.project_dir      = setting_get(cb_, "wp_coder.project_dir", "");
+    if (state_.project_dir.empty()) {
+        std::cout << "[wp_coder] ВНИМАНИЕ: корневой каталог проекта не задан — "
+                  << "агент не будет знать, где находится код" << std::endl;
+    }
     state_.php_bin          = setting_get(cb_, "wp_coder.php_bin", "");
     state_.wp_site_url      = setting_get(cb_, "wp_coder.site_url", "");
     state_.wp_app_user      = setting_get(cb_, "wp_coder.app_user", "");

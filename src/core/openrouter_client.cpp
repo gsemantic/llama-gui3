@@ -313,14 +313,68 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
 
 OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestParams& params) {
     std::string body = build_completion_body(params);
-    std::string response_str = http_client_.make_request("chat/completions", body);
-    OpenRouterCompletionResponse resp = model_parser_.parse_completion_response(response_str);
-    if (http_client_.last_http_code() == 429) {
-        resp.success = false;
-        resp.content.clear();
-        resp.error = "HTTP 429: лимит запросов провайдера исчерпан — подождите около минуты "
-                     "и повторите (анонимный лимит учитывает и max_tokens)";
+
+    const int kMaxAttempts = 3;
+    const int kRetryDelaysMs[kMaxAttempts - 1] = {3000, 5000};
+    static const auto is_retryable_code = [](long code) {
+        return code == 408 || code == 429 ||
+               code == 500 || code == 502 || code == 503 || code == 504;
+    };
+
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (aborted_.load()) {
+            OpenRouterCompletionResponse resp;
+            resp.success = false;
+            resp.error = "Прервано пользователем";
+            return resp;
+        }
+
+        std::string response_str = http_client_.make_request("chat/completions", body);
+        long http_code = http_client_.last_http_code();
+        OpenRouterCompletionResponse resp = model_parser_.parse_completion_response(response_str);
+
+        if (http_code == 429) {
+            resp.success = false;
+            resp.content.clear();
+            if (attempt < kMaxAttempts - 1) {
+                std::cout << "[CloudClient] HTTP 429 — попытка " << (attempt + 2) << "/"
+                          << kMaxAttempts << " через " << kRetryDelaysMs[attempt] << " мс" << std::endl;
+                for (int waited = 0; waited < kRetryDelaysMs[attempt] && !aborted_.load(); waited += 100) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                continue;
+            }
+            resp.error = "HTTP 429: лимит запросов провайдера исчерпан — подождите около минуты "
+                         "и повторите (анонимный лимит учитывает и max_tokens)";
+            return resp;
+        }
+
+        if (is_retryable_code(http_code) && attempt < kMaxAttempts - 1) {
+            std::cout << "[CloudClient] HTTP " << http_code << " — попытка " << (attempt + 2) << "/"
+                      << kMaxAttempts << " через " << kRetryDelaysMs[attempt] << " мс" << std::endl;
+            for (int waited = 0; waited < kRetryDelaysMs[attempt] && !aborted_.load(); waited += 100) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            continue;
+        }
+
+        // CURL timeout (http_code == 0, пустой ответ) — тоже транзиентная ошибка
+        if (http_code == 0 && response_str.empty() && attempt < kMaxAttempts - 1) {
+            std::cout << "[CloudClient] Таймаут запроса — попытка " << (attempt + 2) << "/"
+                      << kMaxAttempts << " через " << kRetryDelaysMs[attempt] << " мс" << std::endl;
+            for (int waited = 0; waited < kRetryDelaysMs[attempt] && !aborted_.load(); waited += 100) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            continue;
+        }
+
+        return resp;
     }
+
+    // Все попытки исчерпаны
+    OpenRouterCompletionResponse resp;
+    resp.success = false;
+    resp.error = "Все попытки запроса исчерпаны (429/5xx/таймаут)";
     return resp;
 }
 

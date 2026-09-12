@@ -191,6 +191,14 @@ private:
     void scroll_to_bottom();
     void process_pending_responses();
 
+public:
+    /** Потокобезопасная очередь события агента для доставки в UI.
+     *  Вызывается из фонового потока агента (host_agent_mode_push_event).
+     *  Событие будет обработано на следующем кадре через process_pending_responses(). */
+    void enqueue_pending_response(const std::string& content);
+
+private:
+
     // Callback for streaming responses
     void on_stream_chunk(const std::string& chunk, bool is_final);
     static void streaming_callback(void* user_data, const std::string& chunk, bool is_final);

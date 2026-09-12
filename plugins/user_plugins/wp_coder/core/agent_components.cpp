@@ -17,9 +17,22 @@
 namespace coder {
 
 /* Максимум шагов ReAct на задачу. */
-constexpr int kMaxSteps = 12;
+constexpr int kMaxSteps = 8;
+/* Порог «застревания»: если N шагов подряд модель даёт короткий
+ * ответ (< 200 символов), считаем, что она не может прогрессировать
+ * и запрашиваем итоговый ответ. 200 — потому что ответ 100-190 символов
+ * тоже слишком короткий для продуктивного шага агента. */
+constexpr int kStuckThreshold = 3;
+constexpr size_t kShortResponseLen = 200;
 /* Бюджет символов на историю сессии (превышение → сжатие старых RESULT). */
 constexpr size_t kSessionBudget = 60000;
+/* Максимальный размер одного RESULT в сессии. Результаты инструментов
+ * (read_file, repo_map, grep_search) могут быть 5-10К+ символов, и они
+ * полностью отправляются на КАЖДОМ последующем шаге — это основной
+ * источник перерасхода токенов. Обрезаем до kResultBudget символов
+ * сразу после добавления. Модели достаточно начала результата для
+ * принятия решения; если нужно больше — она вызовет инструмент повторно. */
+constexpr size_t kResultBudget = 1500;
 
 /* ======================================================================
  * SessionStore
@@ -301,6 +314,7 @@ bool Planner::plan(const std::string& sys_prompt) {
 
 bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
+    int stuck_counter = 0;  // последовательных коротких ответов
 
     for (int step = 0; step < kMaxSteps; ++step) {
         if (state_.abort_requested.load()) {
@@ -322,6 +336,15 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         LlmReply reply;
         bool ok = false;
         auto t0 = std::chrono::steady_clock::now();
+
+        /* Диагностика: размер контекста, отправляемого в LLM. */
+        {
+            size_t total_chars = 0;
+            for (const auto& m : msgs) total_chars += m.content.size();
+            std::cout << "[wp_coder] step " << (step + 1) << ": msgs=" << msgs.size()
+                      << " chars=" << total_chars << std::endl;
+        }
+
         if (cb_.llm_chat) {
             ok = cb_.llm_chat(sys_prompt, msgs, reply);
         } else if (cb_.llm_complete) {
@@ -370,6 +393,45 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             state_.session.push_back({"assistant", reply.content});
         }
 
+        /* Детектор застревания: если модель несколько раз подряд даёт
+         * очень короткий ответ — она не может прогрессировать. */
+        if (reply.content.size() < kShortResponseLen) {
+            ++stuck_counter;
+            if (stuck_counter >= kStuckThreshold) {
+                this->push_event_(AgentEvent::Status,
+                    "Модель застряла — запрашиваю итоговый ответ.");
+                {
+                    std::lock_guard<std::mutex> lk(state_.mtx);
+                    state_.session.push_back({"user",
+                        "Ты делаешь очень короткие ответы и не прогрессируешь. "
+                        "Инструменты больше вызывать НЕЛЬЗЯ. "
+                        "Дай итоговый ответ по результатам проделанной работы."});
+                }
+                std::vector<ChatMsg> final_msgs;
+                {
+                    std::lock_guard<std::mutex> lk(state_.mtx);
+                    final_msgs = state_.session;
+                }
+                LlmReply final_reply;
+                bool f_ok = false;
+                if (cb_.llm_chat)
+                    f_ok = cb_.llm_chat(sys_prompt, final_msgs, final_reply);
+                if (f_ok && !final_reply.content.empty()) {
+                    std::string f_rest;
+                    extract_action(final_reply.content, f_rest);
+                    std::string f_text = f_rest.empty() ? final_reply.content : f_rest;
+                    if (!f_text.empty()) {
+                        if (!full_response.empty()) full_response += "\n\n";
+                        full_response += f_text;
+                        this->push_event_(AgentEvent::Assistant, f_text);
+                    }
+                }
+                return true;
+            }
+        } else {
+            stuck_counter = 0;  // длинный ответ — сброс счётчика
+        }
+
         if (reply.finish_reason == "length") {
             this->push_event_(AgentEvent::Status,
                 "Внимание: модель упёрлась в лимит токенов (finish=length). "
@@ -377,6 +439,18 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
 
             SessionStore trimmer(state_);
             trimmer.trim();
+        }
+
+        /* Автосжатие: даже без finish=length, если сессия превысила бюджет,
+         * сжимаем старые RESULT — иначе модель теряет контекст. */
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            size_t total = 0;
+            for (const auto& m : state_.session) total += m.content.size();
+            if (total > kSessionBudget) {
+                SessionStore trimmer(state_);
+                trimmer.trim();
+            }
         }
 
         std::string rest;
@@ -435,7 +509,13 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         if (!perm_path.empty()) {
             {
                 std::lock_guard<std::mutex> lk(state_.mtx);
-                state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + result});
+                std::string trimmed_result = result;
+                if (trimmed_result.size() > kResultBudget) {
+                    trimmed_result.resize(kResultBudget);
+                    trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
+                                    + " символов. Вызови инструмент повторно, если нужно больше.]";
+                }
+                state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + trimmed_result});
                 state_.waiting_in_sync = true;
                 state_.running = false;
             }
@@ -484,7 +564,17 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 state_.session.clear();
                 return true;
             }
-            state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + result});
+            /* Обрезаем RESULT до kResultBudget символов — это главный способ
+             * экономии токенов. Полный результат может быть 5-10К+ символов,
+             * и он отправляется на КАЖДОМ следующем шаге. Модели достаточно
+             * начала для принятия решения; если нужно больше — вызовет repeat. */
+            std::string trimmed_result = result;
+            if (trimmed_result.size() > kResultBudget) {
+                trimmed_result.resize(kResultBudget);
+                trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
+                                + " символов. Вызови инструмент повторно, если нужно больше.]";
+            }
+            state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + trimmed_result});
         }
     }
 

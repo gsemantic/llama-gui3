@@ -76,6 +76,12 @@ void ChatInterface::add_assistant_message(const std::string& content) {
     invalidate_cache_for_conversation(active_conv->id);
 }
 
+void ChatInterface::enqueue_pending_response(const std::string& content) {
+    if (content.empty()) return;
+    std::lock_guard<std::mutex> lk(pending_responses_mutex_);
+    pending_responses_.push_back({content, ""});  // пустой conv_id → активная конверсация
+}
+
 void ChatInterface::send_message() {
     std::cerr << "[Chat] send_message: agent_mode=" << active_agent_mode_index_
               << " cloud=" << (settings_.cloud_provider().enabled ? "on" : "off")

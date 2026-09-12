@@ -95,36 +95,49 @@ void ChatInterface::process_pending_responses() {
     // Process all pending responses
     for (auto& pending_response : pending_responses_) {
         const auto& content = pending_response.content;
-        const auto& conversation_id = pending_response.conversation_id;
+        std::string conv_id = pending_response.conversation_id;
+
+        // Если conversation_id пуст (событие от агента), используем активную
+        if (conv_id.empty()) {
+            auto all_convs = state_manager_.get_all_conversations();
+            for (auto* conv : all_convs) {
+                if (conv->is_active) {
+                    conv_id = conv->id;
+                    break;
+                }
+            }
+        }
+
+        if (conv_id.empty()) continue;
 
         if (!content.empty()) {
             // Add assistant response
             llama_gui::core::Message assistant_msg("assistant", content);
-            state_manager_.add_message(conversation_id, assistant_msg);
+            state_manager_.add_message(conv_id, assistant_msg);
 
             // Invalidate cache for this conversation since we added a new message
-            invalidate_cache_for_conversation(conversation_id);
+            invalidate_cache_for_conversation(conv_id);
 
             // Force scroll to bottom to show the new message (like web chat)
             if (auto_scroll_) {
                 scroll_to_bottom();
             }
 
-            LOG_DEBUG("Added assistant message to conversation " + conversation_id);
+            LOG_DEBUG("Added assistant message to conversation " + conv_id);
         } else {
             // Error response
             llama_gui::core::Message error_msg("assistant", "Error: No response from model");
-            state_manager_.add_message(conversation_id, error_msg);
+            state_manager_.add_message(conv_id, error_msg);
 
             // Invalidate cache for this conversation since we added a new message
-            invalidate_cache_for_conversation(conversation_id);
+            invalidate_cache_for_conversation(conv_id);
 
             // Force scroll to bottom to show the error message
             if (auto_scroll_) {
                 scroll_to_bottom();
             }
 
-            LOG_ERROR("Added error message to conversation " + conversation_id);
+            LOG_ERROR("Added error message to conversation " + conv_id);
         }
     }
 
