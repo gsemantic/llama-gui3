@@ -8,6 +8,7 @@ compile_commands.json
 
 # Runtime data and backups (never commit)
 _backups/
+_secrets/
 backups/
 .cache/
 .config/
