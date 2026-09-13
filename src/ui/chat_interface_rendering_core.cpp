@@ -6,6 +6,7 @@
 #include "../include/core/state_manager.h"
 #include "../include/core/rag_manager.h"
 #include "../include/ui/localization_manager.h"
+#include "../include/ui/markdown_renderer.h"
 #include "../external/imgui/imgui_internal.h"
 #include "imgui.h"
 #include <algorithm>
@@ -266,21 +267,45 @@ void ChatInterface::render_message_list() {
             }
             select_menu_open_prev_ = menu_open_now;
         } else {
-            // Рендеринг текста сообщения — TextWrapped, без child window
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-            ImGui::TextWrapped("%s", message.content.c_str());
-            ImGui::PopStyleColor();
-            ImGui::PopTextWrapPos();
+            // Рендеринг текста сообщения
+            if (message.role == "assistant") {
+                // Для ассистента — markdown с подсветкой кода и thinking-блоками
+                // Обернуть в Group для получения ID и hover-детекции
+                ImGui::BeginGroup();
+                MarkdownRenderer::instance().render_with_thinking(
+                    message.content, message_color);
+                ImGui::EndGroup();
+            } else {
+                // Для user/system — обычный TextWrapped
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, message_color);
+                ImGui::TextWrapped("%s", message.content.c_str());
+                ImGui::PopStyleColor();
+                ImGui::PopTextWrapPos();
+            }
         }
 
         // Контекстное меню + Ctrl+C для копирования
-        if (!in_select_mode && ImGui::IsItemHovered()) {
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                ImGui::OpenPopup(("copy_menu_" + std::to_string(i)).c_str());
+        if (!in_select_mode) {
+            // Для ассистентских сообщений: проверяем hover по группе
+            bool msg_hovered = false;
+            if (message.role == "assistant") {
+                // Group rect доступен через GetItemRect — после EndGroup
+                ImVec2 r_min = ImGui::GetItemRectMin();
+                ImVec2 r_max = ImGui::GetItemRectMax();
+                ImVec2 mouse = ImGui::GetIO().MousePos;
+                msg_hovered = (mouse.x >= r_min.x && mouse.x <= r_max.x &&
+                               mouse.y >= r_min.y && mouse.y <= r_max.y);
+            } else {
+                msg_hovered = ImGui::IsItemHovered();
             }
-            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C)) {
-                ImGui::SetClipboardText(message.content.c_str());
+            if (msg_hovered) {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                    ImGui::OpenPopup(("copy_menu_" + std::to_string(i)).c_str());
+                }
+                if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C)) {
+                    ImGui::SetClipboardText(message.content.c_str());
+                }
             }
         }
 
@@ -339,11 +364,9 @@ void ChatInterface::render_message_list() {
                 stream_display_buffer = stream_display_buffer.substr(0, max_display_length) + "...";
             }
 
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.8f, 0.0f, 1.0f));
-            ImGui::TextWrapped("%s", stream_display_buffer.c_str());
-            ImGui::PopStyleColor();
-            ImGui::PopTextWrapPos();
+            // Markdown-рендеринг для стримингового контента
+            MarkdownRenderer::instance().render(
+                stream_display_buffer, ImVec4(0.0f, 0.8f, 0.0f, 1.0f));
         }
 
         ImGui::EndGroup();
