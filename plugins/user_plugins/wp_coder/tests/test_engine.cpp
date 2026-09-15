@@ -1,6 +1,8 @@
 #include "test_framework.h"
 #include "../core/engine.h"
 
+#include <map>
+
 using namespace coder;
 
 TEST(engine_parse_action_json) {
@@ -69,6 +71,50 @@ TEST(engine_extract_action_with_fenced) {
 
 TEST(engine_extract_action_no_block) {
     std::string text = "Just plain text without any action blocks.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(block.empty());
+}
+
+/* Generic ``` fence с JSON (без "json" суффикса) — модель qwen3-30b
+ * часто генерирует именно такой формат:
+ *   ```{"tool": "read_file", "path": "main.py"}``` */
+TEST(engine_extract_action_generic_fence_json_inline) {
+    std::string text = "```{\"tool\": \"read_file\", \"path\": \"main.py\"}```";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    ASSERT_TRUE(block.find("\"tool\"") != std::string::npos);
+    ASSERT_TRUE(block.find("read_file") != std::string::npos);
+    ASSERT_TRUE(block.find("main.py") != std::string::npos);
+}
+
+TEST(engine_extract_action_generic_fence_json_multiline) {
+    std::string text = "```\n{\"tool\": \"grep_search\", \"root\": \"/src\", \"pattern\": \"TODO\"}\n```";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    ASSERT_TRUE(block.find("\"tool\"") != std::string::npos);
+    ASSERT_TRUE(block.find("grep_search") != std::string::npos);
+}
+
+TEST(engine_extract_action_generic_fence_json_with_surrounding_text) {
+    std::string text = "Сейчас проверю файл.\n```{\"tool\": \"read_file\", \"path\": \"main.py\"}```\nГотово.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    ASSERT_TRUE(block.find("\"tool\"") != std::string::npos);
+    ASSERT_TRUE(rest.find("Сейчас проверю файл.") != std::string::npos);
+    ASSERT_TRUE(rest.find("Готово.") != std::string::npos);
+}
+
+TEST(engine_extract_action_generic_fence_non_json) {
+    /* Generic ``` fence с НЕ-JSON контентом — не должен извлекать инструмент. */
+    std::string text = "```\nprint('hello world')\n```";
     std::string rest;
     std::string block = Engine::extract_action(text, rest);
 
@@ -184,4 +230,44 @@ TEST(engine_trim_session_compression) {
                 tool_kept = true;
     }
     ASSERT_TRUE(tool_kept);
+}
+
+TEST(engine_settings_deploy_remote_dir_roundtrip) {
+    std::map<std::string, std::string> settings;
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
+    cb.llm_is_connected = []() { return false; };
+    cb.path_data_dir = []() { return std::string(); };
+    cb.path_config_dir = []() { return std::string(); };
+    cb.settings_get = [&](const std::string& key, const std::string& def) -> std::string {
+        auto it = settings.find(key);
+        return it != settings.end() ? it->second : def;
+    };
+    cb.settings_set = [&](const std::string& key, const std::string& value) {
+        settings[key] = value;
+    };
+    cb.chat_event = [](const std::string&) {};
+
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    /* Сохраняем путь деплоя. */
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().deploy_remote_dir = "/var/www/remote";
+    }
+    eng.save_settings();
+
+    /* Очищаем поле и перезагружаем настройки. */
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().deploy_remote_dir.clear();
+    }
+    eng.load_settings();
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().deploy_remote_dir, std::string("/var/www/remote"));
+    }
 }

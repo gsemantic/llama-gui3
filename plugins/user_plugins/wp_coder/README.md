@@ -12,14 +12,15 @@ WordPress — один из модулей; Python и DevOps подключаю�
 wp_coder/
 ├── core/                 # Универсальное ядро (не зависит от доменов)
 │   ├── engine.{h,cpp}            # ReAct-движок: multi-turn сессия, метрики, LLM-callbacks
-│   ├── agent_components.{h,cpp}  # SessionStore, PermissionGate, ToolRunner, Planner, AgentLoop (D1)
+│   ├── agent_components.{h,cpp}  # SessionStore, PermissionGate, ToolRunner, Planner, AgentLoop
 │   ├── tools_registry.{h,cpp}    # Динамический реестр инструментов
 │   ├── skills_manager.{h,cpp}    # Навыки: inline из модулей + .md из skills/
-│   ├── tool_protocol.{h,cpp}     # Парсер wp_action / JSON tool_calls (D2)
+│   ├── tool_protocol.{h,cpp}     # Парсер wp_action / JSON tool_calls
 │   ├── base_tools.{h,cpp}        # read/write/search_replace/repo_map/grep/exec/rag
 │   ├── git_tools.{h,cpp}         # git_status/diff/log/commit
 │   ├── security.{h,cpp}          # path traversal, blocked commands, shell_escape
 │   ├── project.{h,cpp}           # настройки проекта
+│   ├── shell.h                   # безопасные shell-обёртки (timeout, quote, cap)
 │   ├── module_api.{h,cpp}        # интерфейс модуля + ModuleRegistry
 │   └── prompts.h                 # базовый системный промпт
 ├── modules/              # доменные модули
@@ -27,10 +28,13 @@ wp_coder/
 │   ├── python/           # 6 инструментов + 4 inline-навыка
 │   └── devops/           # 11 инструментов + 3 inline-навыка
 ├── ui/coder_window.{h,cpp}  # окна «Проект», «Модули», «Инструменты» + agent-mode UI
-├── skills/               # внешние .md-навыки (загружаются через load_from_directory)
+├── skills/               # внешний навык wp_setup.md
 ├── tests/                # unit-тесты (48)
 ├── src/plugin_main.cpp   # точка входа (ll_plugin_init/render/shutdown, agent mode)
-└── CMakeLists.txt, plugin.json
+├── CMakeLists.txt
+├── plugin.json
+├── DEVELOPMENT_PLAN.md   # план развития (фазы 1–6)
+└── CHANGELOG.md
 ```
 
 ## Инструменты и навыки
@@ -43,14 +47,7 @@ wp_coder/
 | **Python** | `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint` | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
 | **DevOps** | `docker_build`, `docker_run`, `docker_ps`, `docker_logs`, `systemd_status`, `systemd_restart`, `nginx_test`, `nginx_reload`, `cron_list`, `cron_add`, `ssh_exec` | `devops_docker`, `devops_systemd`, `devops_nginx` |
 
-Итого: **43 инструмента**, **14 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
-
-> **Про навыки:** менеджер дедуплицирует по имени — inline-навыки модулей имеют
-> приоритет над `.md`. Поэтому 6 файлов в `skills/`
-> (`wp_database.md`, `wp_git.md`, `wp_hook.md`, `wp_media.md`,
-> `wp_plugin_boilerplate.md`, `wp_theme.md`) сейчас **теневые** (не загружаются:
-> их имена уже заняты inline-версиями). Реально из `skills/` подхватывается
-> только `wp_setup.md`.
+Итого: **43 инструмента**, **13 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
 
 ## Как это работает
 
@@ -61,31 +58,39 @@ wp_coder/
 5. ReAct-цикл (`AgentLoop`) вызывает инструменты и ведёт multi-turn сессию диалога
 6. Прогресс и метрики видны в чате через `chat_event` и в окне «AI Coder»
 
+## Безопасность
+
+- **Пути:** `security::is_path_safe()` — запрет path traversal (`..`)
+- **Опасные пути:** `security::is_path_not_dangerous()` — запрет записи в `/etc`, `/proc`
+- **Команды:** `security::is_command_allowed()` — блок `rm -rf /`, `mkfs`, `dd` и т.д.
+- **Разрешения:** доступ к файлам вне проекта требует подтверждения пользователя
+- **Shell:** `shell::shell_quote()` — экранирование аргументов для shell
+
+> ⚠️ **Известные проблемы безопасности (план исправления — Фаза 1 в DEVELOPMENT_PLAN.md):**
+> Python и DevOps модули не используют `shell::shell_quote`. Инструменты `docker_run`,
+> `ssh_exec`, `cron_add`, `pip_install` подвержены shell injection через аргументы от LLM.
+
 ## Сборка и деплой
 
 ```bash
-# 0. Конфигурация (один раз; системные nlohmann_json + curl уже подключены)
+# Конфигурация
 cmake -S . -B build
 
-# 1. Тесты
+# Тесты
 cmake --build build --target wp_coder_tests -j$(nproc)
 ./build/tests/wp_coder_tests          # 48/48 PASS
 
-# 2. Плагин
+# Плагин
 cmake --build build --target wp_coder -j$(nproc)
 #    артефакт: build/plugins/libwp_coder.so
 
-# 3. Деплой (приложение подхватывает из plugins/)
+# Деплой
 cp build/plugins/libwp_coder.so plugins/libwp_coder.so
 ```
-
-Плагин **не** линкует ядро приложения — только SDK (`include/plugins/plugin_api.h`),
-ImGui (символы из exe) и `headless_browser` (статически, опционально).
 
 ## Запуск
 
 ```bash
-# локальный LLM-сервер (например llama-server на 8081)
 env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 ```
 
@@ -97,12 +102,43 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 | Модули | `Ctrl+Shift+M` |
 | Инструменты | `Ctrl+Shift+T` |
 
-## Текущее состояние (2026-09-10)
+## Текущее состояние
 
-- ✅ Сборка проходит, `libwp_coder.so` (~670 Кб) собран и задеплоен
-- ✅ 48/48 unit-тестов проходят
+- ✅ Сборка проходит, `libwp_coder.so` (~670 Кб) собран
+- ✅ 64/64 unit-тестов проходят
 - ✅ D1 (разбивка `run_task` на компоненты) завершён
-- ✅ `--agent=ai_coder` проверен вживую: агент получает сообщение,
-  multi-turn LLM (3 вызова через cloud/agnes-3.0-flash), отвечает корректно
+- ✅ D2 (парсер протокола `tool_protocol`) завершён
+- ✅ `--agent=ai_coder` проверен вживую
+- ✅ Фаза 1 (безопасность) — завершена: shell injection исправлены во всех модулях
+- ✅ Фаза 2 (стабильность) — 2.0–2.2 завершены: data race, дублирование, версия, retry для LLM, таймаут/прерывание LLM-вызова
+- ⏳ Фаза 2.3 (FSM-состояние агента) — не начата
 
-Дальнейшие шаги — в `REFACTOR_PLAN.md` (фазы D3–E).
+Дальнейшие шаги — в `DEVELOPMENT_PLAN.md`.
+
+## Навыки
+
+Inline-навыки модулей (тела не в промпте — подгружаются через `skill_detail`):
+
+| Модуль | Навыки |
+|--------|--------|
+| WordPress | `wp_theme`, `wp_hook`, `wp_database`, `wp_media`, `wp_plugin_boilerplate`, `wp_git` |
+| Python | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
+| DevOps | `devops_docker`, `devops_systemd`, `devops_nginx` |
+
+Внешний навык из `skills/`: `wp_setup.md` (настройка окружения WordPress).
+
+### Свои навыки
+
+Положите `.md` в каталог данных: `<data_dir>/wp_coder/skills/my_skill.md`.
+Формат: первая строка `# Имя`, вторая — описание, далее — тело инструкции.
+При совпадении имени с inline-навыком модуля inline имеет приоритет.
+
+## Режимы
+
+- **Code** — полный доступ ко всем инструментам
+- **Research** — только чтение (нет `write_file` и `deploy`)
+- **Review** — после правок автоматически запускает `verify`
+
+## Разработка модулей
+
+См. `MODULE_DEVELOPMENT.md` — гайд по созданию новых доменных модулей.

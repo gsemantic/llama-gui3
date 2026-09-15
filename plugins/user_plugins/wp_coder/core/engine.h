@@ -101,6 +101,17 @@ struct EngineState {
      * инструментов), который затем добавляется в сессию как контекст. */
     bool use_planning = true;
 
+    /* Продолжать сессию при новом сообщении (по умолчанию — да).
+     * Если false — каждый submit() очищает сессию и начинает заново.
+     * Если true — новое сообщение добавляется к существующей сессии,
+     * план и контекст сохраняются между запросами. */
+    bool continue_conversation = true;
+
+    /* Таймаут одного LLM-вызова, мс (по умолчанию 120 с).
+     * При превышении агент прерывает ожидание и сообщает об ошибке,
+     * не дожидаясь ответа провайдера (2.2). */
+    int llm_timeout_ms = 120000;
+
     /* Агент. */
     std::deque<AgentEvent> events;
     std::queue<std::string> inbox;
@@ -234,6 +245,10 @@ public:
     /* Прерывание текущей задачи (проверяется между шагами цикла). */
     void request_abort();
 
+    /* Очистить сессию и план — начать с чистого листа.
+     * Вызывается из UI или при смене задачи пользователем. */
+    void clear_session();
+
     /* Доступ к состоянию. */
     EngineState& state() { return state_; }
     const EngineState& state() const { return state_; }
@@ -277,6 +292,7 @@ public:
     std::string check_external_permission(const std::string& abs_path);
 
     /* Настройки. */
+    void load_settings();
     void save_settings();
 
     /* Сжатие слишком длинной сессии: старые RESULT-сообщения заменяются
@@ -292,9 +308,6 @@ private:
 
     void run_task(const std::string& task);
     void worker_main();
-
-    /* Загрузка настроек. */
-    void load_settings();
 };
 
 /* Удобные глобальные accessor-ы. */

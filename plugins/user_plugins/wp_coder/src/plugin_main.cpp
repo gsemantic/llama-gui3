@@ -33,6 +33,9 @@
 #include <cstring>
 #include <cstddef>
 #include <iostream>
+#include <chrono>
+#include <thread>
+#include <future>
 
 /* Глобальные хендлы хоста. */
 LlamaPluginHost* g_host = nullptr;
@@ -48,6 +51,7 @@ static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_messa
     eng.submit(user_message);
 
     /* Агент работает в worker-потоке. Ждём результат (таймаут 5 минут). */
+    std::cerr << "[wp_coder] agent_mode_on_message: waiting for response..." << std::endl;
     std::string response = eng.wait_response(300000);
     std::cerr << "[wp_coder] agent_mode_on_message response_len=" << response.size()
               << " head=" << response.substr(0, 120) << std::endl;
@@ -97,7 +101,7 @@ LLAMA_PLUGIN_EXPORT const char* ll_plugin_api_version(void) {
 LLAMA_PLUGIN_EXPORT const LlamaPluginInfo* ll_plugin_info(void) {
     static const LlamaPluginInfo info = {
         "wp_coder",
-        "0.2.0",
+        "0.3.0",
         "AI-кодер: модульная архитектура (WordPress, Python, ...)",
         "llama-gui"
     };
@@ -136,7 +140,7 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
     };
     /* Multi-turn: парсим JSON от llm_chat_messages (ok/content/usage).
      * Fallback на llm_complete_ex при старом хосте без llm_chat_messages. */
-    cb.llm_chat = [cb](const std::string& sys_prompt,
+    cb.llm_chat = [](const std::string& sys_prompt,
                      const std::vector<coder::ChatMsg>& messages,
                      coder::LlmReply& out) -> bool {
         if (!g_api || !g_host) return false;
@@ -156,13 +160,9 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
                         json_escape(messages[i].content) + "\"}";
             }
             json += "]";
-            char* raw = g_api->llm_chat_messages(g_host,
-                sys_prompt.empty() ? nullptr : sys_prompt.c_str(), json.c_str());
-            if (!raw) return false;
-            std::string resp(raw);
-            g_api->free_string(g_host, raw);
 
-            /* Парсим {"ok":1,"content":"...","finish_reason":"...","prompt_tokens":N,"completion_tokens":N}. */
+            /* Парсим {"ok":1,"content":"...","finish_reason":"...","prompt_tokens":N,"completion_tokens":N}
+             * или {"ok":0,"error":"..."}. */
             auto find_str = [](const std::string& s, const char* key) -> std::string {
                 std::string pat = std::string("\"") + key + "\":\"";
                 size_t p = s.find(pat);
@@ -200,13 +200,102 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
                 }
                 return n;
             };
-            if (find_int(resp, "ok") != 1) return false;
-            out.content = find_str(resp, "content");
-            out.finish_reason = find_str(resp, "finish_reason");
-            if (out.finish_reason.empty()) out.finish_reason = "stop";
-            out.prompt_tokens = find_int(resp, "prompt_tokens");
-            out.completion_tokens = find_int(resp, "completion_tokens");
-            return true;
+
+            /* 2.1: Retry для транзиентных ошибок LLM (429/5xx/timeout).
+             * Хост сам ретраит облачные вызовы (OpenRouterClient::complete),
+             * этот цикл — страховка для остальных путей (локальный сервер,
+             * сетевые сбои), которые хост возвращает как ok=0/nullptr. */
+            const int kMaxAttempts = 3;
+            const int kRetryDelaysSec[kMaxAttempts - 1] = {1, 3};
+            static const auto is_retryable_error = [](const std::string& err) {
+                if (err.find("429") != std::string::npos) return true;
+                if (err.find("500") != std::string::npos ||
+                    err.find("502") != std::string::npos ||
+                    err.find("503") != std::string::npos ||
+                    err.find("504") != std::string::npos) return true;
+                if (err.find("5xx") != std::string::npos) return true;
+                if (err.find("таймаут") != std::string::npos ||
+                    err.find("timeout") != std::string::npos ||
+                    err.find("timed out") != std::string::npos) return true;
+                if (err.find("исчерпан") != std::string::npos) return true;
+                return false;
+            };
+
+            for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+                /* 2.2: вызов в отдельном потоке с таймаутом — «Стоп» прерывает
+                 * ожидание, не дожидаясь ответа провайдера. Захватываем копии
+                 * строк: поток может продолжить работу в фоне после таймаута
+                 * (хост не поддерживает отмену — API llm_chat_cancel нет). */
+                std::string json_copy = json;
+                std::string sys_copy = sys_prompt;
+                std::future<char*> call_future = std::async(std::launch::async,
+                    [json_copy, sys_copy]() -> char* {
+                        return g_api->llm_chat_messages(g_host,
+                            sys_copy.empty() ? nullptr : sys_copy.c_str(),
+                            json_copy.c_str());
+                    });
+                int timeout_ms = coder::engine().state().llm_timeout_ms;
+                auto deadline = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(timeout_ms);
+                char* raw = nullptr;
+                for (;;) {
+                    if (coder::engine().state().abort_requested.load()) {
+                        out.error = "Прервано пользователем";
+                        return false;
+                    }
+                    auto status = call_future.wait_for(std::chrono::milliseconds(100));
+                    if (status == std::future_status::ready) {
+                        raw = call_future.get();
+                        break;
+                    }
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        out.error = "Таймаут LLM-вызова ("
+                                  + std::to_string(timeout_ms / 1000) + " с)";
+                        return false;
+                    }
+                }
+                std::string error_text;
+                if (!raw) {
+                    error_text = "LLM-вызов вернул null (сеть/хост)";
+                } else {
+                    std::string resp(raw);
+                    g_api->free_string(g_host, raw);
+                    if (find_int(resp, "ok") == 1) {
+                        out.content = find_str(resp, "content");
+                        out.finish_reason = find_str(resp, "finish_reason");
+                        if (out.finish_reason.empty()) out.finish_reason = "stop";
+                        out.prompt_tokens = find_int(resp, "prompt_tokens");
+                        out.completion_tokens = find_int(resp, "completion_tokens");
+                        return true;
+                    }
+                    error_text = find_str(resp, "error");
+                    if (error_text.empty()) error_text = "LLM-ошибка (ok=0)";
+                }
+
+                if (attempt < kMaxAttempts - 1 && is_retryable_error(error_text)) {
+                    std::string msg = "[retry] LLM: " + error_text
+                        + " — попытка " + std::to_string(attempt + 2) + "/"
+                        + std::to_string(kMaxAttempts) + " через "
+                        + std::to_string(kRetryDelaysSec[attempt]) + "s";
+                    coder::engine().push_event(coder::AgentEvent::Status, msg);
+                    /* Спим с проверкой abort — Стоп пользователя прерывает ожидание. */
+                    const auto& st = coder::engine().state();
+                    for (int waited = 0;
+                         waited < kRetryDelaysSec[attempt] * 1000 && !st.abort_requested.load();
+                         waited += 100) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (st.abort_requested.load()) {
+                        out.error = "Прервано пользователем";
+                        return false;
+                    }
+                    continue;
+                }
+                out.error = error_text;
+                return false;
+            }
+            out.error = "LLM: все попытки исчерпаны";
+            return false;
         }
 
         /* Fallback: одногилый (старый хост без llm_chat_messages). */
@@ -214,8 +303,11 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
         for (const auto& m : messages)
             if (m.role == "user") last_user = m.content;
         std::string resp;
-        if (!cb.llm_complete || !cb.llm_complete(sys_prompt, last_user, resp))
-            return false;
+        char* r = nullptr;
+        int rc = g_api->llm_complete_ex(g_host, sys_prompt.c_str(), last_user.c_str(), &r);
+        if (rc != 1 || !r) return false;
+        resp = r;
+        g_api->free_string(g_host, r);
         out.content = resp;
         out.finish_reason = "stop";
         out.prompt_tokens = 0;

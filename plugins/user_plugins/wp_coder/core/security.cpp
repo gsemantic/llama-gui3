@@ -91,5 +91,33 @@ std::string shell_escape(const std::string& s) {
     return out.str();
 }
 
+std::string sanitize_ident(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    for (char c : s) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.')
+            r += c;
+    }
+    return r;
+}
+
+bool is_shell_arg_safe(const std::string& s) {
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        switch (c) {
+            case ';': case '|': case '&': case '`':
+            case '>': case '<': case '$':
+                /* Разрешаем $$ (PID) только в начале или после пробела. */
+                if (c == '$' && i + 1 < s.size() && s[i + 1] == '(')
+                    return false;
+                if (c != '$') return false;
+                break;
+            default:
+                break;
+        }
+    }
+    return true;
+}
+
 } // namespace security
 } // namespace coder

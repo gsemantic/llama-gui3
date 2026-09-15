@@ -3,6 +3,7 @@
 #include "../../core/engine.h"
 #include "../../core/skills_manager.h"
 #include "../../core/shell.h"
+#include "../../core/security.h"
 
 #include <fstream>
 #include <sstream>
@@ -45,30 +46,27 @@ void walk_php(const fs::path& root, std::vector<std::string>& out, size_t limit 
     }
 }
 
-/* Безопасный идентификатор для имён сайта/БД/пользователя (без инъекций). */
-std::string sanitize_ident(const std::string& s) {
-    std::string r;
-    r.reserve(s.size());
-    for (char c : s) {
-        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
-            r += c;
-    }
-    return r;
-}
-
 /* ===== WP-CLI =====
- * args — набор аргументов wp-cli от модели. Многоаргументную строку нельзя
- * безопасно обернуть в один qoute, поэтому выполняем как есть, но с таймаутом
- * и лимитом вывода. */
+ * Аргументы wp-cli от модели передаются с базовой валидацией:
+ * запрещаем shell-метасимволы ; | & ` $ и перенаправления > <. */
 std::string wp_cli(const std::string& args) {
     const auto& st = engine_state();
     if (args.empty()) return "[ошибка] пустая команда wp-cli";
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
+
+    /* Базовая валидация: запрет shell-инъекций. */
+    for (char c : args) {
+        if (c == ';' || c == '|' || c == '&' || c == '`' ||
+            c == '>' || c == '<' || c == '$') {
+            return "[запрещено] shell-инъекция в wp_cli: символ '" +
+                   std::string(1, c) + "' не разрешён";
+        }
+    }
+
     std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir) + " "
                       + args + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
-    return out.empty() ? "[wp-cli: нет вывода]" : out;
+    return out.empty() ? "[wp-cli: нет вывода]" : shell::cap(out, kWpMaxOutput);
 }
 
 /* ===== wp_db ===== */
@@ -76,11 +74,23 @@ std::string wp_db(const std::string& query) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
     if (query.empty()) return "[ошибка] пустой SQL-запрос";
+
+    /* Запрет DDL-операций без явного подтверждения:
+     * DROP, ALTER, TRUNCATE, GRANT, REVOKE. */
+    std::string upper = query;
+    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+    if (upper.find("DROP ") != std::string::npos ||
+        upper.find("TRUNCATE ") != std::string::npos ||
+        upper.find("GRANT ") != std::string::npos ||
+        upper.find("REVOKE ") != std::string::npos) {
+        return "[запрещено] DDL/ACL операция в wp_db. Используй exec_command "
+               "с явным wp db query для таких операций.";
+    }
+
     std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
                       + " db query " + shell::shell_quote(query) + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
-    return out.empty() ? "[wp db query: нет вывода]" : out;
+    return out.empty() ? "[wp db query: нет вывода]" : shell::cap(out, kWpMaxOutput);
 }
 
 /* ===== wp_media ===== */
@@ -92,8 +102,7 @@ std::string wp_media(int count) {
                       + " media list --posts_per_page=" + std::to_string(count)
                       + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
-    return out.empty() ? "[wp media list: нет медиафайлов]" : out;
+    return out.empty() ? "[wp media list: нет медиафайлов]" : shell::cap(out, kWpMaxOutput);
 }
 
 /* ===== wp_option ===== */
@@ -101,11 +110,12 @@ std::string wp_option(const std::string& name) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
     if (name.empty()) return "[ошибка] пустое имя опции";
+    std::string safe_name = security::sanitize_ident(name);
+    if (safe_name.empty()) return "[ошибка] невалидное имя опции";
     std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
-                      + " option get " + shell::shell_quote(name) + " --no-color";
+                      + " option get " + shell::shell_quote(safe_name) + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
-    return out.empty() ? "[wp option get: опция не найдена]" : out;
+    return out.empty() ? "[wp option get: опция не найдена]" : shell::cap(out, kWpMaxOutput);
 }
 
 /* ===== wp_rest ===== */
@@ -113,14 +123,24 @@ std::string wp_rest(const std::string& ep) {
     const auto& st = engine_state();
     if (st.wp_site_url.empty() || st.wp_app_password.empty())
         return "[ошибка] не заданы wp_site_url / app_password";
+    if (ep.empty()) return "[ошибка] пустой endpoint (QUERY)";
+
+    /* Валидация endpoint: только alnum, _, -, /. */
+    for (char c : ep) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) &&
+            c != '_' && c != '-' && c != '/') {
+            return "[запрещено] невалидный REST endpoint";
+        }
+    }
+
     std::string url = st.wp_site_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
     url += "/wp-json/wp/v2/" + ep;
-    std::string cmd = "curl -s -m 30 --fail -u " + shell::shell_quote(st.wp_app_user + ":" + st.wp_app_password)
+    std::string cmd = "curl -s -m 30 --fail -u " +
+                      shell::shell_quote(st.wp_app_user + ":" + st.wp_app_password)
                       + " " + shell::shell_quote(url);
     std::string out = shell::run_capture(cmd, 40);
-    if (out.size() > kWpMaxOutput) out = shell::cap(out, kWpMaxOutput);
-    return out.empty() ? "[wp_rest: пустой ответ]" : out;
+    return out.empty() ? "[wp_rest: пустой ответ]" : shell::cap(out, kWpMaxOutput);
 }
 
 /* ===== wp_check_deps ===== */
@@ -182,10 +202,10 @@ std::string wp_check_deps() {
 std::string wp_create_site(const std::string& site_name_in, const std::string& db_name_in,
                             const std::string& db_user_in, const std::string& db_pass_in,
                             const std::string& site_url) {
-    std::string site_name = sanitize_ident(site_name_in);
+    std::string site_name = security::sanitize_ident(site_name_in);
     if (site_name.empty()) return "[ошибка] укажи имя сайта (латиницей)";
-    std::string db_name = sanitize_ident(db_name_in.empty() ? "wp_" + site_name : db_name_in);
-    std::string db_user = sanitize_ident(db_user_in.empty() ? "wp_" + site_name : db_user_in);
+    std::string db_name = security::sanitize_ident(db_name_in.empty() ? "wp_" + site_name : db_name_in);
+    std::string db_user = security::sanitize_ident(db_user_in.empty() ? "wp_" + site_name : db_user_in);
     std::string db_pass = db_pass_in.empty() ? "pass_" + site_name : db_pass_in;
     std::string docroot = "/var/www/" + site_name;
 
@@ -202,27 +222,30 @@ std::string wp_create_site(const std::string& site_name_in, const std::string& d
     };
 
     if (!run_step("Создание директории " + docroot,
-                   "sudo mkdir -p " + docroot + " && sudo chown -R www-data:www-data " + docroot))
+                   "sudo mkdir -p " + shell::shell_quote(docroot) +
+                   " && sudo chown -R www-data:www-data " + shell::shell_quote(docroot)))
         return s.str();
     {
+        /* SQL с экранированными идентификаторами. */
         std::string create_db = "sudo mariadb -e \"CREATE DATABASE IF NOT EXISTS `" + db_name
-            + "`; CREATE USER IF NOT EXISTS '" + db_user + "'@'localhost' IDENTIFIED BY '" + db_pass
+            + "`; CREATE USER IF NOT EXISTS '" + db_user + "'@'localhost' IDENTIFIED BY '"
+            + shell::shell_quote(db_pass).substr(1, shell::shell_quote(db_pass).size() - 2)
             + "'; GRANT ALL ON `" + db_name + "`.* TO '" + db_user + "'@'localhost'; FLUSH PRIVILEGES;\"";
         if (!run_step("Создание БД " + db_name, create_db)) return s.str();
     }
     if (!run_step("Скачивание WordPress",
-                   "sudo -u www-data wp core download --path=" + docroot + " --locale=ru_RU --allow-root"))
+                   "sudo -u www-data wp core download --path=" + shell::shell_quote(docroot) + " --locale=ru_RU --allow-root"))
         return s.str();
     {
-        std::string wp_config = "sudo -u www-data wp config create --path=" + docroot
-            + " --dbname=" + db_name + " --dbuser=" + db_user + " --dbpass=" + db_pass
+        std::string wp_config = "sudo -u www-data wp config create --path=" + shell::shell_quote(docroot)
+            + " --dbname=" + db_name + " --dbuser=" + db_user + " --dbpass=" + shell::shell_quote(db_pass)
             + " --allow-root 2>&1";
         if (!run_step("Создание wp-config.php", wp_config)) return s.str();
     }
     {
         std::string url = site_url.empty() ? "http://" + site_name + ".localhost" : site_url;
-        std::string install = "sudo -u www-data wp core install --path=" + docroot
-            + " --url=" + url + " --title=" + shell::shell_quote(site_name)
+        std::string install = "sudo -u www-data wp core install --path=" + shell::shell_quote(docroot)
+            + " --url=" + shell::shell_quote(url) + " --title=" + shell::shell_quote(site_name)
             + " --admin_user=admin --admin_password=admin --admin_email=admin@" + site_name
             + ".local --skip-email --allow-root 2>&1";
         if (!run_step("Установка WordPress", install)) return s.str();
@@ -243,7 +266,7 @@ std::string wp_create_site(const std::string& site_name_in, const std::string& d
 std::string php_lint(const std::string& path) {
     const auto& st = engine_state();
     if (st.php_bin.empty()) return "[ошибка] php-cli не найден";
-    std::string cmd = st.php_bin + " -l " + shell::shell_quote(path);
+    std::string cmd = shell::shell_quote(st.php_bin) + " -l " + shell::shell_quote(path);
     std::string out = shell::run_capture(cmd, 60);
     return out.empty() ? "[php -l: нет ошибок]" : shell::cap(out, 4000);
 }
@@ -280,11 +303,11 @@ std::string deploy() {
         if (st.deploy_host.empty() || st.deploy_remote_dir.empty())
             return "[ошибка] не заданы deploy_host / deploy_remote_dir";
         std::string target = st.deploy_user.empty()
-            ? st.deploy_host
-            : (st.deploy_user + "@" + st.deploy_host);
+            ? shell::shell_quote(st.deploy_host)
+            : (shell::shell_quote(st.deploy_user) + "@" + shell::shell_quote(st.deploy_host));
         std::string cmd = "rsync -az --delete --exclude=wp-config.php --exclude=.git --exclude=node_modules "
             + shell::shell_quote(st.project_dir + "/") + " "
-            + shell::shell_quote(target + ":" + st.deploy_remote_dir + "/");
+            + target + ":" + shell::shell_quote(st.deploy_remote_dir) + "/";
         std::string out = shell::run_capture(cmd, 300);
         return "[deploy rsync] " + (out.empty() ? "успешно" : shell::cap(out, 4000));
     }
@@ -314,7 +337,11 @@ std::string verify() {
 /* ===== headless_render ===== */
 std::string headless_render(const std::string& url) {
     if (url.empty()) return "[ошибка] пустой URL";
-    return "[headless_render] " + url + " (headless browser integration)";
+    /* Валидация URL: базовая проверка. */
+    if (url.find("://") == std::string::npos)
+        return "[ошибка] URL должен содержать схему (http:// или https://)";
+    return "[headless_render] " + url + " — headless browser не подключён; "
+           "используй curl или wp_rest для проверки HTTP-ответов.";
 }
 
 } // anonymous namespace
@@ -380,18 +407,23 @@ static const char* kWpThemeSkill =
     "Описание: иерархия шаблонов и безопасная вёрстка темы\n"
     "При правке темы WordPress:\n"
     "- Точка входа — style.css (заголовок темы обязателен) и index.php.\n"
-    "- Подключай стили/скрипты только через wp_enqueue_scripts.\n"
+    "- Подключай стили/скрипты только через wp_enqueue_scripts "
+    "(wp_enqueue_style / wp_enqueue_script).\n"
     "- Используй цикл: if ( have_posts() ) : while ( have_posts() ) : the_post(); ... endwhile; endif;\n"
     "- Экранируй вывод: esc_html(), esc_attr(), esc_url(); перевод — __('...', 'textdomain').\n"
+    "- Используй get_template_part( 'content', 'page' ) для переиспользуемых блоков.\n"
     "- Не правь wp-includes/wp-admin — только wp-content/themes/<theme> и wp-content/plugins.";
 
 static const char* kWpHookSkill =
     "# wp_hook\n"
     "Описание: правильные хуки WordPress (action/filter/shortcode)\n"
-    "- add_action( 'init', 'my_init' ); — первый аргумент имя хука, второй — коллбэк.\n"
+    "- add_action( 'init', 'my_init' ): первый аргумент — имя хука, второй — коллбэк, "
+    "третий — приоритет (int, по умолчанию 10), четвёртый — число аргументов.\n"
     "- add_filter( 'the_title', 'my_title_filter', 10, 1 ); — фильтр ДОЛЖЕН возвращать return.\n"
     "- Имя коллбэка уникально; префиксуй функции чтобы не конфликтовать.\n"
-    "- Для shortcode: add_shortcode( 'mysc', 'my_shortcode_cb' );\n"
+    "- Для shortcode: add_shortcode( 'mysc', 'my_shortcode_cb' ); "
+    "коллбэк принимает $atts, $content, $tag и возвращает строку.\n"
+    "- Хуки загрузки темы: after_setup_theme, init, wp_enqueue_scripts.\n"
     "- Никогда не выводи echo внутри фильтра — только return.";
 
 static const char* kWpDatabaseSkill =
@@ -399,8 +431,10 @@ static const char* kWpDatabaseSkill =
     "Описание: работа с базой данных WordPress через wp-cli\n"
     "- Используй wp db query для SQL-запросов.\n"
     "- Всегда делай бэкап перед изменением: wp db export backup.sql.\n"
-    "- Для поиска данных используй wp db search.\n"
+    "- Для поиска данных используй wp db search вместо ручных SQL-запросов.\n"
     "- Проверяй опции через wp option get / wp option update.\n"
+    "- Для миграций используй wp db prefix для проверки префикса таблиц.\n"
+    "- Используй wp db optimize для оптимизации таблиц после массовых изменений.\n"
     "- Не удаляй таблицы ядра без крайней необходимости.";
 
 static const char* kWpMediaSkill =
@@ -408,26 +442,38 @@ static const char* kWpMediaSkill =
     "Описание: работа с медиафайлами WordPress\n"
     "- Загрузка: wp media import <file> --title='...' --featured_image.\n"
     "- Список: wp media list --posts_per_page=N.\n"
+    "- Размеры: wp media image-size.\n"
+    "- Мета: wp media meta get <id>.\n"
+    "- Регенерация: wp media regenerate.\n"
     "- Удаление: wp media delete <id>.\n"
+    "- Импорт из URL: wp media import <url>.\n"
     "- Для галерей используй shortcode [gallery ids='1,2,3'].";
 
 static const char* kWpPluginBoilerplateSkill =
     "# wp_plugin_boilerplate\n"
-    "Описание: структура плагина WordPress\n"
-    "- Минимальный плагин: один PHP-файл с комментарием в шапке (Plugin Name, Description, Version).\n"
+    "Описание: каркас корректного плагина WordPress\n"
+    "- Заголовок Plugin Name обязателен; добавь Description, Version, Author.\n"
+    "- Проверяй ABSPATH: if ( ! defined( 'ABSPATH' ) ) exit;\n"
+    "- Не используй префикс wp_ для своих функций/таблиц — это пространство ядра.\n"
     "- Хуки: register_activation_hook / register_deactivation_hook.\n"
-    "- Для Options API: register_setting / add_settings_section / add_settings_field.\n"
+    "- Инициализация: add_action( 'plugins_loaded', ... ) или add_action( 'init', ... ).\n"
+    "- Настройки: get_option / update_option + register_setting / add_settings_section.\n"
+    "- Логирование: error_log() для отладки; не выводи данные на экран в продакшене.\n"
     "- Админка: add_menu_page / add_submenu_page.\n"
     "- Не забывай nonce: wp_verify_nonce / wp_create_nonce.\n"
     "- Текстуризация: esc_html(), esc_attr(), esc_url(), sanitize_text_field().";
 
 static const char* kWpGitSkill =
     "# wp_git\n"
-    "Описание: Git для WordPress-проектов\n"
-    "- .gitignore: wp-config.php, wp-content/uploads/, wp-content/plugins/*/vendor/.\n"
-    "- Коммиты: регулярные, с описанием изменений.\n"
+    "Описание: работа с Git в проектах WordPress\n"
+    "- Перед коммитом: git status + git diff для проверки изменений.\n"
+    "- Осмысленные коммиты на английском с описанием что и почему.\n"
+    "- git add <файл> для конкретных файлов, не git add -A без необходимости.\n"
+    "- .gitignore: wp-config.php, .env, wp-content/uploads/, node_modules/, vendor/.\n"
+    "- Проверяй .gitignore перед первым коммитом.\n"
     "- Ветки: main (продакшн), dev (разработка), feature/*.\n"
-    "- Деплой через rsync или Git-хук (post-receive).";
+    "- Деплой через rsync или Git-хук (post-receive).\n"
+    "- Исключать wp-config.php и .env из репозитория — содержат секреты.";
 
 std::vector<Skill> get_wp_skills() {
     return {
@@ -435,8 +481,8 @@ std::vector<Skill> get_wp_skills() {
         {"wp_hook", "Правильные хуки WordPress (action/filter/shortcode)", kWpHookSkill, "wordpress"},
         {"wp_database", "Работа с базой данных WordPress через wp-cli", kWpDatabaseSkill, "wordpress"},
         {"wp_media", "Работа с медиафайлами WordPress", kWpMediaSkill, "wordpress"},
-        {"wp_plugin_boilerplate", "Структура плагина WordPress", kWpPluginBoilerplateSkill, "wordpress"},
-        {"wp_git", "Git для WordPress-проектов", kWpGitSkill, "wordpress"}
+        {"wp_plugin_boilerplate", "Каркас корректного плагина WordPress", kWpPluginBoilerplateSkill, "wordpress"},
+        {"wp_git", "Работа с Git в проектах WordPress", kWpGitSkill, "wordpress"}
     };
 }
 

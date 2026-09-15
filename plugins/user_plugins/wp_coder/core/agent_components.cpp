@@ -16,8 +16,10 @@
 
 namespace coder {
 
-/* Максимум шагов ReAct на задачу. */
-constexpr int kMaxSteps = 8;
+/* Максимум шагов ReAct на задачу. Единственное определение —
+ * engine.h kMaxSteps. Здесь значение дублировалось (8 vs 12),
+ * что приводило к преждевременному обрыву на 8 шаге. */
+constexpr int kMaxSteps = 12;
 /* Порог «застревания»: если N шагов подряд модель даёт короткий
  * ответ (< 200 символов), считаем, что она не может прогрессировать
  * и запрашиваем итоговый ответ. 200 — потому что ответ 100-190 символов
@@ -65,7 +67,8 @@ bool SessionStore::empty() const {
     return state_.session.empty();
 }
 
-const std::vector<ChatMsg>& SessionStore::messages() const {
+std::vector<ChatMsg> SessionStore::messages() const {
+    std::lock_guard<std::mutex> lk(state_.mtx);
     return state_.session;
 }
 
@@ -217,21 +220,26 @@ std::string ToolRunner::run(const std::string& tool_name, const ToolArgs& args) 
         + args.query + "\n" + args.pattern + "\n" + args.cli + "\n" + args.url + "\n"
         + std::to_string(args.k);
 
+    bool loop_detected = false;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         if (state_.recent_calls.size() >= 2 &&
             state_.recent_calls[state_.recent_calls.size() - 1] == fp &&
             state_.recent_calls[state_.recent_calls.size() - 2] == fp) {
-            this->push_event_(AgentEvent::Error,
-                "Инструмент " + tool_name + " вызван 3 раза подряд с одинаковыми "
-                "аргументами — прерываю, чтобы не зациклиться.");
+            loop_detected = true;
             state_.recent_calls.clear();
-            return "[ошибка] зацикливание вызова " + tool_name;
+        } else {
+            state_.recent_calls.push_back(fp);
+            if (state_.recent_calls.size() > 8) {
+                state_.recent_calls.pop_front();
+            }
         }
-        state_.recent_calls.push_back(fp);
-        if (state_.recent_calls.size() > 8) {
-            state_.recent_calls.pop_front();
-        }
+    }  /* mtx отпущен — push_event_ безопасен */
+    if (loop_detected) {
+        this->push_event_(AgentEvent::Error,
+            "Инструмент " + tool_name + " вызван 3 раза подряд с одинаковыми "
+            "аргументами — прерываю, чтобы не зациклиться.");
+        return "[ошибка] зацикливание вызова " + tool_name;
     }
 
     std::string result = ToolsRegistry::instance().run(tool_name, args);
@@ -263,6 +271,29 @@ void ToolRunner::record_call(const std::string& fingerprint) {
 
 bool Planner::plan(const std::string& sys_prompt) {
     if (!state_.use_planning) return false;
+
+    /* Если в сессии уже есть план — не генерируем новый.
+     * Раньше каждый submit() очищал сессию и план терялся,
+     * теперь сессия сохраняется между запросами. */
+    bool plan_exists = false;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        for (const auto& msg : state_.session) {
+            if (msg.role == "assistant" &&
+                msg.content.rfind("[ПЛАН]", 0) == 0) {
+                plan_exists = true;
+                break;
+            }
+        }
+    }  /* mtx отпущен ДО push_event_ — иначе deadlock: push_event_
+        * внутри тоже захватывает state_.mtx, а std::mutex не рекурсивный. */
+    if (plan_exists) {
+        std::cerr << "[wp_coder] planner: plan already exists, skipping" << std::endl;
+        this->push_event_(AgentEvent::Status,
+            "План уже существует — продолжаю по нему.");
+        return true;
+    }
+    std::cerr << "[wp_coder] planner: no existing plan, generating..." << std::endl;
 
     std::vector<ChatMsg> plan_msgs;
     {
@@ -316,6 +347,8 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
     int stuck_counter = 0;  // последовательных коротких ответов
 
+    std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << kMaxSteps << std::endl;
+
     for (int step = 0; step < kMaxSteps; ++step) {
         if (state_.abort_requested.load()) {
             this->push_event_(AgentEvent::Status, "[прервано пользователем]");
@@ -345,6 +378,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                       << " chars=" << total_chars << std::endl;
         }
 
+        std::cerr << "[wp_coder] agent_loop: step " << (step+1) << " calling LLM..." << std::endl;
         if (cb_.llm_chat) {
             ok = cb_.llm_chat(sys_prompt, msgs, reply);
         } else if (cb_.llm_complete) {
@@ -382,7 +416,14 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
 
         if (!ok || reply.content.empty()) {
             std::string err = reply.error.empty() ? "не ответил" : reply.error;
-            this->push_event_(AgentEvent::Error, (std::string("[ошибка] LLM: ") + err).c_str());
+            std::string diag;
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                diag = "session_msgs=" + std::to_string(state_.session.size())
+                     + " step=" + std::to_string(step + 1);
+            }
+            this->push_event_(AgentEvent::Error,
+                (std::string("[ошибка] LLM: ") + err + " (" + diag + ")").c_str());
             full_response = full_response.empty()
                 ? "[ошибка] LLM: " + err : full_response;
             return false;
@@ -393,9 +434,17 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             state_.session.push_back({"assistant", reply.content});
         }
 
-        /* Детектор застревания: если модель несколько раз подряд даёт
-         * очень короткий ответ — она не может прогрессировать. */
-        if (reply.content.size() < kShortResponseLen) {
+        /* Извлекаем вызов инструмента ДО stuck-детектора: если модель
+         * вызвала инструмент — она прогрессирует, независимо от длины ответа.
+         * Раньше короткие tool call-ы (< 200 символов) ошибочно считались
+         * признаком застревания, и после 3 таких вызовов агент прерывался
+         * с ошибкой "LLM: не ответил". */
+        std::string rest;
+        std::string block = extract_action(reply.content, rest);
+
+        /* Детектор застревания: учитываем ТОЛЬКО короткие текстовые ответы
+         * БЕЗ вызова инструмента. Tool call = прогресс → сброс счётчика. */
+        if (reply.content.size() < kShortResponseLen && block.empty()) {
             ++stuck_counter;
             if (stuck_counter >= kStuckThreshold) {
                 this->push_event_(AgentEvent::Status,
@@ -429,7 +478,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 return true;
             }
         } else {
-            stuck_counter = 0;  // длинный ответ — сброс счётчика
+            stuck_counter = 0;  // tool call или длинный ответ = прогресс
         }
 
         if (reply.finish_reason == "length") {
@@ -452,9 +501,6 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 trimmer.trim();
             }
         }
-
-        std::string rest;
-        std::string block = extract_action(reply.content, rest);
         if (!rest.empty()) {
             if (!full_response.empty()) full_response += "\n\n";
             full_response += rest;

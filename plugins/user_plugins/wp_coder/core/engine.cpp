@@ -16,8 +16,6 @@
 
 namespace coder {
 
-/* Максимум шагов ReAct на задачу. */
-constexpr int kMaxSteps = 12;
 /* Бюджет символов на историю сессии (превышение → сжатие старых RESULT). */
 constexpr size_t kSessionBudget = 60000;
 
@@ -54,9 +52,19 @@ void Engine::submit(const std::string& prompt) {
         std::lock_guard<std::mutex> lk(state_.mtx);
         bool resume = state_.preserve_session;
         state_.preserve_session = false;
-        if (!resume || state_.session.empty()) {
+        if (resume) {
+            /* Возобновление после паузы на разрешение: не модифицируем сессию. */
+        } else if (state_.continue_conversation && !state_.session.empty()) {
+            /* Продолжение сессии: добавляем сообщение к существующему контексту.
+             * План и предыдущие результаты сохраняются — модель знает историю. */
+            state_.session.push_back({"user", prompt});
+            std::cerr << "[wp_coder] submit: continue session, msgs="
+                      << state_.session.size() << std::endl;
+        } else {
+            /* Новая задача: очищаем сессию и начинаем заново. */
             state_.session.clear();
             state_.session.push_back({"user", prompt});
+            std::cerr << "[wp_coder] submit: new session" << std::endl;
         }
         state_.last_agent_task = prompt;
         state_.response_ready = false;
@@ -64,6 +72,8 @@ void Engine::submit(const std::string& prompt) {
         state_.abort_requested.store(false);
         state_.inbox.push(prompt);
         state_.cv.notify_all();
+        std::cerr << "[wp_coder] submit: inbox_size=" << state_.inbox.size()
+                  << " running=" << state_.running << std::endl;
     }
 }
 
@@ -74,6 +84,16 @@ void Engine::request_abort() {
         state_.waiting_for_permission = false;
         state_.permission_cv.notify_all();
     }
+}
+
+void Engine::clear_session() {
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.session.clear();
+        state_.recent_calls.clear();
+        state_.last_agent_task.clear();
+    }  /* mtx отпущен — push_event безопасен */
+    push_event(AgentEvent::Status, "Сессия очищена — следующий запрос начнётся заново.");
 }
 
 std::string Engine::wait_response(int timeout_ms) {
@@ -173,64 +193,27 @@ void Engine::pending_discard(size_t idx) {
 }
 
 std::string Engine::check_external_permission(const std::string& abs_path) {
-    std::string proj;
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        proj = state_.project_dir;
-    }
-    if (!is_path_outside(abs_path, proj)) return "";
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        if (is_path_allowed(abs_path, proj, state_.allowed_external_paths)) return "";
-    }
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.pending_permission_path = abs_path;
-        state_.waiting_for_permission = true;
-    }
-    push_event(AgentEvent::Tool, "[access] Требуется разрешение: " + abs_path);
-    return "[ВАЖНО] Доступ запрещён. Файл вне проекта: " + abs_path
-           + "\nНЕ ПОВТОРЯЙ вызов. Скажи пользователю что нужно нажать «Разрешить»."
-           + "\nЖди подтверждения. Не пытайся снова до подтверждения.";
+    auto push = [this](AgentEvent::Kind k, const std::string& t) { push_event(k, t); };
+    PermissionGate gate(state_, cb_, push);
+    return gate.check(abs_path);
 }
 
 void Engine::permission_allow_once(const std::string& path) {
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.allowed_external_paths.push_back(path);
-        state_.once_path = path;
-        state_.pending_permission_path.clear();
-        state_.waiting_for_permission = false;
-    }
-    state_.permission_cv.notify_all();
+    auto push = [this](AgentEvent::Kind k, const std::string& t) { push_event(k, t); };
+    PermissionGate gate(state_, cb_, push);
+    gate.allow_once(path);
 }
 
 void Engine::permission_allow_always(const std::string& path) {
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.allowed_external_paths.push_back(path);
-        state_.pending_permission_path.clear();
-        state_.waiting_for_permission = false;
-    }
-    state_.permission_cv.notify_all();
-    /* Сохраняем на диск. */
-    std::string json = "[";
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        for (size_t i = 0; i < state_.allowed_external_paths.size(); ++i) {
-            if (i > 0) json += ",";
-            json += "\"" + state_.allowed_external_paths[i] + "\"";
-        }
-    }
-    json += "]";
-    if (cb_.settings_set) cb_.settings_set("wp_coder.allowed_external_paths", json);
+    auto push = [this](AgentEvent::Kind k, const std::string& t) { push_event(k, t); };
+    PermissionGate gate(state_, cb_, push);
+    gate.allow_always(path);
 }
 
-void Engine::permission_reject(const std::string& /*path*/) {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    state_.pending_permission_path.clear();
-    state_.waiting_for_permission = false;
-    state_.permission_cv.notify_all();
+void Engine::permission_reject(const std::string& path) {
+    auto push = [this](AgentEvent::Kind k, const std::string& t) { push_event(k, t); };
+    PermissionGate gate(state_, cb_, push);
+    gate.reject();
 }
 
 /* ======================================================================
@@ -306,9 +289,17 @@ void Engine::load_settings() {
     state_.deploy_user      = setting_get(cb_, "wp_coder.deploy_user", "");
     state_.deploy_pass      = setting_get(cb_, "wp_coder.deploy_pass", "");
     state_.deploy_port      = setting_get(cb_, "wp_coder.deploy_port", "");
+    state_.deploy_remote_dir = setting_get(cb_, "wp_coder.deploy_remote_dir", "");
     state_.wp_local_url    = setting_get(cb_, "wp_coder.local_url", "");
     state_.agent_system_prompt = setting_get(cb_, "wp_coder.agent_system_prompt", "");
     state_.active_module    = setting_get(cb_, "wp_coder.active_module", "");
+    state_.continue_conversation = setting_get(cb_, "wp_coder.continue_conversation", "true") != "false";
+    {
+        int timeout = 120000;
+        std::string t = setting_get(cb_, "wp_coder.llm_timeout_ms", "120000");
+        try { timeout = std::stoi(t); } catch (...) {}
+        state_.llm_timeout_ms = timeout;
+    }
 
     state_.allowed_external_paths.clear();
     std::string paths_json = setting_get(cb_, "wp_coder.allowed_external_paths", "[]");
@@ -336,9 +327,12 @@ void Engine::save_settings() {
     setting_set(cb_, "wp_coder.deploy_user", state_.deploy_user);
     setting_set(cb_, "wp_coder.deploy_pass", state_.deploy_pass);
     setting_set(cb_, "wp_coder.deploy_port", state_.deploy_port);
+    setting_set(cb_, "wp_coder.deploy_remote_dir", state_.deploy_remote_dir);
     setting_set(cb_, "wp_coder.local_url", state_.wp_local_url);
     setting_set(cb_, "wp_coder.agent_system_prompt", state_.agent_system_prompt);
     setting_set(cb_, "wp_coder.active_module", state_.active_module);
+    setting_set(cb_, "wp_coder.continue_conversation", state_.continue_conversation ? "true" : "false");
+    setting_set(cb_, "wp_coder.llm_timeout_ms", std::to_string(state_.llm_timeout_ms));
 }
 
 /* ======================================================================
@@ -363,6 +357,8 @@ void Engine::run_task(const std::string& task) {
         state_.steps = 0;
         if (state_.session.empty())
             state_.session.push_back({"user", task});
+        std::cerr << "[wp_coder] run_task: session_msgs=" << state_.session.size()
+                  << " continue=" << state_.continue_conversation << std::endl;
     }
     push_event(AgentEvent::Status, "Задача: " + task);
 
@@ -404,6 +400,7 @@ void Engine::run_task(const std::string& task) {
         cleanup();
         return;
     }
+    std::cerr << "[wp_coder] run_task: LLM connected, starting plan+loop" << std::endl;
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -412,18 +409,24 @@ void Engine::run_task(const std::string& task) {
 
     {
         std::string sys = build_system_prompt();
+        std::cerr << "[wp_coder] run_task: system prompt built, len="
+                  << sys.size() << std::endl;
 
         /* D1: Фаза B1 — планирование (если включен). */
         Planner planner(state_, cb_, [this](AgentEvent::Kind k, const std::string& text) {
             push_event(k, text);
         });
+        std::cerr << "[wp_coder] run_task: calling planner.plan()..." << std::endl;
         planner.plan(sys);
+        std::cerr << "[wp_coder] run_task: planner.plan() done" << std::endl;
 
         /* D1: Фаза C — основной ReAct-цикл через AgentLoop. */
         AgentLoop agent_loop(state_, cb_, [this](AgentEvent::Kind k, const std::string& text) {
             push_event(k, text);
         });
+        std::cerr << "[wp_coder] run_task: calling agent_loop.run()..." << std::endl;
         agent_loop.run(sys, full_response);
+        std::cerr << "[wp_coder] run_task: agent_loop.run() done" << std::endl;
     }
 
     cleanup();
@@ -445,7 +448,9 @@ void Engine::worker_main() {
             task = std::move(state_.inbox.front());
             state_.inbox.pop();
         }
+        std::cerr << "[wp_coder] worker: picked up task, len=" << task.size() << std::endl;
         run_task(task);
+        std::cerr << "[wp_coder] worker: run_task done" << std::endl;
     }
 }
 

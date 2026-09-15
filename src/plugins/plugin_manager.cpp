@@ -742,7 +742,15 @@ char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
         }
     }
 
-    if (!ok) return nullptr;
+    if (!ok) {
+        /* Ошибка: возвращаем JSON с текстом ошибки вместо nullptr, чтобы
+         * плагин (wp_coder) мог определить тип (429/5xx/timeout) и ретраить. */
+        json err;
+        err["ok"] = 0;
+        err["error"] = content.empty() ? "LLM-вызов не удался" : content;
+        std::string e = err.dump();
+        return strdup(e.c_str());
+    }
 
     json out;
     out["ok"] = 1;

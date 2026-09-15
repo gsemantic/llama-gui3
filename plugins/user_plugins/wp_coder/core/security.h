@@ -30,5 +30,14 @@ bool is_command_allowed(const std::string& cmd);
 /* Санитизация строки для использования в shell (экранирование). */
 std::string shell_escape(const std::string& s);
 
+/* Санитизация идентификатора: только alnum, _, -, точка.
+ * Используется для имён контейнеров, сервисов, имён сайтов, опций и т.д.
+ * Предотвращает shell injection через имена. */
+std::string sanitize_ident(const std::string& s);
+
+/* Валидация shell-аргумента: запрещает ; | & ` $ > < — метасимволы,
+ * позволяющие инъекцию команд. Возвращает true если аргумент безопасен. */
+bool is_shell_arg_safe(const std::string& s);
+
 } // namespace security
 } // namespace coder

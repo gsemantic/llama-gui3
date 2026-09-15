@@ -37,7 +37,7 @@ public:
     std::vector<ChatMsg> snapshot() const;
     bool empty() const;
     void trim();
-    const std::vector<ChatMsg>& messages() const;
+    std::vector<ChatMsg> messages() const;
 
 private:
     EngineState& state_;

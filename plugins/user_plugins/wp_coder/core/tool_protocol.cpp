@@ -23,12 +23,73 @@ std::string extract_action(const std::string& text, std::string& rest) {
         a = text.find("```\nwp_action");
         if (a == std::string::npos) {
             a = text.find("```");
-            if (a == std::string::npos) return "";
-            size_t body_check = text.find('\n', a);
-            if (body_check == std::string::npos) return "";
-            size_t wp = text.find("wp_action", body_check + 1);
-            size_t close = text.find("```", body_check + 1);
-            if (wp == std::string::npos || (close != std::string::npos && wp > close)) return "";
+            if (a == std::string::npos) {
+                /* Fallback: unfenced wp_action или JSON-блок.
+                 * Модели иногда пишут wp_action без обратных кавычек:
+                 *   wp_action\nTOOL: ...\nPATH: ...\n
+                 * или JSON без обрамления:
+                 *   {"tool": "read_file", "path": "..."}  */
+                size_t uf_wp = text.find("wp_action\n");
+                if (uf_wp != std::string::npos) {
+                    size_t body_start = text.find('\n', uf_wp);
+                    if (body_start == std::string::npos) return "";
+                    /* Ищем конец: двойной newline или конец текста. */
+                    size_t body_end = text.find("\n\n", body_start + 1);
+                    if (body_end == std::string::npos) body_end = text.size();
+                    std::string block = text.substr(body_start + 1, body_end - body_start - 1);
+                    rest = text.substr(0, uf_wp) + text.substr(body_end);
+                    return block;
+                }
+                /* Unfenced JSON: строка начинается с { и содержит "tool": */
+                size_t uf_json = text.find("{\"tool\"");
+                if (uf_json == std::string::npos) return "";
+                size_t json_end = text.find('}', uf_json);
+                if (json_end == std::string::npos) return "";
+                std::string block = text.substr(uf_json, json_end - uf_json + 1);
+                rest = text.substr(0, uf_json) + text.substr(json_end + 1);
+                return block;
+            }
+
+            /* Generic ``` fence (без "json" или "wp_action" суффикса).
+             * Модели (особенно qwen3-30b) иногда пишут:
+             *   ```{"tool": "read_file", "path": "main.py"}```
+             * или:
+             *   ```
+             *   {"tool": "read_file", "path": "main.py"}
+             *   ```
+             * Ищем JSON { ... } внутри fence. */
+            size_t close = text.find("```", a + 3);
+            if (close != std::string::npos) {
+                /* Контент между открывающим и закрывающим ```. */
+                std::string fence = text.substr(a + 3, close - a - 3);
+                /* Убираем ведущие пробелы/newlines. */
+                size_t content_start = fence.find_first_not_of(" \t\n\r");
+                if (content_start != std::string::npos && fence[content_start] == '{') {
+                    /* JSON внутри generic fence — извлекаем. */
+                    size_t json_end = fence.rfind('}');
+                    if (json_end != std::string::npos && json_end >= content_start) {
+                        std::string block = fence.substr(content_start, json_end - content_start + 1);
+                        rest = text.substr(0, a) + text.substr(close + 3);
+                        return block;
+                    }
+                }
+                /* Не JSON — проверяем wp_action внутри fence. */
+                size_t wp = fence.find("wp_action");
+                if (wp != std::string::npos) {
+                    size_t wp_body = fence.find('\n', wp);
+                    if (wp_body != std::string::npos) {
+                        std::string block = fence.substr(wp_body + 1);
+                        /* Убираем trailing whitespace. */
+                        while (!block.empty() && (block.back() == '\n' || block.back() == '\r'))
+                            block.pop_back();
+                        rest = text.substr(0, a) + text.substr(close + 3);
+                        return block;
+                    }
+                }
+            }
+
+            /* Ни JSON, ни wp_action внутри ``` — нет инструмента. */
+            return "";
         }
     }
     size_t body = text.find('\n', a);

@@ -308,6 +308,36 @@ void render_extras() {
             st.plan_mode = pm;
     }
 
+    /* Продолжение сессии и очистка. */
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        bool cc = st.continue_conversation;
+        if (ImGui::Checkbox("Продолжать сессию", &cc)) {
+            st.continue_conversation = cc;
+            engine().save_settings();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Если включено — план и контекст сохраняются\nмежду сообщениями. Если нет — каждый запрос\nначинается заново.");
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Очистить сессию")) {
+        engine().clear_session();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Сбросить план и историю диалога.\nСледующий запрос начнётся с чистого листа.");
+
+    /* Размер сессии. */
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        if (!st.session.empty()) {
+            size_t total = 0;
+            for (const auto& m : st.session) total += m.content.size();
+            ImGui::SameLine();
+            ImGui::TextDisabled("ctx: %zuK / %zuK",
+                total / 1024, (size_t)60000 / 1024);
+        }
+    }
+
     /* Режим агента. */
     const char* modes[] = {"Code", "Research", "Review"};
     int m = st.mode;
