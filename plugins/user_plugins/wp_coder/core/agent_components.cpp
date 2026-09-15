@@ -144,7 +144,7 @@ std::string PermissionGate::check(const std::string& abs_path) {
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.pending_permission_path = abs_path;
-        state_.waiting_for_permission = true;
+        state_.state = AgentState::WaitingPermission;
     }
     this->push_event_(AgentEvent::Tool, "[access] Требуется разрешение: " + abs_path);
     return "[ВАЖНО] Доступ запрещён. Файл вне проекта: " + abs_path
@@ -158,7 +158,7 @@ void PermissionGate::allow_once(const std::string& path) {
         state_.allowed_external_paths.push_back(path);
         state_.once_path = path;
         state_.pending_permission_path.clear();
-        state_.waiting_for_permission = false;
+        state_.state = AgentState::Executing;
     }
     state_.permission_cv.notify_all();
 }
@@ -168,7 +168,7 @@ void PermissionGate::allow_always(const std::string& path) {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.allowed_external_paths.push_back(path);
         state_.pending_permission_path.clear();
-        state_.waiting_for_permission = false;
+        state_.state = AgentState::Executing;
     }
     state_.permission_cv.notify_all();
     std::string json = "[";
@@ -185,18 +185,19 @@ void PermissionGate::allow_always(const std::string& path) {
 void PermissionGate::reject() {
     std::lock_guard<std::mutex> lk(state_.mtx);
     state_.pending_permission_path.clear();
-    state_.waiting_for_permission = false;
+    state_.state = AgentState::Executing;
     state_.permission_cv.notify_all();
 }
 
 bool PermissionGate::is_waiting() const {
     std::lock_guard<std::mutex> lk(state_.mtx);
-    return state_.waiting_for_permission;
+    return state_.state == AgentState::WaitingPermission;
 }
 
 void PermissionGate::wait(std::unique_lock<std::mutex>& lk) {
     state_.permission_cv.wait(lk, [this] {
-        return !state_.waiting_for_permission || state_.shutting_down;
+        return state_.state != AgentState::WaitingPermission
+            || state_.shutting_down || state_.abort_requested.load();
     });
 }
 
@@ -548,7 +549,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         std::string perm_path;
         {
             std::lock_guard<std::mutex> lk(state_.mtx);
-            if (state_.waiting_for_permission)
+            if (state_.state == AgentState::WaitingPermission)
                 perm_path = state_.pending_permission_path;
         }
 
@@ -563,7 +564,6 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 }
                 state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + trimmed_result});
                 state_.waiting_in_sync = true;
-                state_.running = false;
             }
             this->push_event_(AgentEvent::Status, "Ожидание разрешения: " + perm_path);
             if (cb_.chat_event)
@@ -572,10 +572,10 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             {
                 std::unique_lock<std::mutex> lk(state_.mtx);
                 state_.permission_cv.wait(lk, [this] {
-                    return !state_.waiting_for_permission || state_.shutting_down;
+                    return state_.state != AgentState::WaitingPermission
+                        || state_.shutting_down || state_.abort_requested.load();
                 });
                 state_.waiting_in_sync = false;
-                state_.running = true;
             }
 
             if (state_.shutting_down) {

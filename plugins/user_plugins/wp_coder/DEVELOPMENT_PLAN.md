@@ -101,17 +101,23 @@
   - Захват копий строк в async-лямбду — защита от use-after-free при брошенном потоке
   - Ограничение: отменённый запрос всё равно дойдёт до провайдера (хост не умеет cancel)
 
-- [ ] 2.3. **Состояние агента как FSM (D3 из REFACTOR_PLAN)**
-  - States: Idle → Planning → Executing → WaitingPermission → Done/Aborted
-  - Observer-события при переходах для UI
-  - Убрать флаги `running`, `waiting_for_permission`, `shutting_down` — заменить на state
+- [x] 2.3. **Состояние агента как FSM (D3 из REFACTOR_PLAN)**
+  - States: `AgentState` enum: Idle → Planning → Executing ⇄ WaitingPermission → Done/Aborted
+  - Добавлен `agent_state_name()` (человекочитаемые имена для UI)
+  - Добавлен `Engine::set_state()` — публикует observer-событие `state: <имя>` при реальном переходе
+  - Убраны флаги `running`, `waiting_for_permission` — заменены на `state_.state`
+  - `shutting_down` оставлен отдельно: это lifecycle-флаг движка (stop()), а не состояние агента
+  - `waiting_in_sync` оставлен: означает «синхронное ожидание разрешения» (для chat-режима)
+  - wait()-предикаты включают `abort_requested` — «Стоп» будит ожидание разрешения
+  - UI: спиннер показывает имя состояния («План», «Выполнение», «Ожидание разрешения»)
+  - Тест: `engine_fsm_state_transitions` (переходы, события, имена, no-spam)
 
-- [ ] 2.4. **Версия plugin_info = plugin.json**
-  - Файл: `src/plugin_main.cpp:ll_plugin_info`
-  - Заменить hardcoded "0.2.0" на "0.3.0" (и в дальнейшем держать синхронно)
+- [x] 2.4. **Версия plugin_info = plugin.json** (дубликат 2.0d — уже сделано)
+  - `ll_plugin_info` возвращает "0.3.0", синхронно с plugin.json
+  - При будущих подъёмах версии обновлять оба места
 
-- [ ] 2.5. **Удалить `.bak2` файл**
-  - Удалить `core/engine.cpp.bak2`
+- [x] 2.5. **Удалить `.bak2` файл** (дубликат 2.0e — уже сделано)
+  - `core/engine.cpp.bak2` удалён вместе с `.bak`
 
 - [ ] 2.6. **`headless_render` — реальная интеграция или убрать**
   - Сейчас заглушка: `"[headless_render] " + url + " (headless browser integration)"`

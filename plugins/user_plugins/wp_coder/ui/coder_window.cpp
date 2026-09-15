@@ -275,18 +275,16 @@ void render_extras() {
 /* Индикатор статуса агента + кнопка Стоп. */
     {
         std::lock_guard<std::mutex> lk(st.mtx);
-        if (st.running) {
+        if (st.state != coder::AgentState::Idle) {
             float t = (float)ImGui::GetTime();
             const char spinner[] = "|/-\\";
             int idx = (int)(t * 4.0f) % 4;
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
-                "%c Агент работает...", spinner[idx]);
+                "%c Агент работает... (%s)", spinner[idx],
+                coder::agent_state_name(st.state));
             if ( ImGui::Button("Стоп", {-1, 0}) ) {
                 engine().request_abort();
             }
-        } else if (st.waiting_for_permission) {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
-                "! Ожидание разрешения доступа");
         } else if (st.last_response_time > 0) {
             char stats[160];
             std::snprintf(stats, sizeof(stats),

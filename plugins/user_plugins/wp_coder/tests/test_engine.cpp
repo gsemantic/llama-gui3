@@ -271,3 +271,59 @@ TEST(engine_settings_deploy_remote_dir_roundtrip) {
         ASSERT_EQ(eng.state().deploy_remote_dir, std::string("/var/www/remote"));
     }
 }
+
+TEST(engine_fsm_state_transitions) {
+    std::map<std::string, std::string> settings;
+    HostCallbacks cb;
+    cb.settings_get = [&](const std::string& key, const std::string& def) -> std::string {
+        auto it = settings.find(key);
+        return it != settings.end() ? it->second : def;
+    };
+    cb.settings_set = [&](const std::string& key, const std::string& value) {
+        settings[key] = value;
+    };
+    cb.chat_event = [](const std::string&) {};
+
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    /* По умолчанию — Idle. */
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ((int)eng.state().state, (int)AgentState::Idle);
+    }
+
+    /* Каждый реальный переход публикует observer-событие. */
+    size_t events_before;
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        events_before = eng.state().events.size();
+    }
+    eng.set_state(AgentState::Planning);
+    eng.set_state(AgentState::Executing);
+    eng.set_state(AgentState::WaitingPermission);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ((int)eng.state().state, (int)AgentState::WaitingPermission);
+        ASSERT_TRUE(eng.state().events.size() >= events_before + 3);
+    }
+
+    /* Имена состояний (human-readable). */
+    ASSERT_EQ(std::string(agent_state_name(AgentState::Idle)), std::string("Idle"));
+    ASSERT_EQ(std::string(agent_state_name(AgentState::Planning)), std::string("План"));
+    ASSERT_EQ(std::string(agent_state_name(AgentState::WaitingPermission)),
+              std::string("Ожидание разрешения"));
+    ASSERT_EQ(std::string(agent_state_name(AgentState::Aborted)), std::string("Прервано"));
+
+    /* Повторный переход в то же состояние не спамит событие. */
+    size_t events_now;
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        events_now = eng.state().events.size();
+    }
+    eng.set_state(AgentState::WaitingPermission);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().events.size(), events_now);
+    }
+}

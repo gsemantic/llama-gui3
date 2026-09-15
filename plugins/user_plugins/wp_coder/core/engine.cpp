@@ -73,7 +73,7 @@ void Engine::submit(const std::string& prompt) {
         state_.inbox.push(prompt);
         state_.cv.notify_all();
         std::cerr << "[wp_coder] submit: inbox_size=" << state_.inbox.size()
-                  << " running=" << state_.running << std::endl;
+                  << " state=" << agent_state_name(state_.state) << std::endl;
     }
 }
 
@@ -81,7 +81,8 @@ void Engine::request_abort() {
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.abort_requested.store(true);
-        state_.waiting_for_permission = false;
+        /* Не переводим FSM здесь: wait()-предикаты включают abort_requested,
+         * поток разбудится и AgentLoop/cleanup сам переведёт в Aborted. */
         state_.permission_cv.notify_all();
     }
 }
@@ -216,6 +217,22 @@ void Engine::permission_reject(const std::string& path) {
     gate.reject();
 }
 
+/* FSM (2.3): переход состояния. Observer-событие публикуется только при
+ * реальном изменении — не спамим лог повторными переходами. */
+void Engine::set_state(AgentState s) {
+    AgentState prev;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        prev = state_.state;
+        state_.state = s;
+    }
+    if (prev != s)
+        push_event(AgentEvent::Status,
+            std::string("state: ") + agent_state_name(s));
+    else
+        state_.permission_cv.notify_all();
+}
+
 /* ======================================================================
  * События
  * ====================================================================== */
@@ -346,7 +363,7 @@ void Engine::run_task(const std::string& task) {
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.running = true;
+        state_.state = AgentState::Planning;
         state_.last_response.clear();
         state_.response_ready = false;
         state_.abort_requested.store(false);
@@ -375,7 +392,10 @@ void Engine::run_task(const std::string& task) {
                 state_.once_path.clear();
             }
 
-            state_.running = false;
+            /* FSM: итоговое состояние — прервано пользователем или завершено. */
+            state_.state = state_.abort_requested.load()
+                ? AgentState::Aborted : AgentState::Done;
+
             state_.last_response = full_response.empty() ? "(пустой ответ)" : full_response;
 
             auto end_time = std::chrono::steady_clock::now();
@@ -419,6 +439,12 @@ void Engine::run_task(const std::string& task) {
         std::cerr << "[wp_coder] run_task: calling planner.plan()..." << std::endl;
         planner.plan(sys);
         std::cerr << "[wp_coder] run_task: planner.plan() done" << std::endl;
+
+        /* FSM: план готов (или пропущен) — переходим к исполнению. */
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.state = AgentState::Executing;
+        }
 
         /* D1: Фаза C — основной ReAct-цикл через AgentLoop. */
         AgentLoop agent_loop(state_, cb_, [this](AgentEvent::Kind k, const std::string& text) {

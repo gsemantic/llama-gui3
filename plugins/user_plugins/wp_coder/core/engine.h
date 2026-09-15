@@ -45,6 +45,31 @@ struct ChatMsg {
     std::string content;
 };
 
+/* Состояние агента (FSM, 2.3). Переходы:
+ *   Idle → Planning → Executing ⇄ WaitingPermission → Done | Aborted
+ * Вместо разрозненных флагов running/waiting_for_permission. */
+enum class AgentState {
+    Idle,               // задачи нет, worker ждёт
+    Planning,           // Planner: первый LLM-вызов — план действий
+    Executing,          // AgentLoop: ReAct-цикл (вызовы инструментов)
+    WaitingPermission,  // ожидание решения пользователя по доступу
+    Done,               // задача завершена успешно
+    Aborted             // прервано пользователем или фатальная ошибка
+};
+
+/* Человекочитаемое имя состояния (для статуса в UI). */
+inline const char* agent_state_name(AgentState s) {
+    switch (s) {
+        case AgentState::Idle:              return "Idle";
+        case AgentState::Planning:          return "План";
+        case AgentState::Executing:         return "Выполнение";
+        case AgentState::WaitingPermission: return "Ожидание разрешения";
+        case AgentState::Done:              return "Готово";
+        case AgentState::Aborted:           return "Прервано";
+    }
+    return "?";
+}
+
 /* Структурированный ответ LLM (заполняется через HostCallbacks::llm_chat). */
 struct LlmReply {
     bool ok = false;
@@ -117,7 +142,10 @@ struct EngineState {
     std::queue<std::string> inbox;
     std::condition_variable cv;
     std::thread worker;
-    bool running = false;
+    /* Текущее состояние FSM (заменяет флаги running/waiting_for_permission). */
+    AgentState state = AgentState::Idle;
+    /* Lifecycle-флаг движка (не состояние агента): stop() запрошен —
+     * worker-поток должен выйти из цикла. */
     bool shutting_down = false;
     std::atomic<bool> abort_requested{false};
     std::vector<PendingWrite> pending;
@@ -137,7 +165,6 @@ struct EngineState {
     /* Разрешения на доступ к файлам. */
     std::vector<std::string> allowed_external_paths;
     std::string pending_permission_path;
-    bool waiting_for_permission = false;
     std::string once_path;
 
     /* A1: последние вызовы инструментов (fingerprint) для детекта зацикливания. */
@@ -301,6 +328,10 @@ public:
 
     /* Тестовый доступор: текущая сессия диалога (для юнит-тестов). */
     const std::vector<ChatMsg>& session_for_test() const { return state_.session; }
+
+    /* FSM (2.3): переход состояния. Публикует observer-событие
+     * AgentEvent::Status «state: <имя>» — видно в окне AI Coder. */
+    void set_state(AgentState s);
 
 private:
     EngineState state_;
