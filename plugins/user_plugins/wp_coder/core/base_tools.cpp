@@ -20,7 +20,8 @@ namespace coder {
 
 namespace {
 
-const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor"};
+const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
+                                            "__pycache__"};
 
 /* Лимиты вывода — единый источник: core/limits.h (Фаза 4.5). */
 using limits::kMaxToolOutput;

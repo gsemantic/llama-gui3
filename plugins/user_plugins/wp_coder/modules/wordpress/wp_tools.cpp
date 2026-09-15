@@ -24,7 +24,8 @@ namespace wp {
 namespace {
 
 const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
-                                            "wp-includes", "wp-admin"};
+                                            "wp-includes", "wp-admin",
+                                            "__pycache__"};
 
 /* Лимит вывода модуля — единый источник: core/limits.h (4.5). */
 using limits::kModuleMaxOutput;
