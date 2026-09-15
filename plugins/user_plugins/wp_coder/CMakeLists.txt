@@ -72,8 +72,12 @@ target_compile_definitions(wp_coder PRIVATE
 
 target_link_libraries(wp_coder PRIVATE wp_coder_core)
 
-# headless_browser (опционально).
-if(NOT TARGET headless_browser)
+# headless_browser: в составе корневого проекта цель уже определена
+# (add_subdirectory(libs/headless_browser)) — линкуем её напрямую.
+if(TARGET headless_browser)
+    target_link_libraries(wp_coder PRIVATE headless_browser)
+else()
+    # Автономная сборка плагина: ищем готовую статическую библиотеку.
     add_library(headless_browser STATIC IMPORTED)
     find_library(HEADLESS_BROWSER_LIB NAMES headless_browser
         PATHS ${PROJECT_ROOT}/build/libs/headless_browser

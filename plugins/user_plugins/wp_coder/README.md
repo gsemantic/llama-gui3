@@ -110,8 +110,7 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 - ✅ D2 (парсер протокола `tool_protocol`) завершён
 - ✅ `--agent=ai_coder` проверен вживую
 - ✅ Фаза 1 (безопасность) — завершена: shell injection исправлены во всех модулях
-- ✅ Фаза 2 (стабильность) — **вся завершена**: 2.0–2.5 (data race, дублирование, версия, retry, таймаут, FSM)
-- ⏳ Фаза 2.6 (`headless_render` — интеграция или убрать) — не начата
+- ✅ Фаза 2 (стабильность) — **вся завершена**: 2.0–2.6 (data race, дублирование, версия, retry, таймаут, FSM, headless_render)
 
 Дальнейшие шаги — в `DEVELOPMENT_PLAN.md`.
 

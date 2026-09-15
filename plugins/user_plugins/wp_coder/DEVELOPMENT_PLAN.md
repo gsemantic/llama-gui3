@@ -119,10 +119,15 @@
 - [x] 2.5. **Удалить `.bak2` файл** (дубликат 2.0e — уже сделано)
   - `core/engine.cpp.bak2` удалён вместе с `.bak`
 
-- [ ] 2.6. **`headless_render` — реальная интеграция или убрать**
-  - Сейчас заглушка: `"[headless_render] " + url + " (headless browser integration)"`
-  - Вариант A: подключить headless_browser если найден, иначе вернуть осмысленную ошибку
-  - Вариант B: убрать из списка инструментов (не вводить модель в заблуждение)
+- [x] 2.6. **`headless_render` — реальная интеграция (Вариант A)**
+  - Подключена библиотека `libs/headless_browser` (линьковка цели headless_browser)
+  - Исправлен CMake: блок `if(NOT TARGET headless_browser)` пропускался при сборке
+    в составе корневого проекта → линкуем target напрямую, fallback на find_library
+  - `render_dom()` → сериализованный DOM после выполнения JS (timeout 30 с)
+  - `is_thin_content()` → диагностика «белого экрана» / SPA-оболочки без рендера
+  - Вывод обрезан до kWpMaxOutput (8000 символов)
+  - Если chromium не найден — внятная ошибка (не заглушка)
+  - Проверено: chromium в системе рендерит DOM (headless --dump-dom) ✅
 
 ---
 

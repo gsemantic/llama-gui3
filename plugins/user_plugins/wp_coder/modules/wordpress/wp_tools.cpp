@@ -5,6 +5,8 @@
 #include "../../core/shell.h"
 #include "../../core/security.h"
 
+#include <headless_browser/headless_browser.h>
+
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -340,8 +342,34 @@ std::string headless_render(const std::string& url) {
     /* Валидация URL: базовая проверка. */
     if (url.find("://") == std::string::npos)
         return "[ошибка] URL должен содержать схему (http:// или https://)";
-    return "[headless_render] " + url + " — headless browser не подключён; "
-           "используй curl или wp_rest для проверки HTTP-ответов.";
+
+    headless_browser::RenderOptions opts;
+    opts.timeout_ms = 30000;
+    if (!headless_browser::available(opts)) {
+        return "[ошибка] headless браузер (chromium) не найден в PATH; "
+               "установи chromium или используй curl/wp_rest для HTTP-проверок.";
+    }
+
+    std::string err;
+    std::string dom = headless_browser::render_dom(url, opts, &err);
+    if (dom.empty()) {
+        return "[ошибка] headless render не удался: "
+               + (err.empty() ? "неизвестная причина" : err);
+    }
+
+    /* Диагностика пустого DOM: HTML есть, но почти нет видимого текста —
+     * признак JS-ошибки («белый экран») или SPA-оболочки без рендера. */
+    std::string out;
+    if (headless_browser::is_thin_content(dom)) {
+        out += "[важно] DOM почти пуст (видимых букв: "
+             + std::to_string(headless_browser::visible_letter_count(dom))
+             + ") — похоже на JS-ошибку или SPA-оболочку без рендера.\n";
+    }
+    out += "DOM (обрезан до " + std::to_string(kWpMaxOutput) + " символов):\n";
+    out += dom.size() > kWpMaxOutput ? dom.substr(0, kWpMaxOutput) : dom;
+    if (dom.size() > kWpMaxOutput)
+        out += "\n[...обрезано, всего " + std::to_string(dom.size()) + " символов]";
+    return out;
 }
 
 } // anonymous namespace
