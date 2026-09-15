@@ -41,13 +41,13 @@ wp_coder/
 
 | Модуль | Инструменты | Навыки (inline) |
 |--------|-------------|-----------------|
-| **core** (базовые) | `read_file`, `write_file`, `search_replace`, `grep_search`, `repo_map`, `list_skills`, `skill_detail`, `exec_command`, `rag_index`, `rag_query` | — |
-| **core** (git) | `git_status`, `git_diff`, `git_log`, `git_commit` | — |
+| **core** (базовые) | `read_file`, `write_file`, `search_replace`, `edit_file`, `undo_edit`, `grep_search`, `repo_map`, `list_dir`, `web_fetch`, `exec_command`, `list_skills`, `skill_detail`, `rag_index`, `rag_query` | — |
+| **core** (git) | `git_status`, `git_diff`, `git_log`, `git_add`, `git_branch`, `git_checkout`, `git_commit` | — |
 | **WordPress** | `wp_cli`, `wp_db`, `wp_media`, `wp_option`, `wp_rest`, `wp_create_site`, `wp_check_deps`, `deploy`, `verify`, `php_lint`, `headless_render`, `validate` | `wp_theme`, `wp_hook`, `wp_database`, `wp_media`, `wp_plugin_boilerplate`, `wp_git` |
 | **Python** | `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint` | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
 | **DevOps** | `docker_build`, `docker_run`, `docker_ps`, `docker_logs`, `systemd_status`, `systemd_restart`, `nginx_test`, `nginx_reload`, `cron_list`, `cron_add`, `ssh_exec` | `devops_docker`, `devops_systemd`, `devops_nginx` |
 
-Итого: **43 инструмента**, **13 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
+Итого: **49 инструментов**, **13 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
 
 ## Как это работает
 
@@ -105,12 +105,13 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 ## Текущее состояние
 
 - ✅ Сборка проходит, `libwp_coder.so` (~670 Кб) собран
-- ✅ 86/86 unit-тестов проходят (core + модули)
+- ✅ 93/93 unit-тестов проходят (core + модули)
 - ✅ D1 (разбивка `run_task` на компоненты) завершён
 - ✅ D2 (парсер протокола `tool_protocol`) завершён
 - ✅ `--agent=ai_coder` проверен вживую
 - ✅ Фаза 1 (безопасность) — завершена: shell injection исправлены во всех модулях
 - ✅ Фаза 2 (стабильность) — **вся завершена**: 2.0–2.6 (data race, дублирование, версия, retry, таймаут, FSM, headless_render)
+- ✅ Фаза 3 (новые инструменты) — **вся завершена**: list_dir, web_fetch, edit_file, undo_edit, git_add/branch/checkout
 - ✅ Фаза 4 (качество кода) — **вся завершена**: limits.h, json_utils.h, file_utils.h, тесты модулей, UI-фиксы
 
 Дальнейшие шаги — в `DEVELOPMENT_PLAN.md`.

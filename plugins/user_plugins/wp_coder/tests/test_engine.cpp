@@ -1,9 +1,16 @@
 #include "test_framework.h"
 #include "../core/engine.h"
+#include "../core/base_tools.h"
+#include "../core/git_tools.h"
+#include "../core/tools_registry.h"
 
 #include <map>
+#include <fstream>
+#include <filesystem>
+#include <unistd.h>
 
 using namespace coder;
+namespace fs = std::filesystem;
 
 TEST(engine_parse_action_json) {
     std::string block = "{\"tool\": \"read_file\", \"path\": \"wp-config.php\", \"k\": 10}";
@@ -326,4 +333,153 @@ TEST(engine_fsm_state_transitions) {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
         ASSERT_EQ(eng.state().events.size(), events_now);
     }
+}
+
+/* ======================================================================
+ * Фаза 3: list_dir / edit_file / undo_edit / web_fetch / git_*
+ * ====================================================================== */
+
+static void init_tools_for_phase3(const fs::path& project) {
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    Engine::instance().init(cb);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = project.string();
+    }
+    register_base_tools();
+    register_git_tools();
+}
+
+static fs::path make_tmp_project() {
+    fs::path tmp = fs::temp_directory_path()
+        / ("wp_coder_p3_" + std::to_string(::getpid()) + "_" + std::to_string(std::rand()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    return tmp;
+}
+
+TEST(list_dir_lists_files_and_dirs) {
+    fs::path tmp = make_tmp_project();
+    {
+        std::ofstream f(tmp / "alpha.txt"); f << "x";
+        std::ofstream f2(tmp / "beta.py");  f2 << "y";
+        fs::create_directory(tmp / "subdir");
+    }
+    init_tools_for_phase3(tmp);
+
+    ToolArgs a;
+    a.path = tmp.string();
+    std::string r = ToolsRegistry::instance().run("list_dir", a);
+    ASSERT_TRUE(r.find("alpha.txt") != std::string::npos);
+    ASSERT_TRUE(r.find("beta.py") != std::string::npos);
+    ASSERT_TRUE(r.find("subdir/") != std::string::npos);
+    fs::remove_all(tmp);
+}
+
+TEST(web_fetch_empty_url_rejected) {
+    fs::path tmp = make_tmp_project();
+    init_tools_for_phase3(tmp);
+    ToolArgs a;
+    std::string r = ToolsRegistry::instance().run("web_fetch", a);
+    ASSERT_TRUE(r.find("пустой URL") != std::string::npos);
+    fs::remove_all(tmp);
+}
+
+TEST(edit_file_replaces_line_range) {
+    fs::path tmp = make_tmp_project();
+    {
+        std::ofstream f(tmp / "e.txt");
+        f << "alpha\nbeta\ngamma\ndelta\n";
+    }
+    init_tools_for_phase3(tmp);
+
+    ToolArgs a;
+    a.path = "e.txt";
+    a.k = 2;      // строка 2 (1-based)
+    a.query = "3"; // до строки 3 включительно
+    a.content = "BETA2\nGAMMA2";  // две новые строки
+    std::string r = ToolsRegistry::instance().run("edit_file", a);
+    ASSERT_TRUE(r.find("[edit_file]") != std::string::npos);
+    ASSERT_TRUE(r.find("2-3") != std::string::npos);
+
+    std::ifstream fin(tmp / "e.txt");
+    std::string content((std::istreambuf_iterator<char>(fin)),
+                        std::istreambuf_iterator<char>());
+    ASSERT_TRUE(content.find("alpha\nBETA2\nGAMMA2\ndelta\n") != std::string::npos);
+    fs::remove_all(tmp);
+}
+
+TEST(edit_file_out_of_range_rejected) {
+    fs::path tmp = make_tmp_project();
+    {
+        std::ofstream f(tmp / "e.txt");
+        f << "one\ntwo\n";
+    }
+    init_tools_for_phase3(tmp);
+
+    ToolArgs a;
+    a.path = "e.txt";
+    a.k = 10;  // за пределами файла
+    std::string r = ToolsRegistry::instance().run("edit_file", a);
+    ASSERT_TRUE(r.find("диапазон строк вне файла") != std::string::npos);
+    fs::remove_all(tmp);
+}
+
+TEST(undo_edit_restores_backup) {
+    fs::path tmp = make_tmp_project();
+    {
+        std::ofstream f(tmp / "u.txt");
+        f << "old-content";
+    }
+    init_tools_for_phase3(tmp);
+
+    /* write_file создаёт .orig-backup (3.5). */
+    ToolArgs w;
+    w.path = "u.txt";
+    w.content = "new-content";
+    std::string wr = ToolsRegistry::instance().run("write_file", w);
+    ASSERT_TRUE(wr.find("[записано]") != std::string::npos);
+    ASSERT_TRUE(fs::exists(tmp / "u.txt.orig"));
+
+    /* undo_edit восстанавливает старую версию. */
+    ToolArgs u;
+    u.path = "u.txt";
+    std::string ur = ToolsRegistry::instance().run("undo_edit", u);
+    ASSERT_TRUE(ur.find("[undo_edit]") != std::string::npos);
+
+    std::ifstream fin(tmp / "u.txt");
+    std::string content((std::istreambuf_iterator<char>(fin)),
+                        std::istreambuf_iterator<char>());
+    ASSERT_EQ(content, std::string("old-content"));
+    fs::remove_all(tmp);
+}
+
+TEST(git_tools_require_project_dir) {
+    fs::path tmp = make_tmp_project();
+    init_tools_for_phase3(tmp);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+    ToolArgs a;
+    std::string r = ToolsRegistry::instance().run("git_add", a);
+    ASSERT_TRUE(r.find("не задан project_dir") != std::string::npos);
+
+    ToolArgs b;
+    std::string r2 = ToolsRegistry::instance().run("git_branch", b);
+    ASSERT_TRUE(r2.find("не задан project_dir") != std::string::npos);
+    fs::remove_all(tmp);
+}
+
+TEST(git_checkout_requires_branch_name) {
+    fs::path tmp = make_tmp_project();
+    init_tools_for_phase3(tmp);
+    ToolArgs a;  // query пуст
+    std::string r = ToolsRegistry::instance().run("git_checkout", a);
+    ASSERT_TRUE(r.find("укажи ветку") != std::string::npos);
+    fs::remove_all(tmp);
 }

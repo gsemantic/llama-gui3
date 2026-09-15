@@ -51,15 +51,19 @@
 ## Список инструментов
 
 ### Базовые (core)
-- `read_file` / `write_file` / `search_replace` — работа с файлами
+- `read_file` / `write_file` / `search_replace` / `edit_file` / `undo_edit` — работа с файлами
 - `grep_search` — regex-поиск (лимит 200 совпадений)
 - `repo_map` — обзор структуры проекта (кэшируется)
+- `list_dir` — лёгкий список файлов/каталогов
+- `web_fetch` — HTTP GET запрос через curl
 - `exec_command` — выполнение команды (timeout 60s, проверка blocked-команд)
 - `list_skills` / `skill_detail` — ленивая загрузка тел навыков
 - `rag_index` / `rag_query` — индексация и поиск по документам
 
 ### Git
-- `git_status`, `git_diff`, `git_log`, `git_commit`
+- `git_status`, `git_diff`, `git_log`
+- `git_add` (частичная индексация), `git_branch`, `git_checkout`
+- `git_commit` (по всем или только по PATH)
 
 ### WordPress
 - `wp_cli`, `wp_db`, `wp_media`, `wp_option`, `wp_rest`

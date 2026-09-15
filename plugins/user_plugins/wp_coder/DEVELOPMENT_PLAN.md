@@ -133,31 +133,32 @@
 
 ## Фаза 3 — Новые инструменты
 
-- [ ] 3.1. **`list_dir` — лёгкий ls каталога**
+- [x] 3.1. **`list_dir` — лёгкий ls каталога**
   - В отличие от `repo_map` (тяжёлый, с символами) — просто список файлов/каталогов
-  - PATH: каталог, опционально K: лимит
+  - PATH: каталог, опционально K: лимит (по умолчанию 100)
   - Регистрация в `base_tools.cpp`
 
-- [ ] 3.2. **`web_fetch` — HTTP GET запрос**
-  - URL: адрес, QUERY: prompt (что извлечь)
-  - Использовать curl через `shell::run_capture`
-  - С лимитом вывода, без follow-redirect на другие домены
-  - Для WP: замена прямого curl в `wp_rest` (переиспользовать)
-
-- [ ] 3.3. **`edit_file` — правка по строкам (line-range replace)**
-  - PATH: файл, K: start_line, QUERY: end_line, CONTENT: новый текст
-  - Надёжнее `search_replace` при множественных вхождениях
+- [x] 3.2. **`web_fetch` — HTTP GET запрос**
+  - URL: адрес
+  - Использовать curl через `shell::run_capture` (`curl -s -L -m 30 --max-redirs 3`)
+  - С лимитом вывода (kMaxToolOutput), ограничение redirects — `--max-redirs 3`
   - Регистрация в `base_tools.cpp`
 
-- [ ] 3.4. **`git_add` / `git_branch` / `git_checkout`**
-  - Частичные коммиты (`git add <path>` вместо `git add -A`)
-  - Создание/переключение веток
-  - Регистрация в `git_tools.cpp`
+- [x] 3.3. **`edit_file` — правка по строкам (line-range replace)**
+  - PATH: файл, K: start_line (1-based), QUERY: end_line (1-based, включительно), CONTENT: новый текст
+  - Надёжнее `search_replace` при множественных вхождениях (заменяет по позиции, а не по совпадению)
+  - Поддержка plan_mode, backup (.orig) для undo_edit
+  - Регистрация в `base_tools.cpp`
 
-- [ ] 3.5. **`undo_edit` — отмена последней правки**
-  - При `write_file`/`search_replace` — сохранять backup (`.orig`)
+- [x] 3.4. **`git_add` / `git_branch` / `git_checkout`**
+  - Частичные коммиты: `git_add PATH` (пусто = все), `git_commit` также принимает PATH
+  - `git_branch` QUERY (пусто = список), `git_checkout` QUERY — имя ветки
+  - Регистрация в `git_tools.cpp`; общий helper `git_run()`
+
+- [x] 3.5. **`undo_edit` — отмена последней правки**
+  - При `write_file`/`search_replace`/`edit_file` — сохраняется backup `.orig` (helper `backup_file()`)
   - `undo_edit` PATH: файл — восстановить из backup
-  - Лимит: хранить только последний backup на файл
+  - Лимит: хранится только последний backup на файл (перезаписывается)
 
 ---
 

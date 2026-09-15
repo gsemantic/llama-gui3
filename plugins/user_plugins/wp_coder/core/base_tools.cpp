@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <regex>
 #include <algorithm>
+#include <utility>
 #include <iostream>
 
 namespace fs = std::filesystem;
@@ -58,6 +59,14 @@ std::string read_text_file(const std::string& path, size_t max_chars, size_t ski
 std::string guard_permission(const std::string& abs_path) {
     auto& eng = engine();
     return eng.check_external_permission(abs_path);
+}
+
+/* Резервная копия файла (.orig) перед правкой — для undo_edit (3.5).
+ * Хранится только последний backup на файл (перезаписывается). */
+void backup_file(const std::string& abs) {
+    if (!fs::exists(abs)) return;
+    std::error_code ec;
+    fs::copy_file(abs, abs + ".orig", fs::copy_options::overwrite_existing, ec);
 }
 
 /* Разрешить относительный путь относительно корня проекта.
@@ -262,6 +271,7 @@ void register_base_tools() {
             return "[запрещено] запись запрещена в: " + abs;
         std::string perm = guard_permission(abs);
         if (!perm.empty()) return perm;
+        backup_file(abs);  // для undo_edit (3.5)
         std::ofstream f(abs, std::ios::binary);
         if (!f) return "[ошибка] не удалось записать: " + abs;
         f << a.content;
@@ -323,6 +333,7 @@ void register_base_tools() {
         std::string perm = guard_permission(abs);
         if (!perm.empty()) return perm;
 
+        backup_file(abs);  // для undo_edit (3.5)
         std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
         if (!fout) return "[ошибка] не удалось записать: " + abs;
         fout << content;
@@ -339,6 +350,115 @@ void register_base_tools() {
         std::string out = shell::run_capture(a.cli, 60);
         return out.empty() ? "[exec: нет вывода]" : shell::cap(out, kMaxToolOutput);
     }, "Запуск shell-команды");
+
+    /* 3.1 list_dir: лёгкий список файлов/каталогов (в отличие от repo_map). */
+    reg.register_tool("list_dir", [](const ToolArgs& a) -> std::string {
+        std::string dir = a.path.empty() ? engine_state().project_dir : a.path;
+        if (dir.empty()) return "[ошибка] пустой PATH — укажи каталог";
+        if (!fs::exists(dir) || !fs::is_directory(dir))
+            return "[ошибка] каталог не существует: " + dir;
+        std::string perm = guard_permission(dir);
+        if (!perm.empty()) return perm;
+        size_t limit = (a.k > 0) ? static_cast<size_t>(a.k) : 100;
+        std::stringstream out;
+        out << "[list_dir] " << dir << ":\n";
+        std::error_code ec;
+        size_t count = 0;
+        for (auto it = fs::directory_iterator(dir, ec);
+             it != fs::directory_iterator(); it.increment(ec)) {
+            if (ec) break;
+            const auto& p = it->path();
+            std::string name = p.filename().string();
+            if (it->is_directory()) name += "/";
+            out << name << "\n";
+            if (++count >= limit) {
+                out << "...[лимит " << limit << " записей]";
+                break;
+            }
+        }
+        return out.str();
+    }, "Список файлов в каталоге");
+
+    /* 3.2 web_fetch: HTTP GET через curl с лимитом вывода. */
+    reg.register_tool("web_fetch", [](const ToolArgs& a) -> std::string {
+        if (a.url.empty()) return "[ошибка] пустой URL (URL)";
+        std::string cmd = "curl -s -L -m 30 --max-redirs 3 " + shell::shell_quote(a.url);
+        std::string out = shell::run_capture(cmd, 40);
+        if (out.empty()) return "[web_fetch: пустой ответ]";
+        return shell::cap(out, kMaxToolOutput);
+    }, "HTTP GET запрос (curl)");
+
+    /* 3.3 edit_file: замена диапазона строк.
+     * K: строка начала (1-based), QUERY: строка конца (1-based, включительно,
+     * пусто = только K), CONTENT: новый текст строк. */
+    reg.register_tool("edit_file", [](const ToolArgs& a) -> std::string {
+        std::string abs = project_resolve(a.path);
+        if (a.k <= 0) return "[ошибка] укажи K: номер строки начала (1-based)";
+        std::ifstream fin(abs, std::ios::binary);
+        if (!fin) return "[ошибка] не удалось открыть файл: " + abs;
+        std::vector<std::string> lines;
+        std::string ln;
+        while (std::getline(fin, ln)) lines.push_back(ln);
+        fin.close();
+        if (lines.empty()) return "[ошибка] пустой файл: " + abs;
+
+        size_t start = static_cast<size_t>(a.k);
+        size_t end = start;
+        if (!a.query.empty()) {
+            try { end = static_cast<size_t>(std::stoul(a.query)); }
+            catch (...) { return "[ошибка] невалидный QUERY (строка конца): " + a.query; }
+        }
+        if (start < 1 || start > lines.size() || end < start || end > lines.size())
+            return "[ошибка] диапазон строк вне файла: K=" + std::to_string(a.k)
+                   + " QUERY=" + a.query + " (всего строк: " + std::to_string(lines.size()) + ")";
+
+        /* Замена: start..end (1-based, включительно) на CONTENT. */
+        std::vector<std::string> replacement;
+        std::string rline;
+        std::istringstream iss(a.content);
+        while (std::getline(iss, rline)) replacement.push_back(rline);
+
+        std::vector<std::string> result;
+        result.reserve(lines.size() + replacement.size());
+        for (size_t i = 0; i < start - 1; ++i) result.push_back(std::move(lines[i]));
+        for (auto& r : replacement) result.push_back(std::move(r));
+        for (size_t i = end; i < lines.size(); ++i) result.push_back(std::move(lines[i]));
+
+        std::string new_content;
+        for (const auto& l : result) { new_content += l; new_content += '\n'; }
+
+        if (engine_state().plan_mode) {
+            std::lock_guard<std::mutex> lk(engine_state().mtx);
+            engine_state().pending.push_back({a.path, new_content});
+            return "[предложено] " + abs + " (edit_file, строки " + std::to_string(start)
+                   + "-" + std::to_string(end) + ")";
+        }
+
+        std::string perm = guard_permission(abs);
+        if (!perm.empty()) return perm;
+        backup_file(abs);  // для undo_edit (3.5)
+        std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
+        if (!fout) return "[ошибка] не удалось записать: " + abs;
+        fout << new_content;
+        fout.close();
+        return "[edit_file] " + abs + ": заменены строки " + std::to_string(start)
+               + "-" + std::to_string(end);
+    }, "Замена диапазона строк файла");
+
+    /* 3.5 undo_edit: отмена последней правки из .orig-backup. */
+    reg.register_tool("undo_edit", [](const ToolArgs& a) -> std::string {
+        std::string abs = project_resolve(a.path);
+        std::string bak = abs + ".orig";
+        if (!fs::exists(bak)) return "[ошибка] нет backup (.orig) для " + abs;
+        if (engine_state().plan_mode)
+            return "[предложено] undo для " + abs;
+        std::string perm = guard_permission(abs);
+        if (!perm.empty()) return perm;
+        std::error_code ec;
+        fs::copy_file(bak, abs, fs::copy_options::overwrite_existing, ec);
+        if (ec) return "[ошибка] восстановление не удалось: " + ec.message();
+        return "[undo_edit] восстановлен файл: " + abs;
+    }, "Отмена последней правки файла");
 }
 
 void register_rag_tools() {
