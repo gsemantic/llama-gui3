@@ -5,6 +5,7 @@
 #include "shell.h"
 #include "engine.h"
 #include "limits.h"
+#include "json_utils.h"
 
 #include <sstream>
 #include <vector>
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <iostream>
 #include <fstream>
+#include <iterator>
 #include <filesystem>
 
 namespace coder {
@@ -46,6 +48,8 @@ void Engine::stop() {
         state_.cv.notify_all();
     }
     if (state_.worker.joinable()) state_.worker.join();
+    /* Resume (5.2): сохраняем последний диалог перед выключением. */
+    save_session();
 }
 
 void Engine::submit(const std::string& prompt) {
@@ -95,7 +99,69 @@ void Engine::clear_session() {
         state_.recent_calls.clear();
         state_.last_agent_task.clear();
     }  /* mtx отпущен — push_event безопасен */
+    /* Удаляем и сохранённую на диске сессию (resume, 5.2). */
+    std::string path = session_file_path();
+    if (!path.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
     push_event(AgentEvent::Status, "Сессия очищена — следующий запрос начнётся заново.");
+}
+
+/* Resume сессии (5.2). */
+std::string Engine::session_file_path() const {
+    if (!cb_.path_data_dir) return "";
+    std::string dir = cb_.path_data_dir();
+    if (dir.empty()) return "";
+    return dir + "/wp_coder/session.json";
+}
+
+void Engine::save_session() {
+    std::string path = session_file_path();
+    if (path.empty()) return;
+    /* Каталог <data_dir>/wp_coder может не существовать — создаём. */
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::vector<ChatMsg> snap;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        snap = state_.session;
+    }
+    std::string json = "[";
+    for (size_t i = 0; i < snap.size(); ++i) {
+        if (i) json += ",";
+        json += "{\"role\":\"" + snap[i].role + "\",\"content\":\""
+              + json::escape(snap[i].content) + "\"}";
+    }
+    json += "]";
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (f) f << json;
+}
+
+void Engine::load_session() {
+    std::string path = session_file_path();
+    if (path.empty()) return;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return;
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+
+    std::vector<ChatMsg> loaded;
+    size_t pos = 0;
+    while ((pos = content.find("{\"role\"", pos)) != std::string::npos) {
+        size_t end = content.find('}', pos);
+        if (end == std::string::npos) break;
+        std::string item = content.substr(pos, end - pos + 1);
+        ChatMsg m;
+        m.role = json::str(item, "role");
+        m.content = json::str(item, "content");
+        if (!m.role.empty()) loaded.push_back(std::move(m));
+        pos = end + 1;
+    }
+    if (loaded.empty()) return;
+
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    if (state_.session.empty()) state_.session = std::move(loaded);
 }
 
 std::string Engine::wait_response(int timeout_ms) {
@@ -318,6 +384,18 @@ void Engine::load_settings() {
         try { timeout = std::stoi(t); } catch (...) {}
         state_.llm_timeout_ms = timeout;
     }
+    {
+        int steps = 12;
+        std::string t = setting_get(cb_, "wp_coder.max_steps", "12");
+        try { steps = std::stoi(t); } catch (...) {}
+        state_.max_steps = steps > 0 ? steps : 12;
+    }
+    {
+        int budget = 60000;
+        std::string t = setting_get(cb_, "wp_coder.session_budget", "60000");
+        try { budget = std::stoi(t); } catch (...) {}
+        state_.session_budget = budget > 0 ? static_cast<size_t>(budget) : 60000;
+    }
 
     state_.allowed_external_paths.clear();
     std::string paths_json = setting_get(cb_, "wp_coder.allowed_external_paths", "[]");
@@ -351,6 +429,8 @@ void Engine::save_settings() {
     setting_set(cb_, "wp_coder.active_module", state_.active_module);
     setting_set(cb_, "wp_coder.continue_conversation", state_.continue_conversation ? "true" : "false");
     setting_set(cb_, "wp_coder.llm_timeout_ms", std::to_string(state_.llm_timeout_ms));
+    setting_set(cb_, "wp_coder.max_steps", std::to_string(state_.max_steps));
+    setting_set(cb_, "wp_coder.session_budget", std::to_string(state_.session_budget));
 }
 
 /* ======================================================================
@@ -413,6 +493,9 @@ void Engine::run_task(const std::string& task) {
             state_.response_ready = true;
         }
         state_.response_cv.notify_all();
+        /* Resume (5.2): сохраняем диалог после каждой задачи —
+         * при следующем запуске можно продолжить. */
+        save_session();
     };
 
     if (!cb_.llm_is_connected || !cb_.llm_is_connected()) {

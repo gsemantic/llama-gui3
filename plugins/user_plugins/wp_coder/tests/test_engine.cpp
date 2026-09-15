@@ -483,3 +483,114 @@ TEST(git_checkout_requires_branch_name) {
     ASSERT_TRUE(r.find("укажи ветку") != std::string::npos);
     fs::remove_all(tmp);
 }
+
+/* ======================================================================
+ * Фаза 5: resume сессии (5.2), настройки агента (5.3)
+ * ====================================================================== */
+
+TEST(save_load_session_roundtrip) {
+    fs::path tmp = make_tmp_project();
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    cb.path_data_dir = [&tmp]() -> std::string { return tmp.string(); };
+
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    {
+        /* Синглтон: чистим сессию от предыдущих тестов. */
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session.clear();
+        eng.state().session.push_back({"user", "привет"});
+        eng.state().session.push_back({"assistant", "привет!\n\"quoted\""});
+    }
+    eng.save_session();
+    ASSERT_TRUE(fs::exists(tmp / "wp_coder" / "session.json"));
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session.clear();
+    }
+    eng.load_session();
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().session.size(), (size_t)2);
+        ASSERT_EQ(eng.state().session[0].role, std::string("user"));
+        ASSERT_EQ(eng.state().session[0].content, std::string("привет"));
+        /* Экранирование кавычек/переводов строк переживает roundtrip. */
+        ASSERT_EQ(eng.state().session[1].content, std::string("привет!\n\"quoted\""));
+    }
+
+    /* clear_session удаляет и файл на диске. */
+    eng.clear_session();
+    ASSERT_FALSE(fs::exists(tmp / "wp_coder" / "session.json"));
+
+    fs::remove_all(tmp);
+}
+
+TEST(load_session_empty_when_no_file) {
+    fs::path tmp = make_tmp_project();
+    HostCallbacks cb;
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    cb.path_data_dir = [&tmp]() -> std::string { return tmp.string(); };
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session.clear();
+    }
+    eng.load_session();  // файла нет — ничего не должно сломаться
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_TRUE(eng.state().session.empty());
+    }
+    fs::remove_all(tmp);
+}
+
+TEST(agent_settings_max_steps_and_budget) {
+    std::map<std::string, std::string> settings;
+    settings["wp_coder.max_steps"] = "21";
+    settings["wp_coder.session_budget"] = "16384";
+    HostCallbacks cb;
+    cb.settings_get = [&](const std::string& k, const std::string& d) -> std::string {
+        auto it = settings.find(k);
+        return it != settings.end() ? it->second : d;
+    };
+    cb.settings_set = [&](const std::string& k, const std::string& v) { settings[k] = v; };
+    cb.chat_event = [](const std::string&) {};
+
+    auto& eng = Engine::instance();
+    eng.init(cb);  // вызывает load_settings()
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().max_steps, 21);
+        ASSERT_EQ(eng.state().session_budget, (size_t)16384);
+    }
+}
+
+TEST(agent_settings_defaults_on_missing) {
+    std::map<std::string, std::string> settings;  // пусто
+    HostCallbacks cb;
+    cb.settings_get = [&](const std::string& k, const std::string& d) -> std::string {
+        auto it = settings.find(k);
+        return it != settings.end() ? it->second : d;
+    };
+    cb.settings_set = [&](const std::string& k, const std::string& v) { settings[k] = v; };
+    cb.chat_event = [](const std::string&) {};
+
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().max_steps, 12);
+        ASSERT_EQ(eng.state().session_budget, (size_t)60000);
+    }
+}

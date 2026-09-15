@@ -105,7 +105,7 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 ## Текущее состояние
 
 - ✅ Сборка проходит, `libwp_coder.so` (~670 Кб) собран
-- ✅ 93/93 unit-тестов проходят (core + модули)
+- ✅ 97/97 unit-тестов проходят (core + модули)
 - ✅ D1 (разбивка `run_task` на компоненты) завершён
 - ✅ D2 (парсер протокола `tool_protocol`) завершён
 - ✅ `--agent=ai_coder` проверен вживую
@@ -113,6 +113,7 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 - ✅ Фаза 2 (стабильность) — **вся завершена**: 2.0–2.6 (data race, дублирование, версия, retry, таймаут, FSM, headless_render)
 - ✅ Фаза 3 (новые инструменты) — **вся завершена**: list_dir, web_fetch, edit_file, undo_edit, git_add/branch/checkout
 - ✅ Фаза 4 (качество кода) — **вся завершена**: limits.h, json_utils.h, file_utils.h, тесты модулей, UI-фиксы
+- ✅ Фаза 5 (UX) — 5.1–5.3: окно «Сессия», resume сессии, настройки агента (5.4 max_tokens — отложено, требует расширения хоста)
 
 Дальнейшие шаги — в `DEVELOPMENT_PLAN.md`.
 

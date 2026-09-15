@@ -137,6 +137,10 @@ struct EngineState {
      * не дожидаясь ответа провайдера (2.2). */
     int llm_timeout_ms = 120000;
 
+    /* Настройки агента (5.3) — переопределяют дефолты из core/limits.h. */
+    int max_steps = 12;            // лимит шагов ReAct на задачу (kMaxSteps)
+    size_t session_budget = 60000; // бюджет символов истории сессии (kSessionBudget)
+
     /* Агент. */
     std::deque<AgentEvent> events;
     std::queue<std::string> inbox;
@@ -276,6 +280,11 @@ public:
      * Вызывается из UI или при смене задачи пользователем. */
     void clear_session();
 
+    /* Resume сессии (5.2): сохранение/загрузка диалога на диск.
+     * Файл: <data_dir>/wp_coder/session.json. */
+    void save_session();
+    void load_session();
+
     /* Доступ к состоянию. */
     EngineState& state() { return state_; }
     const EngineState& state() const { return state_; }
@@ -339,6 +348,9 @@ private:
 
     void run_task(const std::string& task);
     void worker_main();
+
+    /* Путь к файлу сохранённой сессии (resume, 5.2): <data_dir>/wp_coder/session.json. */
+    std::string session_file_path() const;
 };
 
 /* Удобные глобальные accessor-ы. */

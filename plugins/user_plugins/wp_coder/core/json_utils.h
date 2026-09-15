@@ -9,10 +9,35 @@
  */
 
 #include <cctype>
+#include <cstdio>
 #include <string>
 
 namespace coder {
 namespace json {
+
+/* Экранирование строки для JSON (минимальный набор, для сериализации). */
+inline std::string escape(const std::string& s) {
+    std::string r;
+    r.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  r += "\\\""; break;
+            case '\\': r += "\\\\"; break;
+            case '\n': r += "\\n"; break;
+            case '\r': r += "\\r"; break;
+            case '\t': r += "\\t"; break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    r += buf;
+                } else {
+                    r += c;
+                }
+        }
+    }
+    return r;
+}
 
 /* Извлечь строковое значение поля по ключу (с обработкой экранов).
  * Возвращает пустую строку, если поле отсутствует. */

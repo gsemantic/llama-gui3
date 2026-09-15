@@ -381,6 +381,9 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
     api->agent_mode_register(host, &agent_mode);
     std::cerr << "[wp_coder] agent_mode registered: " << agent_mode.name << std::endl;
 
+    /* Resume сессии (5.2): подхватываем сохранённый диалог до старта worker. */
+    coder::engine().load_session();
+
     /* 8. Запускаем worker-поток движка. */
     coder::engine().start();
 

@@ -202,26 +202,31 @@
 
 ## Фаза 5 — UX / Продукт (из REFACTOR_PLAN E1–E4)
 
-- [ ] 5.1. **Окно «Сессия» (E1)**
-  - Список шагов: tool, args, статус, токены
-  - Кнопка отмены конкретного шага
-  - Рендерить в `render_extras()` или отдельное окно
+- [x] 5.1. **Окно «Сессия»**
+  - Новое окно «AI Coder — Сессия» (Ctrl+Shift+S, меню AI Coder → Сессия)
+  - Статус FSM, метрики (токены, tok/s, время LLM, шаги), кнопка «Стоп»
+  - Лента событий (последние 40: assistant/tool/status/error с цветовой кодировкой)
+  - Регистрация в `ui/coder_window.cpp` (render_session + init_windows)
 
-- [ ] 5.2. **Resume сессии (E2)**
-  - Сохранение сессии в JSON на диск при прерывании
-  - Загрузка при старте — продолжение с того же места
-  - Файл: `<data_dir>/wp_coder/session.json`
+- [x] 5.2. **Resume сессии**
+  - `Engine::save_session()` / `load_session()` — файл `<data_dir>/wp_coder/session.json`
+  - Сохранение после каждой задачи (cleanup) и при stop(); `clear_session()` удаляет файл
+  - Загрузка в plugin_main при старте (до запуска worker)
+  - JSON-сериализация через `json::escape()` (core/json_utils.h)
+  - Тесты: save/load roundtrip (вкл. экранирование), пустой файл — не ломается
 
-- [ ] 5.3. **Настройки агента (E3)**
-  - Лимит шагов (сейчас hardcoded kMaxSteps=12)
-  - Бюджет токенов
-  - Модель/провайдер
-  - UI: в окне «Проект» или отдельная вкладка
+- [x] 5.3. **Настройки агента**
+  - `EngineState::max_steps` (default 12) и `session_budget` (default 60000) — вместо констант в коде
+  - load/save_settings: `wp_coder.max_steps`, `wp_coder.session_budget`
+  - UI: InputInt «Лимит шагов» + «Бюджет сессии (КБ)» в окне «Проект»
+  - AgentLoop использует `state_.max_steps`, trim — `state_.session_budget`
+  - Тесты: загрузка кастомных значений и дефолтов
 
-- [ ] 5.4. **max_tokens из настроек (E4)**
-  - Сейчас hardcoded в llm_chat callback
-  - Добавить `EngineState::max_tokens` с default 4096
-  - UI: InputInt в настройках
+- [ ] 5.4. **max_tokens из настроек** — отложено
+  - max_tokens для LLM-вызовов задаётся ХОСТОМ (профиль провайдера,
+    `settings->cloud_provider().max_output_tokens`), плагин не влияет на него
+  - Реализуемо только через расширение `LlamaHostApi` (новое поле) — бэклог
+  - Локальный путь хоста: `req.max_tokens` не передаётся вовсе — тоже хост
 
 ---
 

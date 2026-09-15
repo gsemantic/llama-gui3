@@ -18,9 +18,8 @@
 namespace coder {
 
 /* Лимиты ReAct-цикла — единый источник: core/limits.h (Фаза 4.5).
- * Раньше kMaxSteps дублировался (8 vs 12) — агент обрывался на 8 шаге. */
-using limits::kMaxSteps;
-using limits::kSessionBudget;
+ * kMaxSteps/kSessionBudget переопределяются настройками агента (5.3):
+ * state_.max_steps / state_.session_budget. */
 using limits::kResultBudget;
 
 /* Порог «застревания»: если N шагов подряд модель даёт короткий
@@ -71,7 +70,7 @@ void SessionStore::trim() {
     auto& s = state_.session;
     size_t total = 0;
     for (const auto& m : s) total += m.content.size();
-    if (total <= kSessionBudget) return;
+    if (total <= state_.session_budget) return;
 
     auto make_stub = [](const std::string& content) -> std::string {
         std::string c = content;
@@ -94,7 +93,7 @@ void SessionStore::trim() {
     };
 
     for (size_t i = 1; i < s.size(); ++i) {
-        if (total <= kSessionBudget) break;
+        if (total <= state_.session_budget) break;
         if (s[i].role != "user") continue;
         if (s[i].content.rfind("RESULT [", 0) != 0) continue;
         std::string stub = make_stub(s[i].content);
@@ -105,7 +104,7 @@ void SessionStore::trim() {
 
     size_t last = s.size() > 0 ? s.size() - 1 : 0;
     for (size_t i = 1; i < s.size() && i < last; ++i) {
-        if (total <= kSessionBudget) break;
+        if (total <= state_.session_budget) break;
         if (s[i].role != "assistant") continue;
         std::string stub;
         if (s[i].content.rfind("[ПЛАН]", 0) == 0) stub = "[ПЛАН (счат)]";
@@ -342,9 +341,9 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
     int stuck_counter = 0;  // последовательных коротких ответов
 
-    std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << kMaxSteps << std::endl;
+    std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << state_.max_steps << std::endl;
 
-    for (int step = 0; step < kMaxSteps; ++step) {
+    for (int step = 0; step < state_.max_steps; ++step) {
         if (state_.abort_requested.load()) {
             this->push_event_(AgentEvent::Status, "[прервано пользователем]");
             full_response += "\n\n[прервано пользователем]";
@@ -491,7 +490,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             std::lock_guard<std::mutex> lk(state_.mtx);
             size_t total = 0;
             for (const auto& m : state_.session) total += m.content.size();
-            if (total > kSessionBudget) {
+            if (total > state_.session_budget) {
                 SessionStore trimmer(state_);
                 trimmer.trim();
             }

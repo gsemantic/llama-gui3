@@ -24,6 +24,7 @@ namespace ui {
 static LlamaPluginWindow* g_win_project = nullptr;
 static LlamaPluginWindow* g_win_modules = nullptr;
 static LlamaPluginWindow* g_win_tools = nullptr;
+static LlamaPluginWindow* g_win_session = nullptr;
 
 /* Буферы ввода. */
 static char s_project_dir[512] = "";
@@ -90,6 +91,9 @@ static void cmd_open_modules(void*) {
 }
 static void cmd_open_tools(void*) {
     if (g_api && g_win_tools) g_api->window_set_visible(g_host, g_win_tools, 1);
+}
+static void cmd_open_session(void*) {
+    if (g_api && g_win_session) g_api->window_set_visible(g_host, g_win_session, 1);
 }
 
 /* --- Окно: Проект --- */
@@ -161,6 +165,30 @@ static void render_project() {
 
     ImGui::Separator();
     ImGui::TextDisabled("Корень: %s", st.project_dir.c_str());
+
+    /* Настройки агента (5.3): лимиты, переопределяют дефолты core/limits.h. */
+    ImGui::Separator();
+    ImGui::Text("Агент:");
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        int steps = st.max_steps;
+        if (ImGui::InputInt("Лимит шагов", &steps, 1, 5)) {
+            if (steps < 1) steps = 1;
+            if (steps > 100) steps = 100;
+            st.max_steps = steps;
+            engine().save_settings();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Максимум шагов ReAct-цикла на задачу (по умолчанию 12)");
+        int budget_kb = (int)(st.session_budget / 1024);
+        if (ImGui::InputInt("Бюджет сессии (КБ)", &budget_kb, 8, 64)) {
+            if (budget_kb < 8) budget_kb = 8;
+            st.session_budget = (size_t)budget_kb * 1024;
+            engine().save_settings();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Бюджет символов истории сессии — при превышении старые RESULT сжимаются");
+    }
 
     ImGui::Spacing();
     if (ImGui::Button("Сохранить все настройки")) {
@@ -234,6 +262,60 @@ static void render_tools() {
     ImGui::End();
 }
 
+/* --- Окно: Сессия (5.1) --- */
+static void render_session() {
+    if (!g_api->window_is_visible(g_host, g_win_session)) return;
+    ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
+    bool open = true;
+    ImGui::Begin("AI Coder — Сессия", &open);
+    if (!open) g_api->window_set_visible(g_host, g_win_session, 0);
+
+    auto& st = engine_state();
+
+    /* Статус FSM + метрики. */
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        ImGui::Text("Состояние: %s", coder::agent_state_name(st.state));
+        char stats[200];
+        std::snprintf(stats, sizeof(stats),
+            "токены: %d | скорость: %.1f tok/s | LLM: %.1fs | шаги: %d",
+            st.total_completion_tokens, st.last_tokens_per_second,
+            st.llm_total_time, st.steps);
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "%s", stats);
+        if (st.state != AgentState::Idle && ImGui::Button("Стоп", {-1, 0})) {
+            engine().request_abort();
+        }
+        ImGui::Separator();
+    }
+
+    /* Лента событий (последние 40). */
+    ImGui::BeginChild("session_events", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        size_t from = st.events.size() > 40 ? st.events.size() - 40 : 0;
+        for (size_t i = from; i < st.events.size(); ++i) {
+            const auto& e = st.events[i];
+            switch (e.kind) {
+                case AgentEvent::Assistant:
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%s", e.text.c_str());
+                    break;
+                case AgentEvent::Tool:
+                    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "%s", e.text.c_str());
+                    break;
+                case AgentEvent::Status:
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", e.text.c_str());
+                    break;
+                case AgentEvent::Error:
+                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", e.text.c_str());
+                    break;
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::End();
+}
+
 /* --- Инициализация --- */
 void init_windows() {
     if (!g_api || !g_host) return;
@@ -244,17 +326,21 @@ void init_windows() {
                             "AI Coder: Modules", "Ctrl+Shift+M");
     g_api->command_register(g_host, "ai_coder_open_tools", cmd_open_tools, nullptr,
                             "AI Coder: Tools", "Ctrl+Shift+T");
+    g_api->command_register(g_host, "ai_coder_open_session", cmd_open_session, nullptr,
+                            "AI Coder: Session", "Ctrl+Shift+S");
 
     LlamaPluginMenu* menu = g_api->menu_add(g_host, "AI Coder");
     if (menu) {
         g_api->menu_add_item(g_host, menu, "Проект", "ai_coder_open_project", "Ctrl+Shift+W");
         g_api->menu_add_item(g_host, menu, "Модули", "ai_coder_open_modules", "Ctrl+Shift+M");
         g_api->menu_add_item(g_host, menu, "Инструменты", "ai_coder_open_tools", "Ctrl+Shift+T");
+        g_api->menu_add_item(g_host, menu, "Сессия", "ai_coder_open_session", "Ctrl+Shift+S");
     }
 
     g_win_project = g_api->window_register(g_host, "ai_coder_project", "AI Coder — Проект");
     g_win_modules = g_api->window_register(g_host, "ai_coder_modules", "AI Coder — Модули");
     g_win_tools   = g_api->window_register(g_host, "ai_coder_tools", "AI Coder — Инструменты");
+    g_win_session = g_api->window_register(g_host, "ai_coder_session", "AI Coder — Сессия");
 
     init_buffers();
 }
@@ -264,6 +350,7 @@ void render_all_windows() {
     render_project();
     render_modules();
     render_tools();
+    render_session();
 }
 
 void render_extras() {
@@ -329,7 +416,7 @@ void render_extras() {
             for (const auto& m : st.session) total += m.content.size();
             ImGui::SameLine();
             ImGui::TextDisabled("ctx: %zuK / %zuK",
-                total / 1024, (size_t)60000 / 1024);
+                total / 1024, st.session_budget / 1024);
         }
     }
 
