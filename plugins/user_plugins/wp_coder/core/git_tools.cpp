@@ -14,8 +14,10 @@ namespace {
 std::string git_run(const std::string& args, unsigned timeout = 30) {
     const auto& dir = engine_state().project_dir;
     if (dir.empty()) return "[ошибка] не задан project_dir";
+    /* git -C не требует cd: timeout(1) выполняет команду через execvp и
+     * НЕ понимает встроенные команды shell («timeout: failed to run 'cd'»). */
     std::string out = shell::run_capture(
-        "cd " + shell::shell_quote(dir) + " && git " + args, timeout);
+        "git -C " + shell::shell_quote(dir) + " " + args, timeout);
     if (out.size() > 8000) out = shell::cap(out, 8000);
     return out;
 }
@@ -68,10 +70,11 @@ std::string git_checkout(const std::string& branch) {
 
 std::string git_commit(const std::string& message, const std::string& path) {
     if (message.empty()) return "[ошибка] пустое сообщение коммита";
-    /* Частичные коммиты: если задан PATH — индексируем только его. */
-    std::string out = git_run(
-        "add " + (path.empty() ? std::string("-A") : shell::shell_quote(path))
-        + " && git commit -m " + shell::shell_quote(message), 60);
+    /* Частичные коммиты: если задан PATH — индексируем только его.
+     * add и commit раздельно: «timeout ... A && B» выполнит A под timeout,
+     * а B — в шелле РОДИТЕЛЯ (без git -C). */
+    git_run("add " + (path.empty() ? std::string("-A") : shell::shell_quote(path)), 30);
+    std::string out = git_run("commit -m " + shell::shell_quote(message), 60);
     return "[git commit]: " + (out.empty() ? "успешно" : shell::cap(out, 4000));
 }
 

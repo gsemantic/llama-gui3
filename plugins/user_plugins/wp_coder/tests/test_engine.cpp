@@ -3,6 +3,7 @@
 #include "../core/base_tools.h"
 #include "../core/git_tools.h"
 #include "../core/tools_registry.h"
+#include "../core/shell.h"
 
 #include <map>
 #include <fstream>
@@ -481,6 +482,52 @@ TEST(git_checkout_requires_branch_name) {
     ToolArgs a;  // query пуст
     std::string r = ToolsRegistry::instance().run("git_checkout", a);
     ASSERT_TRUE(r.find("укажи ветку") != std::string::npos);
+    fs::remove_all(tmp);
+}
+
+TEST(git_tools_work_in_real_repo) {
+    /* Регрессия: git-команды падали с «timeout: failed to run 'cd'»,
+     * т.к. команда строилась через «cd ... && git ...», а timeout(1)
+     * не понимает встроенные команды shell. Исправлено: git -C <dir>. */
+    fs::path tmp = make_tmp_project();
+    /* Инициализируем реальный git-репозиторий. */
+    {
+        std::string out;
+        int rc = -1;
+        bool ok1 = shell::run_capture_status(
+            "git -C " + tmp.string() + " init", out, rc, 30);
+        ASSERT_TRUE(ok1 || rc == 0);  // git собран и каталог инициализируется
+        /* Identity для commit (в тесте git не знает user). */
+        shell::run_capture_status("git -C " + tmp.string() + " config user.email test@example.com", out, rc, 10);
+        shell::run_capture_status("git -C " + tmp.string() + " config user.name test", out, rc, 10);
+    }
+    init_tools_for_phase3(tmp);
+
+    ToolArgs a;
+    std::string r = ToolsRegistry::instance().run("git_status", a);
+    /* Не должно быть ошибки «cd» — только нормальный git-вывод oт состояния. */
+    ASSERT_TRUE(r.find("cd") == std::string::npos);
+    ASSERT_TRUE(r.find("git status") != std::string::npos);
+
+    /* git_add + git_commit работают в реальном репо. */
+    {
+        std::ofstream f(tmp / "a.txt"); f << "x";
+    }
+    ToolArgs add;
+    add.path = "a.txt";
+    std::string ra = ToolsRegistry::instance().run("git_add", add);
+    ASSERT_TRUE(ra.find("[git add]") != std::string::npos);
+
+    ToolArgs cm;
+    cm.query = "test commit";
+    std::string rc2 = ToolsRegistry::instance().run("git_commit", cm);
+    ASSERT_TRUE(rc2.find("cd") == std::string::npos);
+
+    ToolArgs log;
+    log.k = 3;
+    std::string rl = ToolsRegistry::instance().run("git_log", log);
+    ASSERT_TRUE(rl.find("test commit") != std::string::npos);
+
     fs::remove_all(tmp);
 }
 
