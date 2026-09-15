@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.4.0] - 2026-09-15
+
+### Added
+- Фаза 2 (стабильность): FSM агента (`AgentState` + `Engine::set_state`),
+  retry LLM-вызовов (3 попытки, 1s/3s; хост возвращает `{ok:0,error}`),
+  таймаут LLM (120с, `wp_coder.llm_timeout_ms`), `headless_render` через
+  `libs/headless_browser` (DOM после JS + диагностика пустого рендера)
+- Фаза 3 (инструменты): `list_dir`, `web_fetch`, `edit_file` (range replace),
+  `undo_edit` (`.orig`-backup), `git_add`/`git_branch`/`git_checkout`,
+  частичный коммит (`git_commit` с PATH)
+- Фаза 5 (UX): окно «Сессия» (`Ctrl+Shift+S`), resume сессии
+  (`<data_dir>/wp_coder/session.json`), настройки агента
+  (`max_steps`, `session_budget` в окне «Проект»)
+- Тесты модулей WP/Python/DevOps (валидация, shell-injection), тесты FSM,
+  инструментов, resume и настроек
+
+### Fixed
+- Фаза 1 (безопасность): shell injection в python/devops/wordpress —
+  `shell::shell_quote` + `sanitize_ident`; `docker_run` блокировал только
+  `$(` — теперь `; | & \` $ > <`
+- Фаза 4 (качество): data race `SessionStore::messages()`, дублирование
+  `walk_*`/`resolve_path`/JSON-парсеров/констант лимитов
+
+### Changed
+- Константы лимитов в `core/limits.h`; JSON-парсер в `core/json_utils.h`;
+  обход файлов в `core/file_utils.h`
+- Логика разрешений — тонкие делегаты `PermissionGate`; флаги
+  `running`/`waiting_for_permission` → FSM `state`
+
+### Stats
+- Инструментов: 49 (15 базовых + 7 git + 12 WP + 6 Python + 11 DevOps)
+- Навыков: 14 (13 inline + 1 внешний `skills/wp_setup.md`);
+  теневые `.md` в `skills/` удалены
+- Тестов: 97 (все PASS)
+- Размер .so: ~700 Кб
+
 ## [0.3.0] - 2026-09-10
 
 ### Added

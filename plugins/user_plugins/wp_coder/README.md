@@ -27,9 +27,9 @@ wp_coder/
 │   ├── wordpress/        # 12 инструментов + 6 inline-навыков
 │   ├── python/           # 6 инструментов + 4 inline-навыка
 │   └── devops/           # 11 инструментов + 3 inline-навыка
-├── ui/coder_window.{h,cpp}  # окна «Проект», «Модули», «Инструменты» + agent-mode UI
+├── ui/coder_window.{h,cpp}  # окна «Проект», «Модули», «Инструменты», «Сессия» + agent-mode UI
 ├── skills/               # внешний навык wp_setup.md
-├── tests/                # unit-тесты (48)
+├── tests/                # unit-тесты (97)
 ├── src/plugin_main.cpp   # точка входа (ll_plugin_init/render/shutdown, agent mode)
 ├── CMakeLists.txt
 ├── plugin.json
@@ -47,7 +47,7 @@ wp_coder/
 | **Python** | `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint` | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
 | **DevOps** | `docker_build`, `docker_run`, `docker_ps`, `docker_logs`, `systemd_status`, `systemd_restart`, `nginx_test`, `nginx_reload`, `cron_list`, `cron_add`, `ssh_exec` | `devops_docker`, `devops_systemd`, `devops_nginx` |
 
-Итого: **49 инструментов**, **13 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
+Итого: **49 инструментов**, **14 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
 
 ## Как это работает
 
@@ -66,9 +66,10 @@ wp_coder/
 - **Разрешения:** доступ к файлам вне проекта требует подтверждения пользователя
 - **Shell:** `shell::shell_quote()` — экранирование аргументов для shell
 
-> ⚠️ **Известные проблемы безопасности (план исправления — Фаза 1 в DEVELOPMENT_PLAN.md):**
-> Python и DevOps модули не используют `shell::shell_quote`. Инструменты `docker_run`,
-> `ssh_exec`, `cron_add`, `pip_install` подвержены shell injection через аргументы от LLM.
+> ✅ **Фаза 1 (безопасность) реализована:** все аргументы от LLM проходят
+> `shell::shell_quote()`/`sanitize_ident()`/валидацию метасимволов во всех модулях
+> (python, devops, wordpress). `exec_command` проверяется политикой
+> `is_command_allowed()`.
 
 ## Сборка и деплой
 
@@ -78,7 +79,7 @@ cmake -S . -B build
 
 # Тесты
 cmake --build build --target wp_coder_tests -j$(nproc)
-./build/tests/wp_coder_tests          # 48/48 PASS
+./build/tests/wp_coder_tests          # 97/97 PASS
 
 # Плагин
 cmake --build build --target wp_coder -j$(nproc)
@@ -101,6 +102,7 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 | Проект | `Ctrl+Shift+W` |
 | Модули | `Ctrl+Shift+M` |
 | Инструменты | `Ctrl+Shift+T` |
+| Сессия | `Ctrl+Shift+S` |
 
 ## Текущее состояние
 
@@ -114,6 +116,7 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 - ✅ Фаза 3 (новые инструменты) — **вся завершена**: list_dir, web_fetch, edit_file, undo_edit, git_add/branch/checkout
 - ✅ Фаза 4 (качество кода) — **вся завершена**: limits.h, json_utils.h, file_utils.h, тесты модулей, UI-фиксы
 - ✅ Фаза 5 (UX) — 5.1–5.3: окно «Сессия», resume сессии, настройки агента (5.4 max_tokens — отложено, требует расширения хоста)
+- ✅ Фаза 6 (документация) — **вся завершена**: теневые .md удалены, README/CHANGELOG/USAGE актуализированы
 
 Дальнейшие шаги — в `DEVELOPMENT_PLAN.md`.
 
