@@ -4,6 +4,8 @@
 #include "../../core/skills_manager.h"
 #include "../../core/shell.h"
 #include "../../core/security.h"
+#include "../../core/limits.h"
+#include "../../core/file_utils.h"
 
 #include <headless_browser/headless_browser.h>
 
@@ -21,32 +23,13 @@ namespace wp {
 
 namespace {
 
-/* Ограничение вывода инструментов модуля. */
-constexpr size_t kWpMaxOutput = 8000;
-
 const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
                                             "wp-includes", "wp-admin"};
 
-void walk_php(const fs::path& root, std::vector<std::string>& out, size_t limit = 4000) {
-    if (!fs::exists(root)) return;
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(root, ec);
-         it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) break;
-        const auto& p = it->path();
-        if (it->is_directory()) {
-            std::string name = p.filename().string();
-            if (std::find(kSkipDirs.begin(), kSkipDirs.end(), name) != kSkipDirs.end()) {
-                it.disable_recursion_pending();
-                continue;
-            }
-        }
-        if (it->is_regular_file() && p.extension() == ".php") {
-            out.push_back(p.string());
-            if (out.size() >= limit) return;
-        }
-    }
-}
+/* Лимит вывода модуля — единый источник: core/limits.h (4.5). */
+using limits::kModuleMaxOutput;
+
+/* Обход PHP-файлов — общая реализация: core/file_utils.h (4.2). */
 
 /* ===== WP-CLI =====
  * Аргументы wp-cli от модели передаются с базовой валидацией:
@@ -68,7 +51,7 @@ std::string wp_cli(const std::string& args) {
     std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir) + " "
                       + args + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    return out.empty() ? "[wp-cli: нет вывода]" : shell::cap(out, kWpMaxOutput);
+    return out.empty() ? "[wp-cli: нет вывода]" : shell::cap(out, kModuleMaxOutput);
 }
 
 /* ===== wp_db ===== */
@@ -92,7 +75,7 @@ std::string wp_db(const std::string& query) {
     std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
                       + " db query " + shell::shell_quote(query) + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    return out.empty() ? "[wp db query: нет вывода]" : shell::cap(out, kWpMaxOutput);
+    return out.empty() ? "[wp db query: нет вывода]" : shell::cap(out, kModuleMaxOutput);
 }
 
 /* ===== wp_media ===== */
@@ -104,7 +87,7 @@ std::string wp_media(int count) {
                       + " media list --posts_per_page=" + std::to_string(count)
                       + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    return out.empty() ? "[wp media list: нет медиафайлов]" : shell::cap(out, kWpMaxOutput);
+    return out.empty() ? "[wp media list: нет медиафайлов]" : shell::cap(out, kModuleMaxOutput);
 }
 
 /* ===== wp_option ===== */
@@ -117,7 +100,7 @@ std::string wp_option(const std::string& name) {
     std::string cmd = "wp --path=" + shell::shell_quote(st.project_dir)
                       + " option get " + shell::shell_quote(safe_name) + " --no-color";
     std::string out = shell::run_capture(cmd, 60);
-    return out.empty() ? "[wp option get: опция не найдена]" : shell::cap(out, kWpMaxOutput);
+    return out.empty() ? "[wp option get: опция не найдена]" : shell::cap(out, kModuleMaxOutput);
 }
 
 /* ===== wp_rest ===== */
@@ -142,7 +125,7 @@ std::string wp_rest(const std::string& ep) {
                       shell::shell_quote(st.wp_app_user + ":" + st.wp_app_password)
                       + " " + shell::shell_quote(url);
     std::string out = shell::run_capture(cmd, 40);
-    return out.empty() ? "[wp_rest: пустой ответ]" : shell::cap(out, kWpMaxOutput);
+    return out.empty() ? "[wp_rest: пустой ответ]" : shell::cap(out, kModuleMaxOutput);
 }
 
 /* ===== wp_check_deps ===== */
@@ -277,7 +260,7 @@ std::string php_lint(const std::string& path) {
 std::string validate() {
     const auto& st = engine_state();
     std::vector<std::string> files;
-    walk_php(st.project_dir, files);
+    file_utils::walk_files(st.project_dir, files, 4000, kSkipDirs, ".php");
     if (files.empty()) return "[validate: php-файлы не найдены]";
     const size_t kMaxFiles = 200;
     bool truncated = files.size() > kMaxFiles;
@@ -365,9 +348,9 @@ std::string headless_render(const std::string& url) {
              + std::to_string(headless_browser::visible_letter_count(dom))
              + ") — похоже на JS-ошибку или SPA-оболочку без рендера.\n";
     }
-    out += "DOM (обрезан до " + std::to_string(kWpMaxOutput) + " символов):\n";
-    out += dom.size() > kWpMaxOutput ? dom.substr(0, kWpMaxOutput) : dom;
-    if (dom.size() > kWpMaxOutput)
+    out += "DOM (обрезан до " + std::to_string(kModuleMaxOutput) + " символов):\n";
+    out += dom.size() > kModuleMaxOutput ? dom.substr(0, kModuleMaxOutput) : dom;
+    if (dom.size() > kModuleMaxOutput)
         out += "\n[...обрезано, всего " + std::to_string(dom.size()) + " символов]";
     return out;
 }

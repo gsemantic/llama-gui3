@@ -4,6 +4,7 @@
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
+#include "limits.h"
 
 #include <sstream>
 #include <vector>
@@ -16,8 +17,8 @@
 
 namespace coder {
 
-/* Бюджет символов на историю сессии (превышение → сжатие старых RESULT). */
-constexpr size_t kSessionBudget = 60000;
+/* Бюджет символов на историю сессии — единый источник: core/limits.h (4.5). */
+using limits::kSessionBudget;
 
 /*
  * Engine — глобальный singleton

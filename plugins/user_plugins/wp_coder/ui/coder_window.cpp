@@ -58,6 +58,29 @@ void init_buffers() {
     std::snprintf(s_agent_prompt, sizeof(s_agent_prompt), "%s", st.agent_system_prompt.c_str());
 }
 
+/* Скопировать UI-буферы в состояние движка и сохранить.
+ * Общая реализация для всех кнопок «Сохранить» (Фаза 4.8 — убрано дублирование). */
+static void apply_settings_from_buffers() {
+    auto& st = engine_state();
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        st.project_dir = s_project_dir;
+        st.php_bin = s_php_bin;
+        st.wp_site_url = s_site_url;
+        st.wp_app_user = s_app_user;
+        st.wp_app_password = s_app_password;
+        st.deploy_proto = s_deploy_proto;
+        st.deploy_host = s_deploy_host;
+        st.deploy_user = s_deploy_user;
+        st.deploy_pass = s_deploy_pass;
+        st.deploy_port = s_deploy_port;
+        st.deploy_remote_dir = s_deploy_remote;
+        st.wp_local_url = s_local_url;
+    }
+    engine().invalidate_prompt_cache();
+    engine().save_settings();
+}
+
 /* Команды. */
 static void cmd_open_project(void*) {
     if (g_api && g_win_project) g_api->window_set_visible(g_host, g_win_project, 1);
@@ -86,20 +109,7 @@ static void render_project() {
         if (!coder::security::is_project_dir_valid(s_project_dir)) {
             /* Путь запрещён — не сохраняем. */
         } else {
-            st.project_dir = s_project_dir;
-            st.php_bin = s_php_bin;
-            st.wp_site_url = s_site_url;
-            st.wp_app_user = s_app_user;
-            st.wp_app_password = s_app_password;
-            st.deploy_proto = s_deploy_proto;
-            st.deploy_host = s_deploy_host;
-            st.deploy_user = s_deploy_user;
-            st.deploy_pass = s_deploy_pass;
-            st.deploy_port = s_deploy_port;
-            st.deploy_remote_dir = s_deploy_remote;
-            st.wp_local_url = s_local_url;
-            engine().invalidate_prompt_cache();
-            engine().save_settings();
+            apply_settings_from_buffers();
         }
     }
     /* Предупреждение о небезопасном пути. */
@@ -154,20 +164,7 @@ static void render_project() {
 
     ImGui::Spacing();
     if (ImGui::Button("Сохранить все настройки")) {
-        st.project_dir = s_project_dir;
-        st.php_bin = s_php_bin;
-        st.wp_site_url = s_site_url;
-        st.wp_app_user = s_app_user;
-        st.wp_app_password = s_app_password;
-        st.deploy_proto = s_deploy_proto;
-        st.deploy_host = s_deploy_host;
-        st.deploy_user = s_deploy_user;
-        st.deploy_pass = s_deploy_pass;
-        st.deploy_port = s_deploy_port;
-        st.deploy_remote_dir = s_deploy_remote;
-        st.wp_local_url = s_local_url;
-        engine().invalidate_prompt_cache();
-        engine().save_settings();
+        apply_settings_from_buffers();
     }
 
     ImGui::End();
@@ -369,20 +366,17 @@ void render_extras() {
 
     /* Предложенные правки. */
     {
-        size_t count = 0;
+        /* Копия под мьютексом: worker-поток может менять st.pending между
+         * кадрами — работаем только с целостным снимком (Фаза 4.7). */
+        std::vector<coder::PendingWrite> pending_copy;
         {
             std::lock_guard<std::mutex> lk(st.mtx);
-            count = st.pending.size();
+            pending_copy = st.pending;
         }
-        if (count > 0) {
-            ImGui::Text("Предложенные правки (%zu):", count);
-            for (size_t i = 0; i < count; ++i) {
-                std::string ppath;
-                {
-                    std::lock_guard<std::mutex> lk(st.mtx);
-                    if (i < st.pending.size()) ppath = st.pending[i].path;
-                }
-                ImGui::BulletText("%s", ppath.c_str());
+        if (!pending_copy.empty()) {
+            ImGui::Text("Предложенные правки (%zu):", pending_copy.size());
+            for (size_t i = 0; i < pending_copy.size(); ++i) {
+                ImGui::BulletText("%s", pending_copy[i].path.c_str());
                 ImGui::SameLine();
                 if (ImGui::SmallButton(("OK##a"+std::to_string(i)).c_str())) {
                     engine().pending_apply(i);

@@ -1,5 +1,6 @@
 #include "project.h"
 #include "engine.h"
+#include "shell.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -10,20 +11,6 @@
 
 namespace fs = std::filesystem;
 namespace coder {
-
-namespace {
-
-bool run_capture(const std::string& cmd, std::string& out) {
-    FILE* f = popen(cmd.c_str(), "r");
-    if (!f) return false;
-    char buf[4096];
-    out.clear();
-    while (fgets(buf, sizeof(buf), f)) out += buf;
-    int rc = pclose(f);
-    return rc == 0;
-}
-
-} // anonymous namespace
 
 std::string setting_get_str(const std::string& key, const std::string& def) {
     auto& st = engine_state();
@@ -51,7 +38,8 @@ void project_detect_php() {
     auto& st = engine_state();
     if (!st.php_bin.empty()) return;
     std::string out;
-    if (run_capture("php -v", out) && !out.empty()) {
+    int rc = -1;
+    if (shell::run_capture_status("php -v", out, rc, 30) && !out.empty()) {
         st.php_bin = "php";
     }
 }

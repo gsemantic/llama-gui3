@@ -107,12 +107,21 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_engine.cpp
         tests/test_module_api.cpp
         tests/test_security.cpp
+        tests/test_wp_tools.cpp
+        tests/test_python_tools.cpp
+        tests/test_devops_tools.cpp
+        ${MODULE_SOURCES}
     )
     target_include_directories(wp_coder_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${PROJECT_ROOT}/include
+        ${PROJECT_ROOT}/libs/headless_browser/include
     )
     target_link_libraries(wp_coder_tests PRIVATE wp_coder_core)
+    # Модули линкуются с headless_browser (wp_tools.cpp использует render_dom).
+    if(TARGET headless_browser)
+        target_link_libraries(wp_coder_tests PRIVATE headless_browser)
+    endif()
     target_compile_options(wp_coder_tests PRIVATE -Wall -Wextra)
     set_target_properties(wp_coder_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"

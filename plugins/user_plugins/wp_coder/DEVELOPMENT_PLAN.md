@@ -163,40 +163,39 @@
 
 ## Фаза 4 — Качество кода и устранение дублирования
 
-- [ ] 4.1. **Устранить дублирование `run_capture`**
+- [x] 4.1. **Устранить дублирование `run_capture`**
   - Три копии: `shell.h`, `python_tools.cpp`, `devops_tools.cpp`
   - Фаза 1.1 и 1.2 уже заменяют на `shell::run_capture`
-  - После: удалить мёртвый код
+  - Осталась копия в `project.cpp` (`bool run_capture`) — заменена на `shell::run_capture_status`
 
-- [ ] 4.2. **Дублирование `walk_php` / `walk_all`**
+- [x] 4.2. **Дублирование `walk_php` / `walk_all`**
   - `base_tools.cpp` и `wp_tools.cpp` содержат почти идентичные функции
-  - Вынести в `core/file_utils.h` с параметром расширений (`.php`, `*`, `.py`)
+  - Вынесены в `core/file_utils.h` как `file_utils::walk_files()` с параметром skip-каталогов и расширения
 
-- [ ] 4.3. **Дублирование `resolve_path`**
-  - В `base_tools.cpp` и `python_tools.cpp` — вынести в `core/project.h`
+- [x] 4.3. **Дублирование `resolve_path`**
+  - В `base_tools.cpp` и `python_tools.cpp` — вынесено в `core/project.h` (`project_resolve`)
 
-- [ ] 4.4. **Тесты для модулей (WordPress, Python, DevOps)**
-  - Сейчас 48 тестов только для core
-  - Добавить тесты: `test_wp_tools.cpp`, `test_python_tools.cpp`, `test_devops_tools.cpp`
-  - Тесты безопасности: shell injection в каждом инструменте
+- [x] 4.4. **Тесты для модулей (WordPress, Python, DevOps)**
+  - Добавлены: `test_wp_tools.cpp`, `test_python_tools.cpp`, `test_devops_tools.cpp` (+21 тест, всего 86)
+  - Модульные .cpp компилируются в тестовый бинарник (`${MODULE_SOURCES}` + линковка headless_browser)
+  - Тесты безопасности: shell injection в wp_cli/docker_run, DDL-запрет wp_db, санитизация имён
+  - Тестируются только ветки валидации (без запуска реальных команд)
+  - Исправлен баг: `docker_run` блокировал только `$(` — теперь `; | & \` $ > <`
 
-- [ ] 4.5. **Константы лимитов в одном месте**
-  - `kMaxToolOutput`, `kWpMaxOutput`, `kMaxGrepMatches` разбросаны по файлам
-  - Вынести в `core/limits.h`
-  - `kSessionBudget`, `kMaxSteps`, `kResultBudget` дублируются в engine.cpp и agent_components.cpp
+- [x] 4.5. **Константы лимитов в одном месте**
+  - Вынесены в `core/limits.h`: kMaxToolOutput, kModuleMaxOutput, kMaxGrepMatches, kReadFileChars, kMaxSymFile, kMaxSteps, kSessionBudget, kResultBudget
+  - `kSessionBudget` дублировался (engine.cpp + agent_components.cpp), `kMaxSteps` (8 vs 12) — устранено
 
-- [ ] 4.6. **Дублирование JSON-парсинга**
+- [x] 4.6. **Дублирование JSON-парсинга**
   - `json_str`/`json_int` в `tool_protocol.cpp` и `find_str`/`find_int` в `plugin_main.cpp`
-  - Одинаковая логика, разные имена
-  - Вынести в `core/json_utils.h` и использовать из обоих мест
+  - Вынесены в `core/json_utils.h` (`json::str`, `json::int_`)
 
-- [ ] 4.7. **UI: race condition для pending-правок**
-  - `pending_apply/discard` по индексу, count проверяется без мьютекса
-  - Исправление: копировать pending под мьютексом, работать с копией
+- [x] 4.7. **UI: race condition для pending-правок**
+  - Копия `st.pending` под мьютексом, работа по целостному снимку
 
-- [ ] 4.8. **UI: дублирование кода сохранения настроек**
-  - 11 полей копируются в двух кнопках «Сохранить»
-  - Вынести в функцию `apply_settings_from_buffers()`
+- [x] 4.8. **UI: дублирование кода сохранения настроек**
+  - 12 полей копировались в двух кнопках «Сохранить»
+  - Вынесены в `apply_settings_from_buffers()` (с записью под мьютексом)
 
 ---
 

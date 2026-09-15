@@ -18,6 +18,7 @@
 #include "core/base_tools.h"
 #include "core/git_tools.h"
 #include "core/module_api.h"
+#include "core/json_utils.h"
 #include "ui/coder_window.h"
 
 /* Модули. */
@@ -162,43 +163,12 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
             json += "]";
 
             /* Парсим {"ok":1,"content":"...","finish_reason":"...","prompt_tokens":N,"completion_tokens":N}
-             * или {"ok":0,"error":"..."}. */
+             * или {"ok":0,"error":"..."}. Общий парсер — core/json_utils.h (4.6). */
             auto find_str = [](const std::string& s, const char* key) -> std::string {
-                std::string pat = std::string("\"") + key + "\":\"";
-                size_t p = s.find(pat);
-                if (p == std::string::npos) return "";
-                p += pat.size();
-                size_t e = p;
-                while (e < s.size() && s[e] != '"') {
-                    if (s[e] == '\\' && e + 1 < s.size()) e += 2;
-                    else ++e;
-                }
-                std::string v = s.substr(p, e - p);
-                std::string r;
-                for (size_t i = 0; i < v.size(); ++i) {
-                    if (v[i] == '\\' && i + 1 < v.size()) {
-                        switch (v[i + 1]) {
-                            case 'n': r += '\n'; i++; break;
-                            case 't': r += '\t'; i++; break;
-                            case 'r': r += '\r'; i++; break;
-                            case '"': r += '"'; i++; break;
-                            case '\\': r += '\\'; i++; break;
-                            default: r += v[i]; break;
-                        }
-                    } else r += v[i];
-                }
-                return r;
+                return coder::json::str(s, key);
             };
             auto find_int = [](const std::string& s, const char* key) -> int {
-                std::string pat = std::string("\"") + key + "\":";
-                size_t p = s.find(pat);
-                if (p == std::string::npos) return 0;
-                p += pat.size();
-                int n = 0;
-                while (p < s.size() && std::isdigit((unsigned char)s[p])) {
-                    n = n * 10 + (s[p] - '0'); ++p;
-                }
-                return n;
+                return coder::json::int_(s, key);
             };
 
             /* 2.1: Retry для транзиентных ошибок LLM (429/5xx/timeout).

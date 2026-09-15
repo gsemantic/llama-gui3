@@ -1,8 +1,11 @@
 #include "base_tools.h"
 #include "tools_registry.h"
 #include "engine.h"
+#include "project.h"
 #include "security.h"
 #include "shell.h"
+#include "limits.h"
+#include "file_utils.h"
 
 #include <fstream>
 #include <sstream>
@@ -18,54 +21,11 @@ namespace {
 
 const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor"};
 
-/* Лимиты вывода — результат инструмента попадает в следующий запрос к LLM,
- * поэтому его размер напрямую определяет скорость и стоимость префилля. */
-constexpr size_t kMaxToolOutput = 12000;   // байт на результат инструмента
-constexpr size_t kMaxGrepMatches = 200;    // строк совпадений
-constexpr size_t kReadFileChars = 12000;   // байт на read_file
-constexpr size_t kMaxSymFile = 40;         // символов в файле для repo_map
-
-void walk_php(const fs::path& root, std::vector<std::string>& out, size_t limit = 4000) {
-    if (!fs::exists(root)) return;
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(root, ec);
-         it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) break;
-        const auto& p = it->path();
-        if (it->is_directory()) {
-            std::string name = p.filename().string();
-            if (std::find(kSkipDirs.begin(), kSkipDirs.end(), name) != kSkipDirs.end()) {
-                it.disable_recursion_pending();
-                continue;
-            }
-        }
-        if (it->is_regular_file() && p.extension() == ".php") {
-            out.push_back(p.string());
-            if (out.size() >= limit) return;
-        }
-    }
-}
-
-void walk_all(const fs::path& root, std::vector<std::string>& out, size_t limit = 4000) {
-    if (!fs::exists(root)) return;
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(root, ec);
-         it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) break;
-        const auto& p = it->path();
-        if (it->is_directory()) {
-            std::string name = p.filename().string();
-            if (std::find(kSkipDirs.begin(), kSkipDirs.end(), name) != kSkipDirs.end()) {
-                it.disable_recursion_pending();
-                continue;
-            }
-        }
-        if (it->is_regular_file()) {
-            out.push_back(p.string());
-            if (out.size() >= limit) return;
-        }
-    }
-}
+/* Лимиты вывода — единый источник: core/limits.h (Фаза 4.5). */
+using limits::kMaxToolOutput;
+using limits::kMaxGrepMatches;
+using limits::kReadFileChars;
+using limits::kMaxSymFile;
 
 /* Чтение файла с ограничением размера и пропуском первых skip_lines строк. */
 std::string read_text_file(const std::string& path, size_t max_chars, size_t skip_lines) {
@@ -100,17 +60,8 @@ std::string guard_permission(const std::string& abs_path) {
     return eng.check_external_permission(abs_path);
 }
 
-/* Разрешить относительный путь относительно корня проекта. */
-std::string resolve_path(const std::string& rel) {
-    const auto& st = engine_state();
-    if (st.project_dir.empty()) return rel;
-    if (rel.empty()) return st.project_dir;
-    if (rel.size() > 0 && (rel[0] == '/' || rel.find(":") == 1)) return rel;
-    std::string p = st.project_dir;
-    if (!p.empty() && p.back() != '/') p += '/';
-    p += rel;
-    return p;
-}
+/* Разрешить относительный путь относительно корня проекта.
+ * Единая реализация — project_resolve() (см. core/project.h). */
 
 /* grep_search: поиск по файлам — НАСТОЯЩЕЕ регулярное выражение (ECMAScript). */
 std::string base_grep(const std::string& root, const std::string& pattern) {
@@ -132,7 +83,7 @@ std::string base_grep(const std::string& root, const std::string& pattern) {
         return "[ошибка] каталог не существует: " + base;
 
     std::vector<std::string> files;
-    walk_all(base, files, 2000);
+    file_utils::walk_files(base, files, 2000, kSkipDirs);
 
     std::stringstream out;
     size_t found = 0;
@@ -177,7 +128,7 @@ std::string base_repo_map(const std::string& root) {
     }
 
     std::vector<std::string> files;
-    walk_all(base, files, 1500);
+    file_utils::walk_files(base, files, 1500, kSkipDirs);
     if (files.empty()) return "[repo_map: файлы не найдены в " + base + "]";
 
     std::stringstream out;
@@ -283,7 +234,7 @@ void register_base_tools() {
     auto& reg = ToolsRegistry::instance();
 
     reg.register_tool("read_file", [](const ToolArgs& a) -> std::string {
-        std::string abs = resolve_path(a.path);
+        std::string abs = project_resolve(a.path);
         std::string perm = guard_permission(abs);
         if (!perm.empty()) return perm;
         size_t skip = (a.k > 1) ? static_cast<size_t>(a.k - 1) : 0;
@@ -298,7 +249,7 @@ void register_base_tools() {
 
     reg.register_tool("write_file", [](const ToolArgs& a) -> std::string {
         auto& st = engine_state();
-        std::string abs = resolve_path(a.path);
+        std::string abs = project_resolve(a.path);
         if (st.plan_mode) {
             std::lock_guard<std::mutex> lk(st.mtx);
             st.pending.push_back({a.path, a.content});
@@ -336,7 +287,7 @@ void register_base_tools() {
 
     /* search_replace: поиск и замена текста в файле (diff-based edit). */
     reg.register_tool("search_replace", [](const ToolArgs& a) -> std::string {
-        std::string abs = resolve_path(a.path);
+        std::string abs = project_resolve(a.path);
         std::ifstream fin(abs, std::ios::binary);
         if (!fin) return "[ошибка] не удалось открыть файл: " + abs;
         std::string content((std::istreambuf_iterator<char>(fin)),
@@ -397,7 +348,7 @@ void register_rag_tools() {
         std::string base = a.root.empty() ? engine_state().project_dir : a.root;
         if (base.empty()) return "[ошибка] не задан корень индексации";
         std::vector<std::string> files;
-        walk_php(base, files);
+        file_utils::walk_files(base, files, 4000, kSkipDirs, ".php");
         const auto& cb = Engine::instance().callbacks();
         int ok = 0;
         for (const auto& fp : files) {

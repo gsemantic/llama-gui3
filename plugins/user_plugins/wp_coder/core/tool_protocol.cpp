@@ -1,4 +1,5 @@
 #include "tool_protocol.h"
+#include "json_utils.h"
 
 #include <sstream>
 #include <cctype>
@@ -101,72 +102,20 @@ std::string extract_action(const std::string& text, std::string& rest) {
     return block;
 }
 
-namespace {
-
-/* Извлечь строковое значение JSON-поля по ключу (с экранированием). */
-std::string json_str(const std::string& block, const char* key) {
-    std::string pat = std::string("\"") + key + "\"";
-    size_t p = block.find(pat);
-    if (p == std::string::npos) return "";
-    size_t colon = block.find(':', p + pat.size());
-    if (colon == std::string::npos) return "";
-    size_t q1 = block.find('"', colon + 1);
-    if (q1 == std::string::npos) return "";
-    /* Ищем закрывающую кавычку с учётом экранированных \" и \\. */
-    size_t q2 = q1 + 1;
-    while (q2 < block.size()) {
-        if (block[q2] == '\\') { q2 += 2; continue; }
-        if (block[q2] == '"') break;
-        ++q2;
-    }
-    if (q2 >= block.size()) return "";
-    std::string v = block.substr(q1 + 1, q2 - q1 - 1);
-    std::string r;
-    for (size_t i = 0; i < v.size(); ++i) {
-        if (v[i] == '\\' && i + 1 < v.size()) {
-            char c = v[i + 1];
-            if (c == 'n') { r += '\n'; i++; }
-            else if (c == 't') { r += '\t'; i++; }
-            else if (c == 'r') { r += '\r'; i++; }
-            else if (c == '"') { r += '"'; i++; }
-            else if (c == '\\') { r += '\\'; i++; }
-            else r += v[i];
-        } else r += v[i];
-    }
-    return r;
-}
-
-int json_int(const std::string& block, const char* key) {
-    std::string pat = std::string("\"") + key + "\"";
-    size_t p = block.find(pat);
-    if (p == std::string::npos) return 0;
-    size_t colon = block.find(':', p + pat.size());
-    if (colon == std::string::npos) return 0;
-    size_t s = colon + 1;
-    while (s < block.size() && (block[s] == ' ' || block[s] == '\t')) ++s;
-    int n = 0;
-    while (s < block.size() && std::isdigit(static_cast<unsigned char>(block[s]))) {
-        n = n * 10 + (block[s] - '0'); ++s;
-    }
-    return n;
-}
-
-} // namespace
-
 bool parse_action(const std::string& block, Action& a) {
     /* JSON-протокол: {"tool":"...","path":"...","k":N,...} (Фаза B3). */
     size_t brace = block.find('{');
     if (brace != std::string::npos && block.find('}') != std::string::npos) {
-        a.tool = json_str(block, "tool");
+        a.tool = json::str(block, "tool");
         if (!a.tool.empty()) {
-            a.path = json_str(block, "path");
-            a.root = json_str(block, "root");
-            a.query = json_str(block, "query");
-            a.pattern = json_str(block, "pattern");
-            a.cli = json_str(block, "cli");
-            a.url = json_str(block, "url");
-            a.content = json_str(block, "content");
-            int k = json_int(block, "k");
+            a.path = json::str(block, "path");
+            a.root = json::str(block, "root");
+            a.query = json::str(block, "query");
+            a.pattern = json::str(block, "pattern");
+            a.cli = json::str(block, "cli");
+            a.url = json::str(block, "url");
+            a.content = json::str(block, "content");
+            int k = json::int_(block, "k");
             if (k > 0) a.k = k;
             return true;
         }

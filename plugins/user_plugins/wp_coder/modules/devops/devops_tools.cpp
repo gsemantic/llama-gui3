@@ -33,12 +33,11 @@ void register_devops_tools() {
         if (a.cli.empty()) return "[ошибка] укажи параметры запуска (CLI)";
         /* docker run args сложны: --name, -p, -v и т.д.
          * Полное экранирование сломает синтаксис Docker.
-         * Валидируем: запрещаем ; | && ` $() и другие shell-метасимволы. */
-        for (size_t i = 0; i < a.cli.size(); ++i) {
-            char c = a.cli[i];
-            if (c == ';' || c == '|' || c == '`' || c == '$') {
-                if (i + 1 < a.cli.size() && a.cli[i + 1] == '(')
-                    return "[запрещено] shell-инъекция в docker run";
+         * Валидируем: запрещаем shell-метасимволы ; | & ` $ > <. */
+        for (char c : a.cli) {
+            if (c == ';' || c == '|' || c == '&' || c == '`' ||
+                c == '$' || c == '>' || c == '<') {
+                return "[запрещено] shell-инъекция в docker run";
             }
         }
         std::string out = shell::run_capture("docker run " + a.cli, 120);
