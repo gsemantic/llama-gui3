@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <core/rag_manager.h>
 
 namespace wp_coder {
 
@@ -41,6 +42,7 @@ private:
 
     agents::AgentContext* context_ = nullptr;
     bool initialized_ = false;
+    std::unique_ptr<llama_gui::core::RagManager> rag_manager_;
 };
 
 } // namespace wp_coder
