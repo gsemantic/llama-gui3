@@ -62,9 +62,9 @@
 5. Написать документацию: USAGE.md с примерами, MODULE_DEVELOPMENT.md для контрибьюторов.
 6. Настроить CI: сборка, тесты, проверка политик безопасности.
 
-### Текущая работа (пункт 1)
-- **Файл**: `plugins/user_plugins/wp_coder/src/wp_plugin_agent.cpp`
-- **Задача**: заменить заглушку `handle_generate` на реальный вызов LLM через `core::OpenRouterClient`.
+### Текущая работа (пункт 2)
+- **Файл**: `plugins/user_plugins/wp_coder/src/wp_rag_agent.cpp`
+- **Задача**: подключить wp_rag_agent к core::RagManager для семантического поиска по WordPress-кодовой базе.
 - **Статус**: 🟡 В работе
 
 ## 7. Метрики успеха
