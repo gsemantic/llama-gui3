@@ -1,0 +1,17 @@
+{
+  "model": "local",
+  "temperature": 0.0,
+  "max_tokens": 1024,
+  "tools_policy": "strict",
+  "timeout_ms": 60000,
+  "allowed_commands": [
+    "ls",
+    "cat"
+  ],
+  "allowed_extensions": [
+    ".php",
+    ".json"
+  ],
+  "rag_enabled": false,
+  "description": "Строгая валидация, запрет опасных команд, только белый список. Для аудита и ревью."
+}

@@ -1,0 +1,31 @@
+{
+  "model": "cloud",
+  "temperature": 0.0,
+  "max_tokens": 4096,
+  "tools_policy": "standard",
+  "timeout_ms": 120000,
+  "allowed_commands": [
+    "ls",
+    "cat",
+    "mkdir",
+    "cp",
+    "mv",
+    "rm",
+    "php",
+    "wp",
+    "git",
+    "rsync"
+  ],
+  "allowed_extensions": [
+    ".php",
+    ".js",
+    ".css",
+    ".json",
+    ".md",
+    ".txt",
+    ".yml",
+    ".yaml"
+  ],
+  "rag_enabled": true,
+  "description": "Облачная модель, длинные промпты, с RAG. Для сложных задач и деплоя."
+}
