@@ -1,96 +1,169 @@
-# wp_coder — Использование
+# wp-coder: Usage Guide
 
-## Быстрый старт
+## Overview
+`wp-coder` — это набор AI-агентов для автоматизации разработки на WordPress. 
+Охватывает генерацию тем/плагинов, работу с хуками, деплой, RAG-поиск и безопасные файловые операции.
 
-1. **Запуск с агентом ai_coder:**
-   ```bash
-   env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
-   ```
+## Quick Start
 
-2. **Настройка проекта** — меню **AI Coder → Проект** (`Ctrl+Shift+W`):
-   - Корень проекта (например `/var/www/html`)
-   - URL локального сайта для `verify`/`headless_render`
-   - Путь к php-cli (обычно автоопределяется)
-   - Нажмите «Сохранить все настройки»
+### 1. Запуск оркестратора
+```bash
+# Создаем агент через фабрику
+agents::IAgent* orchestrator = plugin_create_agent("wp_coder_orchestrator");
+orchestrator->initialize(context);
+```
 
-3. **Выбор модуля** — меню **AI Coder → Модули** (`Ctrl+Shift+M`):
-   - WordPress / Python / DevOps
-   - От выбора зависят доступные инструменты и навыки
+### 2. Генерация темы WordPress
+```json
+{
+  "action": "generate_theme",
+  "params": {
+    "description": "Современная блог-тема с поддержкой Gutenberg, темным режимом и SEO-оптимизацией"
+  }
+}
+```
+**Результат**: полный код темы с `style.css`, `index.php`, `functions.php`, `header.php`, `footer.php`.
 
-4. **Отправка задачи** — введите текст в поле чата и нажмите Enter.
-   Метрики шага: `%d tok | %.1f tok/s | %ds (LLM %.1fs) | %d steps`.
-   Кнопка «Стоп» прерывает текущую задачу.
+### 3. Генерация плагина
+```json
+{
+  "action": "generate_plugin",
+  "params": {
+    "description": "Плагин для шорткода [contact_form] с валидацией и отправкой на email"
+  }
+}
+```
+**Результат**: структура плагина с основным файлом, includes/, admin/, public/.
 
-5. **Разрешения** — при доступе к файлам вне проекта появится запрос:
-   «Разрешить (один раз)» / «Разрешить (всегда)» / «Отклонить».
+### 4. Поиск хуков
+```json
+{
+  "action": "find_hooks",
+  "params": {
+    "query": "фильтр для изменения контента поста"
+  }
+}
+```
+**Результат**: список подходящих фильтров (`the_content`, `wp_insert_post_data` и др.).
 
-## Режимы
+### 5. Деплой на хостинг
+```json
+{
+  "action": "deploy",
+  "params": {
+    "source": "/local/wp-site",
+    "target": "/var/www/html",
+    "wp_cli": "/usr/local/bin/wp"
+  }
+}
+```
+**Использует**: rsync + WP-CLI + LLM-генерация дополнительных команд.
 
-- **Code** — полный доступ ко всем инструментам
-- **Research** — только чтение (нет `write_file` и `deploy`)
-- **Review** — после правок автоматически запускает `verify`
+### 6. RAG-поиск по кодовой базе
+```json
+{
+  "action": "search_code",
+  "params": {
+    "query": "как правильно добавить meta box в WordPress",
+    "k": 5
+  }
+}
+```
+**Результат**: семантически релевантные фрагменты из ядра WP, тем и плагинов.
 
-Переключение: выпадающий список «Режим» в области под полем ввода чата.
+### 7. Безопасные файловые операции
+```json
+{
+  "action": "file_ops",
+  "params": {
+    "action": "read",
+    "path": "wp-content/themes/my-theme/style.css"
+  }
+}
+```
+**Политики**: только wp-content, проверка расширений, лимит размера.
 
-## Опции агента
+## Harness-профили
 
-| Опция | Описание | По умолчанию |
-|-------|----------|--------------|
-| Продолжать сессию | План и контекст сохраняются между сообщениями | Вкл |
-| План-режим | Правки не применяются, а предлагаются | Выкл |
-| Лимит шагов | Максимум шагов ReAct-цикла на задачу (окно «Проект») | 12 |
-| Бюджет сессии (КБ) | При превышении старые RESULT сжимаются (окно «Проект») | 60000 |
-| Очистить сессию | Сбросить план и историю диалога | — |
+Выберите профиль в зависимости от задачи:
 
-## Resume сессии
+| Профиль | Описание | Когда использовать |
+|---------|----------|-------------------|
+| `fast_local` | Локальная модель, без RAG | Быстрая генерация, итерации |
+| `accurate_cloud` | Облачная модель, с RAG | Сложные задачи, деплой |
+| `secure_audit` | Строгая валидация | Аудит, ревью кода |
+| `debug_verbose` | Максимальная детализация | Отладка, разработка |
 
-Диалог автоматически сохраняется в `<data_dir>/wp_coder/session.json` после каждой
-задачи и при выходе. При следующем запуске плагина разговор продолжается с того же
-места (если включена опция «Продолжать сессию»). «Очистить сессию» удаляет и файл.
+Установка профиля:
+```cpp
+orchestrator->initialize(context);
+// Профиль загружается автоматически из plugins/user_plugins/wp_coder/profiles/wp_coder/
+```
 
-## Окна
+## Примеры интеграции
 
-| Окно | Горячая клавиша | Содержимое |
-|------|-----------------|------------|
-| Проект | `Ctrl+Shift+W` | Настройки: корень, PHP, WP-URL, деплой, промпт, лимиты агента |
-| Модули | `Ctrl+Shift+M` | Выбор модуля, счётчики инструментов/навыков |
-| Инструменты | `Ctrl+Shift+T` | Список зарегистрированных инструментов, активные навыки |
-| Сессия | `Ctrl+Shift+S` | Статус FSM, метрики, цветная лента событий, кнопка «Стоп» |
+### C++ (через C-API)
+```cpp
+#include "wp_coder_plugin.h"
 
-## Список инструментов
+// Создание агента
+agents::IAgent* agent = plugin_create_agent("wp_theme_agent");
+agent->initialize(context);
 
-### Базовые (core)
-- `read_file` / `write_file` / `search_replace` / `edit_file` / `undo_edit` — работа с файлами
-- `grep_search` — regex-поиск (лимит 200 совпадений)
-- `repo_map` — обзор структуры проекта (кэшируется)
-- `list_dir` — лёгкий список файлов/каталогов
-- `web_fetch` — HTTP GET запрос через curl
-- `exec_command` — выполнение команды (timeout 60s, проверка blocked-команд)
-- `list_skills` / `skill_detail` — ленивая загрузка тел навыков
-- `rag_index` / `rag_query` — индексация и поиск по документам
+// Выполнение запроса
+agents::AgentRequest request;
+request.set_action("generate");
+request.set_param("description", "Минималистичная тема для портфолио");
 
-### Git
-- `git_status`, `git_diff`, `git_log`
-- `git_add` (частичная индексация), `git_branch`, `git_checkout`
-- `git_commit` (по всем или только по PATH)
+agents::AgentResult result = agent->execute(request);
+if (result.is_success()) {
+    std::string code = result.get<std::string>("theme_code");
+    // Сохраняем файлы
+}
 
-### WordPress
-- `wp_cli`, `wp_db`, `wp_media`, `wp_option`, `wp_rest`
-- `wp_create_site`, `wp_check_deps`, `deploy`, `verify`
-- `php_lint`, `headless_render`, `validate`
+agent->shutdown();
+plugin_destroy_agent(agent);
+```
 
-### Python
-- `python_run`, `pip_install`, `django_manage`
-- `pytest_run`, `venv_create`, `python_lint`
+### Python (через REST API хост-агента)
+```python
+import requests
 
-### DevOps
-- `docker_build`, `docker_run`, `docker_ps`, `docker_logs`
-- `systemd_status`, `systemd_restart`
-- `nginx_test`, `nginx_reload`
-- `cron_list`, `cron_add`, `ssh_exec`
+# Генерация темы
+response = requests.post(
+    "http://localhost:8080/agent/execute",
+    json={
+        "agent": "wp_coder_orchestrator",
+        "action": "generate_theme",
+        "params": {"description": "Тема для интернет-магазина"}
+    }
+)
 
-## Свои навыки
+theme_files = response.json()["files"]
+for filename, content in theme_files.items():
+    with open(filename, "w") as f:
+        f.write(content)
+```
 
-Положите `.md` в каталог данных: `<data_dir>/wp_coder/skills/my_skill.md`.
-Формат: первая строка `# Имя`, вторая — описание, далее — тело инструкции.
-При совпадении имени с inline-навыком модуля inline имеет приоритет.
+## Требования
+
+- WordPress 5.8+
+- PHP 7.4+
+- LLM API ключ (OpenRouter/OpenAI) для генерации
+- WP-CLI для деплоя
+- rsync для синхронизации файлов
+
+## Безопасность
+
+- Все shell-команды проходят через белый список
+- Файловые операции ограничены `wp-content/`
+- Размер файлов ограничен 10 МБ
+- Строгий режим: только разрешенные команды
+
+## Лицензия
+
+MIT — см. `LICENSE` файл.
+
+## Поддержка
+
+Для вопросов и баг-репортов: [GitHub Issues](https://github.com/gsemantic/llama-gui3/issues)
