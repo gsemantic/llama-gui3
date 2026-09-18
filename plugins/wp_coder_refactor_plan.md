@@ -62,9 +62,9 @@
 5. Написать документацию: USAGE.md с примерами, MODULE_DEVELOPMENT.md для контрибьюторов.
 6. Настроить CI: сборка, тесты, проверка политик безопасности.
 
-### Текущая работа (пункт 2)
-- **Файл**: `plugins/user_plugins/wp_coder/src/wp_rag_agent.cpp`
-- **Задача**: подключить wp_rag_agent к core::RagManager для семантического поиска по WordPress-кодовой базе.
+### Текущая работа (пункт 3)
+- **Файл**: `plugins/user_plugins/wp_coder/src/wp_deploy_agent.cpp`
+- **Задача**: реализовать wp_deploy_agent: rsync + WP-CLI обёртка.
 - **Статус**: 🟡 В работе
 
 ## 7. Метрики успеха
