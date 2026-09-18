@@ -62,9 +62,9 @@
 5. Написать документацию: USAGE.md с примерами, MODULE_DEVELOPMENT.md для контрибьюторов.
 6. Настроить CI: сборка, тесты, проверка политик безопасности.
 
-### Текущая работа (пункт 3)
-- **Файл**: `plugins/user_plugins/wp_coder/src/wp_deploy_agent.cpp`
-- **Задача**: реализовать wp_deploy_agent: rsync + WP-CLI обёртка.
+### Текущая работа (пункт 4)
+- **Файл**: `plugins/user_plugins/wp_coder/tests/test_wp_deploy_agent.cpp`
+- **Задача**: добавить тесты для wp_deploy_agent (цель: 80% покрытие).
 - **Статус**: 🟡 В работе
 
 ## 7. Метрики успеха
