@@ -63,8 +63,8 @@
 6. Настроить CI: сборка, тесты, проверка политик безопасности.
 
 ### Текущая работа (пункт 1)
-- **Файл**: `plugins/user_plugins/wp_coder/src/wp_theme_agent.cpp`
-- **Задача**: заменить заглушку `handle_generate` на реальный вызов LLM через `core::LLMClient`.
+- **Файл**: `plugins/user_plugins/wp_coder/src/wp_plugin_agent.cpp`
+- **Задача**: заменить заглушку `handle_generate` на реальный вызов LLM через `core::OpenRouterClient`.
 - **Статус**: 🟡 В работе
 
 ## 7. Метрики успеха
