@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <core/openrouter_client.h>
 
 namespace wp_coder {
 
@@ -39,6 +40,9 @@ private:
 
     agents::AgentContext* context_ = nullptr;
     bool initialized_ = false;
+    std::unique_ptr<llama_gui::core::OpenRouterClient> llm_client_;
+
+    nlohmann::json parse_generated_files(const std::string& generated_code) const;
 };
 
 } // namespace wp_coder
