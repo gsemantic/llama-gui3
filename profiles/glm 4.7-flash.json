@@ -68,74 +68,44 @@
         "auto_price": false,
         "context_length": 0,
         "enabled": true,
-        "endpoint_url": "https://apihub.agnes-ai.com/v1",
+        "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 0,
-        "model_id": "agnes-3.0-flash",
+        "model_id": "deepseek-v4-flash",
         "price_input_per_1m": 0.0,
         "price_output_per_1m": 0.0,
-        "provider_name": "agnes",
+        "provider_name": "Qwen (DashScope)",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
             {
-                "endpoint_url": "https://apihub.agnes-ai.com/v1",
-                "id": "agnes-3.0-flash",
-                "provider_name": "agnes"
-            },
-            {
-                "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
-                "id": "glm-4.7-flash",
-                "provider_name": "Zhipu (GLM)"
-            },
-            {
-                "endpoint_url": "https://openrouter.ai/api/v1",
-                "id": "openrouter/free",
-                "provider_name": "OpenRouter"
-            },
-            {
                 "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "deepseek-v4-pro-0813",
+                "id": "deepseek-v4-flash",
                 "provider_name": "Qwen (DashScope)"
             },
             {
-                "endpoint_url": "https://open.bigmodel.cn/api/paas/v4",
-                "id": "glm-5.3-flash",
-                "provider_name": "Zhipu (GLM)"
+                "endpoint_url": "http://localhost:8090/v1",
+                "id": "GigaChat-3-Pro",
+                "provider_name": "GigaChat"
             },
             {
-                "endpoint_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-                "id": "deepseek-v4-flash-0731",
-                "provider_name": "Alibaba Token Plan"
+                "endpoint_url": "http://localhost:8090/v1",
+                "id": "GigaChat-3-Ultra",
+                "provider_name": "GigaChat"
             },
             {
-                "endpoint_url": "https://openrouter.ai/api/v1",
-                "id": "nex-agi/nex-n2.5-pro:free",
-                "provider_name": "OpenRouter"
-            },
-            {
-                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "qwen3-coder-480b-a35b-instruct",
-                "provider_name": "Qwen (DashScope)"
-            },
-            {
-                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "deepseek-v4-pro",
-                "provider_name": "Qwen (DashScope)"
-            },
-            {
-                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "kimi-k3",
-                "provider_name": "Qwen (DashScope)"
+                "endpoint_url": "http://localhost:8090/v1",
+                "id": "GigaChat-3-Lightning",
+                "provider_name": "GigaChat"
             }
         ],
         "saved_providers": [
             {
-                "endpoint_url": "https://apihub.agnes-ai.com/v1",
+                "endpoint_url": "https://ai.sbercloud.ru/v1/",
                 "max_output_tokens": 0,
-                "model_id": "agnes-3.0-flash",
-                "name": "agnes",
+                "model_id": "GigaChat-3-Ultra",
+                "name": "GigaChat",
                 "socks5_proxy_host": "127.0.0.1:9050",
                 "timeout_ms": 120000,
                 "use_tor": true
@@ -143,7 +113,7 @@
         ],
         "socks5_proxy_host": "127.0.0.1:9050",
         "timeout_ms": 120000,
-        "use_tor": false
+        "use_tor": true
     },
     "control_vector_layer_end": -1,
     "control_vector_layer_start": 0,
@@ -156,6 +126,7 @@
         "wp_coder.allowed_external_paths": "\"[\"/home/Alex/Desktop/\",\"/var/www/html/.\"]\"",
         "wp_coder.app_password": "\"\"",
         "wp_coder.app_user": "\"\"",
+        "wp_coder.continue_conversation": "\"false\"",
         "wp_coder.deploy_host": "\"\"",
         "wp_coder.deploy_pass": "\"\"",
         "wp_coder.deploy_port": "\"\"",
@@ -251,16 +222,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 166,
-            "avg_response_time_ms": 1036.07,
-            "avg_tokens_generated": 82,
-            "avg_tokens_per_second": 113.5,
-            "first_used": "Sat Sep 12 14:59:45 2026",
-            "last_used": "Sat Sep 12 14:59:45 2026",
+            "avg_context_used": 145,
+            "avg_response_time_ms": 787.26,
+            "avg_tokens_generated": 79,
+            "avg_tokens_per_second": 84.6,
+            "first_used": "Tue Sep 22 19:34:01 2026",
+            "last_used": "Tue Sep 22 19:34:01 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 78
+            "total_generations": 82
         }
     },
     "output": {

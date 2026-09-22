@@ -342,6 +342,21 @@ int main(int argc, char* argv[]) {
         // SIGTERM/SIGINT: корректное завершение GUI с сохранением сессии
         std::signal(SIGTERM, [](int) { MainWindow::requestExternalStop(); });
         std::signal(SIGINT, [](int) { MainWindow::requestExternalStop(); });
+
+        // atexit: гарантированное убийство осиротевших llama-server процессов.
+        // EmbeddingServer регистрирует свой atexit-обработчик при создании,
+        // но на случай если GUI упадёт до создания EmbeddingServer — ставим
+        // общий обработчик, который убьёт все llama-server на порту 8083
+        // (embedding) и 8081 (основной). Это защитная сеть, а не основной
+        // механизм остановки — нормальная остановка идёт через деструкторы.
+        std::atexit([]() {
+            // fuser -k отправляет SIGKILL только процессу, слушающему порт.
+            // Безопасно: не трогает чужие процессы.
+            for (int port : {8083, 8081}) {
+                std::string cmd = "fuser -k " + std::to_string(port) + "/tcp 2>/dev/null";
+                (void)system(cmd.c_str());
+            }
+        });
     }
 
     try {

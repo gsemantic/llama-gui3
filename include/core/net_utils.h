@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <cctype>
 #include <cerrno>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -9,6 +10,43 @@
 
 namespace llama_gui {
 namespace core {
+
+/**
+ * @brief Извлечь хост из URL (scheme://host[:port]/path,UserInfo,IPv6 в скобках)
+ */
+inline std::string url_host(const std::string& url) {
+    std::string rest = url;
+    size_t p = rest.find("://");
+    if (p != std::string::npos) rest = rest.substr(p + 3);
+    size_t end = rest.find_first_of("/?#");
+    if (end != std::string::npos) rest = rest.substr(0, end);
+    size_t at = rest.rfind('@');
+    if (at != std::string::npos) rest = rest.substr(at + 1);
+    if (!rest.empty() && rest.front() == '[') {
+        size_t rb = rest.find(']');
+        return rb == std::string::npos ? rest.substr(1) : rest.substr(1, rb - 1);
+    }
+    size_t colon = rest.rfind(':');
+    if (colon != std::string::npos) rest = rest.substr(0, colon);
+    return rest;
+}
+
+/**
+ * @brief true если URL указывает на локальный (loopback) адрес.
+ *
+ * Используется для обхода SOCKS/Tor-прокси: Tor не может (и не должен)
+ * ходить в localhost — запросы к локальному прокси-серверу (например,
+ * gpt2giga на http://localhost:8090) должны идти напрямую.
+ */
+inline bool url_is_loopback(const std::string& url) {
+    std::string host = url_host(url);
+    for (auto& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (host == "localhost" || host == "::1" || host == "0.0.0.0" ||
+        host.rfind("127.", 0) == 0 || host.rfind("::ffff:127.", 0) == 0) {
+        return true;
+    }
+    return false;
+}
 
 /**
  * @brief Проверка, свободен ли TCP-порт (bind-тест)

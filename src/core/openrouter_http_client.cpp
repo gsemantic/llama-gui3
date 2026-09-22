@@ -1,5 +1,6 @@
 #include "../../include/core/openrouter_http_client.h"
 #include "../../include/core/logger.h"
+#include "../../include/core/net_utils.h"
 #include <iostream>
 
 namespace llama_gui {
@@ -145,8 +146,8 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
-    // SOCKS5-прокси (Tor и т.п.)
-    if (!proxy_.empty()) {
+    // SOCKS5-прокси (Tor и т.п.); локальные endpoints — всегда напрямую
+    if (!proxy_.empty() && !url_is_loopback(url)) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_.c_str());
         curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
     }
@@ -220,8 +221,8 @@ std::string OpenRouterHttpClient::make_request(const std::string& endpoint, cons
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
-    // SOCKS5-прокси (Tor и т.п.)
-    if (!proxy_.empty()) {
+    // SOCKS5-прокси (Tor и т.п.); локальные endpoints — всегда напрямую
+    if (!proxy_.empty() && !url_is_loopback(url)) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_.c_str());
         curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
     }

@@ -8,6 +8,10 @@
 #include <csignal>
 #include <unistd.h>
 #include <fstream>
+#include <cstdlib>
+#include <sys/wait.h>
+#include <cstring>
+#include <algorithm>
 
 namespace llama_gui {
 namespace core {
@@ -185,31 +189,89 @@ bool ServerManager::restart_with_settings(std::function<void(Settings&)> new_set
 // ============================================================================
 
 void ServerManager::server_thread_function() {
+    // -----------------------------------------------------------------------
+    // Разбиваем команду на argv[] для execvp (без shell)
+    // -----------------------------------------------------------------------
     std::string command = build_server_command();
+    std::vector<std::string> args_str;
+    std::istringstream iss(command);
+    std::string token;
+    while (iss >> token) {
+        args_str.push_back(token);
+    }
 
-    std::cerr << "Starting server with command:" << std::endl;
-    std::cerr << command << std::endl;
+    std::vector<char*> argv;
+    for (auto& a : args_str) {
+        argv.push_back(a.data());
+    }
+    argv.push_back(nullptr);
 
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) {
-        std::cerr << "Failed to start server process" << std::endl;
+    // -----------------------------------------------------------------------
+    // pipe: дочерний процесс пишет stdout → parent читает
+    // -----------------------------------------------------------------------
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        std::cerr << "[ServerManager] pipe() failed: " << strerror(errno) << std::endl;
         server_running_ = false;
         return;
     }
 
-    char buffer[128];
+    std::cerr << "Starting server with command:" << std::endl;
+    std::cerr << command << std::endl;
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        std::cerr << "[ServerManager] fork() failed: " << strerror(errno) << std::endl;
+        close(pipefd[0]);
+        close(pipefd[1]);
+        server_running_ = false;
+        return;
+    }
+
+    if (pid == 0) {
+        // === CHILD ===
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        execvp(argv[0], argv.data());
+
+        // execvp returns only on error
+        _exit(127);
+    }
+
+    // === PARENT ===
+    close(pipefd[1]);
+    child_stdout_fd_ = pipefd[0];
+    child_pid_.store(pid);
+
+    // -----------------------------------------------------------------------
+    // Читаем вывод дочернего процесса
+    // -----------------------------------------------------------------------
+    char buffer[256];
     std::string output;
 
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr && !shutting_down_) {
+    while (!shutting_down_) {
+        ssize_t n = read(child_stdout_fd_, buffer, sizeof(buffer) - 1);
+        if (n <= 0) break;
+        buffer[n] = '\0';
         output += buffer;
         server_output_ = output;
-        
+
         if (status_callback_) {
             status_callback_(buffer, server_running_);
         }
     }
 
-    pclose(pipe);
+    close(child_stdout_fd_);
+    child_stdout_fd_ = -1;
+
+    // Wait for child to avoid zombie
+    int status = 0;
+    waitpid(pid, &status, 0);
+    child_pid_.store(0);
+
     server_running_ = false;
 
     // Cleanup temp chat template file
@@ -483,17 +545,47 @@ std::string ServerManager::format_dry_breakers(const std::vector<std::string>& b
 }
 
 bool ServerManager::kill_server_process(bool blocking) {
-    // Try to kill the llama-server process
-    std::string pid_cmd = "pkill -f llama-server";
-    int result = system(pid_cmd.c_str());
-    
+    pid_t pid = child_pid_.load();
+
+    // 1) Убиваем по PID — SIGTERM (graceful), затем SIGKILL
+    if (pid > 0) {
+        if (kill(pid, 0) == 0) {
+            std::cerr << "[ServerManager] Отправляю SIGTERM процессу " << pid << std::endl;
+            kill(pid, SIGTERM);
+
+            // Ждём до 3 секунд для graceful shutdown
+            for (int i = 0; i < 30; ++i) {
+                if (kill(pid, 0) != 0) {
+                    std::cerr << "[ServerManager] Процесс " << pid << " завершился" << std::endl;
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            // SIGKILL как last resort
+            std::cerr << "[ServerManager] SIGTERM не сработал, отправляю SIGKILL процессу " << pid << std::endl;
+            kill(pid, SIGKILL);
+
+            if (blocking) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+            return true;
+        }
+    }
+
+    // 2) Fallback: fuser -k по порту (безопаснее чем pkill -f llama-server)
+    std::string kill_cmd = "fuser -k " + std::to_string(server_port_) + "/tcp 2>/dev/null";
+    int result = system(kill_cmd.c_str());
     if (result == 0) {
+        std::cerr << "[ServerManager] fuser убил процесс на порту " << server_port_ << std::endl;
         if (blocking) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
         }
         return true;
     }
-    
+
+    std::cerr << "[ServerManager] Не удалось убить процесс на порту " << server_port_
+              << " (PID=" << pid << ", fuser вернул " << result << ")" << std::endl;
     return false;
 }
 

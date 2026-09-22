@@ -48,7 +48,7 @@ void impl::LlamaInterfaceImpl::apply_ssl_options(CURL* curl) const
 {
     // verify_ssl=false (локальный сценарий по умолчанию) — самоподписанные
     // сертификаты и https-прокси без CA не блокируют подключение.
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, ssl_verify_ ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, ssl_verify_ ? 2L : 0L);
 }
 

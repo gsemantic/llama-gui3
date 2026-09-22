@@ -4,6 +4,7 @@
 #include "../include/ui/localization_manager.h"
 #include "../include/ui/input_text_context_menu.h"
 #include "../include/core/logger.h"
+#include "../include/core/net_utils.h"
 #include <imgui.h>
 #include <cstring>
 #include <iostream>
@@ -337,7 +338,8 @@ void CloudServicesDialog::fetch_models() {
             curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
                              timeout_ms_ > 0 && timeout_ms_ < 15000 ? timeout_ms_ : 15000);
 
-            if (!proxy_url.empty()) {
+            // Локальные endpoints — всегда напрямую (Tor не ходит в localhost)
+            if (!proxy_url.empty() && !url_is_loopback(url)) {
                 curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
                 curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
             }
@@ -529,7 +531,8 @@ void CloudServicesDialog::start_model_checks() {
                 curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
                 curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
-                if (!proxy_url.empty()) {
+                // Локальные endpoints — всегда напрямую (Tor не ходит в localhost)
+                if (!proxy_url.empty() && !url_is_loopback(url)) {
                     curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
                     curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
                 }

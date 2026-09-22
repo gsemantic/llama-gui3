@@ -19,13 +19,15 @@ AgentChatIntegration::AgentChatIntegration() = default;
 AgentChatIntegration::~AgentChatIntegration() = default;
 
 bool AgentChatIntegration::initialize(agents::AgentRegistry* registry,
-                                       agents::AgentContext* context) {
+                                       agents::AgentContext* context,
+                                       core::Settings* settings) {
     if (!registry || !context) {
         return false;
     }
     
     registry_ = registry;
     context_ = context;
+    settings_ = settings;
     
     // Инициализация компонентов
     if (!agent_panel_.initialize(registry_)) {
@@ -34,7 +36,7 @@ bool AgentChatIntegration::initialize(agents::AgentRegistry* registry,
     
     status_widget_.initialize(registry_);
     
-    if (!agent_commands_.initialize(registry_, context_)) {
+    if (!agent_commands_.initialize(registry_, context_, settings_)) {
         return false;
     }
     

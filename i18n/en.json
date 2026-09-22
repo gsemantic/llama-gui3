@@ -893,6 +893,9 @@
     "commands.agents_usage": "/agents <command>",
     "commands.agents_example1": "/agents list",
     "commands.agents_example2": "/agents status",
+    "commands.connect_desc": "Connect to cloud providers",
+    "commands.connect_usage": "/connect <provider> [options]",
+    "commands.connect_example": "/connect gigachat",
 
     "labels.builtin": "Built-in",
     "labels.plugin": "Plugin",

@@ -911,6 +911,9 @@
     "commands.agents_usage": "/agents <команда>",
     "commands.agents_example1": "/agents list",
     "commands.agents_example2": "/agents status",
+    "commands.connect_desc": "Подключение к облачным провайдерам",
+    "commands.connect_usage": "/connect <провайдер> [опции]",
+    "commands.connect_example": "/connect gigachat",
 
     "labels.builtin": "Встроенный",
     "labels.plugin": "Плагин",

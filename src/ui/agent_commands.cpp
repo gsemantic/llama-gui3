@@ -4,6 +4,7 @@
  */
 
 #include "ui/agent_commands.h"
+#include "ui/connect_commands.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -20,13 +21,15 @@ AgentCommands::AgentCommands() = default;
 AgentCommands::~AgentCommands() = default;
 
 bool AgentCommands::initialize(agents::AgentRegistry* registry, 
-                                agents::AgentContext* context) {
-    if (!registry || !context) {
+                                agents::AgentContext* context,
+                                core::Settings* settings) {
+    if (!registry || !context || !settings) {
         return false;
     }
     
     registry_ = registry;
     context_ = context;
+    settings_ = settings;
     
     return true;
 }
@@ -77,6 +80,8 @@ AgentCommandResult AgentCommands::execute(const std::string& command) {
         return handle_terminal_command(args);
     } else if (cmd == "agents") {
         return handle_agents_command(args);
+    } else if (cmd == "connect") {
+        return handle_connect_command(args);
     }
     
     AgentCommandResult result;
@@ -725,6 +730,42 @@ AgentCommandResult AgentCommands::handle_terminal_command(
         result.message = agent_result.message();
     }
 
+    return result;
+}
+
+AgentCommandResult AgentCommands::handle_connect_command(
+        const std::vector<std::string>& args) {
+    
+    AgentCommandResult result;
+    
+    if (!settings_) {
+        result.success = false;
+        result.message = "Settings not initialized for connect commands";
+        return result;
+    }
+    
+    // Create a ConnectCommands instance to handle the connection logic
+    llama_gui::ui::ConnectCommands connect_cmds;
+    if (!connect_cmds.initialize(settings_)) {
+        result.success = false;
+        result.message = "Failed to initialize connect commands";
+        return result;
+    }
+    
+    // Build command string from args
+    std::string command = "/connect";
+    for (const auto& arg : args) {
+        command += " " + arg;
+    }
+    
+    auto connect_result = connect_cmds.execute(command);
+    
+    result.agent_name = "connect_agent";
+    result.action = "connect";
+    result.success = connect_result.success;
+    result.message = connect_result.message;
+    result.data = connect_result.data;
+    
     return result;
 }
 

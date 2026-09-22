@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <vector>
+#include <sys/types.h>
 
 #include "core/settings.h"
 
@@ -17,7 +18,11 @@ namespace core {
 class Settings;
 
 /**
- * Server manager for controlling llama.cpp server process
+ * Server manager for controlling llama.cpp server process.
+ *
+ * Дочерний процесс запускается через fork/exec (не popen), что позволяет
+ * отслеживать PID и гарантированно убивать процесс при завершении приложения,
+ * включая аварийные сценарии (через atexit-обработчик).
  */
 class ServerManager : public std::enable_shared_from_this<ServerManager> {
 public:
@@ -63,6 +68,9 @@ public:
     /// Get current server URL
     std::string get_server_url() const;
 
+    /// PID дочернего процесса (0 = не запущен). Используется atexit-обработчиком.
+    pid_t child_pid() const { return child_pid_.load(); }
+
     /// Restart server with new settings
     bool restart_with_settings(std::function<void(Settings&)> new_settings);
 
@@ -71,6 +79,8 @@ private:
     std::unique_ptr<std::thread> server_thread_;
     std::atomic<bool> server_running_;
     std::atomic<bool> shutting_down_;
+    std::atomic<pid_t> child_pid_{0};
+    int child_stdout_fd_ = -1;
     std::string server_status_;
     std::string server_output_;
     StatusCallback status_callback_;

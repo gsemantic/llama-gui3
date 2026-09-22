@@ -44,6 +44,12 @@ bool WPFileAgent::initialize(agents::AgentContext* context) {
     };
     
     // Базовая директория wp-content
+    if (context_ && !context_->get_project_root().empty()) {
+        fs::path root(context_->get_project_root());
+        if (fs::exists(root / wp_content_base_)) {
+            wp_content_base_ = (root / wp_content_base_).string();
+        }
+    }
     wp_content_base_ = "wp-content";
     
     if (context_) {

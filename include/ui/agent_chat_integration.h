@@ -11,9 +11,13 @@
 #include <agents/agents.h>
 #include <string>
 #include <functional>
+#include "../../include/core/settings.h"
 
 namespace llama_gui {
 namespace ui {
+namespace core {
+using Settings = llama_gui::core::Settings;
+} // namespace core
 
 /**
  * @brief Результат выполнения команды для отображения в чате
@@ -41,9 +45,11 @@ public:
      * @brief Инициализация интеграции
      * @param registry Реестр агентов
      * @param context Контекст агентов
+     * @param settings Настройки приложения (опционально)
      * @return true если успешно
      */
-    bool initialize(agents::AgentRegistry* registry, agents::AgentContext* context);
+    bool initialize(agents::AgentRegistry* registry, agents::AgentContext* context,
+                    core::Settings* settings = nullptr);
 
     /**
      * @brief Обработка команды из чата
@@ -100,6 +106,7 @@ private:
 
     agents::AgentRegistry* registry_ = nullptr;
     agents::AgentContext* context_ = nullptr;
+    core::Settings* settings_ = nullptr;
     
     AgentPanel agent_panel_;
     AgentStatusWidget status_widget_;

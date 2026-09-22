@@ -98,77 +98,105 @@ agents::AgentResult WPCoderOrchestrator::handle_generate_theme(const agents::Age
     if (context_) {
         context_->info(name(), "Delegating to wp_theme_agent");
     }
-    // TODO: Делегировать реальному wp_theme_agent
-    return agents::AgentResult::success({
-        {"message", "Theme generation delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto theme_agent = std::make_unique<wp_coder::WPThemeAgent>();
+    if (!theme_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_theme_agent");
+    }
+    
+    // Делегируем запрос
+    return theme_agent->execute(request);
 }
 
 agents::AgentResult WPCoderOrchestrator::handle_generate_plugin(const agents::AgentRequest& request) {
     if (context_) {
         context_->info(name(), "Delegating to wp_plugin_agent");
     }
-    // TODO: Делегировать реальному wp_plugin_agent
-    return agents::AgentResult::success({
-        {"message", "Plugin generation delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto plugin_agent = std::make_unique<wp_coder::WPPluginAgent>();
+    if (!plugin_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_plugin_agent");
+    }
+    
+    // Делегируем запрос
+    return plugin_agent->execute(request);
 }
 
 agents::AgentResult WPCoderOrchestrator::handle_find_hooks(const agents::AgentRequest& request) {
     if (context_) {
         context_->info(name(), "Delegating to wp_hook_agent");
     }
-    // TODO: Делегировать реальному wp_hook_agent
-    return agents::AgentResult::success({
-        {"message", "Hook search delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto hook_agent = std::make_unique<wp_coder::WPHookAgent>();
+    if (!hook_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_hook_agent");
+    }
+    
+    // Делегируем запрос
+    return hook_agent->execute(request);
 }
 
 agents::AgentResult WPCoderOrchestrator::handle_deploy(const agents::AgentRequest& request) {
     if (context_) {
         context_->info(name(), "Delegating to wp_deploy_agent");
     }
-    // TODO: Делегировать реальному wp_deploy_agent
-    return agents::AgentResult::success({
-        {"message", "Deployment delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto deploy_agent = std::make_unique<wp_coder::WPDeployAgent>();
+    if (!deploy_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_deploy_agent");
+    }
+    
+    // Делегируем запрос
+    return deploy_agent->execute(request);
 }
 
 agents::AgentResult WPCoderOrchestrator::handle_search_code(const agents::AgentRequest& request) {
     if (context_) {
         context_->info(name(), "Delegating to wp_rag_agent");
     }
-    // TODO: Делегировать реальному wp_rag_agent
-    return agents::AgentResult::success({
-        {"message", "Code search delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto rag_agent = std::make_unique<wp_coder::WPRagAgent>();
+    if (!rag_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_rag_agent");
+    }
+    
+    // Делегируем запрос
+    return rag_agent->execute(request);
 }
 
 agents::AgentResult WPCoderOrchestrator::handle_exec_cli(const agents::AgentRequest& request) {
     if (context_) {
         context_->info(name(), "Delegating to wp_terminal_agent");
     }
-    // TODO: Делегировать реальному wp_terminal_agent
-    return agents::AgentResult::success({
-        {"message", "CLI execution delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto terminal_agent = std::make_unique<wp_coder::WPTerminalAgent>();
+    if (!terminal_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_terminal_agent");
+    }
+    
+    // Делегируем запрос
+    return terminal_agent->execute(request);
 }
 
 agents::AgentResult WPCoderOrchestrator::handle_file_ops(const agents::AgentRequest& request) {
     if (context_) {
         context_->info(name(), "Delegating to wp_file_agent");
     }
-    // TODO: Делегировать реальному wp_file_agent
-    return agents::AgentResult::success({
-        {"message", "File operations delegated to sub-agent"},
-        {"status", "delegated"}
-    });
+    
+    // Создаем и инициализируем субагент
+    auto file_agent = std::make_unique<wp_coder::WPFileAgent>();
+    if (!file_agent->initialize(context_)) {
+        return agents::AgentResult::error("Failed to initialize wp_file_agent");
+    }
+    
+    // Делегируем запрос
+    return file_agent->execute(request);
 }
 
 // ===========================================================================

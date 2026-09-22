@@ -908,11 +908,18 @@ void MainWindow::shutdown() {
     // потому что WorkspaceLayoutManager::save() читает позиции/размеры из ImGui::GetCurrentContext().
     // Вызов здесь (после destroy Context) привёл бы к сохранению устаревших данных WindowManager.
 
-    // Останавливаем выделенный сервер эмбеддингов (bge-m3)
+    // Останавливаем серверы ДО уничтожения UI-подсистем, чтобы дочерние
+    // процессы llama-server были гарантированно убиты (PID отслеживается
+    // через fork/exec, а не слепой pkill -f).
     if (embedding_server_) {
         embedding_server_->stop_server(true);
         embedding_server_.reset();
         LOG_INFO("EmbeddingServer остановлен");
+    }
+
+    if (server_manager_) {
+        server_manager_->stop_server(true);
+        LOG_INFO("ServerManager остановлен");
     }
 
     // Выгружаем плагины до уничтожения UI-подсистем
@@ -1737,7 +1744,7 @@ void MainWindow::initialize_agent_system() {
 
     // Chat integration: /agent <name> <action> [params] commands
     agent_chat_integration_ = std::make_unique<AgentChatIntegration>();
-    if (agent_chat_integration_->initialize(&agent_registry_, &agent_context_)) {
+    if (agent_chat_integration_->initialize(&agent_registry_, &agent_context_, &settings_)) {
         chat_interface_->set_agent_command_handler(
             [this](const std::string& command) {
                 if (!agent_chat_integration_ || !agent_chat_integration_->is_available()) {

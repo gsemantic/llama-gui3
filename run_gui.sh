@@ -102,13 +102,15 @@ show_status() {
     
     echo ""
     
-    # Проверяем порт 8081
-    if lsof -i :8081 > /dev/null 2>&1; then
-        print_colored $GREEN "✅ Порт 8081 занят:"
-        lsof -i :8081
-    else
-        print_colored $RED "❌ Порт 8081 свободен"
-    fi
+    # Проверяем порты (основной + embedding)
+    for port in 8081 8083; do
+        if fuser "$port"/tcp > /dev/null 2>&1; then
+            print_colored $GREEN "✅ Порт $port занят:"
+            fuser "$port"/tcp 2>/dev/null
+        else
+            print_colored $RED "❌ Порт $port свободен"
+        fi
+    done
     
     echo ""
     print_colored $BLUE "Путь к llama-server: /home/Alex/projects/llama-b7472-bin-ubuntu-x64/llama-b7472/llama-server"
@@ -125,27 +127,37 @@ kill_servers() {
     echo "======================================================"
     print_colored $BLUE "     ОСТАНОВКА СЕРВЕРОВ"
     echo "======================================================"
-    
-    if pgrep -f llama-server > /dev/null; then
-        print_colored $YELLOW "🛑 Останавливаю llama-server процессы..."
-        pkill -f llama-server
-        sleep 2
-        
-        if pgrep -f llama-server > /dev/null; then
-            print_colored $YELLOW "⚠ Принудительная остановка..."
-            pkill -9 -f llama-server
+
+    # Останавливаем по портам (безопаснее чем pkill -f, не трогает чужие процессы)
+    local ports_stopped=0
+    for port in 8081 8083; do
+        if fuser "$port"/tcp > /dev/null 2>&1; then
+            print_colored $YELLOW "🛑 Останавливаю процесс на порту $port..."
+            fuser -k "$port"/tcp 2>/dev/null || true
+            sleep 1
+            # Проверяем — если жив, SIGKILL
+            if fuser "$port"/tcp > /dev/null 2>&1; then
+                fuser -k -9 "$port"/tcp 2>/dev/null || true
+            fi
+            ports_stopped=$((ports_stopped + 1))
         fi
-        
-        print_colored $GREEN "✅ Серверы остановлены"
+    done
+
+    if [ $ports_stopped -gt 0 ]; then
+        print_colored $GREEN "✅ Серверы остановлены ($ports_stopped портов освобождено)"
     else
-        print_colored $GREEN "✅ Активные серверы не найдены"
-    fi
-    
-    # Освобождаем порт 8081
-    if lsof -i :8081 > /dev/null 2>&1; then
-        print_colored $YELLOW "🛑 Освобождаю порт 8081..."
-        fuser -k 8081/tcp 2>/dev/null || true
-        print_colored $GREEN "✅ Порт 8081 освобожден"
+        # Fallback: pkill если fuser не нашёл, но процессы есть
+        if pgrep -f llama-server > /dev/null; then
+            print_colored $YELLOW "🛑 fuser не нашёл, использую pkill..."
+            pkill -f llama-server
+            sleep 2
+            if pgrep -f llama-server > /dev/null; then
+                pkill -9 -f llama-server
+            fi
+            print_colored $GREEN "✅ Серверы остановлены (pkill)"
+        else
+            print_colored $GREEN "✅ Активные серверы не найдены"
+        fi
     fi
 }
 
