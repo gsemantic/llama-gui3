@@ -14,6 +14,7 @@
 #include "test_framework.h"
 #include "../core/limits.h"
 
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -51,6 +52,57 @@ std::string json_field(const std::string& text, const std::string& key) {
     return text.substr(q1 + 1, q2 - q1 - 1);
 }
 
+/* Оставить только код: вырезать комментарии и строковые литералы.
+ *
+ * Нужно, чтобы guard-тесты ловили ВЫЗОВ, а не упоминание. Без этого
+ * политика команд попадает сама в свой же тест: в command_policy.cpp
+ * есть строковый литерал "system(" (поиск подстроки в аргументах awk) и
+ * комментарий про system() — и ни то, ни другое вызовом не является.
+ *
+ * Известная погрешность: одинарные кавычки не разбираются, поэтому
+ * код вида char q = '"' может «съесть» остаток строки. Для этих двух
+ * проверок это означает лишь риск НЕ заметить вызов в той же строке,
+ * но не ложную тревогу. */
+std::string code_only(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    bool in_block = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (in_block) {
+            if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '/') {
+                in_block = false;
+                ++i;
+            } else {
+                r += (s[i] == '\n' ? '\n' : ' ');
+            }
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            in_block = true;
+            ++i;
+            r += "  ";
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') { r += ' '; ++i; }
+            r += '\n';
+            continue;
+        }
+        if (s[i] == '"') {
+            ++i;
+            while (i < s.size() && s[i] != '"' && s[i] != '\n') {
+                if (s[i] == '\\') { r += ' '; ++i; }
+                if (i < s.size()) r += (s[i] == '\n' ? '\n' : ' ');
+                ++i;
+            }
+            r += ' ';
+            continue;
+        }
+        r += s[i];
+    }
+    return r;
+}
+
 }  // namespace
 
 TEST(manifest_plugin_json_has_version) {
@@ -58,7 +110,7 @@ TEST(manifest_plugin_json_has_version) {
     ASSERT_TRUE(!j.empty());
     std::string v = json_field(j, "version");
     ASSERT_TRUE(!v.empty());
-    ASSERT_TRUE(v == "0.7.0");
+    ASSERT_TRUE(v == "0.8.0");
 }
 
 TEST(manifest_repo_copy_matches_plugin_json) {
@@ -93,7 +145,7 @@ TEST(manifest_code_version_matches_manifest) {
 #ifdef WP_CODER_VERSION
     const char* code_version = WP_CODER_VERSION;
 #else
-    const char* code_version = "0.7.0";
+    const char* code_version = "0.8.0";
 #endif
     std::string j = read_file(plugin_root() / "plugin.json");
     ASSERT_TRUE(json_field(j, "version") == std::string(code_version));
@@ -102,6 +154,7 @@ TEST(manifest_code_version_matches_manifest) {
 TEST(manifest_changelog_documents_current_version) {
     std::string c = read_file(plugin_root() / "CHANGELOG.md");
     ASSERT_TRUE(!c.empty());
+    ASSERT_TRUE(c.find("## [0.8.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.7.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.5.0]") != std::string::npos);
     /* Старая версия 0.4.0 осталась в истории — это нормально. */
@@ -269,6 +322,67 @@ TEST(root_cmake_guards_against_stale_test_artifacts) {
     ASSERT_TRUE(cml.find("BUILD_TESTS=OFF") != std::string::npos);
     ASSERT_TRUE(cml.find("tests/CTestTestfile.cmake") != std::string::npos);
     ASSERT_TRUE(cml.find("FATAL_ERROR") != std::string::npos);
+}
+
+/* --- И3.7: исполнение LLM-строки только через popen с политикой --- */
+
+TEST(no_std_system_in_sources) {
+    /* Мёртвый код src/wp_deploy_agent.cpp (удалён в И0.6) исполнял строку,
+     * собранную моделью, через std::system — без таймаута, без разбора
+     * команды, без политики. С тех пор весь исполняемый код плагина идёт
+     * через shell::run_capture*, где стоит проверка политики команд
+     * (И3.6) и timeout(1). Возвращать std::system нельзя: это обход
+     * обоих.
+     *
+     * Проверяется всё дерево, кроме тестов: сами тесты обязаны
+     * называть запрещённую строку, чтобы проверять политику. */
+    const std::string self_dir = "tests";
+    for (const auto& e : fs::recursive_directory_iterator(plugin_root())) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().parent_path().filename() == self_dir) continue;
+        auto ext = e.path().extension().string();
+        if (ext != ".cpp" && ext != ".h") continue;
+        const std::string s = code_only(read_file(e.path()));
+        /* «system(» с границей идентификатора: run_capture_status( и
+         * filesystem::path не должны срабатывать, а system( — должен. */
+        size_t at = 0;
+        while ((at = s.find("system(", at)) != std::string::npos) {
+            const bool boundary =
+                at == 0 || !(std::isalnum(static_cast<unsigned char>(s[at - 1])) ||
+                              s[at - 1] == '_');
+            if (boundary) {
+                std::cerr << "  найден вызов system( в " << e.path().string()
+                          << std::endl;
+                ASSERT_TRUE(false);
+            }
+            at += 7;
+        }
+    }
+}
+
+TEST(all_shell_execution_goes_through_the_guarded_wrapper) {
+    /* popen — единственная точка исполнения. Обёртка shell::run_capture
+     * стоит перед ней и проверяет политику команд; если где-то появится
+     * свой popen/system, проверка перестанет работать для этого места
+     * молча. */
+    for (const char* dir : {"core", "modules", "src", "ui"}) {
+        for (const auto& e :
+             fs::recursive_directory_iterator(plugin_root() / dir)) {
+            if (!e.is_regular_file()) continue;
+            auto ext = e.path().extension().string();
+            if (ext != ".cpp") continue;
+            const std::string s = code_only(read_file(e.path()));
+            const std::string name = e.path().filename().string();
+            if (name == "shell.h") continue;   /* сама обёртка */
+            for (const char* call : {"popen(", "::system(", "execvp(", "execv("}) {
+                if (s.find(call) != std::string::npos) {
+                    std::cerr << "  " << e.path().string() << ": прямой вызов "
+                              << call << " в обход shell-обёртки" << std::endl;
+                    ASSERT_TRUE(false);
+                }
+            }
+        }
+    }
 }
 
 /* --- Проектные строки-инварианты, которые легко сломать --- */

@@ -532,8 +532,16 @@ void register_base_tools() {
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             std::string cmd = arg_str(a, "cli");
             if (cmd.empty()) return out("[ошибка] пустая команда (cli)");
-            if (!security::is_command_allowed(cmd))
-                return out("[запрещено] команда заблокирована политикой безопасности");
+            /* И3.6: allowlist вместо blocklist. Разбор команды снимает
+             * кавычки и обходит конвейеры, поэтому «cat x | sh» —
+             * это две команды, а не строка; программа сверх списка
+             * не выполняется, а sudo -E / git -c core.pager= / rm -rf ~
+             * отклоняются валидаторами. Отказ политики подтверждению
+             * пользователем не подлежит: разрешение («bash → allow»)
+             * не отменяет запрет, иначе политика была бы украшением. */
+            std::string refusal = security::check_command(cmd);
+            if (!refusal.empty())
+                return out("[запрещено политикой команд] " + refusal);
             /* Команда упоминает путь за пределами проекта — спрашиваем
              * разрешение пользователя, как это делают файловые инструменты.
              * Раньше проверки не было вовсе: единственный инструмент, который

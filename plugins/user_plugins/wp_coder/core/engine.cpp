@@ -506,6 +506,19 @@ void Engine::load_settings() {
      * база уже стоит. */
     permissions_.load_user_rules(
         setting_get(cb_, "wp_coder.permission_rules", ""));
+
+    /* И3.6: доверенные сетевые хосты для curl/wget в exec_command.
+     * Штатно доверен только localhost (задан в конструкторе политики),
+     * сюда добавляются адреса сайта из настроек: их плагин и так
+     * считает своими и сам по ним ходит при проверке и health check.
+     * Доверять произвольный хост по умолчанию нельзя — тогда список
+     * разрешённых хостов ничего не разрешает. */
+    {
+        std::vector<std::string> hosts;
+        if (!state_.wp_local_url.empty()) hosts.push_back(state_.wp_local_url);
+        if (!state_.wp_site_url.empty()) hosts.push_back(state_.wp_site_url);
+        security::trust_command_hosts(hosts);
+    }
 }
 
 void Engine::save_settings() {

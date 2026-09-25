@@ -214,11 +214,25 @@ std::string wp_create_site(const std::string& site_name_in, const std::string& d
                    " && sudo chown -R www-data:www-data " + shell::shell_quote(docroot)))
         return s.str();
     {
-        /* SQL с экранированными идентификаторами. */
-        std::string create_db = "sudo mariadb -e \"CREATE DATABASE IF NOT EXISTS `" + db_name
-            + "`; CREATE USER IF NOT EXISTS '" + db_user + "'@'localhost' IDENTIFIED BY '"
+        /* SQL с экранированными идентификаторами.
+         *
+         * И3: обратные кавычки экранируются. В двойных кавычках bash
+         * считает ` командой — «CREATE DATABASE `wp_x`» выполняло wp_x
+         * как программу и подставляла пустой вывод, то есть SQL
+         * приходил битым: «CREATE DATABASE IF NOT EXISTS ;». Проверено
+         * на bash: echo "a `id -u` b" печатает «a 0 b». Политика команд
+         * (И3.6) теперь отказывает такой команде целиком, так что без
+         * экранирования wp_create_site просто перестал бы работать — но
+         * и до этого не работал.
+
+         *
+         * Экранирование пароля (D8) остаётся открытым до И13.3: пароль
+         * с кавычкой или обратным слэшем по-прежнему ломает выход, и
+         * теперь это видно как отказ политики, а не как молча битый SQL. */
+        std::string create_db = "sudo mariadb -e \"CREATE DATABASE IF NOT EXISTS \\`" + db_name
+            + "\\`; CREATE USER IF NOT EXISTS '" + db_user + "'@'localhost' IDENTIFIED BY '"
             + shell::shell_quote(db_pass).substr(1, shell::shell_quote(db_pass).size() - 2)
-            + "'; GRANT ALL ON `" + db_name + "`.* TO '" + db_user + "'@'localhost'; FLUSH PRIVILEGES;\"";
+            + "'; GRANT ALL ON \\`" + db_name + "\\`.* TO '" + db_user + "'@'localhost'; FLUSH PRIVILEGES;\"";
         if (!run_step("Создание БД " + db_name, create_db)) return s.str();
     }
     if (!run_step("Скачивание WordPress",

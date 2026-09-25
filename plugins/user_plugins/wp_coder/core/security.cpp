@@ -1,4 +1,7 @@
 #include "security.h"
+
+#include "command_policy.h"
+
 #include <algorithm>
 #include <sstream>
 
@@ -59,6 +62,13 @@ bool is_path_not_dangerous(const std::string& abs_path) {
 }
 
 const std::vector<std::string>& blocked_commands() {
+    /* И3: curl и wget убраны из списка. Запрет «любой curl подстрокой» —
+     * это ровно тот приём, которым был заменён allowlist: нельзя
+     * перечислить плохие строки, можно перечислить допустимые хосты.
+     * Теперь curl проверяется политикой команд (allowlist хостов +
+     * запрет --upload-file/--config/выгрузки в системный каталог).
+     * Остальные семь строк остаются как грубый фильтр: он ловит и то,
+     * что разбор команды не понял. */
     static const std::vector<std::string> blocked = {
         "rm -rf /",
         "rm -rf /*",
@@ -67,8 +77,6 @@ const std::vector<std::string>& blocked_commands() {
         "> /dev/sda",
         ":(){ :|:& };:",  // fork bomb
         "chmod -R 777 /",
-        "wget ",  // + pipe to sh
-        "curl ",  // + pipe to sh
     };
     return blocked;
 }
@@ -78,6 +86,30 @@ bool is_command_allowed(const std::string& cmd) {
         if (cmd.find(b) != std::string::npos) return false;
     }
     return true;
+}
+
+std::string check_command(const std::string& cmd) {
+    /* Грубый фильтр по подстрокам — первая линия (ловит то, что разбор
+     * команды не понял), решение принимает политика. */
+    for (const auto& b : blocked_commands()) {
+        if (cmd.find(b) != std::string::npos) {
+            return "команда содержит запрещённый шаблон: " + b;
+        }
+    }
+    return command_policy().check(cmd);
+}
+
+std::string check_assembled_command(const std::string& cmd) {
+    /* Без подстрочного фильтра: команду собрал код плагина, и совпадение
+     * шаблона означало бы ложный отказ исправной работы инструмента. */
+    return command_policy().check_assembled(cmd);
+}
+
+void trust_command_hosts(const std::vector<std::string>& hosts) {
+    for (const auto& h : hosts) {
+        std::string host = CommandPolicy::host_from_url(h);
+        if (!host.empty()) command_policy().trust_host(host);
+    }
 }
 
 std::string shell_escape(const std::string& s) {

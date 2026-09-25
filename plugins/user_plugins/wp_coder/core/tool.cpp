@@ -3,6 +3,7 @@
 #include "tool.h"
 #include "engine.h"
 #include "agent_components.h"
+#include "command_policy.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -453,8 +454,19 @@ std::string permission_pattern(const ToolDef& def, const json::JsonValue& args) 
 
 std::string permission_suggested_pattern(const ToolDef& def,
                                          const std::string& pattern) {
-    (void)def;
-    return pattern.empty() ? "*" : pattern;
+    if (pattern.empty() || pattern == "*") return "*";
+    /* И3.5: когда значение — это команда, «всегда» = безопасный префикс.
+     * «Всегда разрешить git status --porcelain» не должно разрешить
+     * git push --force, поэтому CommandPolicy::always_pattern сужает
+     * шаблон до «бинарник + подкоманда». Для путей и URL значение
+     * остаётся как есть: сужать каталог до подкаталога нельзя, это
+     * был бы другой инструмент. */
+    static const char* kCommandKeys[] = {"bash", "docker", "cron", "ssh", "deploy"};
+    const std::string key = permission_key_of(def);
+    for (const char* k : kCommandKeys) {
+        if (key == k) return command_policy().always_pattern(pattern);
+    }
+    return pattern;
 }
 
 } // namespace coder

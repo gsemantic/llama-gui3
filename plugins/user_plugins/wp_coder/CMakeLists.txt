@@ -24,6 +24,7 @@ set(CORE_SOURCES
     core/git_tools.cpp
     core/project.cpp
     core/security.cpp
+    core/command_policy.cpp
     core/json.cpp
     core/tool.cpp
     core/permission.cpp
@@ -154,6 +155,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_engine.cpp
         tests/test_module_api.cpp
         tests/test_security.cpp
+        tests/test_command_policy.cpp
         tests/test_base_tools.cpp
         tests/test_wp_tools.cpp
         tests/test_python_tools.cpp

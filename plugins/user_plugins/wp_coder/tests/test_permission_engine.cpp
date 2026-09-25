@@ -832,10 +832,23 @@ TEST(permission_pattern_comes_from_the_right_argument) {
     ASSERT_TRUE(ls != nullptr);
     ASSERT_EQ(permission_pattern(*ls, json::JsonValue::object()),
               std::string("*"));
-    /* Предлагаемый «всегда»-паттерн не шире самого значения. */
+
+    /* И3.5: для команды предлагаемый «всегда»-паттерн УЖЕ, чем значение.
+     * До И3 здесь было ожидание «git push --force», то есть кнопка
+     * «всегда» предлагала записать в правила ровно ту строку, которую
+     * пользователь подтвердил. Ровно это И3.5 и закрывает: подтвердив
+     * «git push --force» один раз, пользователь навсегда разрешал бы
+     * любой push. Теперь предлагается «git push *» — подкоманда
+     * зафиксирована, аргументы нет. */
     ASSERT_EQ(permission_suggested_pattern(*ex, "git push --force"),
-              std::string("git push --force"));
+              std::string("git push *"));
+    /* Для не-командных ключей значение остаётся как есть: сужать путь
+     * до подкаталога нельзя, это изменило бы объект разрешения. */
+    ASSERT_EQ(permission_suggested_pattern(*rd, "config/.env"),
+              std::string("config/.env"));
+    ASSERT_EQ(permission_suggested_pattern(*ex, "*"), std::string("*"));
 }
+
 
 /* Инструмент без ключа (если кто-то его забудет) спрашивает по имени
  * инструмента, а не молчит: неизвестный ключ не должен превращаться в
