@@ -16,6 +16,10 @@ kv_cache/
 .mimocode/
 bench_results/
 /news_rewriter/
+# Состояние сессии плагина wp_coder: session_path() строит путь как
+# <data_dir>/wp_coder/session.json, а при запуске с data_dir="." (тесты
+# хоста, ручной запуск из корня) data_dir — это корень репозитория.
+/wp_coder/
 profiles/.env
 nr_wp_env_test/
 **/nr_wp_env_test/
