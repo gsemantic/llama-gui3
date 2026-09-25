@@ -424,4 +424,37 @@ std::string check_tool_mode_policy(const std::string& tool_name,
     return check_tool_mode_policy(tool_name, def.flags, mode, plan_mode);
 }
 
+/* --- И2.5/2.9: значение и ключ разрешения --- */
+
+std::string permission_key_of(const ToolDef& def) {
+    return def.permission_key.empty() ? def.name : def.permission_key;
+}
+
+std::string permission_pattern(const ToolDef& def, const json::JsonValue& args) {
+    /* Порядок = приоритет. «path» раньше «url»: у одного инструмента
+     * могут быть оба (скажем, скачать файл по URL в путь), и вопрос
+     * должен звучать про то, что инструмент меняет, а не откуда он
+     * это взял. */
+    static const char* kPatternArgs[] = {
+        "path", "file", "filePath", "command", "cmd", "cli",
+        "url", "host", "query", "name", "branch", "site"
+    };
+    if (!args.is_object()) return "*";
+    for (const char* key : kPatternArgs) {
+        if (!args.has(key)) continue;
+        const json::JsonValue& v = args.get(key);
+        if (!v.is_string()) continue;
+        const std::string s = v.as_string();
+        if (!s.empty()) return s;
+    }
+    /* Нечего предъявлять — решение по факту вызова инструмента. */
+    return "*";
+}
+
+std::string permission_suggested_pattern(const ToolDef& def,
+                                         const std::string& pattern) {
+    (void)def;
+    return pattern.empty() ? "*" : pattern;
+}
+
 } // namespace coder

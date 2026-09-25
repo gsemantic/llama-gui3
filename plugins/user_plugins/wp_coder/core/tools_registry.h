@@ -69,6 +69,11 @@ public:
      * идёт валидация. */
     std::string build_tool_catalogue() const;
 
+    /* То же, но только для перечисленных инструментов (И2.8): запрещённые
+     * правилами разрешений убираются из схемы, чтобы модель не тратила
+     * шаг на заведомо отклонённый вызов. Пустой список — все. */
+    std::string build_tool_catalogue(const std::vector<std::string>& visible) const;
+
     /* Описание одного инструмента — для точечного запроса и тестов. */
     std::string describe_tool(const std::string& tool_name) const;
 

@@ -22,6 +22,8 @@ namespace coder {
 /* Бюджет символов на историю сессии — единый источник: core/limits.h (4.5). */
 using limits::kSessionBudget;
 
+namespace fs = std::filesystem;
+
 /*
  * Engine — глобальный singleton
  * ====================================================================== */
@@ -33,6 +35,11 @@ Engine& Engine::instance() {
 
 void Engine::init(HostCallbacks callbacks) {
     cb_ = std::move(callbacks);
+    /* Мост системы разрешений в состояние и лог: без него PermissionEngine
+     * умеет решать, но не умеет спросить (И2.5). */
+    permissions_.bind(&state_, [this](const std::string& text) {
+        push_event(AgentEvent::Tool, text);
+    });
     load_settings();
 }
 
@@ -47,12 +54,21 @@ void Engine::stop() {
         state_.permission_cv.notify_all();
         state_.cv.notify_all();
     }
+    /* Вне лока: cancel_all() берёт свой mtx_, а брать его поверх
+     * state_.mtx здесь нельзя — PermissionEngine ходит в state_.mtx
+     * короткими захватами, и обратный порядок означал бы дедлок. */
+    permissions_.cancel_all();
     if (state_.worker.joinable()) state_.worker.join();
     /* Resume (5.2): сохраняем последний диалог перед выключением. */
     save_session();
 }
 
 void Engine::submit(const std::string& prompt) {
+    /* Новая задача — снимаем отмену разрешений от прошлой. Иначе после
+     * «стоп» движок задавал бы мгновенные отказы на любой вопрос до
+     * конца сессии. Вне лока: cancel_all/clear_cancel берут свой mtx_,
+     * и брать его поверх state_.mtx нельзя (порядок блокировок). */
+    permissions_.clear_cancel();
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         bool resume = state_.preserve_session;
@@ -83,6 +99,10 @@ void Engine::submit(const std::string& prompt) {
 }
 
 void Engine::request_abort() {
+    /* Снаружи лока — см. комментарий в stop(). Именно этот вызов
+     * вытаскивает worker из ожидания разрешения: иначе «стоп» работал
+     * бы не на том шаге, где агент висит на вопросе пользователю. */
+    permissions_.cancel_all();
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.abort_requested.store(true);
@@ -252,9 +272,15 @@ std::string Engine::build_system_prompt() const {
      * истины, оба разошлись с кодом: exec_command не был описан (D2),
      * а 29 инструментов модулей не были видны модели вообще (D15).
      * Теперь описание, валидация аргументов и этот каталог читают одну
-     * схему, поэтому дрейф документации невозможен по построению. */
+     * схему, поэтому дрейф документации невозможен по построению.
+     *
+     * И2.8: запрещённые правилами разрешений в каталог не попадают —
+     * модель не тратит шаг на вызов, который всё равно отклонят. */
     {
-        std::string cat = ToolsRegistry::instance().build_tool_catalogue();
+        std::vector<ToolDef> all = ToolsRegistry::instance().defs();
+        std::vector<std::string> visible = permissions_.visible_tools(all);
+        std::string cat =
+            ToolsRegistry::instance().build_tool_catalogue(visible);
         if (!cat.empty()) {
             sys += "\n\n";
             sys += cat;
@@ -319,6 +345,14 @@ void Engine::permission_reject(const std::string& path) {
     auto push = [this](AgentEvent::Kind k, const std::string& t) { push_event(k, t); };
     PermissionGate gate(state_, cb_, push);
     gate.reject();
+}
+
+void Engine::permission_reply(uint64_t id, PermissionReply how) {
+    permissions_.reply(id, how);
+}
+
+std::vector<PermissionRequest> Engine::permission_pending() const {
+    return permissions_.pending();
 }
 
 /* FSM (2.3): переход состояния. Observer-событие публикуется только при
@@ -447,6 +481,31 @@ void Engine::load_settings() {
             pos = q2 + 1;
         }
     }
+
+    /* Дефолты разрешений (И2.4). Ставится здесь, а не в init(): только
+     * к этому моменту известны доверенные каталоги — data_dir от хоста
+     * и каталоги навыков, загруженные плагином. */
+    if (!permissions_.has_agent_defaults()) {
+        permissions_.set_on_change([this] { invalidate_prompt_cache(); });
+        std::vector<std::string> trusted;
+        if (cb_.path_data_dir) {
+            std::string data = cb_.path_data_dir();
+            if (!data.empty()) trusted.push_back(data);
+        }
+        std::error_code ec;
+        std::string tmp = fs::temp_directory_path(ec);
+        if (ec) tmp = "/tmp";
+        trusted.push_back(tmp);
+        for (const auto& d : SkillsManager::instance().source_dirs()) {
+            trusted.push_back(d);
+        }
+        permissions_.apply_agent_defaults(trusted);
+    }
+    /* Правила пользователя — после дефолтов, чтобы перекрывали их, и
+     * вне блока выше: их должно быть видно и при повторном init, когда
+     * база уже стоит. */
+    permissions_.load_user_rules(
+        setting_get(cb_, "wp_coder.permission_rules", ""));
 }
 
 void Engine::save_settings() {

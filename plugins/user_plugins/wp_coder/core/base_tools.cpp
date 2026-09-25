@@ -323,6 +323,7 @@ void register_base_tools() {
         def.name = "read_file";
         def.description = "Чтение текстового файла";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "путь к файлу относительно корня проекта")
          .integer_range("k", "с какой строки читать (1 — с первой); 0 = с начала",
@@ -351,6 +352,7 @@ void register_base_tools() {
         def.name = "write_file";
         def.description = "Запись текста в файл (создаёт или перезаписывает)";
         def.flags = TF_WRITES_FILES;
+        def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу относительно корня проекта")
          .str("content", "полный новый содержимое файла")
@@ -389,6 +391,7 @@ void register_base_tools() {
         def.name = "repo_map";
         def.description = "Обзор структуры каталога: файлы и найденные символы";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("root", "каталог; пусто = корень проекта");
         def.parameters = b.build();
@@ -404,6 +407,7 @@ void register_base_tools() {
         def.name = "grep_search";
         def.description = "Поиск по файлам регулярным выражением (ECMAScript)";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("root", "каталог; пусто = корень проекта")
          .str("pattern", "регулярное выражение")
@@ -421,6 +425,7 @@ void register_base_tools() {
         def.name = "list_skills";
         def.description = "Список доступных навыков (имени и описаний)";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
             return out("навыки", base_list_skills());
@@ -433,6 +438,7 @@ void register_base_tools() {
         def.name = "skill_detail";
         def.description = "Полный текст навыка по имени";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "имя навыка из list_skills").required("query");
         def.parameters = b.build();
@@ -450,6 +456,7 @@ void register_base_tools() {
             "Поиск и замена текста в файле. Искомый текст должен встречаться"
             " РОВНО ОДИН раз — иначе добавь к нему контекст.";
         def.flags = TF_WRITES_FILES;
+        def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу")
          .str("query", "что искать (должно быть уникальным в файле)")
@@ -517,6 +524,7 @@ void register_base_tools() {
          * инструмент не умеет. Именно поэтому он обязан быть виден
          * политике режимов и (в И2) подтверждению пользователя. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "bash";
         SchemaBuilder b;
         b.str("cli", "команда для выполнения в shell")
          .required("cli");
@@ -548,6 +556,7 @@ void register_base_tools() {
         def.name = "list_dir";
         def.description = "Список файлов и каталогов (одного уровня)";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "каталог; пусто = корень проекта")
          .integer_range("k", "максимум записей (по умолчанию 100)", 1, 100000);
@@ -589,6 +598,7 @@ void register_base_tools() {
         def.description = "HTTP GET запрос к URL (через curl)";
         /* Сеть разрешена даже в research: это чтение, а не изменение. */
         def.flags = TF_READ_ONLY | TF_NETWORK;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("url", "адрес http(s)")
          .required("url");
@@ -612,6 +622,7 @@ void register_base_tools() {
         def.name = "edit_file";
         def.description = "Замена диапазона строк файла";
         def.flags = TF_WRITES_FILES;
+        def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу")
          .integer_range("k", "номер первой заменяемой строки (с 1)", 1, 10000000)
@@ -684,6 +695,7 @@ void register_base_tools() {
         def.name = "undo_edit";
         def.description = "Отмена последней правки файла (из резервной копии .orig)";
         def.flags = TF_WRITES_FILES;
+        def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу").required("path");
         def.parameters = b.build();
@@ -723,6 +735,7 @@ void register_rag_tools() {
         /* Перестраивает индекс RAG — внешнее хранилище, откатить
          * инструментом нельзя. */
         def.flags = TF_WRITES_FILES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "rag";
         SchemaBuilder b;
         b.str("root", "каталог; пусто = корень проекта");
         def.parameters = b.build();
@@ -749,6 +762,7 @@ void register_rag_tools() {
         def.name = "rag_query";
         def.description = "Поиск по индексу RAG";
         def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "поисковый запрос")
          .integer_range("k", "сколько фрагментов вернуть", 1, 50)

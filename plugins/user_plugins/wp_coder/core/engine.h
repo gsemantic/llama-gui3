@@ -14,6 +14,7 @@
 #include "tools_registry.h"
 #include "skills_manager.h"
 #include "tool_protocol.h"
+#include "permission_engine.h"
 
 #include <string>
 #include <vector>
@@ -326,6 +327,12 @@ public:
     void permission_allow_always(const std::string& path);
     void permission_reject(const std::string& path);
 
+    /* Ответ на запрос системы разрешений И2 из UI: id приходит из
+     * PermissionEngine::pending(). once/always/reject. */
+    void permission_reply(uint64_t id, PermissionReply how);
+    /* Снимок ожидающих запросов для панели (копия, лок отпускается). */
+    std::vector<PermissionRequest> permission_pending() const;
+
     /* Проверка доступа к файлу за пределами проекта. Возвращает пустую строку
      * при разрешении, иначе текст отказа (и переводит агента в ожидание). */
     std::string check_external_permission(const std::string& abs_path);
@@ -345,9 +352,16 @@ public:
      * AgentEvent::Status «state: <имя>» — видно в окне AI Coder. */
     void set_state(AgentState s);
 
+    /* Система разрешений (И2). Правила живут в сессии: ответ «всегда»
+     * должен переживать отдельные вызовы инструментов, поэтому движок —
+     * член Engine, а не локальная переменная цикла. */
+    PermissionEngine& permissions() { return permissions_; }
+    const PermissionEngine& permissions() const { return permissions_; }
+
 private:
     EngineState state_;
     HostCallbacks cb_;
+    PermissionEngine permissions_;
 
     void run_task(std::string task);
     void worker_main();

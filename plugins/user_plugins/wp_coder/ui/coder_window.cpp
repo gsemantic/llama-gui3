@@ -476,6 +476,42 @@ void render_extras() {
         }
     }
 
+    /* Запросы системы разрешений И2. Снимок берётся ДО отрисовки и без
+     * st.mtx: PermissionEngine живёт под своим мьютексом, и правило
+     * D-6 здесь буквальное — вычисления отдельно, рисование отдельно.
+     * Запросов может быть несколько: показываем первый, кнопки отвечают
+     * по его id. */
+    {
+        std::vector<coder::PermissionRequest> asks = engine().permission_pending();
+        if (!asks.empty()) {
+            const coder::PermissionRequest& r = asks.front();
+            ImGui::Separator();
+            ImGui::Text("Требуется разрешение: %s", r.permission.c_str());
+            if (!r.metadata.empty()) ImGui::TextWrapped("%s", r.metadata.c_str());
+            for (const auto& p : r.patterns) {
+                ImGui::TextDisabled("шаблон: %s", p.c_str());
+            }
+            if (!r.suggested.empty()) {
+                ImGui::TextDisabled("«всегда» разрешит: %s", r.suggested.c_str());
+            }
+            if (asks.size() > 1) {
+                ImGui::TextDisabled("ещё в очереди: %zu", asks.size() - 1);
+            }
+            const std::string id = std::to_string(r.id);
+            if (ImGui::SmallButton(("Разрешить (один раз)##perm" + id).c_str())) {
+                engine().permission_reply(r.id, coder::PermissionReply::Once);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(("Всегда##perm" + id).c_str())) {
+                engine().permission_reply(r.id, coder::PermissionReply::Always);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(("Отклонить##perm" + id).c_str())) {
+                engine().permission_reply(r.id, coder::PermissionReply::Reject);
+            }
+        }
+    }
+
     /* Диалог разрешения доступа. */
     {
         std::string perm_path;

@@ -26,6 +26,8 @@ set(CORE_SOURCES
     core/security.cpp
     core/json.cpp
     core/tool.cpp
+    core/permission.cpp
+    core/permission_engine.cpp
     core/tool_protocol.cpp
     core/agent_components.cpp
 )
@@ -145,6 +147,8 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_main.cpp
         tests/test_json.cpp
         tests/test_tool.cpp
+        tests/test_permission.cpp
+        tests/test_permission_engine.cpp
         tests/test_tools_registry.cpp
         tests/test_skills_manager.cpp
         tests/test_engine.cpp

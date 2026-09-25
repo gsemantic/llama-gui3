@@ -58,7 +58,7 @@ TEST(manifest_plugin_json_has_version) {
     ASSERT_TRUE(!j.empty());
     std::string v = json_field(j, "version");
     ASSERT_TRUE(!v.empty());
-    ASSERT_TRUE(v == "0.6.0");
+    ASSERT_TRUE(v == "0.7.0");
 }
 
 TEST(manifest_repo_copy_matches_plugin_json) {
@@ -93,7 +93,7 @@ TEST(manifest_code_version_matches_manifest) {
 #ifdef WP_CODER_VERSION
     const char* code_version = WP_CODER_VERSION;
 #else
-    const char* code_version = "0.6.0";
+    const char* code_version = "0.7.0";
 #endif
     std::string j = read_file(plugin_root() / "plugin.json");
     ASSERT_TRUE(json_field(j, "version") == std::string(code_version));
@@ -102,7 +102,7 @@ TEST(manifest_code_version_matches_manifest) {
 TEST(manifest_changelog_documents_current_version) {
     std::string c = read_file(plugin_root() / "CHANGELOG.md");
     ASSERT_TRUE(!c.empty());
-    ASSERT_TRUE(c.find("## [0.6.0]") != std::string::npos);
+    ASSERT_TRUE(c.find("## [0.7.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.5.0]") != std::string::npos);
     /* Старая версия 0.4.0 осталась в истории — это нормально. */
     ASSERT_TRUE(c.find("## [0.4.0]") != std::string::npos);

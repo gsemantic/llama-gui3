@@ -49,6 +49,7 @@ void register_devops_tools() {
         /* Dockerfile может содержать произвольные RUN-шаги, то есть
          * выполнить код с побочными эффектами. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "docker";
         SchemaBuilder b;
         b.str("path", "путь к Dockerfile; пусто = Dockerfile по умолчанию")
          .str("query", "контекст сборки; пусто = текущий каталог");
@@ -70,6 +71,7 @@ void register_devops_tools() {
         def.name = "docker_run";
         def.description = "Запуск Docker-контейнера";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "docker";
         SchemaBuilder b;
         b.str("cli", "аргументы docker run, например «-d -p 8080:80 nginx»")
          .required("cli");
@@ -98,6 +100,7 @@ void register_devops_tools() {
         def.name = "docker_ps";
         def.description = "Список Docker-контейнеров";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "фильтр docker, например status=running");
         def.parameters = b.build();
@@ -117,6 +120,7 @@ void register_devops_tools() {
         def.name = "docker_logs";
         def.description = "Логи Docker-контейнера (последние 100 строк)";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "имя контейнера").required("query");
         def.parameters = b.build();
@@ -137,6 +141,7 @@ void register_devops_tools() {
         def.name = "systemd_status";
         def.description = "Статус systemd-сервиса";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "имя сервиса, например nginx.service").required("query");
         def.parameters = b.build();
@@ -156,6 +161,7 @@ void register_devops_tools() {
         def.name = "systemd_restart";
         def.description = "Перезапуск systemd-сервиса (через sudo)";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "systemd";
         SchemaBuilder b;
         b.str("query", "имя сервиса, например nginx.service").required("query");
         def.parameters = b.build();
@@ -176,6 +182,7 @@ void register_devops_tools() {
         def.name = "nginx_test";
         def.description = "Проверка конфигурации Nginx (nginx -t)";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "путь к конфигу; пусто = основной nginx.conf");
         def.parameters = b.build();
@@ -194,6 +201,7 @@ void register_devops_tools() {
         def.name = "nginx_reload";
         def.description = "Перезагрузка Nginx (без даунтайма)";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "systemd";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
             std::string result = shell::run_capture("sudo nginx -s reload", 30);
@@ -209,6 +217,7 @@ void register_devops_tools() {
         def.name = "cron_list";
         def.description = "Список cron-задач";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "пользователь; пусто = текущий");
         def.parameters = b.build();
@@ -228,6 +237,7 @@ void register_devops_tools() {
         def.name = "cron_add";
         def.description = "Добавление cron-задачи";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "cron";
         SchemaBuilder b;
         b.str("query", "cron-выражение, например */5 * * * *")
          .str("cli", "команда, которую нужно выполнять")
@@ -262,6 +272,7 @@ void register_devops_tools() {
         def.name = "ssh_exec";
         def.description = "Выполнение команды по SSH на удалённом хосте";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW;
+        def.permission_key = "ssh";
         SchemaBuilder b;
         b.str("query", "хост или user@host")
          .str("cli", "команда для выполнения")

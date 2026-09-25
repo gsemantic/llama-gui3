@@ -161,6 +161,21 @@ std::string PermissionGate::check(const std::string& abs_path) {
         if (is_path_allowed(abs_path, proj, state_.allowed_external_paths)) return "";
     }
 
+    /* И2.4/2.7: поверх списка «разрешённых навсегда» путей — правила
+     * разрешений с ключом external_directory. Именно они дают whitelist
+     * (data_dir, /tmp, навыки): без этого агент спрашивал бы
+     * разрешение на каждый заход в /tmp, и вопрос стал бы помехой.
+     * Порядок именно такой — список пользователя проверяется первым и
+     * работает даже с пустым набором правил. */
+    const PermissionAction action =
+        engine().permissions().evaluate("external_directory", abs_path);
+    if (action == PermissionAction::Deny) {
+        return "[запрещено] Доступ к пути вне проекта запрещён правилом: "
+               + abs_path
+               + "\nНЕ ПОВТОРЯЙ вызов и не ищи обход.";
+    }
+    if (action == PermissionAction::Allow) return "";
+
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.pending_permission_path = abs_path;
@@ -191,6 +206,10 @@ void PermissionGate::allow_always(const std::string& path) {
         state_.state = AgentState::Executing;
     }
     state_.permission_cv.notify_all();
+    /* И2.7: то же решение попадает в правила разрешений, чтобы ключ
+     * external_directory был единственным источником истины, а список
+     * путей — его сохраняемым отражением. */
+    engine().permissions().approve_path(path);
     std::string json = "[";
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -249,6 +268,44 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
     if (!refusal.empty()) {
         this->push_event_(AgentEvent::Error, refusal);
         return refusal;
+    }
+
+    /* И2.5: разрешение по ключу инструмента. Идёт ПОСЛЕ проверки
+     * режима (запрещённый режимом инструмент не спрашивает разрешения:
+     * вопрос пользователю про то, что всё равно нельзя, только путает)
+     * и ДО отпечатка зацикливания (отказ — тоже результат вызова, и он
+     * должен попасть в историю иначе три одинаковых отказа сочтутся
+     * дословно тем же, что три одинаковых успешных вызова). */
+    const std::string perm_key = permission_key_of(*def);
+    const std::string perm_pattern = permission_pattern(*def, args);
+    PermissionEngine& perms = engine().permissions();
+    const PermissionAction perm_action = perms.evaluate(perm_key, perm_pattern);
+    if (perm_action == PermissionAction::Deny) {
+        std::string refusal =
+            "[запрещено] Инструмент " + tool_name + " запрещён правилом"
+            " разрешений (ключ «" + perm_key + "»). Не ищи обход: другой"
+            " инструмент с тем же эффектом тоже запрещён."
+            "\nНЕ ПОВТОРЯЙ вызов. Скажи пользователю, что действие"
+            " запрещено настройкой.";
+        this->push_event_(AgentEvent::Error, refusal);
+        return refusal;
+    }
+    if (perm_action == PermissionAction::Ask) {
+        std::string metadata = tool_name;
+        if (perm_pattern != "*") metadata += " → " + perm_pattern;
+        /* ask() блокирует worker-поток до решения пользователя и сам
+         * возвращает состояние движка, которое до него перевёл. */
+        if (!perms.ask(perm_key, {perm_pattern},
+                       permission_suggested_pattern(*def, perm_pattern),
+                       metadata)) {
+            std::string refusal =
+                "[отказ] Пользователь не разрешил: " + tool_name
+                + (perm_pattern == "*" ? "" : " (" + perm_pattern + ")")
+                + "\nНЕ ПОВТОРЯЙ вызов и не ищи обход. Спроси пользователя,"
+                  " что делать дальше, или перейди к другим задачам.";
+            this->push_event_(AgentEvent::Error, refusal);
+            return refusal;
+        }
     }
 
     /* Отпечаток для детекта зацикливания — сериализованные аргументы.

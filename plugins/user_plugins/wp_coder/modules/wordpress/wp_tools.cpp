@@ -376,6 +376,7 @@ void register_wp_tools() {
         def.description = "WP-CLI команда в каталоге проекта";
         /* WP-CLI умеет всё, включая удаление данных: необратимо. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "wp-cli";
         SchemaBuilder b;
         b.str("cli", "аргументы wp-cli, например «plugin list --format=json»")
          .required("cli");
@@ -394,6 +395,7 @@ void register_wp_tools() {
         def.name = "wp_db";
         def.description = "SQL-запрос к базе WordPress (DDL-операции запрещены)";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "db";
         SchemaBuilder b;
         b.str("query", "SQL-запрос").required("query");
         def.parameters = b.build();
@@ -411,6 +413,7 @@ void register_wp_tools() {
         def.name = "wp_media";
         def.description = "Список медиафайлов библиотеки WordPress";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.integer_range("k", "сколько файлов показать (по умолчанию 20)", 1, 500);
         def.parameters = b.build();
@@ -428,6 +431,7 @@ void register_wp_tools() {
         def.name = "wp_option";
         def.description = "Чтение опции WordPress (wp option get)";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "имя опции, например blogname").required("query");
         def.parameters = b.build();
@@ -446,6 +450,7 @@ void register_wp_tools() {
         def.description = "GET-запрос к REST API WordPress";
         /* Чтение через REST: сеть есть, изменения нет. */
         def.flags = TF_READ_ONLY | TF_NETWORK;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("query", "endpoint после /wp-json/wp/v2/, например posts")
          .required("query");
@@ -464,6 +469,7 @@ void register_wp_tools() {
         def.name = "wp_check_deps";
         def.description = "Проверка зависимостей WordPress";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
             ToolOutput o;
@@ -479,6 +485,7 @@ void register_wp_tools() {
         def.name = "wp_create_site";
         def.description = "Создание нового WordPress-сайта (БД, файлы, установка)";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_WRITES_FILES | TF_SLOW;
+        def.permission_key = "db";
         SchemaBuilder b;
         b.str("query", "имя сайта латиницей")
          .str("pattern", "имя базы данных; пусто = wp_<сайт>")
@@ -503,6 +510,7 @@ void register_wp_tools() {
         def.name = "deploy";
         def.description = "Деплой проекта на удалённый хостер";
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW;
+        def.permission_key = "deploy";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
             ToolOutput o;
@@ -518,6 +526,7 @@ void register_wp_tools() {
         def.name = "verify";
         def.description = "Комплексная проверка проекта (синтаксис + HTTP)";
         def.flags = TF_READ_ONLY | TF_EXECUTES | TF_SLOW;
+        def.permission_key = "read";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
             ToolOutput o;
@@ -533,6 +542,7 @@ void register_wp_tools() {
         def.name = "php_lint";
         def.description = "Проверка синтаксиса PHP-файла (php -l)";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "путь к PHP-файлу").required("path");
         def.parameters = b.build();
@@ -550,6 +560,7 @@ void register_wp_tools() {
         def.name = "headless_render";
         def.description = "Рендер DOM страницы headless-браузером";
         def.flags = TF_READ_ONLY | TF_NETWORK | TF_SLOW;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("url", "адрес страницы").required("url");
         def.parameters = b.build();
@@ -567,6 +578,7 @@ void register_wp_tools() {
         def.name = "validate";
         def.description = "Проверка синтаксиса всех PHP-файлов проекта";
         def.flags = TF_READ_ONLY | TF_EXECUTES | TF_SLOW;
+        def.permission_key = "read";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
             ToolOutput o;

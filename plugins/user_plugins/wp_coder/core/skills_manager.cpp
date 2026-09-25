@@ -78,6 +78,13 @@ std::vector<std::string> SkillsManager::all_skill_names() const {
 void SkillsManager::load_from_directory(const std::string& dir, const std::string& module_name) {
     std::error_code ec;
     if (!fs::exists(dir, ec)) return;
+    /* Запоминаем каталог даже если навыков в нём пока нет: системе
+     * разрешений он нужен как доверенный (И2.4), а решение «каталог
+     * пуст — значит не доверенный» зависит от того, что туда положили
+     * на этой неделе. */
+    if (std::find(dirs_.begin(), dirs_.end(), dir) == dirs_.end()) {
+        dirs_.push_back(dir);
+    }
 
     for (auto it = fs::directory_iterator(dir, ec);
          it != fs::directory_iterator(); it.increment(ec)) {

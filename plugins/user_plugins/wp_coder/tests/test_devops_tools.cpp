@@ -7,6 +7,7 @@
  */
 
 #include "test_framework.h"
+#include "test_support.h"
 #include "../core/json.h"
 #include "../core/tools_registry.h"
 #include "../core/engine.h"
@@ -21,6 +22,7 @@ static void init_engine_and_devops() {
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
     Engine::instance().init(cb);
+    test_support::approve_all_permissions();
     devops::register_devops_tools();
 }
 

@@ -14,6 +14,7 @@
  */
 
 #include "test_framework.h"
+#include "test_support.h"
 #include "../core/json.h"
 #include "../core/tool.h"
 #include "../core/tools_registry.h"
@@ -37,6 +38,9 @@ void register_all_tools() {
     static bool done = false;
     if (done) return;
     done = true;
+    /* Инструменты проверяются поведением, а не разрешениями: имитируем
+     * пользователя, нажавшего «всегда» (см. tests/test_support.h). */
+    test_support::approve_all_permissions();
     register_base_tools();
     register_rag_tools();
     register_git_tools();

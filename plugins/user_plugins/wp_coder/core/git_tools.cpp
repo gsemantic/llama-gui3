@@ -108,6 +108,7 @@ void register_git_tools() {
         def.name = "git_status";
         def.description = "Статус рабочей копии git";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext& ctx) -> ToolOutput {
             return out("git status", git_status(ctx.project_dir()));
@@ -120,6 +121,7 @@ void register_git_tools() {
         def.name = "git_diff";
         def.description = "Разница с HEAD";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "файл или каталог; пусто = все изменения");
         def.parameters = b.build();
@@ -134,6 +136,7 @@ void register_git_tools() {
         def.name = "git_log";
         def.description = "История коммитов";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.integer_range("k", "сколько коммитов показать (по умолчанию 10)", 1, 1000);
         def.parameters = b.build();
@@ -149,6 +152,7 @@ void register_git_tools() {
         def.description = "Создание коммита (path — частичный коммит)";
         /* Коммит меняет историю и не откатывается этим инструментом. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "git";
         SchemaBuilder b;
         b.str("query", "сообщение коммита")
          .str("path", "файл для частичного коммита; пусто = все изменения")
@@ -168,6 +172,7 @@ void register_git_tools() {
         /* Индексация меняет состояние репозитория, и отменить её этим
          * инструментом нельзя (нужен git reset). */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "git";
         SchemaBuilder b;
         b.str("path", "файл или каталог; пусто = все изменения (-A)");
         def.parameters = b.build();
@@ -184,6 +189,7 @@ void register_git_tools() {
         /* Создание ветки — изменение репозитория, откатить его
          * инструмент не умеет. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "git";
         SchemaBuilder b;
         b.str("query", "имя новой ветки; пусто = показать список");
         def.parameters = b.build();
@@ -200,6 +206,7 @@ void register_git_tools() {
         /* Переключение ветки способно выбросить незакоммиченные
          * изменения — откатить это автоматически нельзя. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "git";
         SchemaBuilder b;
         b.str("query", "имя ветки").required("query");
         def.parameters = b.build();

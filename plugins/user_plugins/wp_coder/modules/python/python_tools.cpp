@@ -88,6 +88,7 @@ void register_python_tools() {
         /* Скрипт проекта может писать файлы и ходить в сеть — эффект
          * заранее неизвестен, поэтому считаем изменением. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "bash";
         SchemaBuilder b;
         b.str("path", "путь к скрипту").required("path");
         def.parameters = b.build();
@@ -103,6 +104,7 @@ void register_python_tools() {
         def.description = "Установка Python-пакета";
         /* Меняет окружение, а не файлы проекта: откатить нечем. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW | TF_NETWORK;
+        def.permission_key = "package";
         SchemaBuilder b;
         b.str("query", "имя пакета (например requests)").required("query");
         def.parameters = b.build();
@@ -118,6 +120,7 @@ void register_python_tools() {
         def.description = "Django management-команда (manage.py)";
         /* «migrate», «flush», «createsuperuser» меняют БД. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "bash";
         SchemaBuilder b;
         b.str("cli", "аргументы manage.py, например «migrate» или «test»")
          .required("cli");
@@ -134,6 +137,7 @@ void register_python_tools() {
         def.description = "Запуск тестов pytest";
         /* Фикстуры и сами тесты пишут файлы и кэш. */
         def.flags = TF_EXECUTES | TF_WRITES_FILES | TF_SLOW;
+        def.permission_key = "test";
         SchemaBuilder b;
         b.str("path", "файл или каталог с тестами; пусто = весь проект")
          .str("query", "маркер pytest, например «unit»");
@@ -149,6 +153,7 @@ void register_python_tools() {
         def.name = "venv_create";
         def.description = "Создание виртуального окружения";
         def.flags = TF_EXECUTES | TF_WRITES_FILES | TF_SLOW;
+        def.permission_key = "package";
         SchemaBuilder b;
         b.str("path", "каталог окружения, например venv").required("path");
         def.parameters = b.build();
@@ -163,6 +168,7 @@ void register_python_tools() {
         def.name = "python_lint";
         def.description = "Проверка синтаксиса Python (py_compile)";
         def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "путь к файлу .py").required("path");
         def.parameters = b.build();

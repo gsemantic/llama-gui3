@@ -165,6 +165,18 @@ std::string ToolsRegistry::build_tool_catalogue() const {
     return s;
 }
 
+std::string ToolsRegistry::build_tool_catalogue(
+        const std::vector<std::string>& visible) const {
+    if (visible.empty()) return build_tool_catalogue();
+    std::string s;
+    for (const auto& name : visible) {
+        if (tools_.find(name) == tools_.end()) continue;
+        s += describe_tool(name);
+        s += "\n";
+    }
+    return s;
+}
+
 std::string ToolsRegistry::join_tools() const {
     std::vector<std::string> names = list_tools();
     std::string s;

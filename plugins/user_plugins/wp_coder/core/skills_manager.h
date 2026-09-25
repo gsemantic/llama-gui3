@@ -57,10 +57,16 @@ public:
     /* Загрузка навыков из каталога .md файлов (внешний вызов). */
     void load_from_directory(const std::string& dir, const std::string& module_name = "");
 
+    /* Каталоги, из которых загружались навыки. Нужны системе разрешений
+     * (И2.4): каталог навыков — доверенный, агент может писать в него
+     * без вопроса пользователю. */
+    const std::vector<std::string>& source_dirs() const { return dirs_; }
+
 private:
     std::vector<Skill> skills_;
     std::vector<std::string> active_;
     std::string active_module_;
+    std::vector<std::string> dirs_;
 };
 
 } // namespace coder
