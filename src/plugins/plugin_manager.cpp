@@ -630,7 +630,11 @@ char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
             else                          mr = core::MessageRole::User;
             msgs.push_back(core::ChatMessage(mr, content));
         }
+    } catch (const std::exception& e) {
+        std::cerr << "[llm_chat_messages] JSON parse error: " << e.what() << std::endl;
+        return nullptr;
     } catch (...) {
+        std::cerr << "[llm_chat_messages] JSON parse error: unknown exception" << std::endl;
         return nullptr;
     }
     if (msgs.empty()) return nullptr;

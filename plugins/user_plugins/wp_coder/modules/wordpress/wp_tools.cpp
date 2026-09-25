@@ -6,6 +6,7 @@
 #include "../../core/security.h"
 #include "../../core/limits.h"
 #include "../../core/file_utils.h"
+#include "../../core/json_utils.h"
 
 #include <headless_browser/headless_browser.h>
 
@@ -203,7 +204,7 @@ std::string wp_create_site(const std::string& site_name_in, const std::string& d
         s << ++step << ". " << desc << "... ";
         std::string out; int rc;
         bool ok = shell::run_capture_status(cmd, out, rc, 120);
-        s << (ok ? "OK" : "FAIL: " + out.substr(0, 500)) << "\n";
+        s << (ok ? "OK" : "FAIL: " + text::utf8_prefix(out, 500)) << "\n";
         return ok;
     };
 
@@ -350,7 +351,7 @@ std::string headless_render(const std::string& url) {
              + ") — похоже на JS-ошибку или SPA-оболочку без рендера.\n";
     }
     out += "DOM (обрезан до " + std::to_string(kModuleMaxOutput) + " символов):\n";
-    out += dom.size() > kModuleMaxOutput ? dom.substr(0, kModuleMaxOutput) : dom;
+    out += dom.size() > kModuleMaxOutput ? text::utf8_prefix(dom, kModuleMaxOutput) : dom;
     if (dom.size() > kModuleMaxOutput)
         out += "\n[...обрезано, всего " + std::to_string(dom.size()) + " символов]";
     return out;

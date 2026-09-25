@@ -18,7 +18,7 @@ namespace coder {
 /* Вызов инструмента, распарсенный из ответа модели. */
 struct Action {
     std::string tool, path, root, query, pattern, content, cli, url;
-    int k = 6;
+    int k = 0;
 };
 
 /* Извлечь блок вызова инструмента из текста ответа модели.

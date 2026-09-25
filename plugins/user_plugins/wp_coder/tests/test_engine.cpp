@@ -4,6 +4,7 @@
 #include "../core/git_tools.h"
 #include "../core/tools_registry.h"
 #include "../core/shell.h"
+#include "../core/json_utils.h"
 
 #include <map>
 #include <fstream>
@@ -33,6 +34,38 @@ TEST(engine_parse_action_json_with_content) {
     ASSERT_TRUE(ok);
     ASSERT_EQ(act.tool, std::string("write_file"));
     ASSERT_TRUE(act.content.find("DB_PASS=") != std::string::npos);
+}
+
+TEST(engine_parse_action_defaults_k_to_zero) {
+    Engine::Action act;
+    bool ok = Engine::parse_action("{\"tool\":\"read_file\",\"path\":\"main.py\"}", act);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(act.k, 0);
+}
+
+TEST(json_utf8_prefix_does_not_split_codepoint) {
+    std::string value(1499, 'a');
+    value += "\xE2\x94\x80";
+    value += "tail";
+    std::string prefix = text::utf8_prefix(value, 1500);
+
+    ASSERT_EQ(prefix.size(), (size_t)1499);
+    ASSERT_TRUE(text::is_valid_utf8(prefix));
+}
+
+TEST(json_escape_repairs_invalid_utf8) {
+    std::string value = "ok";
+    value.push_back(static_cast<char>(0xE2));
+    std::string escaped = json::escape(value);
+
+    ASSERT_TRUE(text::is_valid_utf8(escaped));
+    ASSERT_TRUE(escaped.find("\xEF\xBF\xBD") != std::string::npos);
+}
+
+TEST(json_str_decodes_unicode_escape) {
+    std::string block = "{\"content\":\"\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442\"}";
+    ASSERT_EQ(json::str(block, "content"), std::string("Привет"));
 }
 
 TEST(engine_extract_action_json_fenced) {
@@ -361,6 +394,23 @@ static fs::path make_tmp_project() {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
     return tmp;
+}
+
+TEST(read_file_preserves_utf8_at_limit) {
+    fs::path tmp = make_tmp_project();
+    {
+        std::ofstream f(tmp / "boundary.txt", std::ios::binary);
+        f << std::string(11999, 'a') << "\xE2\x94\x80" << "tail";
+    }
+    init_tools_for_phase3(tmp);
+
+    ToolArgs a;
+    a.path = "boundary.txt";
+    a.k = 0;
+    std::string result = ToolsRegistry::instance().run("read_file", a);
+
+    ASSERT_TRUE(text::is_valid_utf8(result));
+    fs::remove_all(tmp);
 }
 
 TEST(list_dir_lists_files_and_dirs) {

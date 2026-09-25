@@ -46,16 +46,17 @@ const LlamaHostApi* g_api = nullptr;
 
 static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_message, void* user_data) {
     if (!user_message || !user_message[0]) return nullptr;
-    std::cerr << "[wp_coder] agent_mode_on_message: " << user_message << std::endl;
+    std::string message = coder::text::sanitize_utf8(user_message);
+    std::cerr << "[wp_coder] agent_mode_on_message: " << message << std::endl;
 
     auto& eng = coder::engine();
-    eng.submit(user_message);
+    eng.submit(message);
 
     /* Агент работает в worker-потоке. Ждём результат (таймаут 5 минут). */
     std::cerr << "[wp_coder] agent_mode_on_message: waiting for response..." << std::endl;
     std::string response = eng.wait_response(300000);
     std::cerr << "[wp_coder] agent_mode_on_message response_len=" << response.size()
-              << " head=" << response.substr(0, 120) << std::endl;
+              << " head=" << coder::text::utf8_prefix(response, 120) << std::endl;
 
     char* out = (char*)malloc(response.size() + 1);
     if (out) memcpy(out, response.c_str(), response.size() + 1);
@@ -68,30 +69,6 @@ static void agent_mode_render_extras(LlamaPluginHost* host, void* user_data) {
 }
 
 /* --- Экспортируемые функции плагина --- */
-
-/* Минимальный JSON-эскейпер (без nlohmann в плагине). */
-static std::string json_escape(const std::string& s) {
-    std::string r;
-    r.reserve(s.size() + 8);
-    for (char c : s) {
-        switch (c) {
-            case '"':  r += "\\\""; break;
-            case '\\': r += "\\\\"; break;
-            case '\n': r += "\\n"; break;
-            case '\r': r += "\\r"; break;
-            case '\t': r += "\\t"; break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
-                    r += buf;
-                } else {
-                    r += c;
-                }
-        }
-    }
-    return r;
-}
 
 extern "C" {
 
@@ -157,8 +134,9 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
             std::string json = "[";
             for (size_t i = 0; i < messages.size(); ++i) {
                 if (i) json += ",";
-                json += "{\"role\":\"" + messages[i].role + "\",\"content\":\"" +
-                        json_escape(messages[i].content) + "\"}";
+                json += "{\"role\":\"" + coder::json::escape(messages[i].role) +
+                        "\",\"content\":\"" +
+                        coder::json::escape(messages[i].content) + "\"}";
             }
             json += "]";
 
@@ -197,7 +175,7 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
                  * строк: поток может продолжить работу в фоне после таймаута
                  * (хост не поддерживает отмену — API llm_chat_cancel нет). */
                 std::string json_copy = json;
-                std::string sys_copy = sys_prompt;
+                std::string sys_copy = coder::text::sanitize_utf8(sys_prompt);
                 std::future<char*> call_future = std::async(std::launch::async,
                     [json_copy, sys_copy]() -> char* {
                         return g_api->llm_chat_messages(g_host,

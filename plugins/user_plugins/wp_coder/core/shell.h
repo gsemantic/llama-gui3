@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <string>
 
+#include "json_utils.h"
+
 namespace coder {
 namespace shell {
 
@@ -57,8 +59,9 @@ inline bool run_capture_status(const std::string& cmd, std::string& out,
 
 /* Обрезать длинный вывод, сохранив маркер обрезки. */
 inline std::string cap(const std::string& s, size_t limit) {
-    if (s.size() <= limit) return s;
-    std::string r = s.substr(0, limit);
+    std::string clean = text::is_valid_utf8(s) ? s : text::sanitize_utf8(s);
+    if (clean.size() <= limit) return clean;
+    std::string r = text::utf8_prefix(clean, limit);
     r += "\n...[вывод обрезан, продолжение недоступно]";
     return r;
 }

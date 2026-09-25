@@ -5,6 +5,7 @@
 #include "shell.h"
 #include "engine.h"
 #include "limits.h"
+#include "json_utils.h"
 
 #include <sstream>
 #include <vector>
@@ -85,13 +86,14 @@ void SessionStore::trim() {
         std::string first;
         size_t nl = c.find('\n');
         if (nl != std::string::npos && nl + 1 < c.size()) {
-            first = c.substr(nl + 1, std::min<size_t>(60, c.size() - nl - 1));
+            first = text::utf8_prefix(c.substr(nl + 1),
+                                      std::min<size_t>(60, c.size() - nl - 1));
             size_t nl2 = first.find('\n');
             if (nl2 != std::string::npos) first.resize(nl2);
         }
         if (first.empty()) first = "(без вывода)";
         std::string r = "[RESULT " + tool + " сжат]: " + first;
-        if (r.size() > 90) { r.resize(90); r += "…"; }
+        if (r.size() > 90) { r = text::utf8_prefix(r, 90); r += "…"; }
         return r;
     };
 
@@ -112,7 +114,7 @@ void SessionStore::trim() {
         std::string stub;
         if (s[i].content.rfind("[ПЛАН]", 0) == 0) stub = "[ПЛАН (счат)]";
         else {
-            stub = s[i].content.substr(0, std::min<size_t>(60, s[i].content.size()));
+            stub = text::utf8_prefix(s[i].content, 60);
             if (s[i].content.size() > 60) stub += "…";
         }
         total -= s[i].content.size();
@@ -239,7 +241,7 @@ std::string ToolRunner::run(const std::string& tool_name, const ToolArgs& args) 
         return "[ошибка] зацикливание вызова " + tool_name;
     }
 
-    std::string result = ToolsRegistry::instance().run(tool_name, args);
+    std::string result = text::sanitize_utf8(ToolsRegistry::instance().run(tool_name, args));
     this->push_event_(AgentEvent::Tool, tool_name + " -> " + result);
     return result;
 }
@@ -509,7 +511,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                     auto& s = state_.session;
                     if (!s.empty() && s.back().role == "assistant") {
                         std::string condensed = block;
-                        if (condensed.size() > 1200) { condensed.resize(1200); condensed += "…"; }
+                        if (condensed.size() > 1200) { condensed = text::utf8_prefix(condensed, 1200); condensed += "…"; }
                         s.back().content = condensed;
                     }
                 }
@@ -572,7 +574,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 std::lock_guard<std::mutex> lk(state_.mtx);
                 std::string trimmed_result = result;
                 if (trimmed_result.size() > kResultBudget) {
-                    trimmed_result.resize(kResultBudget);
+                    trimmed_result = text::utf8_prefix(trimmed_result, kResultBudget);
                     trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
                                     + " символов. Вызови инструмент повторно, если нужно больше.]";
                 }
@@ -630,7 +632,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
              * начала для принятия решения; если нужно больше — вызовет repeat. */
             std::string trimmed_result = result;
             if (trimmed_result.size() > kResultBudget) {
-                trimmed_result.resize(kResultBudget);
+                trimmed_result = text::utf8_prefix(trimmed_result, kResultBudget);
                 trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
                                 + " символов. Вызови инструмент повторно, если нужно больше.]";
             }

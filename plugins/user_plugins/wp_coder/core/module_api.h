@@ -31,7 +31,7 @@ struct ToolArgs {
     std::string content;   // CONTENT (between CONTENT_BEGIN/END)
     std::string cli;       // CLI
     std::string url;       // URL
-    int k = 6;             // K
+    int k = 0;             // K
 };
 
 /* Обработчик инструмента: принимает ToolArgs, возвращает текст-результат. */

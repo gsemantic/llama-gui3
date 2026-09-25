@@ -55,7 +55,7 @@ TEST(module_registry_modules_list) {
 
 TEST(tool_args_defaults) {
     ToolArgs args;
-    ASSERT_EQ(args.k, 6);
+    ASSERT_EQ(args.k, 0);
     ASSERT_TRUE(args.path.empty());
     ASSERT_TRUE(args.query.empty());
 }

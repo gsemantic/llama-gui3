@@ -145,6 +145,7 @@ void Engine::load_session() {
     if (!f) return;
     std::string content((std::istreambuf_iterator<char>(f)),
                         std::istreambuf_iterator<char>());
+    content = text::sanitize_utf8(content);
 
     std::vector<ChatMsg> loaded;
     size_t pos = 0;
@@ -334,7 +335,7 @@ void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
                 break;
         }
         if (forward && !chat_line.empty()) {
-            if (chat_line.size() > 300) { chat_line.resize(300); chat_line += "…"; }
+            if (chat_line.size() > 300) { chat_line = text::utf8_prefix(chat_line, 300); chat_line += "…"; }
             cb_.chat_event(chat_line);
         }
     }
@@ -438,7 +439,8 @@ void Engine::save_settings() {
  * goto устранен: cleanup вынесен в lambda.
  * ====================================================================== */
 
-void Engine::run_task(const std::string& task) {
+void Engine::run_task(std::string task) {
+    task = text::sanitize_utf8(task);
     auto start_time = std::chrono::steady_clock::now();
     std::string full_response;
 

@@ -6,6 +6,19 @@
 namespace llama_gui {
 namespace core {
 
+namespace {
+
+std::string utf8_log_prefix(const std::string& value, size_t limit) {
+    if (value.size() <= limit) return value;
+    size_t end = limit;
+    while (end > 0 &&
+           (static_cast<unsigned char>(value[end]) & 0xC0) == 0x80)
+        --end;
+    return value.substr(0, end);
+}
+
+}
+
 OpenRouterHttpClient::~OpenRouterHttpClient() {
 }
 
@@ -182,7 +195,7 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
     if (response_code != 200) {
         // Не-SSE тело ошибки (JSON от API) накопилось в buffer
         std::cerr << "[CloudClient] HTTP Error: " << response_code << std::endl;
-        std::cerr << "[CloudClient] Response: " << ctx.buffer.substr(0, 500) << std::endl;
+        std::cerr << "[CloudClient] Response: " << utf8_log_prefix(ctx.buffer, 500) << std::endl;
 
         static const auto is_retryable_http_code = [](long code) {
             return code == 408 || code == 429 ||
@@ -232,7 +245,7 @@ std::string OpenRouterHttpClient::make_request(const std::string& endpoint, cons
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
 
         std::cout << "[CloudClient] POST " << url << std::endl;
-        std::cout << "[CloudClient] Request body: " << body.substr(0, 200) << "..." << std::endl;
+        std::cout << "[CloudClient] Request body: " << utf8_log_prefix(body, 200) << "..." << std::endl;
     }
 
     CURLcode res = curl_easy_perform(curl);
@@ -255,7 +268,7 @@ std::string OpenRouterHttpClient::make_request(const std::string& endpoint, cons
 
     if (response_code != 200) {
         std::cerr << "[CloudClient] HTTP Error: " << response_code << std::endl;
-        std::cerr << "[CloudClient] Response: " << response.substr(0, 500) << std::endl;
+        std::cerr << "[CloudClient] Response: " << utf8_log_prefix(response, 500) << std::endl;
     }
 
     std::cout << "[CloudClient] Response size: " << response.size() << " bytes, HTTP " << response_code << std::endl;

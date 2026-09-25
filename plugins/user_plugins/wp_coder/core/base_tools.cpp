@@ -6,6 +6,7 @@
 #include "shell.h"
 #include "limits.h"
 #include "file_utils.h"
+#include "json_utils.h"
 
 #include <fstream>
 #include <sstream>
@@ -40,12 +41,13 @@ std::string read_text_file(const std::string& path, size_t max_chars, size_t ski
     std::string ln;
     while (std::getline(f, ln)) {
         if (line++ < skip_lines) continue;
+        ln = text::sanitize_utf8(ln);
+        if (out.size() >= max_chars) break;
         if (out.size() + ln.size() + 1 > max_chars) {
             size_t room = max_chars - out.size();
-            if (out.size() < max_chars) {
-                out.append(ln, 0, room);
-                out += "\n";
-            }
+            std::string part = text::utf8_prefix(ln, room);
+            out += part;
+            if (part.size() < room) out += '\n';
             break;
         }
         out += ln;

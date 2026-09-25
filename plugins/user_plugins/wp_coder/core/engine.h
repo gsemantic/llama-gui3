@@ -346,7 +346,7 @@ private:
     EngineState state_;
     HostCallbacks cb_;
 
-    void run_task(const std::string& task);
+    void run_task(std::string task);
     void worker_main();
 
     /* Путь к файлу сохранённой сессии (resume, 5.2): <data_dir>/wp_coder/session.json. */
