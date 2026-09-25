@@ -289,7 +289,10 @@ public:
     EngineState& state() { return state_; }
     const EngineState& state() const { return state_; }
 
-    /* Доступ к callbacks хоста (для инструментов). */
+    /* Доступ к callbacks хоста (для инструментов). Неконстантная
+     * перегрузка нужна ToolContext: PermissionGate пишет в настройки
+     * (settings_set) при выдаче постоянного разрешения. */
+    HostCallbacks& callbacks() { return cb_; }
     const HostCallbacks& callbacks() const { return cb_; }
 
     /* Управление событиями. */

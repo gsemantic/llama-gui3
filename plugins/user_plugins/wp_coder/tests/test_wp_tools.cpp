@@ -7,6 +7,7 @@
  */
 
 #include "test_framework.h"
+#include "../core/json.h"
 #include "../core/tools_registry.h"
 #include "../core/engine.h"
 #include "../modules/wordpress/wp_tools.h"
@@ -27,13 +28,23 @@ static std::string run_tool(const std::string& name, ToolArgs& a) {
     return ToolsRegistry::instance().run(name, a);
 }
 
+/* И1.6: обязательный параметр пуст — отказ приходит из валидации схемы,
+ * а не из проверки внутри инструмента. Обе защиты нужны, поэтому
+ * проверяем обе: вторую — явной передачей пустой строки. */
+static std::string run_with_arg(const std::string& name, const char* key) {
+    json::JsonValue args = json::JsonValue::object();
+    args.set(key, "");
+    return ToolsRegistry::instance().run(name, args);
+}
+
 /* --- wp_cli: shell-инъекция --- */
 
 TEST(wp_cli_empty_rejected) {
     init_engine_and_wp();
     ToolArgs a;  // cli пуст
     std::string r = run_tool("wp_cli", a);
-    ASSERT_TRUE(r.find("пустая команда") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(run_with_arg("wp_cli", "cli").find("пустая команда") != std::string::npos);
 }
 
 TEST(wp_cli_semicolon_injection_blocked) {
@@ -82,7 +93,8 @@ TEST(wp_db_empty_query_rejected) {
     }
     ToolArgs a;  // query пуст
     std::string r = run_tool("wp_db", a);
-    ASSERT_TRUE(r.find("пустой SQL-запрос") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(run_with_arg("wp_db", "query").find("пустой SQL-запрос") != std::string::npos);
 }
 
 TEST(wp_db_drop_blocked) {
@@ -148,7 +160,8 @@ TEST(wp_option_empty_name_rejected) {
     }
     ToolArgs a;
     std::string r = run_tool("wp_option", a);
-    ASSERT_TRUE(r.find("пустое имя опции") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(run_with_arg("wp_option", "query").find("пустое имя опции") != std::string::npos);
 }
 
 /* --- headless_render: валидация URL --- */
@@ -157,7 +170,8 @@ TEST(headless_render_empty_url_rejected) {
     init_engine_and_wp();
     ToolArgs a;
     std::string r = run_tool("headless_render", a);
-    ASSERT_TRUE(r.find("пустой URL") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(run_with_arg("headless_render", "url").find("пустой URL") != std::string::npos);
 }
 
 TEST(headless_render_without_scheme_rejected) {

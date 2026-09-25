@@ -7,6 +7,7 @@
  */
 
 #include "test_framework.h"
+#include "../core/json.h"
 #include "../core/tools_registry.h"
 #include "../core/engine.h"
 #include "../modules/devops/devops_tools.h"
@@ -27,9 +28,15 @@ static void init_engine_and_devops() {
 
 TEST(docker_run_empty_cli_rejected) {
     init_engine_and_devops();
+    /* И1.6: cli обязателен по схеме — пустой вызов отсекается валидацией. */
     ToolArgs a;  // cli пуст
     std::string r = ToolsRegistry::instance().run("docker_run", a);
-    ASSERT_TRUE(r.find("укажи параметры запуска") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    /* Явно переданный пустой cli доходит до обработчика. */
+    json::JsonValue args = json::JsonValue::object();
+    args.set("cli", "");
+    std::string r2 = ToolsRegistry::instance().run("docker_run", args);
+    ASSERT_TRUE(r2.find("укажи параметры запуска") != std::string::npos);
 }
 
 TEST(docker_run_semicolon_injection_blocked) {

@@ -1,4 +1,5 @@
 #include "wp_tools.h"
+#include "../../core/tool.h"
 #include "../../core/tools_registry.h"
 #include "../../core/engine.h"
 #include "../../core/skills_manager.h"
@@ -364,53 +365,217 @@ std::string headless_render(const std::string& url) {
 void register_wp_tools() {
     auto& reg = ToolsRegistry::instance();
 
-    reg.register_tool("wp_cli", [](const ToolArgs& a) -> std::string {
-        return wp_cli(a.cli);
-    }, "WP-CLI команда");
+    /* И1.3: чтение типизированных аргументов. */
+    auto arg = [](const json::JsonValue& a, const char* key) {
+        return a.get_string(key);
+    };
 
-    reg.register_tool("wp_db", [](const ToolArgs& a) -> std::string {
-        return wp_db(a.query);
-    }, "SQL-запрос через WP");
+    {
+        ToolDef def;
+        def.name = "wp_cli";
+        def.description = "WP-CLI команда в каталоге проекта";
+        /* WP-CLI умеет всё, включая удаление данных: необратимо. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        SchemaBuilder b;
+        b.str("cli", "аргументы wp-cli, например «plugin list --format=json»")
+         .required("cli");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp-cli";
+            o.output = wp_cli(arg(a, "cli"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("wp_media", [](const ToolArgs& a) -> std::string {
-        return wp_media(a.k);
-    }, "Список медиа");
+    {
+        ToolDef def;
+        def.name = "wp_db";
+        def.description = "SQL-запрос к базе WordPress (DDL-операции запрещены)";
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        SchemaBuilder b;
+        b.str("query", "SQL-запрос").required("query");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp db";
+            o.output = wp_db(arg(a, "query"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("wp_option", [](const ToolArgs& a) -> std::string {
-        return wp_option(a.query);
-    }, "Опция WordPress");
+    {
+        ToolDef def;
+        def.name = "wp_media";
+        def.description = "Список медиафайлов библиотеки WordPress";
+        def.flags = TF_READ_ONLY | TF_EXECUTES;
+        SchemaBuilder b;
+        b.integer_range("k", "сколько файлов показать (по умолчанию 20)", 1, 500);
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp media";
+            o.output = wp_media(static_cast<int>(a.get_int("k", 20)));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("wp_rest", [](const ToolArgs& a) -> std::string {
-        return wp_rest(a.query);
-    }, "REST API");
+    {
+        ToolDef def;
+        def.name = "wp_option";
+        def.description = "Чтение опции WordPress (wp option get)";
+        def.flags = TF_READ_ONLY | TF_EXECUTES;
+        SchemaBuilder b;
+        b.str("query", "имя опции, например blogname").required("query");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp option";
+            o.output = wp_option(arg(a, "query"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("wp_check_deps", [](const ToolArgs&) -> std::string {
-        return wp_check_deps();
-    }, "Проверка зависимостей");
+    {
+        ToolDef def;
+        def.name = "wp_rest";
+        def.description = "GET-запрос к REST API WordPress";
+        /* Чтение через REST: сеть есть, изменения нет. */
+        def.flags = TF_READ_ONLY | TF_NETWORK;
+        SchemaBuilder b;
+        b.str("query", "endpoint после /wp-json/wp/v2/, например posts")
+         .required("query");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp rest";
+            o.output = wp_rest(arg(a, "query"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("wp_create_site", [](const ToolArgs& a) -> std::string {
-        return wp_create_site(a.query, a.pattern, a.content, a.cli, a.url);
-    }, "Создание WP-сайта");
+    {
+        ToolDef def;
+        def.name = "wp_check_deps";
+        def.description = "Проверка зависимостей WordPress";
+        def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.parameters = SchemaBuilder().build();
+        def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp check-deps";
+            o.output = wp_check_deps();
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("deploy", [](const ToolArgs&) -> std::string {
-        return deploy();
-    }, "Деплой на хостер");
+    {
+        ToolDef def;
+        def.name = "wp_create_site";
+        def.description = "Создание нового WordPress-сайта (БД, файлы, установка)";
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_WRITES_FILES | TF_SLOW;
+        SchemaBuilder b;
+        b.str("query", "имя сайта латиницей")
+         .str("pattern", "имя базы данных; пусто = wp_<сайт>")
+         .str("content", "имя пользователя БД; пусто = wp_<сайт>")
+         .str("cli", "пароль пользователя БД; пусто = pass_<сайт>")
+         .str("url", "внешний URL сайта; пусто = http://<сайт>.localhost")
+         .required("query");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "wp create-site";
+            o.output = wp_create_site(arg(a, "query"), arg(a, "pattern"),
+                                      arg(a, "content"), arg(a, "cli"),
+                                      arg(a, "url"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("verify", [](const ToolArgs&) -> std::string {
-        return verify();
-    }, "Комплексная проверка");
+    {
+        ToolDef def;
+        def.name = "deploy";
+        def.description = "Деплой проекта на удалённый хостер";
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW;
+        def.parameters = SchemaBuilder().build();
+        def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "deploy";
+            o.output = deploy();
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("php_lint", [](const ToolArgs& a) -> std::string {
-        return php_lint(a.path);
-    }, "Проверка синтаксиса PHP");
+    {
+        ToolDef def;
+        def.name = "verify";
+        def.description = "Комплексная проверка проекта (синтаксис + HTTP)";
+        def.flags = TF_READ_ONLY | TF_EXECUTES | TF_SLOW;
+        def.parameters = SchemaBuilder().build();
+        def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "verify";
+            o.output = verify();
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("headless_render", [](const ToolArgs& a) -> std::string {
-        return headless_render(a.url);
-    }, "Рендер DOM сайта");
+    {
+        ToolDef def;
+        def.name = "php_lint";
+        def.description = "Проверка синтаксиса PHP-файла (php -l)";
+        def.flags = TF_READ_ONLY | TF_EXECUTES;
+        SchemaBuilder b;
+        b.str("path", "путь к PHP-файлу").required("path");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "php -l";
+            o.output = php_lint(arg(a, "path"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("validate", [](const ToolArgs&) -> std::string {
-        return validate();
-    }, "Проверка синтаксиса PHP всех файлов");
+    {
+        ToolDef def;
+        def.name = "headless_render";
+        def.description = "Рендер DOM страницы headless-браузером";
+        def.flags = TF_READ_ONLY | TF_NETWORK | TF_SLOW;
+        SchemaBuilder b;
+        b.str("url", "адрес страницы").required("url");
+        def.parameters = b.build();
+        def.handler = [arg](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "render";
+            o.output = headless_render(arg(a, "url"));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
+
+    {
+        ToolDef def;
+        def.name = "validate";
+        def.description = "Проверка синтаксиса всех PHP-файлов проекта";
+        def.flags = TF_READ_ONLY | TF_EXECUTES | TF_SLOW;
+        def.parameters = SchemaBuilder().build();
+        def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
+            ToolOutput o;
+            o.title = "validate";
+            o.output = validate();
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
 }
 
 /* ===== WP-навыки ===== */

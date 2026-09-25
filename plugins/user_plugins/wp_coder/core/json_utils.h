@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace coder {
 namespace text {
@@ -220,6 +222,132 @@ inline int int_(const std::string& block, const char* key) {
         n = n * 10 + (block[s] - '0'); ++s;
     }
     return n;
+}
+
+/* --- Разбор массива сообщений [{"role":...,"content":...}, ...] ---
+ *
+ * Нужен для Engine::load_session, который писал и читал сессию.
+ * Раньше чтение шло «найди {"role", затем первый }» — а '}' спокойно
+ * встречается в содержимом (function f() {}), и сообщение обрывалось.
+ *
+ * Здесь полноценный разбор со учётом строковых литералов и escape-последовательностей,
+ * на входе — ровно тот формат, который пишет Engine::save_session.
+ * Возвращает false, если вход не является массивом объектов. */
+inline bool parse_message_array(const std::string& s,
+                                std::vector<std::pair<std::string, std::string>>& out) {
+    out.clear();
+    size_t i = 0;
+    auto skip_ws = [&]() {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+    };
+    /* Разбор строкового литерала начиная с открывающей кавычки. */
+    auto read_string = [&](std::string& dst) -> bool {
+        if (i >= s.size() || s[i] != '"') return false;
+        ++i;
+        dst.clear();
+        while (i < s.size()) {
+            char c = s[i];
+            if (c == '"') { ++i; return true; }
+            if (c == '\\') {
+                if (i + 1 >= s.size()) return false;
+                char e = s[i + 1];
+                i += 2;
+                switch (e) {
+                    case '"':  dst += '"';  break;
+                    case '\\': dst += '\\'; break;
+                    case '/':  dst += '/';  break;
+                    case 'b':  dst += '\b'; break;
+                    case 'f':  dst += '\f'; break;
+                    case 'n':  dst += '\n'; break;
+                    case 'r':  dst += '\r'; break;
+                    case 't':  dst += '\t'; break;
+                    case 'u': {
+                        if (i + 4 > s.size()) return false;
+                        std::uint32_t cp = 0;
+                        for (int k = 0; k < 4; ++k) {
+                            char h = s[i + k];
+                            cp <<= 4;
+                            if (h >= '0' && h <= '9') cp |= static_cast<std::uint32_t>(h - '0');
+                            else if (h >= 'a' && h <= 'f') cp |= static_cast<std::uint32_t>(h - 'a' + 10);
+                            else if (h >= 'A' && h <= 'F') cp |= static_cast<std::uint32_t>(h - 'A' + 10);
+                            else return false;
+                        }
+                        i += 4;
+                        /* Сурогатная пара: \uD83D\uDE00 */
+                        if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 <= s.size() &&
+                            s[i] == '\\' && s[i + 1] == 'u') {
+                            std::uint32_t low = 0;
+                            bool ok = true;
+                            for (int k = 0; k < 4; ++k) {
+                                char h = s[i + 2 + k];
+                                low <<= 4;
+                                if (h >= '0' && h <= '9') low |= static_cast<std::uint32_t>(h - '0');
+                                else if (h >= 'a' && h <= 'f') low |= static_cast<std::uint32_t>(h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') low |= static_cast<std::uint32_t>(h - 'A' + 10);
+                                else { ok = false; break; }
+                            }
+                            if (ok && low >= 0xDC00 && low <= 0xDFFF) {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                                i += 6;
+                            }
+                        }
+                        if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
+                        text::append_utf8(cp, dst);
+                        break;
+                    }
+                    default: dst += e; break;
+                }
+                continue;
+            }
+            dst += c;
+            ++i;
+        }
+        return false;  // строка не закрыта
+    };
+
+    skip_ws();
+    if (i >= s.size() || s[i] != '[') return false;
+    ++i;
+    for (;;) {
+        skip_ws();
+        if (i < s.size() && s[i] == ']') return true;   // конец массива
+        if (i >= s.size() || s[i] != '{') return false;
+
+        std::string role, content;
+        bool have_content = false;
+        ++i;  // '{'
+        for (;;) {
+            skip_ws();
+            if (i < s.size() && s[i] == '}') { ++i; break; }
+            if (i >= s.size() || s[i] != '"') return false;
+            std::string key;
+            if (!read_string(key)) return false;
+            skip_ws();
+            if (i >= s.size() || s[i] != ':') return false;
+            ++i;
+            skip_ws();
+            if (i >= s.size() || s[i] != '"') return false;  // значения — строки
+            std::string val;
+            if (!read_string(val)) return false;
+            if (key == "role") role = val;
+            else if (key == "content") { content = val; have_content = true; }
+            /* Неизвестные ключи игнорируем — формат может расширяться. */
+            skip_ws();
+            if (i < s.size() && s[i] == ',') { ++i; continue; }
+            if (i < s.size() && s[i] == '}') { ++i; break; }
+            return false;
+        }
+        /* Формат фиксирован (его пишет Engine::save_session): оба ключа
+         * обязательны. Отсутствие content — признак обрезанного файла,
+         * а не валидное сообщение. */
+        if (!have_content) return false;
+        if (!role.empty()) out.emplace_back(role, content);
+
+        skip_ws();
+        if (i < s.size() && s[i] == ',') { ++i; continue; }
+        if (i < s.size() && s[i] == ']') return true;
+        return false;
+    }
 }
 
 } // namespace json

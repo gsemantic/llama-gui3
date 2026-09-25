@@ -76,10 +76,29 @@ LLAMA_PLUGIN_EXPORT const char* ll_plugin_api_version(void) {
     return LLAMA_PLUGIN_API_VERSION;
 }
 
+namespace {
+
+/* Версия плагина в ОДНОМ месте.
+ *
+ * Раньше она была продублирована в четырёх файлах (plugin.json,
+ * plugins/wp_coder.json, ll_plugin_info(), CHANGELOG.md) и разошлась:
+ * 0.3.0 / 0.1.0 / 0.3.0 / 0.4.0. При изменении нужно править все четыре.
+ *
+ * CMake генерирует WP_CODER_VERSION из plugin.json, чтобы JSON остался
+ * единственным источником истины; если макрос не определён (сборка вне
+ * CMake) — падаем на значение из манифеста. */
+#ifdef WP_CODER_VERSION
+const char* kPluginVersion = WP_CODER_VERSION;
+#else
+const char* kPluginVersion = "0.5.0";
+#endif
+
+}  // namespace
+
 LLAMA_PLUGIN_EXPORT const LlamaPluginInfo* ll_plugin_info(void) {
     static const LlamaPluginInfo info = {
         "wp_coder",
-        "0.3.0",
+        kPluginVersion,
         "AI-кодер: модульная архитектура (WordPress, Python, ...)",
         "llama-gui"
     };
@@ -336,11 +355,25 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
     coder::SkillsManager::instance().load_from_directory(
         std::string(WP_CODER_SKILLS_DIR), "wordpress");
 
-    /* Активируем навыки выбранного модуля. */
+    /* Активируем навыки выбранного модуля.
+     *
+     * Раньше здесь стояла проверка «если active_module непустой». На
+     * чистой установке настройка пуста, вызов пропускался, и агент
+     * оставался вообще без навыков (и без намёка, что skill_detail
+     * существует). Теперь set_module/set_active вызывается всегда —
+     * refresh_active() сам выберет разумный дефолт. */
     {
         const auto& st = coder::engine().state();
-        if (!st.active_module.empty())
-            coder::SkillsManager::instance().set_module(st.active_module);
+        coder::SkillsManager& sm = coder::SkillsManager::instance();
+        if (!st.active_module.empty()) {
+            sm.set_module(st.active_module);
+        } else {
+            /* Модуль не выбран — оставляем active_module_ пустым, чтобы
+             * были видны навыки всех модулей. */
+            sm.refresh_active();
+        }
+        std::cerr << "[wp_coder] skills: загружено " << sm.all_skills().size()
+                  << ", активно " << sm.active_skills().size() << std::endl;
     }
 
     /* 6. Регистрируем UI. */

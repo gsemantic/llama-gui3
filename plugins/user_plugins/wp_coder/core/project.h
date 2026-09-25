@@ -1,31 +1,29 @@
 #pragma once
 
 /*
- * project.h — Универсальные настройки проекта AI-кодера.
+ * project.h — Пути и окружение проекта AI-кодера.
  *
  * Абстрагирует настройки от WP-специфики.
- * WP-специфичные настройки (wp_site_url, app_password и т.д.)
- * живут в модуле WordPress.
+ * WP-специфичные навыки (wp_setup, деплой) живут в модуле WordPress.
+ *
+ * Про настройки: ЗДЕСЬ их нет. Ими занимается Engine
+ * (Engine::load_settings / Engine::save_settings, engine.cpp), а модули
+ * получают доступ через own_engine_settings() и CoderModule::load_settings.
+ * Функции project_load_settings / project_save_settings /
+ * setting_get_str / setting_set_str были заглушками без единого
+ * вызывающего и удалены в И0.9.
  */
 
 #include <string>
 
 namespace coder {
 
-/* Загрузка настроек проекта из хранилища хоста. */
-void project_load_settings();
-
-/* Сохранение настроек проекта. */
-void project_save_settings();
-
-/* Определение PHP (поиск в PATH). */
+/* Определение PHP (поиск в PATH). Пишет engine_state().php_bin. */
 void project_detect_php();
 
-/* Решение пути: относительный -> абсолютный. */
+/* Решение пути: относительный -> абсолютный относительно project_dir.
+ * Возвращает rel как есть, если он абсолютный (POSIX или Windows-диск)
+ * либо если project_dir не задан. */
 std::string project_resolve(const std::string& rel);
-
-/* Вспомогательные настройки (храним как JSON-строку). */
-std::string setting_get_str(const std::string& key, const std::string& def);
-void setting_set_str(const std::string& key, const std::string& value);
 
 } // namespace coder

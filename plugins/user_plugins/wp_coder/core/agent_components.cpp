@@ -123,6 +123,28 @@ void SessionStore::trim() {
     }
 }
 
+void SessionStore::trim_if_needed() {
+    /* Снаружи лока НЕ держим: весь захват state_.mtx — внутри trim().
+     * Именно из-за внешнего лока в AgentLoop раньше был дедлок. */
+    trim();
+}
+
+size_t SessionStore::total_chars() const {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    size_t total = 0;
+    for (const auto& m : state_.session) total += m.content.size();
+    return total;
+}
+
+bool SessionStore::over_budget() const {
+    /* session_budget тоже меняется из UI-потока, поэтому читаем его
+     * под тем же мьютексом, что и историю. */
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    size_t total = 0;
+    for (const auto& m : state_.session) total += m.content.size();
+    return total > state_.session_budget;
+}
+
 /* ======================================================================
  * PermissionGate
  * ====================================================================== */
@@ -203,8 +225,9 @@ void PermissionGate::wait(std::unique_lock<std::mutex>& lk) {
  * ToolRunner
  * ====================================================================== */
 
-std::string ToolRunner::run(const std::string& tool_name, const ToolArgs& args) {
-    if (!ToolsRegistry::instance().has(tool_name)) {
+std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue& args) {
+    const ToolDef* def = ToolsRegistry::instance().find(tool_name);
+    if (!def) {
         std::string unknown = "[ошибка] неизвестный инструмент: " + tool_name
             + "\nДоступные инструменты: " + ToolsRegistry::instance().join_tools();
         this->push_event_(AgentEvent::Error, (tool_name + " — неизвестный инструмент").c_str());
@@ -215,9 +238,24 @@ std::string ToolRunner::run(const std::string& tool_name, const ToolArgs& args) 
         return unknown;
     }
 
-    std::string fp = tool_name + "\n" + args.path + "\n" + args.root + "\n"
-        + args.query + "\n" + args.pattern + "\n" + args.cli + "\n" + args.url + "\n"
-        + std::to_string(args.k);
+    /* И1.7: enforcement режимов — ДО fingerprint и ДО вызова.
+     * Это единственное место, где решается, допустим ли инструмент.
+     * Лок отпускаем до push_event_ (state_.mtx нерекурсивный). */
+    std::string refusal;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        refusal = check_tool_mode_policy(tool_name, *def, state_.mode, state_.plan_mode);
+    }
+    if (!refusal.empty()) {
+        this->push_event_(AgentEvent::Error, refusal);
+        return refusal;
+    }
+
+    /* Отпечаток для детекта зацикливания — сериализованные аргументы.
+     * Раньше он склеивался из восьми полей ToolArgs, и любой новый
+     * параметр в него не попадал: два разных вызова с одинаковыми
+     * восемью слотами выглядели для детектора одинаково. */
+    std::string fp = tool_name + "\n" + args.dump();
 
     bool loop_detected = false;
     {
@@ -241,9 +279,11 @@ std::string ToolRunner::run(const std::string& tool_name, const ToolArgs& args) 
         return "[ошибка] зацикливание вызова " + tool_name;
     }
 
-    std::string result = text::sanitize_utf8(ToolsRegistry::instance().run(tool_name, args));
-    this->push_event_(AgentEvent::Tool, tool_name + " -> " + result);
-    return result;
+    ToolOutput out = ToolsRegistry::instance().run_output(tool_name, args);
+    std::string label = tool_name;
+    if (!out.title.empty()) label += " (" + out.title + ")";
+    this->push_event_(AgentEvent::Tool, label + " -> " + out.output);
+    return out.output;
 }
 
 bool ToolRunner::is_loop_guard(const std::string& fingerprint) const {
@@ -485,21 +525,17 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 "Внимание: модель упёрлась в лимит токенов (finish=length). "
                 "Разбей задачу на шаги.");
 
-            SessionStore trimmer(state_);
-            trimmer.trim();
+            SessionStore(state_).trim_if_needed();
         }
 
         /* Автосжатие: даже без finish=length, если сессия превысила бюджет,
-         * сжимаем старые RESULT — иначе модель теряет контекст. */
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            size_t total = 0;
-            for (const auto& m : state_.session) total += m.content.size();
-            if (total > state_.session_budget) {
-                SessionStore trimmer(state_);
-                trimmer.trim();
-            }
-        }
+         * сжимаем старые RESULT — иначе модель теряет контекст.
+         *
+         * ВАЖНО: здесь нельзя брать state_.mtx перед вызовом trim() —
+         * trim() берёт тот же нерекурсивный мьютекс. Такая конструкция
+         * раньше приводила к дедлоку воркер-треда и зависанию UI.
+         * Проверка бюджета и сжатие — внутри SessionStore. */
+        SessionStore(state_).trim_if_needed();
         if (!rest.empty()) {
             if (!full_response.empty()) full_response += "\n\n";
             full_response += rest;
@@ -542,25 +578,19 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             return true;
         }
 
-        Action act;
-        if (!parse_action(block, act)) {
+        /* И1.2/И1.3: аргументы — JsonValue целиком, без проекции в
+         * 8 фиксированных слотов. Новый параметр инструмента доходит
+         * до обработчика без правок этого файла. */
+        json::JsonValue args;
+        if (!parse_action(block, args)) {
             this->push_event_(AgentEvent::Error, (std::string("[ошибка разбора wp_action] блок:\n") + block).c_str());
             full_response += "\n\n[ошибка разбора wp_action]";
             return false;
         }
-
-        ToolArgs args;
-        args.path = act.path;
-        args.root = act.root;
-        args.query = act.query;
-        args.pattern = act.pattern;
-        args.content = act.content;
-        args.cli = act.cli;
-        args.url = act.url;
-        args.k = act.k;
+        const std::string tool_name = args.get_string("tool");
 
         ToolRunner tool_runner(state_, cb_, this->push_event_);
-        std::string result = tool_runner.run(act.tool, args);
+        std::string result = tool_runner.run(tool_name, args);
 
         std::string perm_path;
         {
@@ -578,7 +608,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                     trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
                                     + " символов. Вызови инструмент повторно, если нужно больше.]";
                 }
-                state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + trimmed_result});
+                state_.session.push_back({"user", "RESULT [" + tool_name + "]:\n" + trimmed_result});
                 state_.waiting_in_sync = true;
             }
             this->push_event_(AgentEvent::Status, "Ожидание разрешения: " + perm_path);
@@ -636,7 +666,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
                                 + " символов. Вызови инструмент повторно, если нужно больше.]";
             }
-            state_.session.push_back({"user", "RESULT [" + act.tool + "]:\n" + trimmed_result});
+            state_.session.push_back({"user", "RESULT [" + tool_name + "]:\n" + trimmed_result});
         }
     }
 

@@ -127,6 +127,7 @@ void Engine::save_session() {
         std::lock_guard<std::mutex> lk(state_.mtx);
         snap = state_.session;
     }
+    if (snap.empty()) return;
     std::string json = "[";
     for (size_t i = 0; i < snap.size(); ++i) {
         if (i) json += ",";
@@ -134,8 +135,24 @@ void Engine::save_session() {
               + json::escape(snap[i].content) + "\"}";
     }
     json += "]";
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (f) f << json;
+
+    /* Пишем во временный файл и переименовываем: падение посреди записи
+     * больше не оставляет после себя обрезанный session.json, который
+     * при следующем запуске читался бы как «пустая сессия». */
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f << json;
+        f.flush();
+        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return; }
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::cerr << "[wp_coder] session: не удалось сохранить сессию: "
+                  << ec.message() << std::endl;
+        std::filesystem::remove(tmp, ec);
+    }
 }
 
 void Engine::load_session() {
@@ -146,20 +163,23 @@ void Engine::load_session() {
     std::string content((std::istreambuf_iterator<char>(f)),
                         std::istreambuf_iterator<char>());
     content = text::sanitize_utf8(content);
+    if (content.empty()) return;
+
+    /* Полноценный разбор массива. Раньше здесь был «найди {"role", затем
+     * первый }» — '}' внутри содержимого (function f() {}) обрывал
+     * сообщение, и resume сессии молча терял данные. */
+    std::vector<std::pair<std::string, std::string>> parsed;
+    if (!json::parse_message_array(content, parsed) || parsed.empty()) {
+        std::cerr << "[wp_coder] session: файл сессии повреждён, начинаем заново: "
+                  << path << std::endl;
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        return;
+    }
 
     std::vector<ChatMsg> loaded;
-    size_t pos = 0;
-    while ((pos = content.find("{\"role\"", pos)) != std::string::npos) {
-        size_t end = content.find('}', pos);
-        if (end == std::string::npos) break;
-        std::string item = content.substr(pos, end - pos + 1);
-        ChatMsg m;
-        m.role = json::str(item, "role");
-        m.content = json::str(item, "content");
-        if (!m.role.empty()) loaded.push_back(std::move(m));
-        pos = end + 1;
-    }
-    if (loaded.empty()) return;
+    loaded.reserve(parsed.size());
+    for (auto& kv : parsed) loaded.push_back({kv.first, kv.second});
 
     std::lock_guard<std::mutex> lk(state_.mtx);
     if (state_.session.empty()) state_.session = std::move(loaded);
@@ -222,6 +242,22 @@ std::string Engine::build_system_prompt() const {
                     break;
                 }
             }
+        }
+    }
+
+    /* Каталог инструментов, построенный из их JSON-схем (И1.5).
+     *
+     * Раньше здесь был ручной список базовых инструментов в prompts.h
+     * плюс отдельный каталог «инструментов модулей» — два источника
+     * истины, оба разошлись с кодом: exec_command не был описан (D2),
+     * а 29 инструментов модулей не были видны модели вообще (D15).
+     * Теперь описание, валидация аргументов и этот каталог читают одну
+     * схему, поэтому дрейф документации невозможен по построению. */
+    {
+        std::string cat = ToolsRegistry::instance().build_tool_catalogue();
+        if (!cat.empty()) {
+            sys += "\n\n";
+            sys += cat;
         }
     }
 

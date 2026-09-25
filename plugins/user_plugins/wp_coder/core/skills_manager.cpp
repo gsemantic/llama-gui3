@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <iostream>
+#include <cctype>
 
 namespace fs = std::filesystem;
 namespace coder {
@@ -32,8 +33,46 @@ void SkillsManager::load() {
 
     /* 2. Загружаем .md файлы из каталогов навыков.
      *    Ищем в: plugin_dir/skills/, data_dir/coder/skills/ */
+
     /* Внешние каталоги загружаются вызывающим кодом (plugin_main.cpp)
      * через load_from_directory() — здесь только объединяем. */
+
+    /* 3. Восстанавливаем активные навыки.
+     *
+     * Раньше здесь active_ просто оставался пустым, а set_module()
+     * вызывался из plugin_main.cpp только если настройка active_module
+     * была непустой. На чистой установке это значило: навыков нет ВООБЩЕ,
+     * build_skills_prompt() возвращал "", и модель не знала, что
+     * инструмент skill_detail вообще существует. */
+    refresh_active();
+}
+
+void SkillsManager::refresh_active() {
+    if (active_module_.empty()) {
+        /* Модуль не выбран — активны навыки всех модулей: лучше показать
+         * лишний навык в каталоге, чем не показать ни одного. */
+        set_active(all_skill_names());
+    } else {
+        std::vector<std::string> only;
+        for (const auto& sk : skills_) {
+            if (sk.module_name == active_module_) only.push_back(sk.name);
+        }
+        if (only.empty()) {
+            std::cerr << "[wp_coder] skills: модуль '" << active_module_
+                      << "' не дал навыков, активны навыки всех модулей"
+                      << std::endl;
+            set_active(all_skill_names());
+        } else {
+            set_active(only);
+        }
+    }
+}
+
+std::vector<std::string> SkillsManager::all_skill_names() const {
+    std::vector<std::string> names;
+    names.reserve(skills_.size());
+    for (const auto& sk : skills_) names.push_back(sk.name);
+    return names;
 }
 
 void SkillsManager::load_from_directory(const std::string& dir, const std::string& module_name) {
@@ -55,21 +94,34 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
             text = ss.str();
         }
 
+        /* Имя навыка = имя файла БЕЗ расширения (skills/wp_setup.md ->
+         * wp_setup). Это единственная форма, которую модель может
+         * безошибочно передать в skill_detail QUERY (поиск точный).
+         *
+         * Раньше имя бралось из строки заголовка '# ...':
+         *   "# wp_setup — настройка окружения" -> "wp_setup — настройка окружения"
+         *   "# Late Skill"                    -> "Late"
+         * Оба варианта невызываемы или вводят в заблуждение.
+         * Заголовок теперь идёт в описание. */
         Skill sk;
         sk.name = it->path().stem().string();
 
-        /* Парсинг: первая строка "# Имя" -> имя, вторая -> описание, остальное -> body. */
+        /* Формат .md: "# Заголовок", затем строка-описание, затем тело. */
         std::istringstream is(text);
         std::string line;
         bool first = true;
+        bool have_title = false;
+        std::string title_holder;
         std::stringstream body;
 
         while (std::getline(is, line)) {
             if (first && !line.empty() && line[0] == '#') {
-                sk.name = line.substr(1);
-                /* trim */
-                while (!sk.name.empty() && (sk.name[0] == ' ' || sk.name[0] == '\t'))
-                    sk.name.erase(0, 1);
+                title_holder = line.substr(1);
+                size_t b = 0;
+                while (b < title_holder.size() &&
+                       (title_holder[b] == ' ' || title_holder[b] == '\t')) ++b;
+                title_holder = title_holder.substr(b);
+                have_title = !title_holder.empty();
                 first = false;
                 continue;
             }
@@ -86,6 +138,22 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
         }
         sk.body = body.str();
 
+        /* Имя из файла — основное. Заголовок в описании не дублируем: он
+         * почти всегда совпадает с именем. */
+        if (have_title && sk.name.empty()) {
+            /* Файл без имени (например ".md") — sanitized-заголовок. */
+            std::string t;
+            for (char c : title_holder) {
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
+                    t += c;
+            }
+            if (t.empty()) t = "skill";
+            sk.name = t;
+        }
+        if (have_title && sk.description.empty()) {
+            sk.description = title_holder;
+        }
+
         /* Не дублируем если уже есть от модуля (модуль имеет приоритет). */
         bool exists = false;
         for (const auto& s : skills_) {
@@ -100,12 +168,7 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
 
 void SkillsManager::set_module(const std::string& module_name) {
     active_module_ = module_name;
-    active_.clear();
-    for (const auto& sk : skills_) {
-        if (sk.module_name == module_name) {
-            active_.push_back(sk.name);
-        }
-    }
+    refresh_active();
 }
 
 void SkillsManager::set_active(const std::vector<std::string>& names) {
@@ -133,18 +196,25 @@ std::string SkillsManager::build_skills_prompt() const {
     /* Только имена и описания активно включённых навыков. Полные тела навыков
      * НЕ инжектируются в промпт — они тяжёлые и оплачиваются на каждом шаге.
      * Модель подгружает нужный навык через инструмент skill_detail. */
-    if (active_.empty()) return "";
-    std::string result = "\n\n## АКТИВНЫЕ НАВЫКИ\n"
+    if (skills_.empty()) {
+        /* Навыков нет вообще. Модель всё равно должна знать про
+         * skill_detail — иначе она не сможет вызвать его, даже если
+         * пользователь установит навык позже в этой же сессии. */
+        return "\n\n## НАВЫКИ\n"
+               "Список навыков пуст. Инструмент skill_detail всё равно доступен: "
+               "вызови его, чтобы проверить, не появились ли навыки.\n";
+    }
+
+    /* Каталог строим по всем навыкам, но с пометкой активных — так модель
+     * видит и активные, и те, что можно включить через UI. */
+    std::string result = "\n\n## НАВЫКИ\n"
                          "(подробная инструкция — через skill_detail QUERY: <имя>)\n";
-    for (const auto& name : active_) {
-        for (const auto& sk : skills_) {
-            if (sk.name == name) {
-                result += "- " + sk.name;
-                if (!sk.description.empty()) result += " — " + sk.description;
-                result += "\n";
-                break;
-            }
-        }
+    for (const auto& sk : skills_) {
+        bool on = std::find(active_.begin(), active_.end(), sk.name) != active_.end();
+        result += on ? "- " : "- (выключен) ";
+        result += sk.name;
+        if (!sk.description.empty()) result += " — " + sk.description;
+        result += "\n";
     }
     return result;
 }

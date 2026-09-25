@@ -1,5 +1,28 @@
 # wp-coder: Module Development Guide
 
+> ## ⚠️ УСТАРЕЛО (2026-09-25) — не используйте как инструкцию
+>
+> Этот документ описывает **несуществующую** архитектуру. Оркестратор
+> `wp_coder_orchestrator` и специализированные агенты `wp_*_agent` были
+> удалены в итерации **И0.6** плана [`AGENT_PARITY_PLAN.md`](AGENT_PARITY_PLAN.md):
+> они никогда не компилировались (не были в списках исходников `CMakeLists.txt`),
+> содержали 47 заглушек и ссылались на несуществующий C-ABI
+> (`AGENT_PLUGIN_API_VERSION`, `PluginExports`, `plugin_create_agent`).
+>
+> Код доступен в истории git:
+> `git show HEAD~1:plugins/user_plugins/wp_coder/src/wp_theme_agent.cpp`
+>
+> **Актуальная документация:**
+> - архитектура и состав — [`README.md`](README.md)
+> - как добавить инструмент / навык / модуль — раздел «Инструменты и навыки»
+>   в [`README.md`](README.md) и комментарии в `core/module_api.h`
+> - что делается дальше — [`AGENT_PARITY_PLAN.md`](AGENT_PARITY_PLAN.md),
+>   итерация **И8** (субагенты на базе `core/agent_registry.*`)
+>
+> Разделы ниже оставлены как историческая справка.
+
+---
+
 ## Overview
 This guide explains how to develop, test, and contribute new modules (agents) to the wp-coder plugin.
 

@@ -7,6 +7,7 @@
  */
 
 #include "test_framework.h"
+#include "../core/json.h"
 #include "../core/tools_registry.h"
 #include "../core/engine.h"
 #include "../modules/python/python_tools.h"
@@ -25,9 +26,16 @@ static void init_engine_and_python() {
 
 TEST(pip_install_empty_rejected) {
     init_engine_and_python();
+    /* И1.6: query обязателен по схеме — пустой вызов отсекается валидацией. */
     ToolArgs a;  // query пуст
     std::string r = ToolsRegistry::instance().run("pip_install", a);
-    ASSERT_TRUE(r.find("укажи имя пакета") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(r.find("query") != std::string::npos);
+    /* Явно переданный пустой query доходит до обработчика. */
+    json::JsonValue args = json::JsonValue::object();
+    args.set("query", "");
+    std::string r2 = ToolsRegistry::instance().run("pip_install", args);
+    ASSERT_TRUE(r2.find("укажи имя пакета") != std::string::npos);
 }
 
 TEST(python_tools_registered) {

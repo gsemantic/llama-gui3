@@ -2,6 +2,7 @@
 #include "engine.h"
 #include "shell.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -11,28 +12,6 @@
 
 namespace fs = std::filesystem;
 namespace coder {
-
-std::string setting_get_str(const std::string& key, const std::string& def) {
-    auto& st = engine_state();
-    /* Используем Engine callbacks если доступны, иначе — заглушка. */
-    /* В текущей архитектуре Engine::init() ещё не вызван при загрузке настроек,
-     * поэтому project_load_settings вызывается ПОСЛЕ init(). */
-    return def;
-}
-
-void setting_set_str(const std::string& key, const std::string& value) {
-    /* Аналогично — через Engine callbacks. */
-}
-
-void project_load_settings() {
-    auto& st = engine_state();
-    /* Настройки загружаются через Engine::load_settings() после init(). */
-    /* Эта функция вызывается для обратной совместимости. */
-}
-
-void project_save_settings() {
-    /* Сохраняется через Engine::save_settings(). */
-}
 
 void project_detect_php() {
     auto& st = engine_state();
@@ -48,9 +27,26 @@ std::string project_resolve(const std::string& rel) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return rel;
     if (rel.empty()) return st.project_dir;
-    if (rel.size() > 0 && (rel[0] == '/' || rel.find(":") == 1)) return rel;
+
+    /* Абсолютный путь — POSIX (/) либо Windows-диск (C:/, C:\, C:).
+     *
+     * Раньше проверка была `rel.find(":") == 1`, то есть ЛЮБОЙ путь с
+     * двоеточием на второй позиции считался абсолютным и возвращался
+     * как есть. На Linux строка вида "a:b/c" или "wp:content/x"
+     * выходила из project_dir мимо всех проверок — минуя и
+     * is_path_outside, и PermissionGate.
+     *
+     * Диском считается только буква + ':' + разделитель (или ровно "C:").
+     * Иначе "a:b/c" — относительный путь с двоеточием в имени. */
+    bool is_abs = rel[0] == '/' || rel[0] == '\\';
+    if (!is_abs && rel.size() >= 2 && rel[1] == ':' &&
+        std::isalpha(static_cast<unsigned char>(rel[0]))) {
+        if (rel.size() == 2 || rel[2] == '/' || rel[2] == '\\') is_abs = true;
+    }
+    if (is_abs) return rel;
+
     std::string p = st.project_dir;
-    if (!p.empty() && p.back() != '/') p += '/';
+    if (!p.empty() && p.back() != '/' && p.back() != '\\') p += '/';
     p += rel;
     return p;
 }

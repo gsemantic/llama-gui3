@@ -1,7 +1,9 @@
 #include "test_framework.h"
 #include "../core/engine.h"
+#include "../core/agent_components.h"
 #include "../core/base_tools.h"
 #include "../core/git_tools.h"
+#include "../core/json.h"
 #include "../core/tools_registry.h"
 #include "../core/shell.h"
 #include "../core/json_utils.h"
@@ -9,6 +11,10 @@
 #include <map>
 #include <fstream>
 #include <filesystem>
+#include <future>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <unistd.h>
 
 using namespace coder;
@@ -273,6 +279,139 @@ TEST(engine_trim_session_compression) {
     ASSERT_TRUE(tool_kept);
 }
 
+/* ======================================================================
+ * Регрессии: И0.1/D1 — дедлок SessionStore::trim()
+ *
+ * state_.mtx — нерекурсивный std::mutex. Раньше AgentLoop::run брал его
+ * вокруг блока «посчитать размер сессии», а внутри вызывал trim(), который
+ * берёт тот же мьютекс. При превышении session_budget воркер-тред вставал
+ * намертво, а UI (он читает то же состояние под тем же мьютексом) — зависал.
+ *
+ * Тесты ниже воспроизводят ровно этот сценарий: сессия длиннее бюджета +
+ * вызов trim_if_needed() без внешнего лока. Если логика вернётся к
+ * «захватить лок снаружи», тесты провалятся по таймауту.
+ * ====================================================================== */
+
+namespace {
+
+/* Кладёт в сессию сообщения, гарантированно превышающие бюджет. */
+void fill_over_budget_session(Engine& eng, size_t budget) {
+    std::lock_guard<std::mutex> lk(eng.state().mtx);
+    eng.state().session_budget = budget;
+    eng.state().session.clear();
+    eng.state().session.push_back({"user", "исходная задача"});
+    /* Каждый шаг кладёт assistant-сообщение и RESULT-сообщение. */
+    size_t per_step = 2000;
+    for (int i = 0; i < 200; ++i) {
+        eng.state().session.push_back({"assistant", "рассуждение " +
+            std::string(per_step / 2, 'a')});
+        eng.state().session.push_back({"user", "RESULT [read_file]:\n" +
+            std::string(per_step, 'b')});
+    }
+}
+
+}  // namespace
+
+TEST(sessionstore_trim_if_needed_completes_over_budget) {
+    auto& eng = Engine::instance();
+    const size_t budget = 60000;
+    fill_over_budget_session(eng, budget);
+
+    SessionStore store(eng.state());
+    ASSERT_TRUE(store.over_budget());
+
+    /* Тот самый вызов, который раньше вешался. Запускаем в отдельном
+     * потоке с таймаутом, чтобы дедлок валил тест, а не весь прогон. */
+    auto fut = std::async(std::launch::async, [&store] { store.trim_if_needed(); });
+    ASSERT_TRUE(fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    fut.get();
+
+    ASSERT_TRUE(store.total_chars() <= budget);
+}
+
+TEST(sessionstore_trim_is_reentrant_safe_from_loop_pattern) {
+    auto& eng = Engine::instance();
+    const size_t budget = 40000;
+    fill_over_budget_session(eng, budget);
+
+    /* Имитируем точный паттерн AgentLoop::run: проверка бюджета и сжатие
+     * одним вызовом, без захвата state_.mtx снаружи. */
+    auto fut = std::async(std::launch::async, [&eng] {
+        for (int step = 0; step < 5; ++step) {
+            SessionStore(eng.state()).trim_if_needed();
+        }
+    });
+    ASSERT_TRUE(fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    fut.get();
+}
+
+TEST(sessionstore_trim_does_not_block_ui_reader) {
+    auto& eng = Engine::instance();
+    const size_t budget = 60000;
+    fill_over_budget_session(eng, budget);
+
+    std::atomic<bool> ui_stuck{false};
+    std::atomic<bool> stop{false};
+
+    /* «UI-поток»: читает состояние под state_.mtx каждый кадр. */
+    std::thread ui([&] {
+        while (!stop.load()) {
+            {
+                std::lock_guard<std::mutex> lk(eng.state().mtx);
+                volatile size_t n = eng.state().session.size();
+                (void)n;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+
+    /* «Воркер»: сжимает историю. Если trim() ждёт мьютект, который держит
+     * вызывающий код, — воркер зависнет и перестанет освобождать лок,
+     * после чего застрянет и «UI». */
+    std::atomic<bool> worker_done{false};
+    std::thread worker([&] {
+        for (int i = 0; i < 20; ++i)
+            SessionStore(eng.state()).trim_if_needed();
+        worker_done = true;
+    });
+
+    auto t0 = std::chrono::steady_clock::now();
+    while (!worker_done.load() &&
+           std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ui_stuck = !worker_done.load();
+
+    stop = true;
+    ui.join();
+    if (!worker_done.load()) {
+        /* Не держим мёртвый поток — тест просто провалится. */
+        worker.detach();
+    } else {
+        worker.join();
+    }
+    ASSERT_FALSE(ui_stuck);
+}
+
+TEST(sessionstore_over_budget_false_within_budget) {
+    auto& eng = Engine::instance();
+    const size_t budget = 60000;
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session_budget = budget;
+        eng.state().session.clear();
+        eng.state().session.push_back({"user", "маленькая задача"});
+        eng.state().session.push_back({"assistant", "короткий ответ"});
+    }
+    SessionStore store(eng.state());
+    ASSERT_FALSE(store.over_budget());
+
+    /* trim_if_needed() на короткой сессии — no-op, ничего не портит. */
+    store.trim_if_needed();
+    ASSERT_EQ(eng.session_for_test().size(), (size_t)2);
+    ASSERT_EQ(eng.session_for_test()[0].content, std::string("маленькая задача"));
+}
+
 TEST(engine_settings_deploy_remote_dir_roundtrip) {
     std::map<std::string, std::string> settings;
     HostCallbacks cb;
@@ -434,9 +573,16 @@ TEST(list_dir_lists_files_and_dirs) {
 TEST(web_fetch_empty_url_rejected) {
     fs::path tmp = make_tmp_project();
     init_tools_for_phase3(tmp);
+    /* И1.6: url обязателен — отказ приходит из валидации схемы. */
     ToolArgs a;
     std::string r = ToolsRegistry::instance().run("web_fetch", a);
-    ASSERT_TRUE(r.find("пустой URL") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(r.find("url") != std::string::npos);
+    /* Явно переданный пустой url доходит до обработчика. */
+    json::JsonValue args = json::JsonValue::object();
+    args.set("url", "");
+    std::string r2 = ToolsRegistry::instance().run("web_fetch", args);
+    ASSERT_TRUE(r2.find("пустой url") != std::string::npos);
     fs::remove_all(tmp);
 }
 
@@ -475,6 +621,7 @@ TEST(edit_file_out_of_range_rejected) {
     ToolArgs a;
     a.path = "e.txt";
     a.k = 10;  // за пределами файла
+    a.content = "x";  // content обязателен по схеме (И1.6)
     std::string r = ToolsRegistry::instance().run("edit_file", a);
     ASSERT_TRUE(r.find("диапазон строк вне файла") != std::string::npos);
     fs::remove_all(tmp);
@@ -529,9 +676,15 @@ TEST(git_tools_require_project_dir) {
 TEST(git_checkout_requires_branch_name) {
     fs::path tmp = make_tmp_project();
     init_tools_for_phase3(tmp);
+    /* И1.6: query обязателен по схеме — пустой вызов отсекается валидацией. */
     ToolArgs a;  // query пуст
     std::string r = ToolsRegistry::instance().run("git_checkout", a);
-    ASSERT_TRUE(r.find("укажи ветку") != std::string::npos);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    /* Явно переданный пустой query доходит до обработчика. */
+    json::JsonValue args = json::JsonValue::object();
+    args.set("query", "");
+    std::string r2 = ToolsRegistry::instance().run("git_checkout", args);
+    ASSERT_TRUE(r2.find("укажи ветку") != std::string::npos);
     fs::remove_all(tmp);
 }
 
@@ -648,6 +801,135 @@ TEST(load_session_empty_when_no_file) {
         ASSERT_TRUE(eng.state().session.empty());
     }
     fs::remove_all(tmp);
+}
+
+/* И0.5 / D10 — сессия с '}' и '\"' внутри содержимого.
+ *
+ * Старый load_session искал "{\"role\"" и брал содержимое до ПЕРВОГО '}'.
+ * В коде '}' встречается на каждой второй строке (function f() {}),
+ * поэтому resume молча обрезал сообщения. */
+TEST(save_load_session_survives_braces_and_escapes) {
+    fs::path tmp = make_tmp_project();
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    cb.path_data_dir = [&tmp]() -> std::string { return tmp.string(); };
+
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    const std::string tricky =
+        "<?php\n"
+        "function wp_demo() {\n"
+        "    $obj = ['a' => 1];\n"
+        "    if ($x) { return ['ok' => true]; }\n"
+        "}\n"
+        "/* \"кавычки\" и \\ обратный слэш */\n"
+        "wp_json_encode(array(1, 2, 3));\n";
+    const std::string plan = "[ПЛАН]\n1. Создать класс\n2. Хук add_action('init', ...)\n";
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session.clear();
+        eng.state().session.push_back({"user", "напиши функцию"});
+        eng.state().session.push_back({"assistant", tricky});
+        eng.state().session.push_back({"user", "RESULT [write_file]:\n" + tricky});
+        eng.state().session.push_back({"assistant", plan});
+    }
+    eng.save_session();
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session.clear();
+    }
+    eng.load_session();
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().session.size(), (size_t)4);
+        ASSERT_EQ(eng.state().session[1].content, tricky);
+        ASSERT_EQ(eng.state().session[2].content, std::string("RESULT [write_file]:\n") + tricky);
+        ASSERT_EQ(eng.state().session[3].content, plan);
+    }
+
+    eng.clear_session();
+    fs::remove_all(tmp);
+}
+
+/* Битый файл сессии не должен ронять загрузку — и не должен молча
+ * превращаться в пустую сессию с последующей перезаписью. */
+TEST(load_session_rejects_corrupt_file) {
+    fs::path tmp = make_tmp_project();
+    HostCallbacks cb;
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    cb.path_data_dir = [&tmp]() -> std::string { return tmp.string(); };
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    fs::create_directories(tmp / "wp_coder");
+    fs::path bad = tmp / "wp_coder" / "session.json";
+    {
+        /* Обрезанный JSON: строковый литерал не закрыт. */
+        std::ofstream f(bad, std::ios::binary | std::ios::trunc);
+        f << "[{\"role\":\"user\",\"content\":\"незакрытая строка}]";
+    }
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().session.clear();
+    }
+    eng.load_session();
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_TRUE(eng.state().session.empty());
+    }
+    /* Повреждённый файл убран, чтобы он не ломал следующий запуск. */
+    ASSERT_FALSE(fs::exists(bad));
+
+    fs::remove_all(tmp);
+}
+
+/* Юнит-тесты самого разборщика (core/json_utils.h). */
+TEST(json_parse_message_array_handles_braces) {
+    std::vector<std::pair<std::string, std::string>> out;
+    std::string s =
+        R"([{"role":"user","content":"a}b{c"},{"role":"assistant","content":"d\"e\\f\n"}])";
+    ASSERT_TRUE(json::parse_message_array(s, out));
+    ASSERT_EQ(out.size(), (size_t)2);
+    ASSERT_EQ(out[0].first, std::string("user"));
+    ASSERT_EQ(out[0].second, std::string("a}b{c"));
+    ASSERT_EQ(out[1].first, std::string("assistant"));
+    ASSERT_EQ(out[1].second, std::string("d\"e\\f\n"));
+}
+
+TEST(json_parse_message_array_empty_and_invalid) {
+    std::vector<std::pair<std::string, std::string>> out;
+    ASSERT_TRUE(json::parse_message_array("[]", out));
+    ASSERT_TRUE(out.empty());
+    ASSERT_TRUE(json::parse_message_array("  [ ]  ", out));
+    ASSERT_TRUE(out.empty());
+    ASSERT_FALSE(json::parse_message_array("", out));
+    ASSERT_FALSE(json::parse_message_array("{}", out));
+    ASSERT_FALSE(json::parse_message_array(R"([{"role":"user"}])", out));
+    ASSERT_FALSE(json::parse_message_array(R"([{"role":1}])", out));
+    ASSERT_FALSE(json::parse_message_array(R"([{"role":"user","content":"x")", out));
+}
+
+TEST(json_parse_message_array_unicode_escapes) {
+    std::vector<std::pair<std::string, std::string>> out;
+    /* \uD83D\uDE00 — сурогатная пара эмодзи (обычная запись JSON). */
+    std::string s =
+        R"([{"role":"user","content":"\u041f\u0440\u0438\u0432\u0435\u0442 \ud83d\ude00"}])";
+    ASSERT_TRUE(json::parse_message_array(s, out));
+    ASSERT_EQ(out.size(), (size_t)1);
+    ASSERT_TRUE(out[0].second.find("Привет") != std::string::npos);
+    ASSERT_TRUE(out[0].second.find("\xF0\x9F\x98\x80") != std::string::npos);
+    /* Одиночный сурогат не должен ломать разбор — подменяется на U+FFFD. */
+    std::vector<std::pair<std::string, std::string>> out2;
+    ASSERT_TRUE(json::parse_message_array(
+        R"([{"role":"user","content":"\ud83d"}])", out2));
+    ASSERT_EQ(out2.size(), (size_t)1);
+    ASSERT_TRUE(out2[0].second.find("\xEF\xBF\xBD") != std::string::npos);
 }
 
 TEST(agent_settings_max_steps_and_budget) {

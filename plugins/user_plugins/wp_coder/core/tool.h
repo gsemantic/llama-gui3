@@ -1,0 +1,257 @@
+#pragma once
+
+/*
+ * tool.h — Типизированный инструмент (И1.3–1.6, решение D-3).
+ *
+ * До И1 инструмент был `std::function<std::string(const ToolArgs&)>`
+ * плюс фиксированная структура ToolArgs на 8 строковых слотов. Отсюда
+ * были две беды, обе зафиксированы в плане:
+ *   - добавление параметра требовало правки минимум в 4 файлах
+ *     (объявление в module_api.h, извлечение в tool_protocol.cpp,
+ *      строка в промпте, разбор в агенте) — и эти правки расходились;
+ *   - у реестра не было НИКАКИХ метаданных об инструменте, кроме
+ *     описания строкой, поэтому режимы (research/plan) приходилось
+ *     проверять внутри самих инструментов. Проверки стояли в 4 из 50
+ *     инструментов, а exec_command, git_commit, deploy, cron_add,
+ *     systemd_restart, docker_run, wp_create_site, pip_install шли мимо.
+ *
+ * Теперь инструмент описывается декларативно (ToolDef): имя, описание,
+ * JSON-схема параметров и битовая маска ToolFlags. Режимы enforce'ятся
+ * в одном месте — ToolRunner::run (И1.7) — и покрывают все 50
+ * инструментов, а не 4.
+ *
+ * Схема — не «полный» JSON Schema, а подмножество, которого хватает
+ * для проверки аргументов и генерации описания для модели:
+ *   {"type":"object",
+ *    "properties":{"path":{"type":"string","description":"..."}},
+ *    "required":["path"],
+ *    "additionalProperties":false}
+ * Поддерживаемые type: string, integer, number, boolean, array, object.
+ * Поддерживаемые ограничения: minimum, maximum, enum.
+ */
+
+#include "json.h"
+
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace coder {
+
+/* --- И1.4: флаги инструмента (битовая маска) ---
+ *
+ * Флаги отвечают на два разных вопроса, и их важно не путать:
+ *   «что инструмент УМЕЕТ»  — EXECUTES (запускает код), NETWORK (ходит
+ *                             в сеть), WRITES_FILES (трогает файлы);
+ *   «что инструмент ДЕЛАЕТ» — READ_ONLY (ничего не меняет) и
+ *                             DESTRUCTIVE (необратимое изменение).
+ *
+ * Именно поэтому READ_ONLY — единственный флаг, по которому решается
+ * допуск в режиме research: git_status запускает git, но не меняет
+ * ничего, и запрещать его в режиме «только чтение» бессмысленно.
+ * Обратная сторона: инструмент, помеченный WRITES_FILES, но без
+ * READ_ONLY, в research не пройдёт автоматически — при неверной
+ * разметке это отказ, а не дыра, что правильно.
+ */
+enum ToolFlag : unsigned {
+    TF_NONE         = 0u,
+    /* Не меняет ничего: только читает, даже если что-то запускает.
+     * Единственный флаг, разрешённый в режиме research. */
+    TF_READ_ONLY    = 1u << 0,
+    /* Создаёт/изменяет/удаляет файлы. */
+    TF_WRITES_FILES = 1u << 1,
+    /* Запускает код: shell, git, docker, systemctl, ssh, интерпретатор. */
+    TF_EXECUTES     = 1u << 2,
+    /* Ходит в сеть: HTTP, wp rest, headless-браузер. */
+    TF_NETWORK      = 1u << 3,
+    /* Изменение, которое инструмент не может отменить сам: деплой,
+     * перезапуск сервиса, создание БД, установка пакета. По этому
+     * флагу И2 будет требовать подтверждения пользователя. */
+    TF_DESTRUCTIVE  = 1u << 4,
+    /* Долгая операция: exec_command, docker build, pip install.
+     * Учитывается таймаутом (И4.8) и политикой разрешений (И2). */
+    TF_SLOW         = 1u << 5,
+
+    /* Служебный флаг И1.3–И1.7: инструмент зарегистрирован старым
+     * способом (без схемы и флагов) и ждёт миграции на И1.8.
+     * Enforcement относится к нему fail-closed: в research/plan такой
+     * инструмент не вызывается. После И1.8 флага быть не должно —
+     * это проверяет тест no_unclassified_tools. */
+    TF_UNCLASSIFIED = 1u << 6,
+};
+
+inline unsigned tf_has(unsigned flags, ToolFlag f) {
+    return (flags & static_cast<unsigned>(f)) != 0u;
+}
+
+/* Что запрещено в режиме плана: запуск кода и необратимые операции.
+ * WRITES_FILES здесь разрешён — запись перехватывает
+ * ToolContext::propose_write и превращает правку в предложение.
+ *
+ * Для research запрет выражается не маской, а требованием TF_READ_ONLY:
+ * список «безопасных» инструментов меняется вместе с набором флагов,
+ * и перечислять его руками — значит забыть какой-нибудь. */
+constexpr unsigned kPlanForbidden = TF_UNCLASSIFIED | TF_EXECUTES | TF_DESTRUCTIVE;
+constexpr unsigned kAllFlags = TF_READ_ONLY | TF_WRITES_FILES | TF_EXECUTES |
+                               TF_NETWORK | TF_DESTRUCTIVE | TF_SLOW;
+
+const char* tool_flag_names(unsigned flags);   // для отладки и сообщений
+
+/* --- И1.3: результат работы инструмента --- */
+struct ToolOutput {
+    /* Короткий заголовок для UI/таймлайна (И11): «read a.txt», «git status». */
+    std::string title;
+    /* Текст, который увидит модель в RESULT. */
+    std::string output;
+    /* Структурные сведения: exit code, число совпадений, предложенная
+     * правка и т.п. И11 будет рисовать по ним, И5 — хранить. */
+    json::JsonValue metadata;
+    /* Вывод обрезан лимитом (универсальное усечение — И4.10). */
+    bool truncated = false;
+};
+
+/* --- Контекст выполнения ---
+ *
+ * ToolContext намеренно НЕ включает engine.h: tools_registry.h включён
+ * из engine.h, и полноценный тип здесь создал бы циклическую
+ * зависимость. Поэтому здесь только указатели и forward declaration,
+ * а реализация методов — в core/tool.cpp.
+ */
+struct EngineState;
+struct HostCallbacks;
+
+class ToolContext {
+public:
+    ToolContext(EngineState& state, HostCallbacks& cb) : state_(&state), cb_(&cb) {}
+
+    EngineState& state() const;
+    HostCallbacks& callbacks() const;
+
+    /* Текущий режим агента: 0=Code, 1=Research, 2=Review. */
+    int mode() const;
+    /* Режим «сначала план»: правки не применяются, а предлагаются. */
+    bool plan_mode() const;
+    bool research_mode() const;
+    bool review_mode() const;
+
+    std::string project_dir() const;
+    std::string php_bin() const;
+
+    /* Гейт на путь за пределами проекта. Пустая строка — можно,
+     * иначе текст отказа (и агент переведён в ожидание разрешения). */
+    std::string check_external_permission(const std::string& abs_path);
+
+    /* И1.7: единая точка записи файла для агента.
+     *
+     * В plan_mode файл НЕ пишется, а предлагается пользователю
+     * (state.pending) — ровно то поведение, которое раньше было
+     * продублировано в write_file / search_replace / edit_file /
+     * undo_edit четырьмя разными способами. Инструмент не решает, что
+     * делать, — это решает контекст. Возвращает true, если запись
+     * предложена, а не выполнена. */
+    bool propose_write(const std::string& rel_path, const std::string& content);
+
+private:
+    EngineState* state_;
+    HostCallbacks* cb_;
+};
+
+/* --- И1.3: обработчик инструмента --- */
+using ToolHandler2 = std::function<ToolOutput(const json::JsonValue& args, ToolContext& ctx)>;
+
+/* --- И1.3: описание инструмента --- */
+struct ToolDef {
+    std::string name;
+    std::string description;
+    /* JSON-схема параметров (объект). Пустая — валидация пропускается. */
+    json::JsonValue parameters;
+    /* Битовая маска ToolFlag. */
+    unsigned flags = TF_UNCLASSIFIED;
+    /* Ключ разрешения для системы И2 (permission_key): «write», «bash»,
+     * «deploy»… Пока пусто — заполняет И2 (задача 2.9). */
+    std::string permission_key;
+    ToolHandler2 handler;
+};
+
+/* --- Сборка схемы параметров ---
+ *
+ * Без этой обёртки объявление схемы занимало бы 15 строк на параметр
+ * (вложенные объекты) — ровно та цена, ради снятия которой И1 и
+ * существует. Здесь каждый параметр — одна строка.
+ */
+class SchemaBuilder {
+public:
+    SchemaBuilder& str(const char* name, const char* description);
+    SchemaBuilder& integer(const char* name, const char* description);
+    SchemaBuilder& integer_range(const char* name, const char* description,
+                                 long long min_value, long long max_value);
+    SchemaBuilder& number(const char* name, const char* description);
+    SchemaBuilder& boolean(const char* name, const char* description);
+    SchemaBuilder& string_enum(const char* name, const char* description,
+                               const std::vector<std::string>& values);
+    /* Пометить параметр обязательным. */
+    SchemaBuilder& required(const char* name);
+    /* Запретить неизвестные ключи. По умолчанию они разрешены и
+     * игнорируются: локальные 7B-модели постоянно добавляют «note»,
+     * «comment», «path_» — жёсткий отказ заставлял бы их сжигать
+     * шаги впустую. */
+    SchemaBuilder& strict();
+
+    json::JsonValue build() const;
+
+private:
+    json::JsonValue props_ = json::JsonValue::object();
+    json::JsonValue required_ = json::JsonValue::array();
+    bool strict_ = false;
+};
+
+/* Собрать схему с одним параметром path — самый частый случай. */
+json::JsonValue schema_path_only(const char* description);
+
+/* --- И1.6: валидация аргументов по схеме --- */
+
+/* Проверить args против схемы tool. detail — человекочитаемая причина
+ * (на английском: модель получает её в тексте ошибки). */
+bool validate_tool_args(const json::JsonValue& parameters,
+                        const json::JsonValue& args,
+                        std::string& detail);
+
+/* Сообщение об ошибке в стиле opencode (tools/registry.ts:135):
+ * модель должна понять, что именно исправить, и переписать вызов. */
+std::string invalid_arguments_message(const std::string& tool_name,
+                                      const std::string& detail);
+
+/* --- И1.7: политика режимов ---
+ *
+ * Единственное место в плагине, где решается, можно ли вызвать
+ * инструмент в текущем режиме агента. Правило раньше было продублировано
+ * внутри 4 инструментов из 50 (write_file, search_replace, edit_file,
+ * undo_edit), из-за чего 8 опасных инструментов шли мимо: exec_command,
+ * git_commit, deploy, cron_add, systemd_restart, docker_run,
+ * wp_create_site, pip_install (дефект D4), а режим Research вообще
+ * был только текстом в промпте (D3).
+ *
+ * Семантика:
+ *   Research (mode == 1) — только чтение. Пропускаются исключительно
+ *       инструменты с TF_READ_ONLY. Всё, что запускает код, пишет
+ *       файлы или меняет что-то необратимо, — запрещено. Сеть
+ *       разрешена, если инструмент при этом только читает: web_fetch и
+ *       headless_render — это чтение.
+ *   План (plan_mode) — запрещены запуск кода и необратимые операции.
+ *       Инструменты, пишущие файлы, не блокируются: они выполняются,
+ *       но ToolContext::propose_write переводит запись в предложение
+ *       правки, и пользователь её подтверждает.
+ *   Code / Review — ограничений нет.
+ *
+ * Инструмент без флагов (TF_UNCLASSIFIED, ещё не мигрированный на И1.8)
+ * запрещён в обоих режимах: неизвестно, что он делает, а «пропустить
+ * на всякий случай» здесь означало бы дыру.
+ */
+std::string check_tool_mode_policy(const std::string& tool_name, unsigned flags,
+                                   int mode, bool plan_mode);
+
+/* То же для ToolDef. */
+std::string check_tool_mode_policy(const std::string& tool_name,
+                                   const ToolDef& def, int mode, bool plan_mode);
+
+} // namespace coder

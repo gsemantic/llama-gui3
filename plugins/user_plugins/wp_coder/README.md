@@ -3,7 +3,7 @@
 Плагин `wp_coder` для llama-gui — универсальный ReAct-агент с доменными модулями.
 WordPress — один из модулей; Python и DevOps подключаются аналогично.
 
-- **Версия:** 0.3.0 (см. `plugin.json`)
+- **Версия:** 0.5.0 (см. `plugin.json` — единственный источник версии)
 - **Agent mode:** `ai_coder` (отображается как «AI Coder» в чате приложения)
 
 ## Архитектура
@@ -19,7 +19,7 @@ wp_coder/
 │   ├── base_tools.{h,cpp}        # read/write/search_replace/repo_map/grep/exec/rag
 │   ├── git_tools.{h,cpp}         # git_status/diff/log/commit
 │   ├── security.{h,cpp}          # path traversal, blocked commands, shell_escape
-│   ├── project.{h,cpp}           # настройки проекта
+│   ├── project.{h,cpp}           # разрешение путей относительно корня проекта
 │   ├── shell.h                   # безопасные shell-обёртки (timeout, quote, cap)
 │   ├── module_api.{h,cpp}        # интерфейс модуля + ModuleRegistry
 │   └── prompts.h                 # базовый системный промпт
@@ -29,10 +29,12 @@ wp_coder/
 │   └── devops/           # 11 инструментов + 3 inline-навыка
 ├── ui/coder_window.{h,cpp}  # окна «Проект», «Модули», «Инструменты», «Сессия» + agent-mode UI
 ├── skills/               # внешний навык wp_setup.md
-├── tests/                # unit-тесты (97)
+├── tests/                # unit-тесты (138)
 ├── src/plugin_main.cpp   # точка входа (ll_plugin_init/render/shutdown, agent mode)
+├── src/README.md         # почему в src/ только plugin_main.cpp
 ├── CMakeLists.txt
 ├── plugin.json
+├── AGENT_PARITY_PLAN.md  # план паритета агентных возможностей с opencode CLI
 ├── DEVELOPMENT_PLAN.md   # план развития (фазы 1–6)
 └── CHANGELOG.md
 ```
@@ -47,7 +49,7 @@ wp_coder/
 | **Python** | `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint` | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
 | **DevOps** | `docker_build`, `docker_run`, `docker_ps`, `docker_logs`, `systemd_status`, `systemd_restart`, `nginx_test`, `nginx_reload`, `cron_list`, `cron_add`, `ssh_exec` | `devops_docker`, `devops_systemd`, `devops_nginx` |
 
-Итого: **49 инструментов**, **14 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
+Итого: **50 инструментов**, **14 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
 
 ## Как это работает
 
@@ -79,7 +81,7 @@ cmake -S . -B build
 
 # Тесты
 cmake --build build --target wp_coder_tests -j$(nproc)
-./build/tests/wp_coder_tests          # 97/97 PASS
+./build/tests/wp_coder_tests          # 138/138 PASS
 
 # Плагин
 cmake --build build --target wp_coder -j$(nproc)
@@ -107,7 +109,7 @@ env -u LD_PRELOAD ./build/llama-gui-core --agent=ai_coder
 ## Текущее состояние
 
 - ✅ Сборка проходит, `libwp_coder.so` (~670 Кб) собран
-- ✅ 97/97 unit-тестов проходят (core + модули)
+- ✅ 138/138 unit-тестов проходят (core + модули + манифесты)
 - ✅ D1 (разбивка `run_task` на компоненты) завершён
 - ✅ D2 (парсер протокола `tool_protocol`) завершён
 - ✅ `--agent=ai_coder` проверен вживую
@@ -138,10 +140,33 @@ Inline-навыки модулей (тела не в промпте — подг
 Формат: первая строка `# Имя`, вторая — описание, далее — тело инструкции.
 При совпадении имени с inline-навыком модуля inline имеет приоритет.
 
+## Манифест
+
+`plugin.json` — единственный источник версии и capabilities. Плагин
+кладёт его в каталог сборки **под своим именем** (`wp_coder.json`),
+потому что `PluginManager` ищет манифест как `<имя_плагина>.json` и
+только потом — общий `plugin.json`. Общее имя в каталоге, где лежат
+несколько плагинов, принадлежит им всем: кто записал последним, тот и
+«владелец», а плагин без своего манифеста подхватывает чужой. Хост
+дополнительно **отбрасывает** манифест, у которого `name` не совпадает
+с именем плагина.
+
 ## Режимы
 
+Ограничения режимов проверяет ядро по флагам инструментов
+(`ToolFlags`, `core/tool.h`) — не сам инструмент и не текст промпта.
+Инструмент, не помеченный `read_only`, в Research и в режиме
+«сначала план» не вызывается.
+
 - **Code** — полный доступ ко всем инструментам
-- **Research** — только чтение (нет `write_file` и `deploy`)
+- **Research** — только чтение: пропускаются только инструменты с флагом
+  `read_only` (в том числе `read_file`, `grep_search`, `repo_map`,
+  `git_status`, `web_fetch`). Запись файлов, запуск команд и
+  необратимые операции (`write_file`, `exec_command`, `deploy`,
+  `git_commit`, `docker_run`, `wp_cli`, `pip_install`, …) запрещены
+- **План** («сначала план») — запуск команд и необратимые операции
+  запрещены, но правки файлов не блокируются: они сохраняются как
+  предложения и применяются только после подтверждения в UI
 - **Review** — после правок автоматически запускает `verify`
 
 ## Разработка модулей

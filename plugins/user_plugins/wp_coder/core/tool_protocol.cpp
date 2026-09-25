@@ -1,10 +1,42 @@
 #include "tool_protocol.h"
 #include "json_utils.h"
+#include "module_api.h"
 
 #include <sstream>
 #include <cctype>
+#include <cstdlib>
 
 namespace coder {
+
+namespace {
+
+/* Ключи аргументов — единый список для обоих направлений разбора
+ * (JSON → Action и legacy → JsonValue). Раньше он был продублирован
+ * в вызовах json::str(...) и в legacy-разборе, и это была причина
+ * расхождений: «добавил параметр в одном месте — забыл в другом». */
+struct ArgKey {
+    const char* name;
+    std::string Action::*member;
+};
+
+const ArgKey g_action_keys[] = {
+    {"path",    &Action::path},
+    {"root",    &Action::root},
+    {"query",   &Action::query},
+    {"pattern", &Action::pattern},
+    {"content", &Action::content},
+    {"cli",     &Action::cli},
+    {"url",     &Action::url},
+};
+
+void trim_ws(std::string& s) {
+    while (!s.empty() && s.back() == '\r') s.pop_back();
+    size_t b = s.find_first_not_of(" \t");
+    size_t e = s.find_last_not_of(" \t");
+    s = (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
+}
+
+} // anonymous namespace
 
 std::string extract_action(const std::string& text, std::string& rest) {
     rest = text;
@@ -102,26 +134,8 @@ std::string extract_action(const std::string& text, std::string& rest) {
     return block;
 }
 
-bool parse_action(const std::string& block, Action& a) {
-    /* JSON-протокол: {"tool":"...","path":"...","k":N,...} (Фаза B3). */
-    size_t brace = block.find('{');
-    if (brace != std::string::npos && block.find('}') != std::string::npos) {
-        a.tool = json::str(block, "tool");
-        if (!a.tool.empty()) {
-            a.path = json::str(block, "path");
-            a.root = json::str(block, "root");
-            a.query = json::str(block, "query");
-            a.pattern = json::str(block, "pattern");
-            a.cli = json::str(block, "cli");
-            a.url = json::str(block, "url");
-            a.content = json::str(block, "content");
-            int k = json::int_(block, "k");
-            if (k > 0) a.k = k;
-            return true;
-        }
-        /* Если tool нет — это не наш JSON (обычный ответ), падаем в legacy. */
-    }
-
+bool parse_legacy_action(const std::string& block, json::JsonValue& args) {
+    args = json::JsonValue::object();
     std::istringstream iss(block);
     std::string line;
     bool in_content = false;
@@ -130,8 +144,12 @@ bool parse_action(const std::string& block, Action& a) {
 
         if (in_content) {
             if (line.find("CONTENT_END") != std::string::npos) { in_content = false; continue; }
-            if (!a.content.empty()) a.content += '\n';
-            a.content += line;
+            /* Строки CONTENT склеиваем обратно с переводами строк —
+             * ровно так же, как это делал прежний разбор. */
+            std::string cur = args.get_string("content");
+            if (!cur.empty()) cur += '\n';
+            cur += line;
+            args.set("content", cur);
             continue;
         }
         if (line.find("CONTENT_BEGIN") != std::string::npos) { in_content = true; continue; }
@@ -139,24 +157,78 @@ bool parse_action(const std::string& block, Action& a) {
         if (pos == std::string::npos) continue;
         std::string key = line.substr(0, pos);
         std::string val = line.substr(pos + 1);
-        auto trim = [](std::string& s) {
-            while (!s.empty() && s.back() == '\r') s.pop_back();
-            size_t b = s.find_first_not_of(" \t");
-            size_t e = s.find_last_not_of(" \t");
-            s = (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
-        };
-        trim(key); trim(val);
-        if (key == "TOOL") a.tool = val;
-        else if (key == "PATH") a.path = val;
-        else if (key == "ROOT") a.root = val;
-        else if (key == "QUERY") a.query = val;
-        else if (key == "PATTERN") a.pattern = val;
-        else if (key == "CLI") a.cli = val;
-        else if (key == "URL") a.url = val;
-        else if (key == "K") a.k = atoi(val.c_str());
-        else if (key == "CONTENT_BEGIN") in_content = true;
+        trim_ws(key);
+        trim_ws(val);
+        if (key == "TOOL") args.set("tool", val);
+        else if (key == "K") args.set("k", static_cast<long long>(std::atoi(val.c_str())));
+        else {
+            /* Имена legacy-ключей совпадают с ключами JSON-протокола
+             * (PATH → path и т.д.), поэтому конвертируем только регистр. */
+            for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            bool known = false;
+            for (const auto& ak : g_action_keys) {
+                if (key == ak.name) { known = true; break; }
+            }
+            if (known) args.set(key, val);        }
     }
-    return !a.tool.empty();
+    return !args.get_string("tool").empty();
+}
+
+bool parse_action(const std::string& block, json::JsonValue& args) {
+    /* JSON-протокол: {"tool":"...","path":"...","k":N,...} (Фаза B3).
+     *
+     * Разбираем ПЕРВОЕ значение, а не весь блок: эвристики
+     * extract_action вырезают блок «примерно», и за валидным объектом
+     * может идти мусор (тот же случай, что и в json_parse_prefix). */
+    size_t brace = block.find('{');
+    if (brace != std::string::npos && block.find('}') != std::string::npos) {
+        json::JsonValue parsed;
+        size_t consumed = 0;
+        if (json::JsonValue::parse_prefix(block, consumed, parsed) &&
+            parsed.is_object() && !parsed.get_string("tool").empty()) {
+            args = std::move(parsed);
+            return true;
+        }
+        /* Если tool нет — это не наш JSON (обычный ответ), падаем в legacy. */
+    }
+    return parse_legacy_action(block, args);
+}
+
+json::JsonValue action_to_json(const Action& a) {
+    json::JsonValue args = json::JsonValue::object();
+    if (!a.tool.empty()) args.set("tool", a.tool);
+    for (const auto& ak : g_action_keys) {
+        const std::string& v = a.*ak.member;
+        if (!v.empty()) args.set(ak.name, v);
+    }
+    if (a.k > 0) args.set("k", static_cast<long long>(a.k));
+    return args;
+}
+
+void action_from_json(const json::JsonValue& args, Action& a) {
+    a.tool = args.get_string("tool");
+    for (const auto& ak : g_action_keys) {
+        a.*ak.member = args.get_string(ak.name);
+    }
+    a.k = static_cast<int>(args.get_int("k", 0));
+}
+
+bool parse_action(const std::string& block, Action& a) {
+    json::JsonValue args;
+    if (!parse_action(block, args)) return false;
+    action_from_json(args, a);
+    return true;
+}
+
+void tool_args_from_json(const json::JsonValue& args, ToolArgs& a) {
+    a.path = args.get_string("path");
+    a.root = args.get_string("root");
+    a.query = args.get_string("query");
+    a.pattern = args.get_string("pattern");
+    a.content = args.get_string("content");
+    a.cli = args.get_string("cli");
+    a.url = args.get_string("url");
+    a.k = static_cast<int>(args.get_int("k", 0));
 }
 
 } // namespace coder
