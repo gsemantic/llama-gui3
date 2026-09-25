@@ -1,5 +1,22 @@
 # План рефакторинга плагина wp-coder — с отслеживанием прогресса
 
+> ## ⚠️ ДОКУМЕНТ НЕДЕЙСТВИТЕЛЕН (2026-09-25)
+>
+> Этот план объявляет готовность 100 %, но **не соответствует коду**. Описанные
+> «достижения» (оркестратор `wp_coder_orchestrator`, субагенты `wp_*_agent`,
+> harness-профили) — это файлы `plugins/user_plugins/wp_coder/src/wp_*_agent.cpp`,
+> которые **не включены в `CMakeLists.txt`**, содержат 47 заглушек
+> (`{"status":"stub"}`) и **не компилируются** (ссылаются на несуществующие
+> `AGENT_PLUGIN_API_VERSION`, `PluginExports`, `agents::AgentContextMock`,
+> `<gtest/gtest.h>`). Загруженные harness-профили нигде не читаются.
+>
+> Реально работающая система — это `core/` (ReAct-движок), и её в этом плане
+> нет. Он же содержит неотмеченный **P0-дедлок**, подвешивающий GUI.
+>
+> **Действующий план:** [`plugins/user_plugins/wp_coder/AGENT_PARITY_PLAN.md`](user_plugins/wp_coder/AGENT_PARITY_PLAN.md)
+
+---
+
 ## Текущее состояние
 - В `/plugins/user_plugins/wp_coder/` есть исходный код: `plugin.json`, `src/`, `modules/`, `core/`, `tests/`, `ui/` и др.
 - В `build/plugins/` — собранные артефакты.

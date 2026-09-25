@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ============================================================================
 set(VERSION_MAJOR 0)
 set(VERSION_MINOR 1)
-set(VERSION_PATCH 93)
+set(VERSION_PATCH 94)
 set(VERSION_SUFFIX "alpha.2")
 set(VERSION_CODENAME "Archimedes")
 
@@ -541,4 +541,28 @@ option(BUILD_TESTS "Build unit tests" ON)
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+elseif(EXISTS "${CMAKE_BINARY_DIR}/tests/CTestTestfile.cmake")
+    # Мина замедленного действия (D22).
+    #
+    # CMake НЕ удаляет сгенерированные файлы подкаталога, который
+    # перестал конфигурироваться. Выключили BUILD_TESTS — а
+    # build/tests/CTestTestfile.cmake и все бинарники в build/tests
+    # остались на месте, и `ctest` продолжал их запускать: 9 тестов,
+    # собранных месяц назад, отвечали «Passed» за код, которого в них
+    # нет. Именно так выглядели два «сегфолта» PluginLoader и
+    # MenuRestore: бинарники от 2026-08-29 против заголовка ABI,
+    # изменившегося 2026-09-03, — плагин читал поля, которых в старой
+    # структуре LlamaHostApi не было, и вызывал мусор.
+    #
+    # Тише зелёного света здесь не бывает: тест проходит, ничего не
+    # проверяя. Поэтому останавливаем конфигурирование, а не чиним
+    # вслепую.
+    message(FATAL_ERROR
+        "BUILD_TESTS=OFF, но в ${CMAKE_BINARY_DIR}/tests остались "
+        "сгенерированные CMake файлы прошлой сборки. ctest продолжит "
+        "запускать те бинарники и покажет результаты кода, которого в "
+        "них нет.\n"
+        "Удалите каталог ${CMAKE_BINARY_DIR}/tests (он целиком "
+        "генерируемый) либо включите -DBUILD_TESTS=ON и пересоберите "
+        "тесты.")
 endif()
