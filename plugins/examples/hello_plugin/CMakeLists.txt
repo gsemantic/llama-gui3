@@ -29,10 +29,21 @@ set_target_properties(hello_plugin PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
 )
 
-# Манифест plugin.json копируется рядом с .so (PluginManager читает его при загрузке)
+# Манифест копируется рядом с .so ПОД ИМЕНЕ ПЛАГИНА — не как plugin.json.
+#
+# PluginManager::find_manifest_path() ищет <name>.json раньше общего
+# plugin.json, но общий файл в build/plugins/ принадлежит сразу всем
+# плагинам этого каталога: тот, кто пишет последним, перетирает
+# манифест соседа, и плагин без своего манифеста подхватывает чужой.
+# Именно из-за общего имени hello_plugin получал capabilities и
+# версию wp_coder (в 08-26 — наоборот, wp_coder получал версию 0.1.0
+# от wp_coder.json). Собственное имя снимает класс проблемы целиком;
+# тот же приём применён в calculator и wp_coder.
 add_custom_command(TARGET hello_plugin POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/plugin.json"
+        "${CMAKE_BINARY_DIR}/plugins/hello_plugin.json"
+    COMMAND ${CMAKE_COMMAND} -E rm -f
         "${CMAKE_BINARY_DIR}/plugins/plugin.json"
 )
 

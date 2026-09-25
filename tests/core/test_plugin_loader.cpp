@@ -38,12 +38,31 @@ int main() {
 
     bool found_hello = false;
     bool manifest_ok = false;
+    bool foreign_manifest = false;
     for (const auto& p : plugins) {
         std::printf("Loaded plugin: %s v%s (path: %s)\n",
                     p.name.c_str(), p.version.c_str(), p.path.c_str());
+
+        /* Инвариант: применённый манифест обязан принадлежать самому
+         * плагину. Раньше это НЕ проверялось, и общий plugin.json в
+         * build/plugins/ делал ровно обратное: hello_plugin получал
+         * capabilities и версию wp_coder. Как только разрешения
+         * начнут применяться (итерация И2), это дыра в правах. */
+        if (p.manifest.present && !p.manifest.name.empty() &&
+            p.manifest.name != p.name) {
+            std::fprintf(stderr,
+                         "FAIL: плагину '%s' подставлен чужой манифест '%s'\n",
+                         p.name.c_str(), p.manifest.name.c_str());
+            foreign_manifest = true;
+        }
+
         if (p.name == "hello_plugin") {
             found_hello = true;
-            manifest_ok = p.manifest.present && p.manifest.api_version == "1.0.0";
+            /* У hello_plugin свой манифест (hello_plugin.json), значит
+             * он обязан найтись — и именно СВОЙ. */
+            manifest_ok = p.manifest.present &&
+                          p.manifest.name == "hello_plugin" &&
+                          p.manifest.api_version == "1.0.0";
             if (p.manifest.present) {
                 std::printf("  manifest: %s v%s (api %s), permissions: %zu\n",
                             p.manifest.name.c_str(), p.manifest.version.c_str(),
@@ -52,12 +71,15 @@ int main() {
         }
     }
 
+    if (foreign_manifest) return 1;
     if (!found_hello) {
         std::fprintf(stderr, "FAIL: hello_plugin не найден\n");
         return 1;
     }
     if (!manifest_ok) {
-        std::fprintf(stderr, "FAIL: манифест plugin.json не загружен или api_version != 1.0.0\n");
+        std::fprintf(stderr,
+                     "FAIL: у hello_plugin нет собственного манифеста "
+                     "(name == 'hello_plugin', api 1.0.0)\n");
         return 1;
     }
     if (!manager.is_plugin_loaded("hello_plugin")) {

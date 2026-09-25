@@ -1191,19 +1191,36 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     // Манифест plugin.json рядом с библиотекой (информационный; пермиссии не применяются)
     const std::string manifest_path = find_manifest_path(path);
     if (!manifest_path.empty()) {
-        plugin->info.manifest = parse_manifest(manifest_path);
+        PluginManifest manifest = parse_manifest(manifest_path);
+        /* Манифест ЧУЖОГО плагина не применяется.
+         *
+         * find_manifest_path() заканчивает поиск общим кандидатом
+         * `<dir>/plugin.json`. В каталоге, где лежат .so нескольких
+         * плагинов, этот файл принадлежит ровно одному из них, а
+         * подхватывается всеми остальными, у которых нет манифеста
+         * с собственным именем: hello_plugin получал capabilities и
+         * версию wp_coder. Пока манифест информационный, это была ложь
+         * в диагностике; как только разрешения начнут применяться
+         * (итерация И2), это уже дыра в правах.
+         *
+         * Поэтому несоответствие имени — не предупреждение, а отказ:
+         * манифест считается отсутствующим. */
+        if (manifest.present && !manifest.name.empty() &&
+            manifest.name != plugin->info.name) {
+            std::cerr << "[PluginManager] Manifest '" << manifest.name
+                      << "' does not belong to plugin '" << plugin->info.name
+                      << "' (" << manifest_path << ") — IGNORED"
+                      << ". Expected a manifest named after the plugin"
+                      << " (" << plugin->info.name << ".json)." << std::endl;
+            manifest = PluginManifest{};
+        }
+        plugin->info.manifest = manifest;
         if (plugin->info.manifest.present) {
             if (!plugin->info.manifest.api_version.empty() &&
                 plugin->info.manifest.api_version != LLAMA_PLUGIN_API_VERSION) {
                 std::cerr << "[PluginManager] Manifest API version mismatch for " << path
                           << " (manifest: " << plugin->info.manifest.api_version
                           << ", host: " << LLAMA_PLUGIN_API_VERSION << ")" << std::endl;
-            }
-            if (!plugin->info.manifest.name.empty() &&
-                plugin->info.manifest.name != plugin->info.name) {
-                std::cerr << "[PluginManager] Manifest name '" << plugin->info.manifest.name
-                          << "' differs from ll_plugin_info name '" << plugin->info.name
-                          << "' for " << path << std::endl;
             }
             std::cout << "[PluginManager] Manifest: " << plugin->info.manifest.name
                       << " v" << plugin->info.manifest.version
