@@ -14,6 +14,7 @@
 #include "test_framework.h"
 #include "../core/limits.h"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -382,6 +383,58 @@ TEST(all_shell_execution_goes_through_the_guarded_wrapper) {
                 }
             }
         }
+    }
+}
+
+/* --- Напоминалка для новой сессии (правило передачи сессии, §4) --- */
+
+TEST(session_start_file_exists_and_points_at_the_plan) {
+    /* Напоминалка переживает окно чата, поэтому обязана лежать в
+     * репозитории, а не в переписке. */
+    fs::path f = plugin_root() / "SESSION_START.md";
+    std::string s = read_file(f);
+    ASSERT_TRUE(!s.empty());
+    /* И ссылается на единственный источник правды. Иначе получился бы
+     * второй план — ровно та болезнь, которую лечит И1. */
+    ASSERT_TRUE(s.find("AGENT_PARITY_PLAN.md") != std::string::npos);
+    ASSERT_TRUE(s.find("§4") != std::string::npos);
+}
+
+TEST(session_start_file_has_no_volatile_data) {
+    /* Номера коммита, числа тестов и номера итерации в напоминалке
+     * протухают раньше, чем её прочтут, а следующая сессия поверит им.
+     * Всё изменяемое живёт в §4 плана и достаётся из git. */
+    const std::string s = read_file(plugin_root() / "SESSION_START.md");
+    ASSERT_TRUE(!s.empty());
+
+    /* Токен из 7+ символов, состоящих только из 0-9a-f, на границе
+     * слова — это номер коммита (или хеш). Граница обязательна: иначе
+     * под правило попали бы слова вроде «defaced». */
+    size_t i = 0;
+    while (i < s.size()) {
+        const bool left_ok =
+            i == 0 || !(std::isalnum(static_cast<unsigned char>(s[i - 1])) ||
+                        s[i - 1] == '_');
+        if (!left_ok) { ++i; continue; }
+        size_t j = i;
+        while (j < s.size() && (std::isxdigit(static_cast<unsigned char>(s[j])) ||
+                                s[j] == 'x'))
+            ++j;
+        const bool right_ok =
+            j >= s.size() || !(std::isalnum(static_cast<unsigned char>(s[j])) ||
+                               s[j] == '_');
+        if (j - i >= 7 && right_ok) {
+            std::cerr << "  в напоминалке изменяемое данное: «"
+                      << s.substr(i, j - i) << "» (строка "
+                      << (s.substr(0, i).find('\n') == std::string::npos
+                              ? 0
+                              : std::count(s.begin(), s.begin() + i, '\n') + 1)
+                      << "). Такое протухает раньше, чем файл прочтут: "
+                         "положение — в §4 плана, состояние — в git log"
+                      << std::endl;
+            ASSERT_TRUE(false);
+        }
+        i = (j > i) ? j : i + 1;
     }
 }
 
