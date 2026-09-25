@@ -68,17 +68,27 @@
         "auto_price": false,
         "context_length": 0,
         "enabled": true,
-        "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "endpoint_url": "http://localhost:8090/v1",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 0,
-        "model_id": "deepseek-v4-flash",
+        "model_id": "GigaChat-3-Lightning",
         "price_input_per_1m": 0.0,
         "price_output_per_1m": 0.0,
-        "provider_name": "Qwen (DashScope)",
+        "provider_name": "GigaChat",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
+            {
+                "endpoint_url": "http://localhost:8090/v1",
+                "id": "GigaChat-3-Lightning",
+                "provider_name": "GigaChat"
+            },
+            {
+                "endpoint_url": "https://opencode.ai/zen/v1",
+                "id": "space-bunny-free",
+                "provider_name": "OpenCode Zen"
+            },
             {
                 "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                 "id": "deepseek-v4-flash",
@@ -92,11 +102,6 @@
             {
                 "endpoint_url": "http://localhost:8090/v1",
                 "id": "GigaChat-3-Ultra",
-                "provider_name": "GigaChat"
-            },
-            {
-                "endpoint_url": "http://localhost:8090/v1",
-                "id": "GigaChat-3-Lightning",
                 "provider_name": "GigaChat"
             }
         ],
@@ -113,7 +118,7 @@
         ],
         "socks5_proxy_host": "127.0.0.1:9050",
         "timeout_ms": 120000,
-        "use_tor": true
+        "use_tor": false
     },
     "control_vector_layer_end": -1,
     "control_vector_layer_start": 0,
@@ -147,7 +152,7 @@
         "font_size": 14.399999618530273,
         "frame_rate_limit": 60,
         "height": 800,
-        "language": "ru",
+        "language": "en",
         "margin": 10,
         "min_window_height": 600,
         "min_window_width": 800,
@@ -222,16 +227,16 @@
     },
     "model_performance": {
         "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 145,
-            "avg_response_time_ms": 787.26,
-            "avg_tokens_generated": 79,
-            "avg_tokens_per_second": 84.6,
-            "first_used": "Tue Sep 22 19:34:01 2026",
-            "last_used": "Tue Sep 22 19:34:01 2026",
+            "avg_context_used": 135,
+            "avg_response_time_ms": 574.91,
+            "avg_tokens_generated": 82,
+            "avg_tokens_per_second": 1921.68,
+            "first_used": "Fri Sep 25 16:50:00 2026",
+            "last_used": "Fri Sep 25 16:50:00 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/Alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 82
+            "total_generations": 85
         }
     },
     "output": {

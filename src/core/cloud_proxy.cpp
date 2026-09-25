@@ -317,6 +317,10 @@ std::string normalize_reasoning_response(const std::string& out_body) {
                     !msg["reasoning_content"].get<std::string>().empty()) {
                     msg["content"] = msg["reasoning_content"];
                 }
+                // FIX: Если role отсутствует, но есть content/reasoning_content — добавляем роль.
+                if (!msg.contains("role") || msg["role"].is_null()) {
+                    msg["role"] = "assistant";
+                }
             }
         }
         return j.dump();

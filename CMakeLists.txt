@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ============================================================================
 set(VERSION_MAJOR 0)
 set(VERSION_MINOR 1)
-set(VERSION_PATCH 92)
+set(VERSION_PATCH 93)
 set(VERSION_SUFFIX "alpha.2")
 set(VERSION_CODENAME "Archimedes")
 
@@ -98,7 +98,7 @@ if(TREE_SITTER_FOUND)
     # MVP: C/C++/Python/Rust + web-стек для разработки (WordPress и пр.).
     # php/javascript/css/html парсятся только если есть исходники грамматик
     # в deps/tree-sitter-<lang>-src (иначе WARNING и text-fallback в RAG).
-    set(TS_LANGUAGES c cpp python rust)
+    set(TS_LANGUAGES c cpp python rust php javascript css html)
     foreach(LANG ${TS_LANGUAGES})
         string(TOUPPER ${LANG} LANG_UPPER)
 
