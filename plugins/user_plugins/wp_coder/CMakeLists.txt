@@ -174,6 +174,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_python_tools.cpp
         tests/test_devops_tools.cpp
         tests/test_manifest_consistency.cpp
+        tests/test_plan_consistency.cpp
         ${MODULE_SOURCES}
     )
     target_include_directories(wp_coder_tests PRIVATE
