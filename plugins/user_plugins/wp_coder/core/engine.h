@@ -180,8 +180,13 @@ struct EngineState {
     std::vector<PendingWrite> pending;
     std::string last_agent_task;
 
-    /* Многоходовая сессия текущей задачи. */
+    /* Многоходовая сессия текущей задачи. И5.7 переведёт её на
+     * std::vector<Message>; до тех пор она склеивается в сообщения и
+     * обратно через SessionStore (core/session_store.h). */
     std::vector<ChatMsg> session;
+    /* Идентификатор сохраняемой сессии (И5.6). Пусто — сессия ещё ни разу
+     * не записывалась; под локом не меняется иначе, чем сбросом. */
+    std::string session_id;
     /* Флаг: следующий входящий запрос продолжает текущую сессию (после
      * паузы на разрешение), а не начинает новую. */
     bool preserve_session = false;
@@ -309,8 +314,11 @@ public:
      * Вызывается из UI или при смене задачи пользователем. */
     void clear_session();
 
-    /* Resume сессии (5.2): сохранение/загрузка диалога на диск.
-     * Файл: <data_dir>/wp_coder/session.json. */
+    /* Resume сессии (5.2): сохранение/загрузка диалога на диск (И5.6).
+     * Файл: <data_dir>/wp_coder/sessions/<session_id>.json.
+     *
+     * Формат и атомарная запись — в core/session_store.h; здесь только
+     * перевод между историей движка и файлом. */
     void save_session();
     void load_session();
 

@@ -35,6 +35,10 @@ set(CORE_SOURCES
     core/file_lock.cpp
     core/apply_patch.cpp
     core/agent_components.cpp
+    core/llm_event.cpp
+    core/message.cpp
+    core/id_prefix.cpp
+    core/session_store.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -168,6 +172,9 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_read_tool.cpp
         tests/test_bash_tool.cpp
         tests/test_output_truncation.cpp
+        tests/test_llm_events.cpp
+        tests/test_message.cpp
+        tests/test_session_store.cpp
         tests/test_iteration_iv_invariants.cpp
         tests/test_base_tools.cpp
         tests/test_wp_tools.cpp

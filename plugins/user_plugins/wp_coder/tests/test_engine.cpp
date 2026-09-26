@@ -763,7 +763,17 @@ TEST(save_load_session_roundtrip) {
         eng.state().session.push_back({"assistant", "привет!\n\"quoted\""});
     }
     eng.save_session();
-    ASSERT_TRUE(fs::exists(tmp / "wp_coder" / "session.json"));
+    /* И5.6: файл теперь <data_dir>/wp_coder/sessions/<session_id>.json.
+     * Старый единый session.json больше не читается и не пишется —
+     * формат истории изменился целиком (части, parent_id, состояния). */
+    {
+        std::vector<fs::path> files;
+        for (const auto& e : fs::directory_iterator(tmp / "wp_coder" / "sessions")) {
+            if (e.path().extension() == ".json") files.push_back(e.path());
+        }
+        ASSERT_EQ(files.size(), (size_t)1);
+        ASSERT_TRUE(files[0].filename().string().rfind("ses_", 0) == 0);
+    }
 
     {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
@@ -782,7 +792,16 @@ TEST(save_load_session_roundtrip) {
 
     /* clear_session удаляет и файл на диске. */
     eng.clear_session();
-    ASSERT_FALSE(fs::exists(tmp / "wp_coder" / "session.json"));
+    {
+        std::vector<fs::path> files;
+        std::error_code ec;
+        if (fs::is_directory(tmp / "wp_coder" / "sessions", ec)) {
+            for (const auto& e : fs::directory_iterator(tmp / "wp_coder" / "sessions")) {
+                if (e.path().extension() == ".json") files.push_back(e.path());
+            }
+        }
+        ASSERT_EQ(files.size(), (size_t)0);
+    }
 
     fs::remove_all(tmp);
 }
@@ -872,12 +891,15 @@ TEST(load_session_rejects_corrupt_file) {
     auto& eng = Engine::instance();
     eng.init(cb);
 
-    fs::create_directories(tmp / "wp_coder");
-    fs::path bad = tmp / "wp_coder" / "session.json";
+    /* И5.6: путь сессии — <data_dir>/wp_coder/sessions/<id>.json, и текущая
+     * сессия ищется там по самому свежему файлу. */
+    fs::create_directories(tmp / "wp_coder" / "sessions");
+    fs::path bad = tmp / "wp_coder" / "sessions" / "ses_000000000099.json";
     {
         /* Обрезанный JSON: строковый литерал не закрыт. */
         std::ofstream f(bad, std::ios::binary | std::ios::trunc);
-        f << "[{\"role\":\"user\",\"content\":\"незакрытая строка}]";
+        f << "{\"version\":1,\"messages\":[{\"role\":\"user\","
+             "\"content\":\"незакрытая строка}]";
     }
     {
         std::lock_guard<std::mutex> lk(eng.state().mtx);

@@ -4,6 +4,7 @@
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
+#include "session_store.h"
 #include "file_lock.h"
 #include "limits.h"
 #include "json_utils.h"
@@ -126,8 +127,15 @@ void Engine::clear_session() {
         state_.todos.clear();       /* И4.6: план относится к задаче */
         state_.prompt_dirty = true;
     }  /* mtx отпущен — push_event безопасен */
-    /* Удаляем и сохранённую на диске сессию (resume, 5.2). */
+    /* Удаляем и сохранённую на диске сессию (resume, 5.2). Идентификатор
+     * сбрасываем: следующая запись должна создать НОВЫЙ файл, а не
+     * переписать старый (иначе след прежней сессии остался бы на диске
+     * и «текущим» считался бы он). */
     std::string path = session_file_path();
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.session_id.clear();
+    }
     if (!path.empty()) {
         std::error_code ec;
         std::filesystem::remove(path, ec);
@@ -135,81 +143,106 @@ void Engine::clear_session() {
     push_event(AgentEvent::Status, "Сессия очищена — следующий запрос начнётся заново.");
 }
 
-/* Resume сессии (5.2). */
+/* Resume сессии (И5.6). Файл определяется идентификатором сессии, а пока
+ * он не задан — самым свежим файлом в каталоге (SessionArchive::current_file).
+ * Иначе после перезапуска агент не нашёл бы свою же историю. */
 std::string Engine::session_file_path() const {
     if (!cb_.path_data_dir) return "";
-    std::string dir = cb_.path_data_dir();
+    const std::string dir = cb_.path_data_dir();
     if (dir.empty()) return "";
-    return dir + "/wp_coder/session.json";
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        id = state_.session_id;
+    }
+    if (!id.empty()) {
+        const std::string p = SessionArchive::file_path(dir, id);
+        if (!p.empty()) return p;
+    }
+    return SessionArchive::current_file(dir);
 }
 
 void Engine::save_session() {
-    std::string path = session_file_path();
-    if (path.empty()) return;
-    /* Каталог <data_dir>/wp_coder может не существовать — создаём. */
-    std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    const std::string dir = cb_.path_data_dir ? cb_.path_data_dir() : "";
+    if (dir.empty()) return;
+
     std::vector<ChatMsg> snap;
+    std::string session_id;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         snap = state_.session;
+        session_id = state_.session_id;
     }
     if (snap.empty()) return;
-    std::string json = "[";
-    for (size_t i = 0; i < snap.size(); ++i) {
-        if (i) json += ",";
-        json += "{\"role\":\"" + snap[i].role + "\",\"content\":\""
-              + json::escape(snap[i].content) + "\"}";
-    }
-    json += "]";
 
-    /* Пишем во временный файл и переименовываем: падение посреди записи
-     * больше не оставляет после себя обрезанный session.json, который
-     * при следующем запуске читался бы как «пустая сессия». */
-    std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return;
-        f << json;
-        f.flush();
-        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return; }
+    /* Идентификатор сессии выдаётся при первой записи и дальше тот же:
+     * новый id означал бы новый файл, то есть потерю resume. */
+    if (session_id.empty()) {
+        session_id = ids().next_session();
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.session_id = session_id;
     }
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
+
+    /* Мост в модель сообщений И5.4. Преобразование БЕЗОПАСНО в обе
+     * стороны: каждое сообщение ChatMsg становится одной текстовой
+     * частью, а to_model_messages возвращает ту же строку. Оно теряет
+     * ТОЛЬКО то, чего в ChatMsg ещё нет (частей, parent_id, состояния
+     * вызова), и появится как только И5.7 переведёт цикл на
+     * std::vector<Message>. */
+    SessionFile file;
+    file.session_id = session_id;
+    for (const ChatMsg& m : snap) {
+        Message msg;
+        msg.id = ids().next_msg();
+        msg.role = m.role;
+        msg.parts.push_back(MessagePart::text(m.content));
+        file.messages.push_back(std::move(msg));
+    }
+
+    const std::string path = SessionArchive::file_path(dir, session_id);
+    std::string error;
+    if (!SessionArchive::save(path, file, &error)) {
         std::cerr << "[wp_coder] session: не удалось сохранить сессию: "
-                  << ec.message() << std::endl;
-        std::filesystem::remove(tmp, ec);
+                  << error << std::endl;
     }
 }
 
 void Engine::load_session() {
-    std::string path = session_file_path();
+    const std::string dir = cb_.path_data_dir ? cb_.path_data_dir() : "";
+    if (dir.empty()) return;
+    const std::string path = session_file_path();
     if (path.empty()) return;
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return;
-    std::string content((std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
-    content = text::sanitize_utf8(content);
-    if (content.empty()) return;
 
-    /* Полноценный разбор массива. Раньше здесь был «найди {"role", затем
-     * первый }» — '}' внутри содержимого (function f() {}) обрывал
-     * сообщение, и resume сессии молча терял данные. */
-    std::vector<std::pair<std::string, std::string>> parsed;
-    if (!json::parse_message_array(content, parsed) || parsed.empty()) {
-        std::cerr << "[wp_coder] session: файл сессии повреждён, начинаем заново: "
-                  << path << std::endl;
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
+    SessionFile file;
+    std::string error;
+    std::vector<std::string> warnings;
+    if (!SessionArchive::load(path, file, &error, &warnings)) {
+        /* Отказ читается как «сессии нет», но повреждённый файл убираем:
+         * иначе следующая запись затрёт его, а пользователь так и не
+         * увидит, что история пропала (D19). */
+        std::cerr << "[wp_coder] session: " << error << std::endl;
+        SessionArchive::remove(path);
         return;
     }
+    for (const std::string& w : warnings) {
+        std::cerr << "[wp_coder] session: " << w << std::endl;
+    }
 
+    /* Сообщения → реплики модели: единственный путь, которым история
+     * попадает обратно в цикл. Разбиение ходов с вызовами инструментов
+     * делает to_model_messages, а не цикл. */
+    const std::vector<ModelMessage> model_msgs =
+        to_model_messages(file.messages);
     std::vector<ChatMsg> loaded;
-    loaded.reserve(parsed.size());
-    for (auto& kv : parsed) loaded.push_back({kv.first, kv.second});
+    loaded.reserve(model_msgs.size());
+    for (const ModelMessage& m : model_msgs) {
+        loaded.push_back({m.role, m.content});
+    }
 
     std::lock_guard<std::mutex> lk(state_.mtx);
-    if (state_.session.empty()) state_.session = std::move(loaded);
+    if (!state_.session.empty()) return;      /* не затираем текущую */
+    state_.session = std::move(loaded);
+    state_.session_id = file.session_id;
 }
 
 std::string Engine::wait_response(int timeout_ms) {
