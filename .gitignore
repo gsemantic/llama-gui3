@@ -6,6 +6,12 @@ cmake_install.cmake
 Makefile
 compile_commands.json
 
+# Грамматики tree-sitter: каталоги — build-входы, а не исходники
+# проекта. Версии закреплены в deps/grammars.lock, качать их можно
+# самому (`make fetch-grammars`), и в историю они попадать не должны:
+# 172 МБ клонов, из которых сборке нужны только src/*.c.
+deps/tree-sitter-*-src/
+
 # Runtime data and backups (never commit)
 _backups/
 _secrets/

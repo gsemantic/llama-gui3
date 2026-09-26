@@ -93,6 +93,136 @@ else()
     set(ENABLE_AST_PARSING OFF CACHE BOOL "" FORCE)
 endif()
 
+# --- Грамматики tree-sitter: где их брать (И4.13) ---
+#
+# Грамматики лежат в deps/ и НЕ в git: полные клоны — это 172 МБ, из
+# которых сборке нужны только src/*.c (около 13 МБ). Чтобы клон был
+# воспроизводимым, нужные версии закреплены в deps/grammars.lock, и если
+# грамматики нет, CMake берёт её сам — до того, как решает, включать ли
+# AST-разбор. Логика разрешения не меняется: подставленный каталог
+# проходит по той же ветке `if(EXISTS .../src/parser.c)`, что и
+# положенный вручную.
+#
+# Почему не FetchContent, как для nlohmann_json/CURL: у грамматик есть
+# свой CMakeLists, и MakeAvailable начал бы его конфигурировать и
+# собирать — а нужен только исходник, который компилируется нашим же
+# add_library ниже. Поэтому обычный shallow-клон по sha, и только он.
+option(WP_CODER_FETCH_GRAMMARS
+       "Докачивать грамматики tree-sitter из deps/grammars.lock при настройке" ON)
+
+# Достать <url> и <sha> для языка из deps/grammars.lock.
+function(coder_grammar_lock lang out_url out_sha)
+  set(${out_url} "" PARENT_SCOPE)
+  set(${out_sha} "" PARENT_SCOPE)
+  set(_lock "${CMAKE_SOURCE_DIR}/deps/grammars.lock")
+  if(NOT EXISTS "${_lock}")
+    return()
+  endif()
+  file(READ "${_lock}" _raw)
+  # Комментарии срезаются ДО разбиения на список: список в CMake
+  # разделяется «;», и строка комментария с точкой с запятой разорвала бы
+  # данные на части вместе с собой. Первая версия так и сделала — молча и
+  # целиком: ни одна грамматика не находилась, и ошибки не было.
+  string(REGEX REPLACE "#[^\n]*" "" _clean "${_raw}")
+  string(REPLACE "\n" ";" _lines "${_clean}")
+  foreach(_line IN LISTS _lines)
+    string(STRIP "${_line}" _line)
+    if(_line STREQUAL "")
+      continue()
+    endif()
+    # Схема без \t и без {n,m}: регулярка CMake не понимает ни того, ни
+    # другого — с интервалами она просто не совпадала ни с чем, и забор
+    # молча не происходил. Разделитель — пробелы, длину sha проверяем
+    # отдельно (test_grammars_lock).
+    # Два отдельных if, а не составное условие с AND: в CMake
+    # `if(x MATCHES re AND CMAKE_MATCH_1 STREQUAL ...)` не работает —
+    # CMAKE_MATCH_* недоступен правой части (проверено: MATCH_1 при этом
+    # верный, условие всё равно ложно). И молча: забор не происходил, а
+    # предупреждение говорило «нет записи в lock-файле».
+    if(NOT "${_line}" MATCHES "^([A-Za-z0-9_-]+) +([^ ]+) +([0-9a-fA-F]+)")
+      continue()
+    endif()
+    if(NOT "${CMAKE_MATCH_1}" STREQUAL "${lang}")
+      continue()
+    endif()
+    set(${out_url} "${CMAKE_MATCH_2}" PARENT_SCOPE)
+    set(${out_sha} "${CMAKE_MATCH_3}" PARENT_SCOPE)
+    return()
+  endforeach()
+endfunction()
+
+# Забрать грамматику в dest, если её там ещё нет.
+function(coder_ensure_grammar lang dest)
+  if(EXISTS "${dest}/src/parser.c")
+    return()
+  endif()
+  if(NOT WP_CODER_FETCH_GRAMMARS)
+    # Молча выключать AST нельзя: следующий человек увидит «RAG хуже
+    # работает» и не поймёт почему. Поэтому точная команда.
+    # (Комментарии в CMake — решёткой: «/* */» здесь не комментарий, а
+    # синтаксическая ошибка, на которой настройка падает целиком.)
+    message(STATUS
+      "tree-sitter-${lang}: WP_CODER_FETCH_GRAMMARS=OFF, грамматика не"
+      " забрана. Чтобы забрать все: make fetch-grammars")
+    return()
+  endif()
+  coder_grammar_lock("${lang}" _url _sha)
+  if(NOT _url OR NOT _sha)
+    message(WARNING
+      "грамматика ${lang}: нет записи в deps/grammars.lock, "
+      "AST-разбор для ${lang} останется выключенным")
+    return()
+  endif()
+  find_package(Git QUIET)
+  if(NOT GIT_FOUND)
+    message(FATAL_ERROR
+      "нет ${dest}/src/parser.c и нет git, чтобы забрать грамматику ${lang}. "
+      "Поставьте git, либо положите исходники вручную и пересоберите "
+      "с -DWP_CODER_FETCH_GRAMMARS=OFF")
+  endif()
+  message(STATUS "tree-sitter-${lang}: забираю ${_sha}")
+  file(REMOVE_RECURSE "${dest}")
+  # clone --branch умеет только теги и ветки, а пин здесь — sha,
+  # поэтому init + fetch по sha + checkout FETCH_HEAD.
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" init --quiet "${dest}"
+    RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "git init ${dest} не удался")
+  endif()
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${dest}" remote add origin "${_url}"
+    RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${dest}" fetch --quiet --depth 1 origin "${_sha}"
+    RESULT_VARIABLE _rc ERROR_VARIABLE _err OUTPUT_QUIET)
+  if(NOT _rc EQUAL 0)
+    file(REMOVE_RECURSE "${dest}")
+    message(FATAL_ERROR
+      "не удалось забрать ${lang} (${_sha}) из ${_url}: ${_err}\n"
+      "Вручную: git clone ${_url} ${dest} && "
+      "git -C ${dest} checkout ${_sha}")
+  endif()
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${dest}" checkout --quiet FETCH_HEAD
+    RESULT_VARIABLE _rc ERROR_QUIET ERROR_QUIET)
+  if(NOT _rc EQUAL 0 OR NOT EXISTS "${dest}/src/parser.c")
+    file(REMOVE_RECURSE "${dest}")
+    message(FATAL_ERROR
+      "забор ${lang} не дал ${dest}/src/parser.c — это не грамматика "
+      "tree-sitter или версия не та")
+  endif()
+endfunction()
+
+# Явная цель: make fetch-grammars. Работает без настроенной сборки,
+# потому что это `cmake -P`, а не часть конфигурации.
+add_custom_target(fetch-grammars
+  COMMAND "${CMAKE_COMMAND}"
+          "-DGRAMMAR_LOCK=${CMAKE_SOURCE_DIR}/deps/grammars.lock"
+          "-DGRAMMAR_DEPS_DIR=${CMAKE_SOURCE_DIR}/deps"
+          -P "${CMAKE_SOURCE_DIR}/cmake/fetch_grammars.cmake"
+  COMMENT "Грамматики tree-sitter из deps/grammars.lock")
+
 # Tree-sitter language modules (MVP: C, C++, Python, Rust)
 if(TREE_SITTER_FOUND)
     # MVP: C/C++/Python/Rust + web-стек для разработки (WordPress и пр.).
@@ -107,9 +237,11 @@ if(TREE_SITTER_FOUND)
             pkg_check_modules(TREE_SITTER_${LANG_UPPER} QUIET tree-sitter-${LANG})
         endif()
 
-        # If not found via pkg-config, use pre-downloaded grammar sources
+        # If not found via pkg-config, use deps/ source — placed by hand or
+        # fetched just above (WP_CODER_FETCH_GRAMMARS, deps/grammars.lock)
         if(NOT TREE_SITTER_${LANG_UPPER}_FOUND)
             set(GRAMMAR_SRC_DIR ${CMAKE_SOURCE_DIR}/deps/tree-sitter-${LANG}-src)
+            coder_ensure_grammar(${LANG} ${GRAMMAR_SRC_DIR})
             if(EXISTS ${GRAMMAR_SRC_DIR}/src/parser.c)
                 # Create static library from grammar sources
                 file(GLOB TS_${LANG_UPPER}_SRCS ${GRAMMAR_SRC_DIR}/src/*.c)
