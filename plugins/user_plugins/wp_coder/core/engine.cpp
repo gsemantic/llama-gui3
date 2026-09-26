@@ -4,6 +4,7 @@
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
+#include "file_lock.h"
 #include "limits.h"
 #include "json_utils.h"
 
@@ -85,6 +86,10 @@ void Engine::submit(const std::string& prompt) {
             /* Новая задача: очищаем сессию и начинаем заново. */
             state_.session.clear();
             state_.session.push_back({"user", prompt});
+            /* И4.6: план прошлой задачи в промпте новой только сбивает —
+             * модель сверялась бы с чужими пунктами. */
+            state_.todos.clear();
+            state_.prompt_dirty = true;
             std::cerr << "[wp_coder] submit: new session" << std::endl;
         }
         state_.last_agent_task = prompt;
@@ -118,6 +123,8 @@ void Engine::clear_session() {
         state_.session.clear();
         state_.recent_calls.clear();
         state_.last_agent_task.clear();
+        state_.todos.clear();       /* И4.6: план относится к задаче */
+        state_.prompt_dirty = true;
     }  /* mtx отпущен — push_event безопасен */
     /* Удаляем и сохранённую на диске сессию (resume, 5.2). */
     std::string path = session_file_path();
@@ -269,7 +276,7 @@ std::string Engine::build_system_prompt() const {
      *
      * Раньше здесь был ручной список базовых инструментов в prompts.h
      * плюс отдельный каталог «инструментов модулей» — два источника
-     * истины, оба разошлись с кодом: exec_command не был описан (D2),
+     * истины, оба разошлись с кодом: bash не был описан (D2),
      * а 29 инструментов модулей не были видны модели вообще (D15).
      * Теперь описание, валидация аргументов и этот каталог читают одну
      * схему, поэтому дрейф документации невозможен по построению.
@@ -284,6 +291,32 @@ std::string Engine::build_system_prompt() const {
         if (!cat.empty()) {
             sys += "\n\n";
             sys += cat;
+        }
+    }
+
+    /* И4.6: план задачи — в системный промпт, а не в историю.
+     *
+     * В истории он жил бы до конца сессии и костенел: агент, дойдя до
+     * пункта 4, продолжал бы сверяться с планом из пункта 1. В промпте он
+     * один и всегда свежий, а кэш инвалидируется при каждом todowrite. */
+    {
+        std::string plan;
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            for (const auto& t : state_.todos) {
+                plan += "- [" + t.status + "] " + t.content;
+                if (!t.id.empty()) plan += " (id: " + t.id + ")";
+                if (t.priority != "medium") plan += " [" + t.priority + "]";
+                plan += "\n";
+            }
+        }
+        if (!plan.empty()) {
+            sys += "\n\n## ПЛАН ЗАДАЧИ (todowrite)\n\n";
+            sys += plan;
+            sys +=
+                "\nДержи план в актуальном состоянии: отмечай выполненное"
+                " статусом completed, текущий пункт — in_progress. План"
+                " показывается пользователю, и он им вмешивается.\n";
         }
     }
 
@@ -305,16 +338,31 @@ std::string Engine::build_system_prompt() const {
  * ====================================================================== */
 
 void Engine::pending_apply(size_t idx) {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    if (idx >= state_.pending.size()) return;
-    const auto& p = state_.pending[idx];
-    std::string abs = p.path;
-    if (!abs.empty() && abs[0] != '/' && !state_.project_dir.empty()) {
-        abs = state_.project_dir + "/" + abs;
+    /* И4.5: содержимое забираем под state_.mtx, а пишем уже БЕЗ него.
+     *
+     * Порядок блокировок в этом коде — общий, и он не может быть
+     * произвольным: инструменты берут сначала файловый семафор
+     * (file_lock::Guard), и только потом state_.mtx внутри
+     * propose_write. Если бы здесь было наоборот — state_.mtx, а поверх
+     * него файловый семафор, — два потока, взявшие по одной блокировке,
+     * ждали бы друг друга вечно. А этот метод зовётся из UI-потока, то
+     * есть второй поток здесь не теоретический. */
+    PendingWrite p;
+    std::string project;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        if (idx >= state_.pending.size()) return;
+        p = state_.pending[idx];
+        project = state_.project_dir;
+        state_.pending.erase(state_.pending.begin() + idx);
     }
-    std::ofstream f(abs, std::ios::binary);
+    std::string abs = p.path;
+    if (!abs.empty() && abs[0] != '/' && !project.empty()) {
+        abs = project + "/" + abs;
+    }
+    file_lock::Guard guard(abs);
+    std::ofstream f(abs, std::ios::binary | std::ios::trunc);
     if (f) { f << p.content; f.close(); }
-    state_.pending.erase(state_.pending.begin() + idx);
 }
 
 void Engine::pending_discard(size_t idx) {
@@ -507,7 +555,7 @@ void Engine::load_settings() {
     permissions_.load_user_rules(
         setting_get(cb_, "wp_coder.permission_rules", ""));
 
-    /* И3.6: доверенные сетевые хосты для curl/wget в exec_command.
+    /* И3.6: доверенные сетевые хосты для curl/wget в bash.
      * Штатно доверен только localhost (задан в конструкторе политики),
      * сюда добавляются адреса сайта из настроек: их плагин и так
      * считает своими и сам по ним ходит при проверке и health check.

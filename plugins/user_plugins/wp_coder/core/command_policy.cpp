@@ -1055,7 +1055,7 @@ std::string CommandPolicy::check_one(const ParsedCommand& c, bool strict) const 
                 if (!host.empty()) break;
             }
             if (!host.empty() && !host_trusted(host)) {
-                return prog + " к хосту " + host + " запрещён: в exec_command"
+                return prog + " к хосту " + host + " запрещён: в bash"
                        " сеть ограничена доверенными хостами (по умолчанию"
                        " только localhost). Для запроса к произвольному"
                        " адресу есть web_fetch";

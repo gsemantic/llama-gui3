@@ -4,12 +4,24 @@
  * test_framework.h — Минимальный тестовый фреймворк для AI-кодера.
  *
  * Использует attr(used) для предотвращения удаления статических регистраторов.
+ *
+ * Сторож на каждый тест (kWatchdogSeconds). Зависание теста в CI — это
+ * загадка без номера: прогон просто стоит, и непонятно, где. Особенно
+ * неприятно here, где половина кода работает с мьютексами и ожиданием
+ * разрешения пользователя, то есть висеть там умеет. Сторож печатает имя
+ * текущего теста и завершает процесс с особым кодом, после чего падение
+ * становится диагнозом, а не наблюдением.
  */
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <functional>
+#include <mutex>
 
 struct TestCase {
     std::string name;
@@ -64,9 +76,45 @@ struct TestRegistrar {
 
 #define RUN_ALL_TESTS() \
     int main() { \
+        constexpr int kWatchdogSeconds = 30; \
+        std::atomic<int> token{0}; \
+        std::atomic<bool> current_name_set{false}; \
+        std::string current_name; \
+        std::mutex current_name_mutex; \
+        std::thread watchdog([&] { \
+            int last = 0; \
+            auto last_change = std::chrono::steady_clock::now(); \
+            while (true) { \
+                std::this_thread::sleep_for(std::chrono::milliseconds(250)); \
+                const int now = token.load(); \
+                if (now != last) { \
+                    last = now; \
+                    last_change = std::chrono::steady_clock::now(); \
+                    continue; \
+                } \
+                const auto waited = std::chrono::duration_cast<std::chrono::seconds>( \
+                    std::chrono::steady_clock::now() - last_change).count(); \
+                if (waited >= kWatchdogSeconds) { \
+                    std::cerr << "\nСТОРОЖ: тест " \
+                              << (current_name_set.load() ? current_name \
+                                                          : std::string("?")) \
+                              << " идёт дольше " << kWatchdogSeconds \
+                              << " с. Это дедлок или ожидание, которое никто" \
+                                 " не снимет." << std::endl; \
+                    std::_Exit(3); \
+                } \
+            } \
+        }); \
+        watchdog.detach(); \
         int passed = 0, failed = 0; \
         for (const auto& t : get_tests()) { \
-            std::cout << "[TEST] " << t.name << "... "; \
+            { \
+                std::lock_guard<std::mutex> lk(current_name_mutex); \
+                current_name = t.name; \
+                current_name_set = true; \
+            } \
+            std::cout << "[TEST] " << t.name << "... " << std::flush; \
+            token.fetch_add(1); \
             try { \
                 t.func(); \
                 std::cout << "OK" << std::endl; \
@@ -75,7 +123,9 @@ struct TestRegistrar {
                 std::cout << "FAILED" << std::endl; \
                 failed++; \
             } \
+            token.fetch_add(1); \
         } \
-        std::cout << "\n=== " << passed << " passed, " << failed << " failed ===" << std::endl; \
+        std::cout << "\n=== " << passed << " passed, " << failed \
+                  << " failed ===" << std::endl; \
         return failed > 0 ? 1 : 0; \
     }

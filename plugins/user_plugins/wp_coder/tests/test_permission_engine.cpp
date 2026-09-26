@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 using namespace coder;
@@ -253,7 +254,7 @@ TEST(ask_waits_for_user_and_unblocks_on_once) {
     bool allowed = false;
     threads.emplace_back([&] {
         allowed = pe.ask("bash", {"git status"}, "git status",
-                         "exec_command → git status");
+                         "bash → git status");
     });
     Joiner joiner(threads);
 
@@ -261,7 +262,7 @@ TEST(ask_waits_for_user_and_unblocks_on_once) {
     ASSERT_EQ(r.permission, std::string("bash"));
     ASSERT_EQ(r.patterns.size(), (size_t)1);
     ASSERT_EQ(r.suggested, std::string("git status"));
-    ASSERT_TRUE(r.metadata.find("exec_command") != std::string::npos);
+    ASSERT_TRUE(r.metadata.find("bash") != std::string::npos);
     ASSERT_EQ(pe.pending_count(), (size_t)1);
 
     ASSERT_TRUE(pe.reply(r.id, PermissionReply::Once));
@@ -300,7 +301,7 @@ TEST(ask_without_answer_times_out_closed) {
     PermissionGuard g;
     PermissionEngine& pe = engine().permissions();
     pe.set_wait_timeout_ms(50);
-    bool allowed = pe.ask("bash", {"rm -rf /"}, "rm -rf /", "exec_command");
+    bool allowed = pe.ask("bash", {"rm -rf /"}, "rm -rf /", "bash");
     ASSERT_TRUE(!allowed);
     ASSERT_EQ(pe.pending_count(), (size_t)0);
 }
@@ -340,7 +341,7 @@ TEST(ask_uses_engine_state_as_waiting_permission) {
         saved = st.state;
         st.state = AgentState::Executing;
     }
-    pe.ask("bash", {"ls"}, "ls", "exec_command → ls");
+    pe.ask("bash", {"ls"}, "ls", "bash → ls");
     /* Состояние возвращено как было: агент не должен остаться в
      * «Ожидание разрешения» после отказа. */
     {
@@ -398,7 +399,7 @@ TEST(reply_always_records_rule_for_suggested_pattern) {
     bool allowed = false;
     threads.emplace_back([&] {
         allowed = pe.ask("bash", {"git status --porcelain"},
-                         "git status --porcelain", "exec_command");
+                         "git status --porcelain", "bash");
     });
     Joiner joiner(threads);
     PermissionRequest r = wait_for_pending(pe);
@@ -425,7 +426,7 @@ TEST(reply_always_invalidates_prompt_cache) {
     pe.set_on_change([&] { ++changes; });
     pe.set_wait_timeout_ms(2000);
     std::vector<std::thread> threads;
-    threads.emplace_back([&] { pe.ask("bash", {"ls"}, "ls", "exec_command"); });
+    threads.emplace_back([&] { pe.ask("bash", {"ls"}, "ls", "bash"); });
     Joiner joiner(threads);
     PermissionRequest r = wait_for_pending(pe);
     ASSERT_EQ(changes, 0);
@@ -627,7 +628,7 @@ ToolDef fake_def(const char* name, const char* key) {
 }
 
 std::vector<ToolDef> sample_tools() {
-    return {fake_def("read_file", "read"), fake_def("exec_command", "bash"),
+    return {fake_def("read_file", "read"), fake_def("bash", "bash"),
             fake_def("deploy", "deploy"), fake_def("git_commit", "git")};
 }
 
@@ -649,7 +650,7 @@ TEST(visible_tools_hides_only_catch_all_denies) {
     auto vis = pe.visible_tools(all);
     ASSERT_EQ(vis.size(), (size_t)3);
     ASSERT_TRUE(!contains(vis, "deploy"));
-    ASSERT_TRUE(contains(vis, "exec_command"));
+    ASSERT_TRUE(contains(vis, "bash"));
 
     /* Точечный запрет инструмент НЕ прячет: он ограничивает значения. */
     pe.add_rule(rule("read", "*.env*", PermissionAction::Deny));
@@ -658,7 +659,7 @@ TEST(visible_tools_hides_only_catch_all_denies) {
     pe.add_rule(rule("bash", "*", PermissionAction::Deny));
     vis = pe.visible_tools(all);
     ASSERT_EQ(vis.size(), (size_t)2);
-    ASSERT_TRUE(!contains(vis, "exec_command"));
+    ASSERT_TRUE(!contains(vis, "bash"));
     ASSERT_TRUE(contains(vis, "git_commit"));
 }
 
@@ -758,14 +759,27 @@ void register_every_tool() {
  * в «спросить» (или, что хуже, в «разрешить») по умолчанию. */
 const char* kKnownKeys[] = {"read", "write", "bash", "git", "wp-cli", "db",
                             "deploy", "package", "test", "rag", "docker",
-                            "systemd", "cron", "ssh"};
+                            "systemd", "cron", "ssh",
+                            /* И4.6: план задачи. Правил не требует — он не
+                             * касается ни файлов, ни сети, и `* -> allow`
+                             * покрывает его по умолчанию. */ "todo"};
 
 } // anonymous namespace
 
 TEST(every_tool_has_permission_key) {
     register_every_tool();
     auto defs = ToolsRegistry::instance().defs();
-    ASSERT_EQ(defs.size(), (size_t)50);
+    /* Инструменты с именем test_* регистрируются юнит-тестами (например
+     * для проверки усечения вывода) и в плагине не существуют: их нет ни
+     * в CMake, ни в манифесте. Считать их здесь нельзя, иначе тест
+     * зависел бы от порядка и от того, какие тесты уже отработали. */
+    std::vector<ToolDef> real;
+    for (const auto& d : defs) {
+        if (d.name.rfind("test_", 0) == 0) continue;
+        real.push_back(d);
+    }
+    defs = real;
+    ASSERT_EQ(defs.size(), (size_t)54);
     for (const auto& d : defs) {
         if (d.permission_key.empty()) {
             std::cerr << "  инструмент " << d.name << " без ключа разрешения"
@@ -819,10 +833,10 @@ TEST(permission_pattern_comes_from_the_right_argument) {
     ASSERT_EQ(permission_key_of(*rd), std::string("read"));
     ASSERT_EQ(permission_pattern(*rd, args), std::string("config/.env"));
 
-    /* Команда, а не путь: у exec_command параметр называется command. */
+    /* Команда, а не путь: у bash параметр называется command. */
     json::JsonValue cmd = json::JsonValue::object();
     cmd.set("command", json::JsonValue("git push --force"));
-    const ToolDef* ex = ToolsRegistry::instance().find("exec_command");
+    const ToolDef* ex = ToolsRegistry::instance().find("bash");
     ASSERT_TRUE(ex != nullptr);
     ASSERT_EQ(permission_key_of(*ex), std::string("bash"));
     ASSERT_EQ(permission_pattern(*ex, cmd), std::string("git push --force"));
@@ -990,7 +1004,7 @@ TEST(ui_reading_queue_under_state_lock_does_not_deadlock) {
     std::vector<std::thread> threads;
     bool allowed = false;
     threads.emplace_back([&] {
-        allowed = pe.ask("bash", {"ls"}, "ls", "exec_command → ls");
+        allowed = pe.ask("bash", {"ls"}, "ls", "bash → ls");
     });
     Joiner joiner(threads);
     wait_for_pending(pe);
@@ -1051,7 +1065,7 @@ TEST(permission_engine_survives_parallel_use) {
         threads.emplace_back([&] {
             for (int i = 0; i < 10; ++i) {
                 if (pe.evaluate("bash", "ls") != PermissionAction::Ask) continue;
-                if (pe.ask("bash", {"ls"}, "ls", "exec_command")) {
+                if (pe.ask("bash", {"ls"}, "ls", "bash")) {
                     granted.fetch_add(1);
                 }
             }
@@ -1092,18 +1106,158 @@ TEST(new_task_after_abort_asks_again) {
     pe.cancel_all();
     pe.set_wait_timeout_ms(60);
     /* Пока отмена держится, вопрос не задаётся вовсе. */
-    ASSERT_TRUE(!pe.ask("bash", {"ls"}, "ls", "exec_command"));
+    ASSERT_TRUE(!pe.ask("bash", {"ls"}, "ls", "bash"));
 
     engine().submit("тестовая задача после стоп");
     pe.set_wait_timeout_ms(3000);
     std::vector<std::thread> threads;
     bool allowed = false;
     threads.emplace_back([&] {
-        allowed = pe.ask("bash", {"ls"}, "ls", "exec_command");
+        allowed = pe.ask("bash", {"ls"}, "ls", "bash");
     });
     Joiner joiner(threads);
     PermissionRequest r = wait_for_pending(pe);   /* вопрос задан — тест и есть проверка */
     pe.reply(r.id, PermissionReply::Once);
     for (auto& t : threads) t.join();
     ASSERT_TRUE(allowed);
+}
+
+/* ======================================================================
+ * И4.11 — детектор doom-loop: три последних вызова + вопрос пользователю
+ * ====================================================================== */
+
+namespace {
+
+/* Ответить на ВСЕ вопросы, пока поток агента ждёт. Для doom-loop это
+ * «пользователь решил, что повторять можно». */
+struct AutoReply {
+    explicit AutoReply(PermissionReply how, int max_replies = 8)
+        : how_(how), left_(max_replies) {}
+    ~AutoReply() { stop(); }
+
+    void operator()() {
+        PermissionEngine& pe = engine().permissions();
+        for (int i = 0; i < 400 && left_ > 0; ++i) {
+            if (pe.pending_count() > 0) {
+                PermissionRequest r = pe.pending()[0];
+                if (pe.reply(r.id, how_)) --left_;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    void start() {
+        stop();
+        t_ = std::thread([this] { (*this)(); });
+    }
+    void stop() {
+        if (t_.joinable()) t_.join();
+    }
+
+private:
+    PermissionReply how_;
+    int left_;
+    std::thread t_;
+};
+
+} // anonymous namespace
+
+/* Третий одинаковый вызов подряд СПРАШИВАЕТ, а не отменяется сам. */
+/* Корень проекта нужен: без него каждый файловый инструмент упирается в
+ * гейт внешних путей, и тест измерял бы не детектор, а гейт. */
+static void doom_loop_project() {
+    std::lock_guard<std::mutex> lk(engine_state().mtx);
+    engine_state().project_dir = "/tmp";
+}
+
+TEST(doom_loop_asks_the_user_instead_of_cancelling_silently) {
+    /* Правила разрешений — состояние синглтона: без сброса тест
+     * унаследовал бы правила предыдущего и измерял бы не детектор. */
+    PermissionGuard g;
+    RunnerFixture fx;
+    fx.clear_state();
+    doom_loop_project();
+    PermissionEngine& pe = engine().permissions();
+    /* Без дефолтов evaluate() отвечает Ask на всё (правил нет), и вопрос
+     * задавал бы не детектор, а пустой реестр разрешений. */
+    pe.apply_agent_defaults({"/tmp"});
+    pe.set_wait_timeout_ms(5000);
+    AutoReply replier(PermissionReply::Once);
+    replier.start();
+
+    json::JsonValue a = json::JsonValue::object();
+    a.set("path", "zzz.txt");
+    std::string first = fx.runner.run("read_file", a);
+    std::string second = fx.runner.run("read_file", a);
+    std::string third = fx.runner.run("read_file", a);
+
+    /* Ни один из трёх не отменён «по автопилоту»: раньше третий
+     * возвращал «[ошибка] зацикливание вызова» без чьего-либо решения. */
+    ASSERT_TRUE(first.find("зацикливание") == std::string::npos);
+    ASSERT_TRUE(second.find("зацикливание") == std::string::npos);
+    ASSERT_TRUE(third.find("зацикливание") == std::string::npos);
+    /* Третий вызов действительно вызвал вопрос с ключом doom_loop —
+     * иначе проверка выше проходила бы и при полном отсутствии
+     * детектора. */
+    bool asked = false;
+    for (const auto& t : fx.texts) {
+        if (t.find("Зацикливание: read_file") != std::string::npos) asked = true;
+    }
+    ASSERT_TRUE(asked);
+}
+
+/* Отказ пользователя останавливает вызов — и это единственный путь, где
+ * детектор влияет на поведение. */
+TEST(doom_loop_rejection_stops_the_call) {
+    /* Правила разрешений — состояние синглтона: без сброса тест
+     * унаследовал бы правила предыдущего и измерял бы не детектор. */
+    PermissionGuard g;
+    RunnerFixture fx;
+    fx.clear_state();
+    doom_loop_project();
+    PermissionEngine& pe = engine().permissions();
+    /* Без дефолтов evaluate() отвечает Ask на всё (правил нет), и вопрос
+     * задавал бы не детектор, а пустой реестр разрешений. */
+    pe.apply_agent_defaults({"/tmp"});
+    pe.set_wait_timeout_ms(5000);
+    AutoReply replier(PermissionReply::Reject);
+    replier.start();
+
+    json::JsonValue a = json::JsonValue::object();
+    a.set("path", "zzz.txt");
+    fx.runner.run("read_file", a);
+    fx.runner.run("read_file", a);
+    std::string third = fx.runner.run("read_file", a);
+    ASSERT_TRUE(third.find("зацикливание") != std::string::npos);
+    ASSERT_TRUE(third.find("НЕ ПОВТОРЯЙ") != std::string::npos);
+}
+
+/* Окно сужено до трёх вызовов: одинаковые отпечатки, разделённые другими
+ * вызовами, зацикливанием НЕ являются. В окне из восьми они накапливались
+ * и срабатывали ложно. */
+TEST(doom_loop_window_is_three_calls_not_eight) {
+    /* Правила разрешений — состояние синглтона: без сброса тест
+     * унаследовал бы правила предыдущего и измерял бы не детектор. */
+    PermissionGuard g;
+    RunnerFixture fx;
+    fx.clear_state();
+    doom_loop_project();
+    PermissionEngine& pe = engine().permissions();
+    /* Без дефолтов evaluate() отвечает Ask на всё (правил нет), и вопрос
+     * задавал бы не детектор, а пустой реестр разрешений. */
+    pe.apply_agent_defaults({"/tmp"});
+    pe.set_wait_timeout_ms(500);
+    /* Отвечать некому: любой вопрос закончился бы отказом по таймауту, и
+     * мы увидели бы ложное «зацикливание». Значит, вопросов быть не должно
+     * вовсе — это и проверяем. */
+    json::JsonValue a = json::JsonValue::object();
+    a.set("path", "a.txt");
+    json::JsonValue b = json::JsonValue::object();
+    b.set("path", "b.txt");
+    for (int i = 0; i < 5; ++i) {
+        fx.runner.run("read_file", a);
+        fx.runner.run("read_file", b);
+    }
+    for (const auto& t : fx.texts) {
+        ASSERT_TRUE(t.find("Зацикливание") == std::string::npos);
+    }
 }

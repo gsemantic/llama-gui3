@@ -40,6 +40,30 @@ struct PendingWrite {
     std::string content;
 };
 
+/* И4.6: пункт плана задачи (порт opencode tool/todo.ts).
+ *
+ * Список нужен не для красоты, а по двум причинам. Первая: у агента нет
+ * памяти между шагами, кроме истории, и длинный план, выкованный в
+ * первом сообщении, к шестому шагу уже не влияет на решение. Вторая:
+ * пользователь не видит, что агент собирается делать, и может вмешаться
+ * после третьего шага, а не после двенадцатого.
+ *
+ * Статусы и приоритеты — строковые константы, а не enum: значения приходят
+ * от модели текстом, и нераспознанное значение должно быть видно в
+ * интерфейсе как есть, а не молча превращаться в дефолт. */
+struct TodoItem {
+    std::string id;
+    std::string content;
+    /* pending | in_progress | completed | cancelled */
+    std::string status = "pending";
+    /* low | medium | high */
+    std::string priority = "medium";
+};
+
+inline const char* kTodoStatuses[] = {"pending", "in_progress", "completed",
+                                     "cancelled"};
+inline const char* kTodoPriorities[] = {"low", "medium", "high"};
+
 /* Одно сообщение многоходовой истории агента. */
 struct ChatMsg {
     std::string role;    // "user" | "assistant"
@@ -174,6 +198,10 @@ struct EngineState {
 
     /* A1: последние вызовы инструментов (fingerprint) для детекта зацикливания. */
     std::deque<std::string> recent_calls;
+
+    /* И4.6: план задачи. Сбрасывается при новой задаче (run_task) — список
+     * прошлой задачи в промпте новой только сбивает. */
+    std::vector<TodoItem> todos;
 
     /* B2: кэш repo_map на текущую задачу — не перечитываем структуру проекта
      * на каждом шаге, если корень не менялся. Сбрасывается в начале run_task. */

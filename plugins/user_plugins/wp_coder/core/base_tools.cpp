@@ -7,6 +7,10 @@
 #include "shell.h"
 #include "limits.h"
 #include "file_utils.h"
+#include "glob.h"
+#include "apply_patch.h"
+#include "text_edit.h"
+#include "file_lock.h"
 #include "json_utils.h"
 
 #include <fstream>
@@ -118,6 +122,29 @@ void backup_file(const std::string& abs) {
     if (!fs::exists(abs)) return;
     std::error_code ec;
     fs::copy_file(abs, abs + ".orig", fs::copy_options::overwrite_existing, ec);
+}
+
+/* И4.5: вернуть содержимое в формате существующего файла.
+ *
+ * Только для полной перезаписи: если файла нет, пишем как есть. Если
+ * файл существует и у него CRLF или BOM, приводим новое содержимое к
+ * тому же виду — иначе правка выглядит как перезапись всего файла. */
+std::string preserve_file_format(const std::string& abs,
+                                 const std::string& content) {
+    std::error_code ec;
+    if (!fs::exists(abs, ec)) return content;
+    std::ifstream f(abs, std::ios::binary);
+    if (!f) return content;
+    const std::string head((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+    f.close();
+    const TextFile old = split_text(head);
+    if (old.bom.empty() && !old.crlf) return content;
+
+    TextFile nf = split_text(content);
+    nf.bom = old.bom;
+    nf.crlf = old.crlf;
+    return join_text(nf);
 }
 
 /* Разрешить относительный путь относительно корня проекта.
@@ -290,6 +317,136 @@ std::string base_skill_detail(const std::string& name) {
     return "### НАВЫК: " + sk->name + "\n" + sk->body;
 }
 
+/* И4.7: инструкции проекта рядом с прочитанным файлом (задел для И9).
+ *
+ * Поднимаемся от каталога файла к корню проекта и собираем AGENTS.md /
+ * CLAUDE.md, которые там лежат: они относятся к коду, который агент
+ * сейчас читает, и И9 подключит их к промпту. Здесь — только факт
+ * наличия, потому что подключение требует правок промпта (И9.2), а
+ * молчаливый список в metadata без пользы был бы декорцией. */
+std::vector<std::string> nearby_instruction_files(const std::string& abs_file,
+                                                  const std::string& project) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    fs::path dir = fs::path(abs_file).parent_path();
+    fs::path root = project.empty() ? dir : fs::path(project);
+    int hops = 0;
+    while (hops++ < 8) {
+        for (const char* name : {"AGENTS.md", "CLAUDE.md"}) {
+            const fs::path cand = dir / name;
+            if (fs::exists(cand, ec)) {
+                std::string rel = cand.lexically_relative(root).generic_string();
+                if (rel.empty() || rel == ".") rel = name;
+                out.push_back(rel);
+            }
+        }
+        if (dir == root || dir.empty()) break;
+        const fs::path up = dir.parent_path();
+        if (up == dir) break;
+        dir = up;
+    }
+    return out;
+}
+
+/* --- И4.6: план задачи (todowrite / toread) --- */
+
+/* Сравнение без приведения регистра. Наивный tolower здесь не годится:
+ * в локали «C» он не трогает кириллицу, и «ВЫПОЛНЕНО» не совпало бы с
+ * «выполнено» — список молча рассыпался бы. Модели пишут либо строчными,
+ * либо прописными, поэтому сравниваем с обоими написаниями слова. */
+/* Прописная форма слова: ASCII плюс кириллица.
+ *
+ * Диапазоны кириллицы в UTF-8 переходят МЕЖДУ ведущими байтами: «ы…ь»
+ * лежат в D1 80..8F, а «Ы…Ь» — в D0 A0..AF. Поэтому «сдвинуть второй
+ * байт на 0x20» нельзя (так не работало, и «ВЫПОЛНЕНО» не совпадало с
+ * «выполнено»), и нужен разбор по четырём диапазонам. */
+std::string upper_form(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c >= 'a' && c <= 'z') {
+            r += static_cast<char>(c - 'a' + 'A');
+            continue;
+        }
+        if (c == 0xD0 || c == 0xD1) {
+            if (i + 1 >= s.size()) { r += static_cast<char>(c); continue; }
+            const unsigned char n = static_cast<unsigned char>(s[i + 1]);
+            if (c == 0xD0 && n >= 0xA0 && n <= 0xAF) {
+                r += static_cast<char>(0xD0);
+                r += static_cast<char>(n - 0x20);
+                ++i;
+                continue;
+            }
+            if (c == 0xD0 && n >= 0xB0 && n <= 0xBF) {
+                r += static_cast<char>(0xD0);
+                r += static_cast<char>(n - 0x20);
+                ++i;
+                continue;
+            }
+            if (c == 0xD1 && n >= 0x80 && n <= 0x8F) {
+                r += static_cast<char>(0xD0);
+                r += static_cast<char>(n + 0x20);
+                ++i;
+                continue;
+            }
+            if (c == 0xD1 && n >= 0x90 && n <= 0x9F) {
+                r += static_cast<char>(0xD1);
+                r += static_cast<char>(n - 0x20);
+                ++i;
+                continue;
+            }
+        }
+        r += static_cast<char>(c);
+    }
+    return r;
+}
+
+bool eq_ci(const std::string& raw, const char* word) {
+    return raw == word || raw == upper_form(word);
+}
+
+std::string normalize_status(const std::string& raw, bool& known) {
+    static const char* kPending[] = {"", "pending", "new", "todo",
+                                     "не начат", "не начато", "ожидает"};
+    static const char* kDoing[] = {"in_progress", "in progress", "doing",
+                                    "active", "started", "в работе", "делаю",
+                                    "начато"};
+    static const char* kDone[] = {"completed", "complete", "done", "finished",
+                                  "готово", "сделано", "выполнено"};
+    static const char* kCancelled[] = {"cancelled", "canceled", "skipped",
+                                       "отменено", "пропущено"};
+    for (const char* w : kPending) if (eq_ci(raw, w)) { known = true; return "pending"; }
+    for (const char* w : kDoing) if (eq_ci(raw, w)) { known = true; return "in_progress"; }
+    for (const char* w : kDone) if (eq_ci(raw, w)) { known = true; return "completed"; }
+    for (const char* w : kCancelled) if (eq_ci(raw, w)) { known = true; return "cancelled"; }
+    known = false;
+    return "pending";
+}
+
+std::string normalize_priority(const std::string& raw, bool& known) {
+    static const char* kMedium[] = {"", "medium", "normal", "обычный", "средний"};
+    static const char* kHigh[] = {"high", "срочно", "высокий", "важный"};
+    static const char* kLow[] = {"low", "низкий", "неважный"};
+    for (const char* w : kMedium) if (eq_ci(raw, w)) { known = true; return "medium"; }
+    for (const char* w : kHigh) if (eq_ci(raw, w)) { known = true; return "high"; }
+    for (const char* w : kLow) if (eq_ci(raw, w)) { known = true; return "low"; }
+    known = false;
+    return "medium";
+}
+
+std::string render_todos(const std::vector<TodoItem>& todos) {
+    std::stringstream s;
+    if (todos.empty()) return "[todowrite] план пуст";
+    s << "[todowrite] план из " << todos.size() << " пунктов:\n";
+    for (const auto& t : todos) {
+        s << "  [" << t.status << "] " << t.id << ". " << t.content;
+        if (t.priority != "medium") s << " (" << t.priority << ")";
+        s << "\n";
+    }
+    return s.str();
+}
+
 /* --- Маленькие помощники для чтения аргументов (И1.3) --- */
 
 std::string arg_str(const json::JsonValue& a, const char* key) {
@@ -318,31 +475,163 @@ ToolOutput out(std::string title, std::string text) {
 void register_base_tools() {
     auto& reg = ToolsRegistry::instance();
 
+    /* 4.7 read_file: диапазон строк вместо «пропустить K строк», отказ
+     * для двоичных файлов, список для каталога. */
     {
         ToolDef def;
         def.name = "read_file";
-        def.description = "Чтение текстового файла";
+        def.description =
+            "Чтение текстового файла. На каталог возвращает список"
+            " содержимого. Двоичные файлы не читает.";
         def.flags = TF_READ_ONLY;
         def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "путь к файлу относительно корня проекта")
-         .integer_range("k", "с какой строки читать (1 — с первой); 0 = с начала",
-                        0, 1000000)
+         .integer_range("offset", "с какой строки читать (1 — с первой;"
+                        " 0 = с начала)", 0, 10000000)
+         .integer_range("limit", "сколько строк вернуть (по умолчанию 2000)",
+                        1, 1000000)
          .required("path");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
-            std::string abs = project_resolve(arg_str(a, "path"));
+            const std::string rel = arg_str(a, "path");
+            const std::string abs = project_resolve(rel);
             std::string perm = guard_permission(ctx, abs);
             if (!perm.empty()) return out(std::move(perm));
-            int k = arg_int(a, "k");
-            size_t skip = (k > 1) ? static_cast<size_t>(k - 1) : 0;
-            std::string content = read_text_file(abs, kReadFileChars, skip);
+
+            std::error_code ec;
+            if (!fs::exists(abs, ec))
+                return out("read " + rel,
+                           "[ошибка] файла нет: " + abs +
+                               ". Посмотри каталог: list или glob.");
+            /* Каталог: список содержимого вместо отказа. Раньше чтение
+             * каталога давало «не удалось открыть файл», и модель гадала,
+             * существует ли он. */
+            if (fs::is_directory(abs, ec)) {
+                std::stringstream s;
+                s << "[каталог] " << rel << ":\n";
+                int n = 0;
+                for (auto it = fs::directory_iterator(abs, ec);
+                     it != fs::directory_iterator() && !ec; it.increment(ec)) {
+                    std::string name = it->path().filename().string();
+                    std::error_code ec2;
+                    if (it->is_directory(ec2)) name += "/";
+                    if (++n > 200) {
+                        s << "...[больше 200 записей — используй glob]\n";
+                        break;
+                    }
+                    s << "  " << name << "\n";
+                }
+                ToolOutput o = out("read " + rel, s.str());
+                o.metadata = json::JsonValue::object();
+                o.metadata.set("is_dir", true);
+                return o;
+            }
+
+            /* Двоичный файл: доля непечатаемых символов (И4.7). Вываливать
+             * его в контекст бессмысленно и дорого — модель получит мусор,
+             * а следующий запрос станет в разы больше. */
+            {
+                std::ifstream probe(abs, std::ios::binary);
+                std::string head(limits::kBinarySniffBytes, '\0');
+                probe.read(&head[0], static_cast<std::streamsize>(head.size()));
+                const std::streamsize got = probe.gcount();
+                if (got > 0) {
+                    size_t odd = 0;
+                    for (std::streamsize i = 0; i < got; ++i) {
+                        const unsigned char c = static_cast<unsigned char>(head[i]);
+                        const bool printable = c == '\n' || c == '\r' || c == '\t' ||
+                                               (c >= 0x20 && c != 0x7F);
+                        if (!printable) ++odd;
+                    }
+                    if (static_cast<double>(odd) >
+                        limits::kBinaryNonPrintableRatio * got) {
+                        return out("read " + rel,
+                                   "[двоичный файл] " + rel +
+                                       " не является текстом (доля"
+                                       " непечатаемых символов выше 30%)."
+                                       " Прочитать его текстом нельзя; используй"
+                                       " другой инструмент для этого формата.");
+                    }
+                }
+            }
+
+            const int offset_arg = arg_int(a, "offset");
+            const size_t first_line =
+                (offset_arg > 1) ? static_cast<size_t>(offset_arg) : 1;
+            const int limit_arg = arg_int(a, "limit");
+            const size_t limit = (limit_arg > 0)
+                                     ? static_cast<size_t>(limit_arg)
+                                     : limits::kReadDefaultLines;
+
+            /* Читаем построчно и останавливаемся на limit или на лимите
+             * байт: файл на сотни мегабайт не должен попадать в память
+             * целиком ради двух строк. */
+            std::ifstream f(abs, std::ios::binary);
+            std::stringstream body;
+            std::string ln;
+            size_t line_no = 0, taken = 0, bytes = 0;
+            bool byte_capped = false, more = false;
+            while (std::getline(f, ln)) {
+                ++line_no;
+                if (line_no < first_line) continue;
+                if (taken >= limit) { more = true; break; }
+                if (bytes + ln.size() + 1 > kReadFileChars) {
+                    byte_capped = true;
+                    more = true;
+                    break;
+                }
+                bytes += ln.size() + 1;
+                ++taken;
+                body << ln << "\n";
+            }
+
             std::stringstream hdr;
-            hdr << "# read: " << abs;
-            if (skip > 0) hdr << " (строки с " << skip + 1 << ")";
-            if (content.size() >= kReadFileChars)
-                hdr << " [обрезано по лимиту — читай с нужной строки через k]";
-            return out("read " + arg_str(a, "path"), hdr.str() + "\n" + content);
+            hdr << "# read: " << rel;
+            if (first_line > 1) hdr << " (с строки " << first_line << ")";
+            hdr << " [" << taken << " строк";
+            if (line_no > 0) hdr << " из " << line_no;
+            hdr << "]";
+            if (more) {
+                /* Слово «обрезано» — общее для всех инструментов: по нему
+                 * и модель, и тест понимают, что вывод неполон. */
+                hdr << (byte_capped
+                            ? " — обрезано по лимиту байт, читай offset="
+                            : " — обрезано по limit, дальше есть: читай offset=")
+                    << (first_line + taken);
+            }
+
+            /* И4.7 (задел для И9): инструкции рядом с файлом. Само
+             * подключение — И9, пока фиксируем факт наличия, чтобы агент
+             * знал, что правила проекта рядом есть. */
+            json::JsonValue loaded = json::JsonValue::array();
+            for (const auto& p : nearby_instruction_files(abs, ctx.project_dir())) {
+                json::JsonValue e = json::JsonValue::object();
+                e.set("path", p);
+                loaded.push_back(std::move(e));
+            }
+            if (loaded.size() > 0) {
+                std::stringstream il;
+                il << " [рядом найдены инструкции проекта:";
+                for (size_t i = 0; i < loaded.size(); ++i)
+                    il << " " << loaded.at(i).get_string("path");
+                il << "]";
+                hdr << il.str();
+            }
+
+            ToolOutput o;
+            o.title = "read " + rel;
+            o.output =
+                shell::cap(hdr.str() + "\n" + body.str(), limits::kMaxToolOutput + 2000);
+            o.truncated = more;
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("path", rel);
+            o.metadata.set("lines", static_cast<long long>(taken));
+            o.metadata.set("offset", static_cast<long long>(first_line));
+            o.metadata.set("limit", static_cast<long long>(limit));
+            o.metadata.set("more", more);
+            o.metadata.set("loaded", std::move(loaded));
+            return o;
         };
         reg.register_def(std::move(def));
     }
@@ -362,6 +651,10 @@ void register_base_tools() {
             const std::string rel = arg_str(a, "path");
             const std::string content = arg_str(a, "content");
             std::string abs = project_resolve(rel);
+            /* И4.5: правка файла — цикл «прочитал → изменил → записал»,
+             * а писать могут два потока (агент и кнопка «применить» в UI).
+             * Блокировка берётся ДО чтения и держится до конца записи. */
+            file_lock::Guard file_guard(abs);
             /* И1.7: режим плана решается здесь, в контексте, а не в
              * инструменте. Раньше эта проверка была продублирована в
              * четырёх инструментах и отсутствовала в остальных. */
@@ -376,12 +669,16 @@ void register_base_tools() {
             std::string perm = guard_permission(ctx, abs);
             if (!perm.empty()) return out(std::move(perm));
             backup_file(abs);  // для undo_edit (3.5)
+            /* И4.5: формат существующего файла сохраняется. Перезапись
+             * CRLF-файла через LF молча ломает .gitattributes и
+             * .bat/.sh, а BOM ждут Windows-редакторы и часть CI. */
+            const std::string body = preserve_file_format(abs, content);
             std::ofstream f(abs, std::ios::binary | std::ios::trunc);
             if (!f) return out("[ошибка] не удалось записать: " + abs);
-            f << content;
+            f << body;
             f.close();
             return out("записано " + rel, "[записано] " + abs + " ("
-                       + std::to_string(content.size()) + " байт)");
+                       + std::to_string(body.size()) + " байт)");
         };
         reg.register_def(std::move(def));
     }
@@ -420,6 +717,405 @@ void register_base_tools() {
         reg.register_def(std::move(def));
     }
 
+    /* 4.1 glob: поиск файлов по шаблону пути. */
+    {
+        ToolDef def;
+        def.name = "glob";
+        def.description =
+            "Поиск файлов по шаблону пути: ** — любые каталоги, * и ? —"
+            " внутри имени, {a,b} — альтернативы. Свежие файлы сверху.";
+        def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
+        SchemaBuilder b;
+        b.str("pattern", "шаблон пути, например **/*.php или src/**/*.{ts,tsx}")
+         .str("path", "каталог для поиска; пусто = корень проекта")
+         .str("include", "фильтр по расширениям через запятую: php,js (пусто = любые)")
+         .required("pattern");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            const std::string pattern = arg_str(a, "pattern");
+            const std::string rel_root = arg_str(a, "path");
+            /* Пустой path = корень проекта; относительный разрешается от
+             * него же, а не от каталога процесса. */
+            std::string root = rel_root.empty() ? ctx.project_dir()
+                                                : project_resolve(rel_root);
+            if (root.empty())
+                return out("[ошибка] не задан path и не задан корень проекта");
+            std::string perm = guard_permission(ctx, root);
+            if (!perm.empty()) return out(std::move(perm));
+
+            fileglob::Options opt;
+            const std::string include = arg_str(a, "include");
+            if (!include.empty()) {
+                std::string cur;
+                std::string list = include;
+                list += ',';
+                for (char c : list) {
+                    if (c == ',' || c == ' ' || c == ';') {
+                        if (!cur.empty()) opt.extensions.push_back(cur);
+                        cur.clear();
+                    } else {
+                        cur += c;
+                    }
+                }
+            }
+
+            fileglob::Result r = fileglob::find(root, pattern, opt);
+            if (!r.error.empty()) return out("glob", "[ошибка] " + r.error);
+
+            std::stringstream s;
+            s << "[glob] " << pattern << " в " << root << ": ";
+            if (r.entries.empty()) {
+                s << "ничего не найдено";
+                if (r.walk_capped)
+                    s << " [обход остановлен на " << r.visited << " записях —"
+                         " ищи в каталоге поуже]";
+                s << "\n";
+            } else {
+                s << r.entries.size();
+                if (r.matched > r.entries.size())
+                    s << " из " << r.matched << " (лимит " << opt.limit
+                      << " — сузь шаблон или укажи path)";
+                s << ", свежие сверху:\n";
+                for (const auto& e : r.entries) s << e.path << "\n";
+            }
+            ToolOutput o;
+            o.title = "glob " + pattern;
+            o.output = shell::cap(s.str(), kMaxToolOutput);
+            o.truncated = r.truncated || r.walk_capped;
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("count", static_cast<long long>(r.entries.size()));
+            o.metadata.set("matched", static_cast<long long>(r.matched));
+            o.metadata.set("truncated", r.truncated);
+            o.metadata.set("root", root);
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
+
+    /* 4.6 todowrite: план задачи. */
+    {
+        ToolDef def;
+        def.name = "todowrite";
+        def.description =
+            "Записать план задачи. Вызывай в начале сложной задачи и"
+            " обновляй по ходу: пункт в работе — in_progress, сделанный —"
+            " completed. План показывается пользователю, он им вмешивается.";
+        /* Файлов не касается — план живёт в состоянии сессии, поэтому
+         * доступен и в режиме Research. */
+        def.flags = TF_READ_ONLY;
+        def.permission_key = "todo";
+        SchemaBuilder b;
+        b.object_array("todos",
+                       "массив пунктов: {id, content, status, priority}",
+                       "id — номер пункта, content — текст, status — "
+                       "pending|in_progress|completed|cancelled, priority — "
+                       "low|medium|high")
+         .required("todos");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            /* Тип массива уже проверен валидацией схемы (И1.6): сюда
+             * не- массив не доходит, и своя проверка была бы мёртвым кодом. */
+            const json::JsonValue& list = a.get("todos");
+            if (list.size() == 0)
+                return out("todowrite",
+                           "[ошибка] пустой список пунктов. Если план закончен —"
+                           " сообщи пользователю итог текстом, а не пустым"
+                           " вызовом.");
+
+            std::vector<TodoItem> items;
+            std::string problems;
+            int substituted = 0;
+            for (size_t i = 0; i < list.size(); ++i) {
+                const json::JsonValue& el = list.at(i);
+                const std::string at = "пункт " + std::to_string(i + 1);
+                if (!el.is_object()) {
+                    problems += at + ": не объект (нужно {id, content, status,"
+                                " priority}); ";
+                    continue;
+                }
+                TodoItem t;
+                t.content = el.get_string("content");
+                if (t.content.empty()) {
+                    problems += at + ": пустой content; ";
+                    continue;
+                }
+                /* id модель пишет через раз, а ссылаться на пункт надо
+                 * уметь всегда: проставляем по порядку. */
+                t.id = el.get_string("id");
+                if (t.id.empty()) t.id = std::to_string(i + 1);
+                bool known = false;
+                const std::string raw_status = el.get_string("status");
+                t.status = normalize_status(raw_status, known);
+                if (!known && !raw_status.empty()) {
+                    ++substituted;
+                    problems += at + ": статус '" + raw_status +
+                                "' не распознан, взят pending; ";
+                }
+                const std::string raw_prio = el.get_string("priority");
+                t.priority = normalize_priority(raw_prio, known);
+                if (!known && !raw_prio.empty()) {
+                    ++substituted;
+                    problems += at + ": приоритет '" + raw_prio +
+                                "' не распознан, взят medium; ";
+                }
+                items.push_back(std::move(t));
+            }
+            if (items.empty())
+                return out("todowrite", "[ошибка] ни один пункт не разобран: "
+                                       + problems);
+
+            {
+                std::lock_guard<std::mutex> lk(ctx.state().mtx);
+                ctx.state().todos = items;
+            }
+            /* Кэш системного промпта: план печатается именно в нём, и без
+             * сброса модель видела бы прошлый список ещё весь следующий ход. */
+            engine().invalidate_prompt_cache();
+
+            ToolOutput o;
+            o.title = "todowrite (" + std::to_string(items.size()) + ")";
+            std::string text = render_todos(items);
+            if (!problems.empty())
+                text += "[нормализовано: " + problems + "]\n";
+            o.output = text;
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("count", static_cast<long long>(items.size()));
+            o.metadata.set("normalized", static_cast<long long>(substituted));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
+
+    /* 4.6 toread: текущий план задачи. */
+    {
+        ToolDef def;
+        def.name = "todoread";
+        def.description = "Показать текущий план задачи";
+        def.flags = TF_READ_ONLY;
+        def.permission_key = "todo";
+        def.parameters = SchemaBuilder().build();
+        def.handler = [](const json::JsonValue&, ToolContext& ctx) -> ToolOutput {
+            std::vector<TodoItem> items;
+            {
+                std::lock_guard<std::mutex> lk(ctx.state().mtx);
+                items = ctx.state().todos;
+            }
+            return out("todoread", render_todos(items));
+        };
+        reg.register_def(std::move(def));
+    }
+
+    /* 4.2 apply_patch: многофайловый патч в формате opencode. */
+    {
+        ToolDef def;
+        def.name = "apply_patch";
+        def.description =
+            "Правка нескольких файлов одним патчем. Формат: *** Begin Patch,"
+            " затем *** Add File: путь (строки с '+'), *** Update File: путь"
+            " (хуки '@@', строки контекста с пробела, '-' удаляет, '+'"
+            " добавляет, '*** Move to: путь' переименовывает, '*** End of"
+            " File' — правка в конце файла), *** Delete File: путь, и"
+            " *** End Patch.";
+        def.flags = TF_WRITES_FILES;
+        def.permission_key = "write";
+        SchemaBuilder b;
+        b.str("patchText", "текст патча между *** Begin Patch и *** End Patch")
+         .required("patchText");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            const std::string text = arg_str(a, "patchText");
+            const patch::Parsed p = patch::parse(text);
+            if (!p.ok())
+                return out("apply_patch", "[патч не разобран] " + p.error);
+            /* И4.5: один семафор на весь патч — файлы патча могут
+             * совпадать (переименование), и полосы по пути тогда не помогут. */
+            file_lock::Guard patch_guard("<apply_patch>");
+
+            /* Проверки путей и разрешений — ДО любой записи: патч из пяти
+             * файлов не должен оставить систему наполовину изменённой. */
+            std::vector<std::string> blocked;
+            for (const auto& f : p.files) {
+                const std::string rel = f.path;
+                const std::string abs = project_resolve(rel);
+                if (!security::is_path_safe(rel) ||
+                    !security::is_path_not_dangerous(abs)) {
+                    blocked.push_back(rel + " (небезопасный путь)");
+                    continue;
+                }
+                if (f.op == patch::Op::Add) continue;  /* файла может не быть */
+                if (!fs::exists(abs)) {
+                    blocked.push_back(rel + " (файла нет — читай каталог: glob)");
+                    continue;
+                }
+                const std::string perm = guard_permission(ctx, abs);
+                if (!perm.empty()) {
+                    blocked.push_back(rel + " (" + perm + ")");
+                    continue;
+                }
+                if (!f.move_to.empty()) {
+                    const std::string mv_abs = project_resolve(f.move_to);
+                    const std::string perm2 = guard_permission(ctx, mv_abs);
+                    if (!perm2.empty()) blocked.push_back(f.move_to + " (" + perm2 + ")");
+                }
+            }
+            if (!blocked.empty()) {
+                std::stringstream s;
+                s << "[apply_patch: отказ, ничего не изменено]\n";
+                for (const auto& b : blocked) s << "  " << b << "\n";
+                return out("apply_patch", s.str());
+            }
+
+            /* Режим плана: предложить можно только запись содержимого.
+             * Удаление и перемещение в ProposedWrite не выражаются, поэтому
+             * они отказны, а не «предложены наполовину». */
+            if (ctx.plan_mode()) {
+                bool refused = false;
+                for (const auto& f : p.files) {
+                    if (f.op == patch::Op::Delete || !f.move_to.empty())
+                        refused = true;
+                }
+                if (refused) {
+                    return out("apply_patch",
+                               "[режим «сначала план»: патч не применён]"
+                               " Удаление и перемещение файлов предложить"
+                               " нельзя — разбей задачу: сначала предложи"
+                               " содержимое новых файлов через write_file.");
+                }
+            }
+
+            std::stringstream report;
+            int added = 0, updated = 0, deleted = 0, moved = 0, proposed = 0;
+            json::JsonValue files_meta = json::JsonValue::array();
+
+            /* Отказ посреди патча. К этому моменту часть файлов могла уже
+             * быть записана, и молчать об этом нельзя: модель и пользователь
+             * решили бы, что не тронуто ничего, и потеряли бы правки. */
+            auto refuse = [&report](const std::string& what) {
+                std::stringstream s;
+                if (report.str().empty()) {
+                    s << "[apply_patch: отказ, ничего не изменено]\n" << what;
+                } else {
+                    s << "[apply_patch: ОТКАЗ — патч применён НЕ полностью]\n"
+                      << "Уже записано:\n"
+                      << report.str()
+                      << "Не выполнено: " << what << "\n"
+                      << "Остальные файлы патча не тронуты. Перечитай их и"
+                         " пришли оставшиеся операции отдельным патчем.";
+                }
+                return out("apply_patch", s.str());
+            };
+
+            for (const auto& f : p.files) {
+                const std::string abs = project_resolve(f.path);
+
+                if (f.op == patch::Op::Add) {
+                    if (fs::exists(abs)) {
+                        return refuse("файл уже существует: " + f.path +
+                                      ". Для правки существующего файла"
+                                      " используй '*** Update File:'");
+                    }
+                    std::string content;
+                    for (const auto& h : f.hunks) {
+                        for (const auto& l : h.new_lines) {
+                            content += l;
+                            content += '\n';
+                        }
+                    }
+                    if (ctx.propose_write(f.path, content)) {
+                        ++proposed;
+                        report << "  предложено создать " << f.path << "\n";
+                    } else {
+                        /* Каталога может не быть: агент создаёт файлы в
+                         * новых подкаталогах постоянно, и отказ «не удалось
+                         * создать» без указания причины их бы обескуражил. */
+                        std::error_code ec;
+                        fs::create_directories(fs::path(abs).parent_path(), ec);
+                        std::ofstream fo(abs, std::ios::binary | std::ios::trunc);
+                        if (!fo) return refuse("не удалось создать: " + abs);
+                        fo << content;
+                        ++added;
+                        report << "  создан " << f.path << " ("
+                               << content.size() << " байт)\n";
+                    }
+                } else if (f.op == patch::Op::Delete) {
+                    std::error_code ec;
+                    fs::remove(abs, ec);
+                    if (ec)
+                        return refuse("не удалось удалить " + f.path + ": "
+                                      + ec.message());
+                    ++deleted;
+                    report << "  удалён " << f.path << "\n";
+                } else {
+                    std::ifstream fi(abs, std::ios::binary);
+                    if (!fi) return refuse("не удалось прочитать: " + abs);
+                    const std::string raw((std::istreambuf_iterator<char>(fi)),
+                                          std::istreambuf_iterator<char>());
+                    const patch::Applied ap =
+                        patch::apply_hunks(split_text(raw), f.hunks);
+                    if (!ap.ok) {
+                        return refuse(f.path + ": хук #"
+                                      + std::to_string(ap.failed_hunk + 1)
+                                      + " не применён. " + ap.error);
+                    }
+                    const std::string result = join_text(ap.file);
+                    if (ctx.propose_write(f.path, result)) {
+                        ++proposed;
+                        report << "  предложено изменить " << f.path << "\n";
+                    } else {
+                        backup_file(abs);
+                        std::ofstream fo(abs, std::ios::binary | std::ios::trunc);
+                        if (!fo) return refuse("не удалось записать: " + abs);
+                        fo << result;
+                        ++updated;
+                        report << "  изменён " << f.path;
+                        if (!f.move_to.empty()) {
+                            std::error_code ec;
+                            const std::string mv_abs = project_resolve(f.move_to);
+                            if (fs::exists(mv_abs)) {
+                                return refuse("цель перемещения уже существует: "
+                                              + f.move_to);
+                            }
+                            fs::rename(abs, mv_abs, ec);
+                            if (ec)
+                                return refuse("не удалось переместить в "
+                                              + f.move_to + ": " + ec.message());
+                            ++moved;
+                            report << " → " << f.move_to;
+                        }
+                        report << "\n";
+                    }
+                }
+                json::JsonValue meta = json::JsonValue::object();
+                meta.set("path", f.path);
+                meta.set("op", f.op == patch::Op::Add   ? "add"
+                                : f.op == patch::Op::Delete ? "delete"
+                                                            : "update");
+                files_meta.push_back(std::move(meta));
+            }
+
+            std::stringstream head;
+            head << "[apply_patch] готово: создано " << added << ", изменено "
+                 << updated << ", удалено " << deleted;
+            if (moved) head << ", перемещено " << moved;
+            if (proposed) head << ", предложено " << proposed;
+            head << "\n" << report.str();
+
+            ToolOutput o;
+            o.title = "apply_patch";
+            o.output = shell::cap(head.str(), kMaxToolOutput);
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("added", static_cast<long long>(added));
+            o.metadata.set("updated", static_cast<long long>(updated));
+            o.metadata.set("deleted", static_cast<long long>(deleted));
+            o.metadata.set("moved", static_cast<long long>(moved));
+            o.metadata.set("proposed", static_cast<long long>(proposed));
+            o.metadata.set("files", std::move(files_meta));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
+
     {
         ToolDef def;
         def.name = "list_skills";
@@ -449,53 +1145,51 @@ void register_base_tools() {
     }
 
     /* search_replace: поиск и замена текста в файле (diff-based edit). */
+    /* 4.3 search_replace: замена текста через каскад из девяти стадий
+     * (core/text_edit.h). Раньше требовалось буквальное совпадение, и
+     * модель на каждой неудаче гадала, чего именно не хватило. */
     {
         ToolDef def;
         def.name = "search_replace";
         def.description =
-            "Поиск и замена текста в файле. Искомый текст должен встречаться"
-            " РОВНО ОДИН раз — иначе добавь к нему контекст.";
+            "Поиск и замена текста в файле. Совпадение не обязано быть"
+            " буквальным: отступы, пробелы в концах строк и лишние"
+            " переводы строк прощаются. Если фрагмент встречается"
+            " несколько раз, добавь контекст или поставь replace_all.";
         def.flags = TF_WRITES_FILES;
         def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу")
-         .str("query", "что искать (должно быть уникальным в файле)")
+         .str("query", "что искать")
          .str("content", "на что заменить")
+         .boolean("replace_all", "заменить ВСЕ вхождения, а не одно")
          .required("path").required("query").required("content");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             const std::string rel = arg_str(a, "path");
-            const std::string needle = arg_str(a, "query");
-            const std::string replacement = arg_str(a, "content");
-            std::string abs = project_resolve(rel);
+            const std::string abs = project_resolve(rel);
+            file_lock::Guard file_guard(abs);
             std::ifstream fin(abs, std::ios::binary);
             if (!fin) return out("[ошибка] не удалось открыть файл: " + abs);
-            std::string content((std::istreambuf_iterator<char>(fin)),
-                                std::istreambuf_iterator<char>());
-            fin.close();
+            const std::string raw((std::istreambuf_iterator<char>(fin)),
+                                  std::istreambuf_iterator<char>());
 
-            if (needle.empty()) return out("[ошибка] пустой поисковый запрос (query)");
-            size_t pos = content.find(needle);
-            if (pos == std::string::npos)
-                return out("[search_replace] текст не найден в " + abs);
+            EditRequest req;
+            req.old_text = arg_str(a, "query");
+            req.new_text = arg_str(a, "content");
+            req.replace_all = a.get_bool("replace_all", false);
+            if (req.old_text.empty())
+                return out("[ошибка] пустой поисковый запрос (query)");
 
-            size_t count = 0;
-            size_t search_from = 0;
-            while ((pos = content.find(needle, search_from)) != std::string::npos) {
-                count++;
-                search_from = pos + 1;
-            }
-            if (count > 1)
-                return out("[search_replace] НАЙДЕНО " + std::to_string(count)
-                           + " ВХОЖДЕНИЙ. Уточни запрос (добавь контекст вокруг замены).");
+            const EditResult r = apply_edit(split_text(raw), req);
+            if (!r.ok) return out("замена в " + rel, "[search_replace] " + r.error);
+            const std::string result = join_text(r.file);
 
-            pos = content.find(needle);
-            content.replace(pos, needle.size(), replacement);
-
-            if (ctx.propose_write(rel, content)) {
-                return out("предложено " + rel, "[предложено] " + abs + " (search_replace, "
-                           + std::to_string(needle.size()) + " -> "
-                           + std::to_string(replacement.size()) + " байт)");
+            if (ctx.propose_write(rel, result)) {
+                return out("предложено " + rel,
+                           "[предложено] " + abs + " (search_replace, строка "
+                               + std::to_string(r.line) + ", стадия "
+                               + edit_strategy_name(r.used) + ")");
             }
 
             std::string perm = guard_permission(ctx, abs);
@@ -504,29 +1198,47 @@ void register_base_tools() {
             backup_file(abs);  // для undo_edit (3.5)
             std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
             if (!fout) return out("[ошибка] не удалось записать: " + abs);
-            fout << content;
+            fout << result;
             fout.close();
-            return out("замена в " + rel, "[search_replace] " + abs + ": заменено "
-                       + std::to_string(needle.size()) + " -> "
-                       + std::to_string(replacement.size()) + " байт");
+            std::stringstream rep;
+            rep << "[search_replace] " << abs << ": строка " << r.line
+                << ", заменено " << r.occurrences << " вхождени(й)"
+                << " (" << req.old_text.size() << " -> " << req.new_text.size()
+                << " байт, стадия " << edit_strategy_name(r.used) << ")";
+            if (r.used == EditStrategy::BlockAnchor) {
+                /* Единственная нечёткая стадия: пользователь обязан знать,
+                 * что правка попала по сходству, а не по точному тексту. */
+                rep << " [ВНИМАНИЕ: совпадение нечёткое, проверь результат!]";
+            }
+            return out("замена в " + rel, rep.str());
         };
         reg.register_def(std::move(def));
     }
 
-    /* exec_command: запуск shell-команды с таймаутом. */
+    /* 4.8 bash: запуск shell-команды (заменил exec_command).
+     *
+     * Отличия от прежнего exec_command: таймаут 120 с по умолчанию вместо
+     * 60, кольцевой буфер вместо первых 12 КБ, полный вывод уходит в файл
+     * (spill) и его путь возвращается модели, а UI раз в секунду видит
+     * признак жизни команды. Причина одна: у длинных команд хвост вывода —
+     * это и есть ошибка, а раньше он как раз терялся. */
     {
         ToolDef def;
-        def.name = "exec_command";
+        def.name = "bash";
         def.description =
             "Запуск shell-команды. КРАЙНЯЯ мера: сначала пробуй"
-            " специализированные инструменты. Таймаут 60 с.";
+            " специализированные инструменты. Таймаут по умолчанию 120 с;"
+            " полный вывод длинной команды сохраняется в файл, путь"
+            " возвращается в ответе.";
         /* DESTRUCTIVE: команда может сделать что угодно, и откатить это
          * инструмент не умеет. Именно поэтому он обязан быть виден
-         * политике режимов и (в И2) подтверждению пользователя. */
+         * политике режимов и подтверждению пользователя. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
         def.permission_key = "bash";
         SchemaBuilder b;
         b.str("cli", "команда для выполнения в shell")
+         .integer_range("timeout", "таймаут в секундах (по умолчанию 120)",
+                        1, 3600)
          .required("cli");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
@@ -548,53 +1260,144 @@ void register_base_tools() {
              * запускает произвольный код, был единственным без гейта. */
             std::string outside = first_external_path(cmd);
             if (!outside.empty()) {
-                std::string refusal = guard_permission(ctx, outside);
-                if (!refusal.empty()) return out(std::move(refusal));
+                std::string denial = guard_permission(ctx, outside);
+                if (!denial.empty()) return out(std::move(denial));
             }
-            std::string result = shell::run_capture(cmd, 60);
-            return out("shell", result.empty() ? "[exec: нет вывода]"
-                                               : shell::cap(result, kMaxToolOutput));
+
+            shell::RunOptions opt;
+            const int t = arg_int(a, "timeout");
+            opt.timeout_sec = (t > 0) ? static_cast<unsigned>(t)
+                                       : limits::kShellTimeoutSec;
+            const std::string data_dir = ctx.callbacks().path_data_dir
+                                             ? ctx.callbacks().path_data_dir()
+                                             : "";
+            opt.spill_path = shell::next_spill_path(data_dir, "bash");
+            /* Живой признак жизни: раз в секунду в ленту приложения.
+             * Без него «docker build» две минуты выглядит как зависание,
+             * и пользователь жмёт «стоп» на живом процессе. */
+            if (ctx.callbacks().chat_event) {
+                opt.on_progress = [&ctx](size_t bytes, const std::string& tail) {
+                    ctx.callbacks().chat_event(
+                        "[bash] выполняется, " + std::to_string(bytes) +
+                        " байт вывода" + (tail.empty() ? "" : ": " + tail));
+                };
+            }
+
+            shell::RunStats stats;
+            std::string result = shell::run_capture_stream(cmd, opt, stats);
+            if (!result.empty() && result.rfind("[запрещено политикой", 0) == 0)
+                return out("shell", result);
+
+            std::stringstream meta;
+            meta << "<shell_metadata> exit=" << stats.exit_code
+                 << " bytes=" << stats.total_bytes
+                 << " ms=" << static_cast<long long>(stats.elapsed_ms);
+            if (stats.timed_out) {
+                meta << " timed_out=true\n";
+            }
+            if (stats.dropped_bytes > 0) {
+                meta << " shown_from=" << stats.dropped_bytes << " (хвост)\n";
+            }
+            if (!stats.spill_path.empty()) {
+                meta << " output_path=" << stats.spill_path << "\n";
+            } else if (stats.dropped_bytes > 0) {
+                meta << " output_path=недоступен (нет каталога данных)\n";
+            }
+            if (stats.timed_out) {
+                /* Пояснение в терминах <shell_metadata>, как в opencode:
+                 * модель должна понять, что произошло, из ответа, а не
+                 * догадываться по обрыву текста. */
+                meta << "Команда прервана по таймауту " << opt.timeout_sec
+                     << " с. Показан хвост вывода";
+                if (stats.dropped_bytes > 0)
+                    meta << " (начало утрачено: " << stats.dropped_bytes << " байт)";
+                meta << ".";
+                if (!stats.spill_path.empty())
+                    meta << " Полный вывод: " << stats.spill_path;
+                meta << " Если команда законно долгая — повтори с"
+                        " большим timeout.";
+            }
+            meta << "\n</shell_metadata>";
+
+            ToolOutput o;
+            o.title = "shell";
+            /* Кольцо в run_capture_stream УЖЕ ограничило вывод, и второй
+             * раз резать его нельзя: shell::cap берёт начало, то есть
+             * отрезал бы хвост — ровно то, ради чего кольцо затевалось. */
+            o.output = (result.empty() ? "[bash: нет вывода]" : result) +
+                       (result.empty() ? "" : "\n") + meta.str();
+            o.truncated = stats.dropped_bytes > 0;
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("exit_code", static_cast<long long>(stats.exit_code));
+            o.metadata.set("bytes", static_cast<long long>(stats.total_bytes));
+            o.metadata.set("elapsed_ms", static_cast<long long>(stats.elapsed_ms));
+            o.metadata.set("timed_out", stats.timed_out);
+            o.metadata.set("truncated", stats.dropped_bytes > 0);
+            o.metadata.set("output_path", stats.spill_path);
+            return o;
         };
         reg.register_def(std::move(def));
     }
 
-    /* 3.1 list_dir: лёгкий список файлов/каталогов (в отличие от repo_map). */
+    /* 4.9 list: лёгкий список файлов и каталогов с глубиной.
+     *
+     * Заменяет list_dir (тот жил один уровень). Отдельный инструмент
+     * list_dir рядом с list был бы двумя инструментами с одним смыслом —
+     * ровно та двойственность, которую И1 убрала из реестра. */
     {
         ToolDef def;
-        def.name = "list_dir";
-        def.description = "Список файлов и каталогов (одного уровня)";
+        def.name = "list";
+        def.description =
+            "Список файлов и каталогов с заданной глубиной (каталоги"
+            " помечены /). Для поиска по шаблону имени используй glob.";
         def.flags = TF_READ_ONLY;
         def.permission_key = "read";
         SchemaBuilder b;
         b.str("path", "каталог; пусто = корень проекта")
-         .integer_range("k", "максимум записей (по умолчанию 100)", 1, 100000);
+         .integer_range("depth", "глубина обхода: 1 = только этот каталог,"
+                        " 2 = один уровень вглубь (по умолчанию 1)", 1, 10);
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
-            std::string dir = arg_str(a, "path");
-            if (dir.empty()) dir = ctx.project_dir();
-            if (dir.empty()) return out("[ошибка] пустой path — укажи каталог");
-            if (!fs::exists(dir) || !fs::is_directory(dir))
-                return out("[ошибка] каталог не существует: " + dir);
-            std::string perm = guard_permission(ctx, dir);
+            const std::string rel = arg_str(a, "path");
+            const std::string root = rel.empty() ? ctx.project_dir()
+                                                 : project_resolve(rel);
+            if (root.empty())
+                return out("[ошибка] не задан path и не задан корень проекта");
+            std::string perm = guard_permission(ctx, root);
             if (!perm.empty()) return out(std::move(perm));
-            size_t limit = (arg_int(a, "k") > 0) ? static_cast<size_t>(arg_int(a, "k")) : 100;
-            std::stringstream out_s;
-            out_s << "[list_dir] " << dir << ":\n";
-            std::error_code ec;
-            size_t count = 0;
-            for (auto it = fs::directory_iterator(dir, ec);
-                 it != fs::directory_iterator(); it.increment(ec)) {
-                if (ec) break;
-                const auto& p = it->path();
-                std::string name = p.filename().string();
-                if (it->is_directory()) name += "/";
-                out_s << name << "\n";
-                if (++count >= limit) {
-                    out_s << "...[лимит " << limit << " записей]";
-                    break;
-                }
-            }
-            return out("list " + dir, out_s.str());
+
+            int depth_arg = arg_int(a, "depth");
+            const size_t depth = (depth_arg > 0) ? static_cast<size_t>(depth_arg) : 1;
+
+            fileglob::Options opt;
+            opt.include_dirs = true;
+            opt.max_depth = depth;
+            opt.newest_first = false;   /* список читают сверху вниз */
+            opt.limit = limits::kListLimit;
+            const fileglob::Result r = fileglob::find(root, "**", opt);
+            if (!r.error.empty()) return out("list", "[ошибка] " + r.error);
+
+            std::stringstream s;
+            s << "[list] " << (rel.empty() ? std::string("") : rel + " ");
+            s << root << " (глубина " << depth << "): " << r.entries.size();
+            if (r.matched > r.entries.size())
+                s << " из " << r.matched << " записей";
+            s << "\n";
+            for (const auto& e : r.entries)
+                s << "  " << e.path << (e.is_dir ? "/" : "") << "\n";
+            if (r.walk_capped)
+                s << "[обход остановлен: осмотрено " << r.visited
+                  << " записей]\n";
+
+            ToolOutput o;
+            o.title = "list " + (rel.empty() ? std::string(".") : rel);
+            o.output = shell::cap(s.str(), limits::kMaxToolOutput);
+            o.truncated = r.truncated || r.walk_capped;
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("count", static_cast<long long>(r.entries.size()));
+            o.metadata.set("depth", static_cast<long long>(depth));
+            o.metadata.set("truncated", r.truncated);
+            return o;
         };
         reg.register_def(std::move(def));
     }
@@ -643,13 +1446,18 @@ void register_base_tools() {
             const std::string content_in = arg_str(a, "content");
             int k = arg_int(a, "k");
             std::string abs = project_resolve(rel);
+            file_lock::Guard file_guard(abs);
             if (k <= 0) return out("[ошибка] укажи k: номер строки начала (1-based)");
             std::ifstream fin(abs, std::ios::binary);
             if (!fin) return out("[ошибка] не удалось открыть файл: " + abs);
-            std::vector<std::string> lines;
-            std::string ln;
-            while (std::getline(fin, ln)) lines.push_back(ln);
+            /* И4.5: чтение через split_text, а не getline. getline оставлял
+             * BOM в первой строке («\xEF\xBB\xBFa»), и при обратной
+             * записи файл получал два BOM подряд. */
+            const std::string raw((std::istreambuf_iterator<char>(fin)),
+                                  std::istreambuf_iterator<char>());
             fin.close();
+            const TextFile src = split_text(raw);
+            const std::vector<std::string>& lines = src.lines;
             if (lines.empty()) return out("[ошибка] пустой файл: " + abs);
 
             size_t start = static_cast<size_t>(k);
@@ -676,8 +1484,14 @@ void register_base_tools() {
             for (auto& r : replacement) result.push_back(std::move(r));
             for (size_t i = end; i < lines.size(); ++i) result.push_back(std::move(lines[i]));
 
-            std::string new_content;
-            for (const auto& l : result) { new_content += l; new_content += '\n'; }
+            /* И4.5: формат файла (BOM/CRLF) сохраняется — иначе правка
+             * двух строк превращается в «переписан весь файл». */
+            TextFile tf;
+            tf.lines = result;
+            tf.bom = src.bom;
+            tf.crlf = src.crlf;
+            tf.trailing_newline = src.trailing_newline;
+            const std::string new_content = join_text(tf);
 
             if (ctx.propose_write(rel, new_content)) {
                 return out("предложено " + rel, "[предложено] " + abs + " (edit_file, строки "
@@ -710,6 +1524,7 @@ void register_base_tools() {
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             const std::string rel = arg_str(a, "path");
             std::string abs = project_resolve(rel);
+            file_lock::Guard file_guard(abs);
             std::string bak = abs + ".orig";
             if (!fs::exists(bak)) return out("[ошибка] нет backup (.orig) для " + abs);
             /* Откат — это тоже запись, поэтому в режиме плана он

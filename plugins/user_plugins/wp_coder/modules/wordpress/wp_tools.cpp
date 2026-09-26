@@ -71,7 +71,7 @@ std::string wp_db(const std::string& query) {
         upper.find("TRUNCATE ") != std::string::npos ||
         upper.find("GRANT ") != std::string::npos ||
         upper.find("REVOKE ") != std::string::npos) {
-        return "[запрещено] DDL/ACL операция в wp_db. Используй exec_command "
+        return "[запрещено] DDL/ACL операция в wp_db. Используй bash "
                "с явным wp db query для таких операций.";
     }
 

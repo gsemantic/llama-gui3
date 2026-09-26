@@ -308,32 +308,57 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
         }
     }
 
-    /* Отпечаток для детекта зацикливания — сериализованные аргументы.
-     * Раньше он склеивался из восьми полей ToolArgs, и любой новый
-     * параметр в него не попадал: два разных вызова с одинаковыми
-     * восемью слотами выглядели для детектора одинаково. */
+    /* Детектор зацикливания (И4.11).
+     *
+     * Смотрим ТОЛЬКО на последние три вызова, а не на окно из восьми:
+     * в окне из восьми одинаковые отпечатки «плавающего» вызова (например
+     * git_status с меняющимся состоянием рабочей копии) накапливались и
+     * через несколько шагов выглядели как зацикливание, хотя вызовы шли
+     * с разными результатами.
+     *
+     * Раньше детектор сам отменял вызов. Теперь он СПРАШИВАЕТ: три
+     * одинаковых вызова — это ещё не всегда зацикливание (агент вправе
+     * повторить команду после её провала), и решение об этом не наше, а
+     * пользователя. Отказ после ответа — как у любого разрешения. */
     std::string fp = tool_name + "\n" + args.dump();
-
     bool loop_detected = false;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        if (state_.recent_calls.size() >= 2 &&
-            state_.recent_calls[state_.recent_calls.size() - 1] == fp &&
-            state_.recent_calls[state_.recent_calls.size() - 2] == fp) {
-            loop_detected = true;
-            state_.recent_calls.clear();
-        } else {
-            state_.recent_calls.push_back(fp);
-            if (state_.recent_calls.size() > 8) {
-                state_.recent_calls.pop_front();
-            }
-        }
-    }  /* mtx отпущен — push_event_ безопасен */
+        const size_t n = state_.recent_calls.size();
+        loop_detected = n >= 2 && state_.recent_calls[n - 1] == fp &&
+                        state_.recent_calls[n - 2] == fp;
+        state_.recent_calls.push_back(fp);
+        while (state_.recent_calls.size() > 2) state_.recent_calls.pop_front();
+    }  /* mtx отпущен — ask() берёт свой mtx_ */
     if (loop_detected) {
-        this->push_event_(AgentEvent::Error,
-            "Инструмент " + tool_name + " вызван 3 раза подряд с одинаковыми "
-            "аргументами — прерываю, чтобы не зациклиться.");
-        return "[ошибка] зацикливание вызова " + tool_name;
+        bool allowed = true;
+        if (perms.evaluate("doom_loop", tool_name) == PermissionAction::Ask) {
+            /* always_pattern пустой: повторять один и тот же вызов можно
+             * сколько угодно, записывать это в постоянные правила нечего. */
+            allowed = perms.ask("doom_loop", {tool_name}, "",
+                                "Зацикливание: " + tool_name);
+        }
+        if (!allowed) {
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                state_.recent_calls.clear();
+            }
+            this->push_event_(AgentEvent::Error,
+                "Инструмент " + tool_name + " вызван 3 раза подряд с"
+                " одинаковыми аргументами — пользователь прервал зацикливание.");
+            return "[отказ] зацикливание вызова " + tool_name +
+                   ": пользователь не разрешил повтор. НЕ ПОВТОРЯЙ тот же"
+                   " вызов — смени подход или спроси пользователя.";
+        }
+        /* Разрешено: сбрасываем счётчик, иначе следующий такой же вызов
+         * снова спросил бы (а после «всегда» это просто шум). */
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.recent_calls.clear();
+        }
+        this->push_event_(AgentEvent::Status,
+            "Зацикливание: " + tool_name + " вызван 3 раза подряд —"
+            " продолжаю по решению пользователя.");
     }
 
     ToolOutput out = ToolsRegistry::instance().run_output(tool_name, args);

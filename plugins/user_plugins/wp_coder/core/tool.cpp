@@ -139,6 +139,21 @@ SchemaBuilder& SchemaBuilder::boolean(const char* name, const char* description)
     return *this;
 }
 
+SchemaBuilder& SchemaBuilder::object_array(const char* name,
+                                           const char* description,
+                                           const char* item_description) {
+    json::JsonValue item = json::JsonValue::object();
+    item.set("type", "object");
+    if (item_description && item_description[0])
+        item.set("description", item_description);
+    json::JsonValue p = json::JsonValue::object();
+    p.set("type", "array");
+    if (description && description[0]) p.set("description", description);
+    p.set("items", std::move(item));
+    props_.set(name, p);
+    return *this;
+}
+
 SchemaBuilder& SchemaBuilder::string_enum(const char* name, const char* description,
                                           const std::vector<std::string>& values) {
     json::JsonValue p = prop("string", description);

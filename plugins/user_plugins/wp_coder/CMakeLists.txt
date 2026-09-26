@@ -30,6 +30,10 @@ set(CORE_SOURCES
     core/permission.cpp
     core/permission_engine.cpp
     core/tool_protocol.cpp
+    core/glob.cpp
+    core/text_edit.cpp
+    core/file_lock.cpp
+    core/apply_patch.cpp
     core/agent_components.cpp
 )
 
@@ -156,6 +160,15 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_module_api.cpp
         tests/test_security.cpp
         tests/test_command_policy.cpp
+        tests/test_glob.cpp
+        tests/test_apply_patch.cpp
+        tests/test_edit_cascade.cpp
+        tests/test_file_lock.cpp
+        tests/test_todo.cpp
+        tests/test_read_tool.cpp
+        tests/test_bash_tool.cpp
+        tests/test_output_truncation.cpp
+        tests/test_iteration_iv_invariants.cpp
         tests/test_base_tools.cpp
         tests/test_wp_tools.cpp
         tests/test_python_tools.cpp

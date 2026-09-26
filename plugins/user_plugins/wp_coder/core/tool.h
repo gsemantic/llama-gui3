@@ -12,7 +12,7 @@
  *   - у реестра не было НИКАКИХ метаданных об инструменте, кроме
  *     описания строкой, поэтому режимы (research/plan) приходилось
  *     проверять внутри самих инструментов. Проверки стояли в 4 из 50
- *     инструментов, а exec_command, git_commit, deploy, cron_add,
+ *     инструментов, а bash, git_commit, deploy, cron_add,
  *     systemd_restart, docker_run, wp_create_site, pip_install шли мимо.
  *
  * Теперь инструмент описывается декларативно (ToolDef): имя, описание,
@@ -68,7 +68,7 @@ enum ToolFlag : unsigned {
      * перезапуск сервиса, создание БД, установка пакета. По этому
      * флагу И2 будет требовать подтверждения пользователя. */
     TF_DESTRUCTIVE  = 1u << 4,
-    /* Долгая операция: exec_command, docker build, pip install.
+    /* Долгая операция: bash, docker build, pip install.
      * Учитывается таймаутом (И4.8) и политикой разрешений (И2). */
     TF_SLOW         = 1u << 5,
 
@@ -189,6 +189,11 @@ public:
     SchemaBuilder& boolean(const char* name, const char* description);
     SchemaBuilder& string_enum(const char* name, const char* description,
                                const std::vector<std::string>& values);
+    /* Массив объектов (И4.6, todowrite). Схема описывает форму массива, но
+     * не разбирает содержимое элементов: проверку значений делает сам
+     * инструмент, где можно сказать модели, какое поле и почему не так. */
+    SchemaBuilder& object_array(const char* name, const char* description,
+                                const char* item_description);
     /* Пометить параметр обязательным. */
     SchemaBuilder& required(const char* name);
     /* Запретить неизвестные ключи. По умолчанию они разрешены и
@@ -226,7 +231,7 @@ std::string invalid_arguments_message(const std::string& tool_name,
  * Единственное место в плагине, где решается, можно ли вызвать
  * инструмент в текущем режиме агента. Правило раньше было продублировано
  * внутри 4 инструментов из 50 (write_file, search_replace, edit_file,
- * undo_edit), из-за чего 8 опасных инструментов шли мимо: exec_command,
+ * undo_edit), из-за чего 8 опасных инструментов шли мимо: bash,
  * git_commit, deploy, cron_add, systemd_restart, docker_run,
  * wp_create_site, pip_install (дефект D4), а режим Research вообще
  * был только текстом в промпте (D3).

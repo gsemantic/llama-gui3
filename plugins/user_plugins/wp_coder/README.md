@@ -14,13 +14,17 @@ wp_coder/
 │   ├── engine.{h,cpp}            # ReAct-движок: multi-turn сессия, метрики, LLM-callbacks
 │   ├── agent_components.{h,cpp}  # SessionStore, PermissionGate, ToolRunner, Planner, AgentLoop
 │   ├── tools_registry.{h,cpp}    # Динамический реестр инструментов
+│   ├── glob.{h,cpp}              # Поиск файлов по шаблону пути
+│   ├── text_edit.{h,cpp}         # Формат файла (BOM/CRLF) + каскад замен
+│   ├── apply_patch.{h,cpp}       # Разбор и применение патча
+│   ├── file_lock.{h,cpp}         # Сериализация правки одного файла
 │   ├── skills_manager.{h,cpp}    # Навыки: inline из модулей + .md из skills/
 │   ├── tool_protocol.{h,cpp}     # Парсер wp_action / JSON tool_calls
-│   ├── base_tools.{h,cpp}        # read/write/search_replace/repo_map/grep/exec/rag
+│   ├── base_tools.{h,cpp}        # read/write/search_replace/glob/list/bash/apply_patch/todo/rag
 │   ├── git_tools.{h,cpp}         # git_status/diff/log/commit
 │   ├── security.{h,cpp}          # path traversal, blocked commands, shell_escape
 │   ├── project.{h,cpp}           # разрешение путей относительно корня проекта
-│   ├── shell.h                   # безопасные shell-обёртки (timeout, quote, cap)
+│   ├── shell.h                   # безопасные shell-обёртки (timeout, quote, кольцо, spill)
 │   ├── module_api.{h,cpp}        # интерфейс модуля + ModuleRegistry
 │   └── prompts.h                 # базовый системный промпт
 ├── modules/              # доменные модули
@@ -43,13 +47,13 @@ wp_coder/
 
 | Модуль | Инструменты | Навыки (inline) |
 |--------|-------------|-----------------|
-| **core** (базовые) | `read_file`, `write_file`, `search_replace`, `edit_file`, `undo_edit`, `grep_search`, `repo_map`, `list_dir`, `web_fetch`, `exec_command`, `list_skills`, `skill_detail`, `rag_index`, `rag_query` | — |
+| **core** (базовые) | `read_file`, `write_file`, `search_replace`, `edit_file`, `undo_edit`, `grep_search`, `glob`, `repo_map`, `list`, `web_fetch`, `bash`, `apply_patch`, `todowrite`, `todoread`, `list_skills`, `skill_detail`, `rag_index`, `rag_query` | — |
 | **core** (git) | `git_status`, `git_diff`, `git_log`, `git_add`, `git_branch`, `git_checkout`, `git_commit` | — |
 | **WordPress** | `wp_cli`, `wp_db`, `wp_media`, `wp_option`, `wp_rest`, `wp_create_site`, `wp_check_deps`, `deploy`, `verify`, `php_lint`, `headless_render`, `validate` | `wp_theme`, `wp_hook`, `wp_database`, `wp_media`, `wp_plugin_boilerplate`, `wp_git` |
 | **Python** | `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint` | `python_django`, `python_flask`, `python_fastapi`, `python_project` |
 | **DevOps** | `docker_build`, `docker_run`, `docker_ps`, `docker_logs`, `systemd_status`, `systemd_restart`, `nginx_test`, `nginx_reload`, `cron_list`, `cron_add`, `ssh_exec` | `devops_docker`, `devops_systemd`, `devops_nginx` |
 
-Итого: **50 инструментов**, **14 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
+Итого: **54 инструмента**, **14 навыков** (13 inline из модулей + 1 внешний `skills/wp_setup.md`).
 
 ## Как это работает
 

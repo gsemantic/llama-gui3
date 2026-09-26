@@ -4,7 +4,11 @@
 #include "engine.h"
 #include "json_utils.h"
 #include "tool_protocol.h"
+#include "limits.h"
+#include "shell.h"
 
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 
 namespace coder {
@@ -54,6 +58,85 @@ bool is_required(const json::JsonValue& parameters, const std::string& name) {
     return false;
 }
 
+/* --- И4.10: универсальное усечение вывода ---
+ *
+ * Правило одно и применяется к выводу ЛЮБОГО инструмента: не больше
+ * limits::kMaxOutputLines строк и limits::kMaxOutputBytes байт, остальное
+ * — в файл, путь возвращается в тексте ответа.
+ *
+ * Почему здесь, а не в ToolRunner::run: это единственная точка, через
+ * которую проходит вывод каждого инструмента — и агента, и UI, и тестов.
+ * Проверка в ToolRunner обходилась бы вторым вызывающим (панель
+ * предпросмотра в UI вызывает реестр напрямую) и рано или поздно
+ * обошлась бы, а забытый лимит стоит целого запроса к модели.
+ *
+ * Обрезается НАЧАЛО, а не конец: у результата инструмента (файл, grep,
+ * список) полезнее первое, а у команд хвост и так остаётся в кольце
+ * (core/shell.h, И4.8). Обрезанный вывод всегда объявляется словами:
+ * иначе модель решит, что в файле было ровно столько, сколько вернули.
+ */
+void truncate_output(const std::string& tool_name, ToolOutput& out) {
+    /* Инструмент, который умеет усекать сам, уже усек и объявил об этом
+     * флагом. Повторная обрезка здесь отрезала бы то, что инструмент
+     * показал НАМЕРЕННО: у bash это хвост вывода (И4.8), и обрезка по
+     * началу уничтожила бы ровно то, ради чего кольцо и делалось. */
+    if (out.truncated) return;
+
+    if (out.output.size() <= limits::kMaxOutputBytes) {
+        size_t lines = 0;
+        for (char c : out.output) {
+            if (c == '\n' && ++lines > limits::kMaxOutputLines) {
+                out.truncated = true;
+                break;
+            }
+        }
+        if (!out.truncated) return;
+    }
+
+    /* Полный вывод — в файл. Пишем ДО обрезки, иначе «полный» окажется
+     * обрезанным. */
+    std::string spill;
+    const auto& cb = Engine::instance().callbacks();
+    if (cb.path_data_dir) spill = shell::next_spill_path(cb.path_data_dir(), tool_name);
+    std::string kept = out.output;
+    if (!spill.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(spill).parent_path(), ec);
+        std::ofstream f(spill, std::ios::binary | std::ios::trunc);
+        if (f.is_open()) {
+            f << out.output;
+            f.close();
+        } else {
+            spill.clear();   /* не смогли — не врём про путь */
+        }
+    }
+
+    size_t bytes = 0, lines = 0, cut = std::string::npos;
+    for (size_t i = 0; i < kept.size(); ++i) {
+        if (kept[i] == '\n') {
+            if (++lines >= limits::kMaxOutputLines) { cut = i + 1; break; }
+        }
+        if (++bytes >= limits::kMaxOutputBytes) { cut = i + 1; break; }
+    }
+    if (cut != std::string::npos) kept = kept.substr(0, cut);
+
+    std::stringstream note;
+    note << "\n[вывод обрезан: показано " << lines << " строк / " << bytes
+         << " байт из " << out.output.size() << " байт]";
+    if (!spill.empty())
+        note << "\n[полный вывод: " << spill
+             << " — прочитай его через read_file, если нужен целиком]";
+    else
+        note << "\n[полный вывод не сохранён: нет каталога данных]";
+    out.output = kept + note.str();
+    out.truncated = true;
+    if (!out.metadata.is_object()) out.metadata = json::JsonValue::object();
+    out.metadata.set("truncated", true);
+    if (!spill.empty()) out.metadata.set("output_path", spill);
+    out.metadata.set("total_bytes", static_cast<long long>(out.output.size()));
+}
+
 } // anonymous namespace
 
 ToolsRegistry& ToolsRegistry::instance() {
@@ -95,6 +178,7 @@ ToolOutput ToolsRegistry::run_output(const std::string& tool_name,
     out = def.handler(args, ctx);
     out.output = text::sanitize_utf8(out.output);
     if (out.title.empty()) out.title = def.description;
+    truncate_output(tool_name, out);
     return out;
 }
 

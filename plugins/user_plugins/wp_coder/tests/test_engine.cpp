@@ -509,7 +509,7 @@ TEST(engine_fsm_state_transitions) {
 }
 
 /* ======================================================================
- * Фаза 3: list_dir / edit_file / undo_edit / web_fetch / git_*
+ * Фаза 3: list / edit_file / undo_edit / web_fetch / git_*
  * ====================================================================== */
 
 static void init_tools_for_phase3(const fs::path& project) {
@@ -552,7 +552,7 @@ TEST(read_file_preserves_utf8_at_limit) {
     fs::remove_all(tmp);
 }
 
-TEST(list_dir_lists_files_and_dirs) {
+TEST(list_lists_files_and_dirs) {
     fs::path tmp = make_tmp_project();
     {
         std::ofstream f(tmp / "alpha.txt"); f << "x";
@@ -563,7 +563,7 @@ TEST(list_dir_lists_files_and_dirs) {
 
     ToolArgs a;
     a.path = tmp.string();
-    std::string r = ToolsRegistry::instance().run("list_dir", a);
+    std::string r = ToolsRegistry::instance().run("list", a);
     ASSERT_TRUE(r.find("alpha.txt") != std::string::npos);
     ASSERT_TRUE(r.find("beta.py") != std::string::npos);
     ASSERT_TRUE(r.find("subdir/") != std::string::npos);
@@ -708,8 +708,12 @@ TEST(git_tools_work_in_real_repo) {
 
     ToolArgs a;
     std::string r = ToolsRegistry::instance().run("git_status", a);
-    /* Не должно быть ошибки «cd» — только нормальный git-вывод oт состояния. */
-    ASSERT_TRUE(r.find("cd") == std::string::npos);
+    /* Не должно быть ошибки «cd» — только нормальный git-вывод от состояния.
+     * Проверяем САМУ ошибку регрессии, а не подстроку «cd»: git печатает
+     * хеш коммита, и примерно в 2 % прогонов он начинается с «cd»
+     * (например 3fcd812) — такой тест падал бы по случайной причине и
+     * учил бы игнорировать красное. */
+    ASSERT_TRUE(r.find("failed to run 'cd'") == std::string::npos);
     ASSERT_TRUE(r.find("git status") != std::string::npos);
 
     /* git_add + git_commit работают в реальном репо. */
@@ -724,7 +728,8 @@ TEST(git_tools_work_in_real_repo) {
     ToolArgs cm;
     cm.query = "test commit";
     std::string rc2 = ToolsRegistry::instance().run("git_commit", cm);
-    ASSERT_TRUE(rc2.find("cd") == std::string::npos);
+    ASSERT_TRUE(rc2.find("failed to run 'cd'") == std::string::npos);
+    ASSERT_TRUE(rc2.find("test commit") != std::string::npos);
 
     ToolArgs log;
     log.k = 3;

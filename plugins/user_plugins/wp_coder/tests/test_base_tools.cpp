@@ -1,7 +1,7 @@
 /*
- * test_base_tools.cpp — И0: регрессии для exec_command.
+ * test_base_tools.cpp — И0: регрессии для bash.
  *
- * Исторически exec_command был ЗАРЕГИСТРИРОВАН, но не описан ни в одном
+ * Исторически bash был ЗАРЕГИСТРИРОВАН, но не описан ни в одном
  * промпте — модель о нём не знала. И0.3 добавил его в core/prompts.h
  * вместе с правилом «крайняя мера» и гейтом на пути за пределами проекта.
  *
@@ -38,11 +38,11 @@ static void init_engine_and_base() {
 static std::string run_exec(const std::string& cli) {
     ToolArgs a;
     a.cli = cli;
-    return ToolsRegistry::instance().run("exec_command", a);
+    return ToolsRegistry::instance().run("bash", a);
 }
 
 static std::string run_exec_json(const json::JsonValue& args) {
-    return ToolsRegistry::instance().run("exec_command", args);
+    return ToolsRegistry::instance().run("bash", args);
 }
 
 /* --- И0.3: инструмент описан для модели (без этого модель его не зовёт) ---
@@ -53,29 +53,29 @@ static std::string run_exec_json(const json::JsonValue& args) {
  * инструмент присутствует в генерируемом каталоге вместе с параметром
  * CLI — иначе модель не знает, что ему передавать. */
 
-TEST(exec_command_is_documented_in_prompt) {
+TEST(bash_is_documented_in_prompt) {
     std::string p = kBaseSystemPrompt;
     /* Правило «крайняя мера» — текст промпта, он остался на месте. */
-    ASSERT_TRUE(p.find("exec_command — КРАЙНЯЯ мера") != std::string::npos);
+    ASSERT_TRUE(p.find("bash — КРАЙНЯЯ мера") != std::string::npos);
     /* Ручного списка инструментов в промпте больше нет — он генерируется. */
     ASSERT_TRUE(p.find("## БАЗОВЫЕ ИНСТРУМЕНТЫ") == std::string::npos);
 
     init_engine_and_base();
     std::string cat = ToolsRegistry::instance().build_tool_catalogue();
-    size_t at = cat.find("\n- exec_command");
+    size_t at = cat.find("\n- bash");
     ASSERT_TRUE(at != std::string::npos);
     size_t end = cat.find("\n- ", at + 1);
     std::string block = cat.substr(at + 1, (end == std::string::npos
                                            ? cat.size() : end) - at - 1);
     /* И имя инструмента, и имя параметра, и его назначение. */
-    ASSERT_TRUE(block.find("exec_command") != std::string::npos);
+    ASSERT_TRUE(block.find("bash") != std::string::npos);
     ASSERT_TRUE(block.find("cli") != std::string::npos);
     ASSERT_TRUE(block.find("обязательно") != std::string::npos);
 }
 
 /* --- И0.3: гейт на пути вне проекта --- */
 
-TEST(exec_command_empty_rejected) {
+TEST(bash_empty_rejected) {
     init_engine_and_base();
     /* И1.6: cli — обязательный параметр, и пустой вызов отсекается
      * валидацией схемы, до входа в обработчик. */
@@ -90,7 +90,7 @@ TEST(exec_command_empty_rejected) {
     ASSERT_TRUE(r2.find("пустая команда") != std::string::npos);
 }
 
-TEST(exec_command_blocklist_still_applies) {
+TEST(bash_blocklist_still_applies) {
     init_engine_and_base();
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
@@ -106,7 +106,7 @@ TEST(exec_command_blocklist_still_applies) {
  * ничего, кроме написанного. Здесь проверяется то, ради чего И3 и
  * затевалась: команды, которых в списке подстрок не было, и которые
  * проходили при них. */
-TEST(exec_command_allowlist_covers_what_substrings_missed) {
+TEST(bash_allowlist_covers_what_substrings_missed) {
     init_engine_and_base();
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
@@ -135,9 +135,9 @@ TEST(exec_command_allowlist_covers_what_substrings_missed) {
 }
 
 /* Команда с путём ЗА пределами проекта → требуется разрешение пользователя.
- * Раньше гейта не было вовсе: exec_command был единственным инструментом,
+ * Раньше гейта не было вовсе: bash был единственным инструментом,
  * исполняющим произвольный код, и единственным без проверки пути. */
-TEST(exec_command_outside_path_requires_permission) {
+TEST(bash_outside_path_requires_permission) {
     init_engine_and_base();
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
@@ -153,7 +153,7 @@ TEST(exec_command_outside_path_requires_permission) {
 }
 
 /* Путь внутри проекта — гейт не должен срабатывать. */
-TEST(exec_command_inside_path_not_gated) {
+TEST(bash_inside_path_not_gated) {
     init_engine_and_base();
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
@@ -167,7 +167,7 @@ TEST(exec_command_inside_path_not_gated) {
 }
 
 /* Аргумент вида --path=/outside тоже должен ловиться. */
-TEST(exec_command_flag_path_outside_gated) {
+TEST(bash_flag_path_outside_gated) {
     init_engine_and_base();
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);

@@ -25,5 +25,28 @@ inline constexpr int kMaxSteps = 12;              // шагов на задач�
 inline constexpr size_t kSessionBudget = 60000;   // бюджет символов истории сессии
 inline constexpr size_t kResultBudget = 1500;     // обрезка одного RESULT в сессии
 
+/* Универсальный предел вывода инструмента (И4.10, порт tool/truncate.ts).
+ * Применяется к каждому инструменту в ToolsRegistry::run_output; остаток
+ * пишется в файл, путь возвращается в ответе. */
+inline constexpr size_t kMaxOutputLines = 2000;    // строк в RESULT
+inline constexpr size_t kMaxOutputBytes = 50 * 1024;  // байт в RESULT
+
+/* shell (И4.8). 120 с — как в opencode; раньше было 60, и `docker build`
+ * на нормальном проекте не успевал. */
+inline constexpr unsigned kShellTimeoutSec = 120;
+
+/* Чтение файла (И4.7). */
+inline constexpr size_t kReadDefaultLines = 2000;  // строк по умолчанию
+inline constexpr size_t kBinarySniffBytes = 8000;  // сколько байт нюхаем на бинарность
+inline constexpr double kBinaryNonPrintableRatio = 0.3;  // доля непечатаемых = «двоичный»
+
+/* list (И4.9): записей в ответе. */
+inline constexpr size_t kListLimit = 300;
+
+/* glob (И4.1). Лимит результата задан планом; kGlobMaxVisited —
+ * предохранитель обхода, без него «*.zip в /» сканировал бы диск. */
+inline constexpr size_t kGlobLimit = 100;         // файлов в ответе glob
+inline constexpr size_t kGlobMaxVisited = 20000;  // записей каталога за один обход
+
 } // namespace limits
 } // namespace coder

@@ -111,15 +111,25 @@ TEST(manifest_plugin_json_has_version) {
     ASSERT_TRUE(!j.empty());
     std::string v = json_field(j, "version");
     ASSERT_TRUE(!v.empty());
-    ASSERT_TRUE(v == "0.8.0");
+    ASSERT_TRUE(v == "0.9.0");
 }
 
 TEST(manifest_repo_copy_matches_plugin_json) {
     /* plugins/wp_coder.json обязан совпадать с plugin.json: хост ищет
-     * манифест рядом с .so, а в дереве репозитория лежит копия. */
+     * манифест рядом с .so, а в дереве репозитория лежит копия.
+     *
+     * Путь указывал на корень РЕПОЗИТОРИЯ, где копии нет, — и проверка
+     * молча возвращалась, то есть не могла упасть. Ровно то, чего она
+     * должна была ловить: копия отстала до 0.6.0, пока plugin.json был
+     * 0.9.0 (болезнь D12 в третий раз, уже после D20/D21). */
     fs::path a = plugin_root() / "plugin.json";
-    fs::path b = plugin_root().parent_path().parent_path().parent_path() / "wp_coder.json";
+    fs::path b = plugin_root().parent_path().parent_path() / "wp_coder.json";
     if (!fs::exists(b)) return;  /* сборка плагина отдельно от репозитория */
+    if (read_file(a) != read_file(b)) {
+        std::cerr << "  манифесты разошлись: " << a.string() << " и "
+                  << b.string() << " (второй отстал до "
+                  << json_field(read_file(b), "version") << ")" << std::endl;
+    }
     ASSERT_TRUE(read_file(a) == read_file(b));
 }
 
@@ -146,7 +156,7 @@ TEST(manifest_code_version_matches_manifest) {
 #ifdef WP_CODER_VERSION
     const char* code_version = WP_CODER_VERSION;
 #else
-    const char* code_version = "0.8.0";
+    const char* code_version = "0.9.0";
 #endif
     std::string j = read_file(plugin_root() / "plugin.json");
     ASSERT_TRUE(json_field(j, "version") == std::string(code_version));
@@ -155,6 +165,7 @@ TEST(manifest_code_version_matches_manifest) {
 TEST(manifest_changelog_documents_current_version) {
     std::string c = read_file(plugin_root() / "CHANGELOG.md");
     ASSERT_TRUE(!c.empty());
+    ASSERT_TRUE(c.find("## [0.9.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.8.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.7.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.5.0]") != std::string::npos);

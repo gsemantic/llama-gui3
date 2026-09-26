@@ -5,7 +5,7 @@
  * Здесь закрываются дефекты D3 и D4 плана AGENT_PARITY_PLAN.md:
  *   - research был только текстом в промпте, хотя README обещает
  *     «только чтение»;
- *   - plan-режим покрывал 4 инструмента из 50, а exec_command,
+ *   - plan-режим покрывал 4 инструмента из 50, а bash,
  *     git_commit, deploy, cron_add, systemd_restart, docker_run,
  *     wp_create_site и pip_install шли мимо.
  * Правило проверяется на настоящих зарегистрированных инструментах,
@@ -103,13 +103,14 @@ TEST(schema_validates_required_parameter) {
 
 TEST(schema_validates_parameter_type) {
     register_all_tools();
-    /* k объявлен целым — строка не подходит. */
+    /* offset объявлен целым — строка не подходит. (Раньше здесь был
+     * параметр k; И4.7 заменил его на offset/limit.) */
     json::JsonValue args = json::JsonValue::object();
     args.set("tool", "read_file");
     args.set("path", "a.txt");
-    args.set("k", "не число");
+    args.set("offset", "не число");
     std::string r = ToolsRegistry::instance().run("read_file", args);
-    ASSERT_TRUE(r.find("parameter 'k' must be integer") != std::string::npos);
+    ASSERT_TRUE(r.find("parameter 'offset' must be integer") != std::string::npos);
 }
 
 TEST(schema_validates_numeric_range) {
@@ -129,10 +130,10 @@ TEST(schema_accepts_coerced_arguments_from_models) {
     /* Локальные модели присылают "5" вместо 5 — это НЕ повод отклонить
      * вызов: as_int() приводит, проверка типа проходит. */
     json::JsonValue args = json::JsonValue::object();
-    args.set("tool", "list_dir");
+    args.set("tool", "list");
     args.set("path", "/tmp");
     args.set("k", "5");
-    std::string r = ToolsRegistry::instance().run("list_dir", args);
+    std::string r = ToolsRegistry::instance().run("list", args);
     ASSERT_TRUE(r.find("invalid arguments") == std::string::npos);
 }
 
@@ -204,7 +205,7 @@ TEST(research_mode_blocks_every_writing_tool) {
      * один инструмент, меняющий состояние, не вызывается. */
     const char* forbidden[] = {
         "write_file", "search_replace", "edit_file", "undo_edit",
-        "rag_index", "exec_command", "git_commit", "git_add", "git_checkout",
+        "rag_index", "bash", "git_commit", "git_add", "git_checkout",
     };
     for (const char* tool : forbidden) {
         const ToolDef* def = ToolsRegistry::instance().find(tool);
@@ -221,7 +222,7 @@ TEST(research_mode_allows_reading_and_network_tools) {
     /* Чтение и сеть (web_fetch, headless_render, git status) — это
      * тоже чтение, их блокировать нельзя: research без них бесполезен. */
     const char* allowed[] = {
-        "read_file", "repo_map", "grep_search", "list_dir", "list_skills",
+        "read_file", "repo_map", "grep_search", "list", "list_skills",
         "web_fetch", "git_status", "git_diff", "git_log", "rag_query",
     };
     for (const char* tool : allowed) {
@@ -269,7 +270,7 @@ TEST(plan_mode_blocks_execution_and_destructive_tools) {
 
     /* Именно эти инструменты дефект D4 называл обходящими план-режим. */
     const char* forbidden[] = {
-        "exec_command", "git_commit", "deploy", "cron_add", "systemd_restart",
+        "bash", "git_commit", "deploy", "cron_add", "systemd_restart",
         "docker_run", "wp_create_site", "pip_install",
     };
     for (const char* tool : forbidden) {
@@ -288,7 +289,8 @@ TEST(plan_mode_blocks_execution_and_destructive_tools) {
  * этот тест. */
 TEST(plan_mode_allows_only_known_proposers_to_write) {
     register_all_tools();
-    const char* proposers[] = {"write_file", "search_replace", "edit_file", "undo_edit"};
+    const char* proposers[] = {"write_file", "search_replace", "edit_file",
+                             "undo_edit", "apply_patch"};
     for (const auto& def : ToolsRegistry::instance().defs()) {
         if (!tf_has(def.flags, TF_WRITES_FILES)) continue;
         if ((def.flags & kPlanForbidden) != 0u) continue;   /* и так заблокирован */
@@ -341,7 +343,7 @@ TEST(plan_mode_refusal_explains_reason) {
 
 TEST(code_and_review_modes_allow_everything) {
     register_all_tools();
-    const char* tools[] = {"write_file", "exec_command", "read_file"};
+    const char* tools[] = {"write_file", "bash", "read_file"};
     for (const char* tool : tools) {
         const ToolDef& def = def_for(tool);
         ASSERT_TRUE(check_tool_mode_policy(tool, def, 0, false).empty());
