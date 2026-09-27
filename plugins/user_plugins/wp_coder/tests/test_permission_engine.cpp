@@ -882,6 +882,14 @@ namespace {
 /* Инструмент без побочных эффектов, но с реальным обработчиком. */
 json::JsonValue no_args() { return json::JsonValue::object(); }
 
+/* Текст исхода вызова: результат или отказ. И5.7 ToolRunner::run отдаёт
+ * ToolOutcome, а не строку, потому что отказ и пустой вывод — разные
+ * вещи. Здесь они склеиваются обратно в текст ровно для проверок «есть ли
+ * в ответе [отказ]»: смысл этих проверок не изменился. */
+std::string outcome_text(const ToolOutcome& o) {
+    return o.ok ? o.output.output : o.error;
+}
+
 struct RunnerFixture {
     std::vector<AgentEvent::Kind> kinds;
     std::vector<std::string> texts;
@@ -932,7 +940,7 @@ TEST(tool_runner_asks_then_executes_after_once) {
     std::vector<std::thread> threads;
     std::string result;
     threads.emplace_back([&] {
-        result = fx.runner.run("list_skills", no_args());
+        result = outcome_text(fx.runner.run("list_skills", no_args()));
     });
     Joiner joiner(threads);
     PermissionRequest r = wait_for_pending(engine().permissions());
@@ -954,7 +962,7 @@ TEST(tool_runner_denied_tool_never_runs_and_never_asks) {
     RunnerFixture fx;
     fx.clear_state();
 
-    std::string result = fx.runner.run("list_skills", no_args());
+    const std::string result = outcome_text(fx.runner.run("list_skills", no_args()));
     ASSERT_TRUE(result.find("запрещён") != std::string::npos);
     ASSERT_EQ(engine().permissions().pending_count(), (size_t)0);
     /* Модели сказано не повторять и не искать обход. */
@@ -981,7 +989,7 @@ TEST(tool_runner_mode_policy_precedes_permission_ask) {
     json::JsonValue args = json::JsonValue::object();
     args.set("path", json::JsonValue("x.txt"));
     args.set("content", json::JsonValue("x"));
-    std::string result = fx.runner.run("write_file", args);
+    const std::string result = outcome_text(fx.runner.run("write_file", args));
     ASSERT_TRUE(result.find("запрещено режимом") != std::string::npos);
     ASSERT_EQ(engine().permissions().pending_count(), (size_t)0);
     {
@@ -1186,9 +1194,9 @@ TEST(doom_loop_asks_the_user_instead_of_cancelling_silently) {
 
     json::JsonValue a = json::JsonValue::object();
     a.set("path", "zzz.txt");
-    std::string first = fx.runner.run("read_file", a);
-    std::string second = fx.runner.run("read_file", a);
-    std::string third = fx.runner.run("read_file", a);
+    const std::string first = outcome_text(fx.runner.run("read_file", a));
+    const std::string second = outcome_text(fx.runner.run("read_file", a));
+    const std::string third = outcome_text(fx.runner.run("read_file", a));
 
     /* Ни один из трёх не отменён «по автопилоту»: раньше третий
      * возвращал «[ошибка] зацикливание вызова» без чьего-либо решения. */
@@ -1226,7 +1234,7 @@ TEST(doom_loop_rejection_stops_the_call) {
     a.set("path", "zzz.txt");
     fx.runner.run("read_file", a);
     fx.runner.run("read_file", a);
-    std::string third = fx.runner.run("read_file", a);
+    const std::string third = outcome_text(fx.runner.run("read_file", a));
     ASSERT_TRUE(third.find("зацикливание") != std::string::npos);
     ASSERT_TRUE(third.find("НЕ ПОВТОРЯЙ") != std::string::npos);
 }

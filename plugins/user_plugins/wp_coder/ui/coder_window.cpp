@@ -412,8 +412,10 @@ void render_extras() {
     {
         std::lock_guard<std::mutex> lk(st.mtx);
         if (!st.session.empty()) {
-            size_t total = 0;
-            for (const auto& m : st.session) total += m.content.size();
+            /* Считается по транскрипту для модели, а не по сырым частям:
+             * в панели должно быть видно тот размер, который реально уйдёт
+             * провайдеру (model_history_chars, core/message.h). */
+            const size_t total = coder::model_history_chars(st.session);
             ImGui::SameLine();
             ImGui::TextDisabled("ctx: %zuK / %zuK",
                 total / 1024, st.session_budget / 1024);

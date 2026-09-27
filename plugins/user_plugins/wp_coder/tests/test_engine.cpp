@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "test_printers.h"
 #include "../core/engine.h"
 #include "../core/agent_components.h"
 #include "../core/base_tools.h"
@@ -235,120 +236,173 @@ TEST(engine_system_prompt_stable_across_steps) {
     ASSERT_TRUE(p1 == p3);
 }
 
-TEST(engine_trim_session_compression) {
-    auto& eng = Engine::instance();
-    /* Наполняем сессию большими RESULT-сообщениями. */
-    {
-        std::lock_guard<std::mutex> lk(eng.state().mtx);
-        eng.state().session.clear();
-        eng.state().session.push_back({"user", "задача"});
-        for (int i = 0; i < 200; ++i) {
-            eng.state().session.push_back({"assistant", "ответ " + std::to_string(i) +
-                " " + std::string(500, 'x')});
-            eng.state().session.push_back({"user", "RESULT [tool]:\n" +
-                std::string(2000, 'y')});
-        }
-    }
-    /* Вызываем сжатие (через тестовый обёртку). */
-    eng.trim_session_test();
+/* ======================================================================
+ * И5.7: сжатие истории сообщений
+ *
+ * Проверяется не «длина упала», а ЧТО именно упало. Старый код заменял
+ * целые сообщения строками-заглушками, а старую реплику ассистента обрубал
+ * до 60 символов — вместе с ВЫЗОВОМ, который её породил. Тогда
+ * «RESULT [read_file]: …» оставалось в истории без вызова, и модель
+ * читала результат, не зная, что его вызвало. Поэтому проверка здесь
+ * трёх вещей: объём упал, вызов УЦЕЛ, результат сжат.
+ * ====================================================================== */
 
-    /* Итоговый объём должен упасть ниже бюджета (60 Кб). */
-    size_t total = 0;
-    {
-        std::lock_guard<std::mutex> lk(eng.state().mtx);
-        for (const auto& m : eng.session_for_test()) total += m.content.size();
+namespace {
+
+/* Ход с вызовом инструмента и большим результатом. */
+Message turn_with_tool_result(const std::string& text,
+                              const std::string& result_body) {
+    Message m = Message::assistant("msg_parent");
+    m.parts.push_back(MessagePart::text(text));
+    MessagePart part = MessagePart::tool("call_" + text, "read_file",
+                                         json::JsonValue::object());
+    ToolOutput out;
+    out.title = "read a.txt";
+    out.output = result_body;
+    part.set_result(out);
+    m.parts.push_back(std::move(part));
+    return m;
+}
+
+/* История, гарантированно превышающая бюджет. */
+void fill_over_budget_history(Engine& eng, size_t budget) {
+    std::lock_guard<std::mutex> lk(eng.state().mtx);
+    eng.state().session_budget = budget;
+    eng.state().session.clear();
+    eng.state().session.push_back(Message::user("исходная задача"));
+    for (int i = 0; i < 60; ++i) {
+        eng.state().session.push_back(
+            turn_with_tool_result("рассуждение " + std::to_string(i),
+                                 std::string(2000, 'y')));
     }
-    ASSERT_TRUE(total <= 60000);
-    /* Старые RESULT должны быть заменены сжатой заглушкой с именем инструмента. */
-    bool stub_found = false;
-    {
-        std::lock_guard<std::mutex> lk(eng.state().mtx);
-        for (const auto& m : eng.session_for_test())
-            if (m.content.find("сжат") != std::string::npos)
-                stub_found = true;
+}
+
+}  // namespace
+
+TEST(compress_history_keeps_the_call_and_shrinks_the_result) {
+    std::vector<Message> history;
+    history.push_back(Message::user("задача"));
+    for (int i = 0; i < 60; ++i) {
+        history.push_back(turn_with_tool_result("ход " + std::to_string(i),
+                                                std::string(2000, 'y')));
     }
-    ASSERT_TRUE(stub_found);
-    /* В сжатой заглушке сохраняется имя инструмента (tool). */
-    bool tool_kept = false;
-    {
-        std::lock_guard<std::mutex> lk(eng.state().mtx);
-        for (const auto& m : eng.session_for_test())
-            if (m.content.find("[RESULT tool сжат]") != std::string::npos)
-                tool_kept = true;
+    const size_t before = model_history_chars(history);
+    ASSERT_TRUE(before > 60000);
+
+    compress_history(history, 60000);
+    const size_t after = model_history_chars(history);
+    ASSERT_TRUE(after <= 60000);
+    ASSERT_TRUE(after < before);
+
+    /* Вызов уцелел: без него результат в транскрипте осиротел бы. */
+    const MessagePart* part = nullptr;
+    for (const Message& m : history) {
+        if (const MessagePart* p = find_tool_part(m, "call_ход 0")) part = p;
     }
-    ASSERT_TRUE(tool_kept);
+    ASSERT_TRUE(part != nullptr);
+    ASSERT_EQ(part->tool_name(), std::string("read_file"));
+    ASSERT_TRUE(part->has_result());
+    ASSERT_TRUE(part->output().output.find("сжат") != std::string::npos);
+}
+
+TEST(compress_history_keeps_the_first_and_the_last_turn) {
+    std::vector<Message> history;
+    history.push_back(Message::user(std::string(2000, 'z')));
+    for (int i = 0; i < 60; ++i) {
+        history.push_back(
+            turn_with_tool_result("ход " + std::to_string(i),
+                                 std::string(2000, 'y')));
+    }
+    compress_history(history, 60000);
+    /* Задача пользователя и последний ход — то, над чем модель работает
+     * прямо сейчас, — не трогаются. Сжатая задача отняла бы у неё цель. */
+    ASSERT_EQ(history.front().text().size(), (size_t)2000);
+    const size_t last_body =
+        find_tool_part(history.back(), "call_ход 59")->output().output.size();
+    ASSERT_EQ(last_body, (size_t)2000);
+}
+
+TEST(compress_history_under_budget_is_a_no_op) {
+    std::vector<Message> history;
+    history.push_back(Message::user("маленькая задача"));
+    history.push_back(Message::assistant(""));
+    history.back().parts.push_back(MessagePart::text("короткий ответ"));
+    const std::string before = history.back().text();
+    compress_history(history, 60000);
+    ASSERT_EQ(history.size(), (size_t)2);
+    ASSERT_EQ(history.front().text(), std::string("маленькая задача"));
+    ASSERT_EQ(history.back().text(), before);
+}
+
+TEST(compress_history_reports_progress_in_the_model_transcript) {
+    /* Объём считается по ТРАНСКРИПТУ для модели: именно он уходит
+     * провайдеру, и именно он ограничен бюджетом. */
+    std::vector<Message> history;
+    history.push_back(Message::user("задача"));
+    history.push_back(turn_with_tool_result("ход", std::string(500, 'q')));
+    /* Заголовок ToolOutput в транскрипт не попадает, а вызов и «RESULT [x]:»
+     * попадают — отсюда и неравенство. */
+    ASSERT_TRUE(model_history_chars(history) > 500);
 }
 
 /* ======================================================================
- * Регрессии: И0.1/D1 — дедлок SessionStore::trim()
+ * Регрессии: И0.1/D1 — дедлок сжатия истории
  *
  * state_.mtx — нерекурсивный std::mutex. Раньше AgentLoop::run брал его
  * вокруг блока «посчитать размер сессии», а внутри вызывал trim(), который
  * берёт тот же мьютекс. При превышении session_budget воркер-тред вставал
  * намертво, а UI (он читает то же состояние под тем же мьютексом) — зависал.
  *
- * Тесты ниже воспроизводят ровно этот сценарий: сессия длиннее бюджета +
- * вызов trim_if_needed() без внешнего лока. Если логика вернётся к
- * «захватить лок снаружи», тесты провалятся по таймауту.
+ * Тесты ниже воспроизводят ровно этот сценарий: история длиннее бюджета +
+ * вызов сжатия без внешнего лока. Если логика вернётся к «захватить лок
+ * снаружи», тесты провалятся по таймауту. И5.7 класс SessionStore убран,
+ * и проверка осталась прежней — суть дедлока не изменилась, изменилось
+ * лишь то, что сжимается (сообщения, а не строки).
  * ====================================================================== */
 
-namespace {
-
-/* Кладёт в сессию сообщения, гарантированно превышающие бюджет. */
-void fill_over_budget_session(Engine& eng, size_t budget) {
-    std::lock_guard<std::mutex> lk(eng.state().mtx);
-    eng.state().session_budget = budget;
-    eng.state().session.clear();
-    eng.state().session.push_back({"user", "исходная задача"});
-    /* Каждый шаг кладёт assistant-сообщение и RESULT-сообщение. */
-    size_t per_step = 2000;
-    for (int i = 0; i < 200; ++i) {
-        eng.state().session.push_back({"assistant", "рассуждение " +
-            std::string(per_step / 2, 'a')});
-        eng.state().session.push_back({"user", "RESULT [read_file]:\n" +
-            std::string(per_step, 'b')});
-    }
-}
-
-}  // namespace
-
-TEST(sessionstore_trim_if_needed_completes_over_budget) {
+TEST(history_compression_completes_over_budget) {
     auto& eng = Engine::instance();
     const size_t budget = 60000;
-    fill_over_budget_session(eng, budget);
+    fill_over_budget_history(eng, budget);
 
-    SessionStore store(eng.state());
-    ASSERT_TRUE(store.over_budget());
+    size_t before = 0;
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        before = model_history_chars(eng.state().session);
+    }
+    ASSERT_TRUE(before > budget);
 
     /* Тот самый вызов, который раньше вешался. Запускаем в отдельном
      * потоке с таймаутом, чтобы дедлок валил тест, а не весь прогон. */
-    auto fut = std::async(std::launch::async, [&store] { store.trim_if_needed(); });
+    auto fut = std::async(std::launch::async, [&eng] {
+        eng.trim_history_if_needed();
+    });
     ASSERT_TRUE(fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     fut.get();
 
-    ASSERT_TRUE(store.total_chars() <= budget);
+    std::lock_guard<std::mutex> lk(eng.state().mtx);
+    ASSERT_TRUE(model_history_chars(eng.state().session) <= budget);
 }
 
-TEST(sessionstore_trim_is_reentrant_safe_from_loop_pattern) {
+TEST(history_compression_is_reentrant_safe_from_loop_pattern) {
     auto& eng = Engine::instance();
-    const size_t budget = 40000;
-    fill_over_budget_session(eng, budget);
+    fill_over_budget_history(eng, 40000);
 
-    /* Имитируем точный паттерн AgentLoop::run: проверка бюджета и сжатие
-     * одним вызовом, без захвата state_.mtx снаружи. */
+    /* Имитируем точный паттерн AgentLoop::run: сжатие одним вызовом,
+     * без захвата state_.mtx снаружи. */
     auto fut = std::async(std::launch::async, [&eng] {
         for (int step = 0; step < 5; ++step) {
-            SessionStore(eng.state()).trim_if_needed();
+            eng.trim_history_if_needed();
         }
     });
     ASSERT_TRUE(fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     fut.get();
 }
 
-TEST(sessionstore_trim_does_not_block_ui_reader) {
+TEST(history_compression_does_not_block_ui_reader) {
     auto& eng = Engine::instance();
     const size_t budget = 60000;
-    fill_over_budget_session(eng, budget);
+    fill_over_budget_history(eng, budget);
 
     std::atomic<bool> ui_stuck{false};
     std::atomic<bool> stop{false};
@@ -370,8 +424,7 @@ TEST(sessionstore_trim_does_not_block_ui_reader) {
      * после чего застрянет и «UI». */
     std::atomic<bool> worker_done{false};
     std::thread worker([&] {
-        for (int i = 0; i < 20; ++i)
-            SessionStore(eng.state()).trim_if_needed();
+        for (int i = 0; i < 20; ++i) eng.trim_history_if_needed();
         worker_done = true;
     });
 
@@ -393,29 +446,35 @@ TEST(sessionstore_trim_does_not_block_ui_reader) {
     ASSERT_FALSE(ui_stuck);
 }
 
-TEST(sessionstore_over_budget_false_within_budget) {
+TEST(history_compression_within_budget_changes_nothing) {
     auto& eng = Engine::instance();
-    const size_t budget = 60000;
     {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
-        eng.state().session_budget = budget;
+        eng.state().session_budget = 60000;
         eng.state().session.clear();
-        eng.state().session.push_back({"user", "маленькая задача"});
-        eng.state().session.push_back({"assistant", "короткий ответ"});
+        eng.state().session.push_back(Message::user("маленькая задача"));
+        Message answer = Message::assistant("msg_0");
+        answer.parts.push_back(MessagePart::text("короткий ответ"));
+        eng.state().session.push_back(answer);
     }
-    SessionStore store(eng.state());
-    ASSERT_FALSE(store.over_budget());
+    size_t before = 0;
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        before = model_history_chars(eng.state().session);
+    }
 
-    /* trim_if_needed() на короткой сессии — no-op, ничего не портит. */
-    store.trim_if_needed();
+    /* Сжатие в пределах бюджета — no-op, ничего не портит. */
+    eng.trim_history_if_needed();
     ASSERT_EQ(eng.session_for_test().size(), (size_t)2);
-    ASSERT_EQ(eng.session_for_test()[0].content, std::string("маленькая задача"));
+    ASSERT_EQ(eng.session_for_test()[0].text(), std::string("маленькая задача"));
+    std::lock_guard<std::mutex> lk(eng.state().mtx);
+    ASSERT_EQ(model_history_chars(eng.state().session), before);
 }
 
 TEST(engine_settings_deploy_remote_dir_roundtrip) {
     std::map<std::string, std::string> settings;
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.path_data_dir = []() { return std::string(); };
@@ -514,7 +573,7 @@ TEST(engine_fsm_state_transitions) {
 
 static void init_tools_for_phase3(const fs::path& project) {
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
@@ -746,7 +805,7 @@ TEST(git_tools_work_in_real_repo) {
 TEST(save_load_session_roundtrip) {
     fs::path tmp = make_tmp_project();
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
@@ -759,8 +818,10 @@ TEST(save_load_session_roundtrip) {
         /* Синглтон: чистим сессию от предыдущих тестов. */
         std::lock_guard<std::mutex> lk(eng.state().mtx);
         eng.state().session.clear();
-        eng.state().session.push_back({"user", "привет"});
-        eng.state().session.push_back({"assistant", "привет!\n\"quoted\""});
+        eng.state().session.push_back(Message::user("привет"));
+        Message answer = Message::assistant("");
+        answer.parts.push_back(MessagePart::text("привет!\n\"quoted\""));
+        eng.state().session.push_back(answer);
     }
     eng.save_session();
     /* И5.6: файл теперь <data_dir>/wp_coder/sessions/<session_id>.json.
@@ -785,9 +846,14 @@ TEST(save_load_session_roundtrip) {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
         ASSERT_EQ(eng.state().session.size(), (size_t)2);
         ASSERT_EQ(eng.state().session[0].role, std::string("user"));
-        ASSERT_EQ(eng.state().session[0].content, std::string("привет"));
+        ASSERT_EQ(eng.state().session[0].text(), std::string("привет"));
         /* Экранирование кавычек/переводов строк переживает roundtrip. */
-        ASSERT_EQ(eng.state().session[1].content, std::string("привет!\n\"quoted\""));
+        ASSERT_EQ(eng.state().session[1].text(), std::string("привет!\n\"quoted\""));
+        /* И5.7: round-trip больше не разбирает историю в строки, поэтому
+         * переживает и СТРУКТУРА: части, идентификаторы, родитель. */
+        ASSERT_TRUE(!eng.state().session[0].id.empty());
+        ASSERT_EQ(eng.state().session[1].parts.size(), (size_t)1);
+        ASSERT_TRUE(eng.state().session[1].parts[0].is(PartKind::Text));
     }
 
     /* clear_session удаляет и файл на диске. */
@@ -835,7 +901,7 @@ TEST(load_session_empty_when_no_file) {
 TEST(save_load_session_survives_braces_and_escapes) {
     fs::path tmp = make_tmp_project();
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
     cb.path_data_dir = [&tmp]() -> std::string { return tmp.string(); };
@@ -856,10 +922,28 @@ TEST(save_load_session_survives_braces_and_escapes) {
     {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
         eng.state().session.clear();
-        eng.state().session.push_back({"user", "напиши функцию"});
-        eng.state().session.push_back({"assistant", tricky});
-        eng.state().session.push_back({"user", "RESULT [write_file]:\n" + tricky});
-        eng.state().session.push_back({"assistant", plan});
+        eng.state().session.push_back(Message::user("напиши функцию"));
+        /* Ход с вызовом инструмента: раньше вызов и его результат были
+         * двумя СТРОКАМИ, и склейка «RESULT [x]:» была единственным
+         * признаком принадлежности (её можно было подделать). */
+        Message turn = Message::assistant(eng.state().session.back().id);
+        turn.parts.push_back(MessagePart::text(tricky));
+        json::JsonValue args = json::JsonValue::object();
+        args.set("path", "wp_demo.php");
+        args.set("content", tricky);
+        MessagePart call = MessagePart::tool(
+            "call_0", "write_file", args,
+            "{\"tool\": \"write_file\", \"path\": \"wp_demo.php\"}");
+        ToolOutput out;
+        out.title = "write wp_demo.php";
+        out.output = "Записано " + std::to_string(tricky.size()) + " байт";
+        call.set_result(out);
+        turn.parts.push_back(std::move(call));
+        eng.state().session.push_back(turn);
+
+        Message plan_msg = Message::assistant(turn.id);
+        plan_msg.parts.push_back(MessagePart::text(plan));
+        eng.state().session.push_back(plan_msg);
     }
     eng.save_session();
     {
@@ -870,10 +954,30 @@ TEST(save_load_session_survives_braces_and_escapes) {
 
     {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
-        ASSERT_EQ(eng.state().session.size(), (size_t)4);
-        ASSERT_EQ(eng.state().session[1].content, tricky);
-        ASSERT_EQ(eng.state().session[2].content, std::string("RESULT [write_file]:\n") + tricky);
-        ASSERT_EQ(eng.state().session[3].content, plan);
+        const std::vector<Message>& h = eng.state().session;
+        ASSERT_EQ(h.size(), (size_t)3);
+        ASSERT_EQ(h[1].text(), tricky);
+        ASSERT_EQ(h[2].text(), plan);
+        /* Вызов пережил round-trip целиком: имя, аргументы, сырой блок и
+         * состояние. Раньше всё это терялось — история разбиралась в строки
+         * (отклонение 35), и результат возвращался в модель отдельной
+         * репликой без единого следа о том, что он вызвал. */
+        const MessagePart* call = find_tool_part(h[1], "call_0");
+        ASSERT_TRUE(call != nullptr);
+        ASSERT_EQ(call->tool_name(), std::string("write_file"));
+        ASSERT_EQ(call->args().get_string("content"), tricky);
+        ASSERT_EQ(call->state(), ToolState::Completed);
+        ASSERT_EQ(call->output().title, std::string("write wp_demo.php"));
+        ASSERT_TRUE(call->raw_call().find("wp_demo.php") != std::string::npos);
+        /* Идентификаторы и родитель — тоже: по ним UI (И11) строит дерево. */
+        ASSERT_EQ(h[1].parent_id, h[0].id);
+        ASSERT_EQ(h[2].parent_id, h[1].id);
+        /* Транскрипт для модели содержит и вызов, и его результат. */
+        const std::vector<ModelMessage> model = to_model_messages(h);
+        ASSERT_TRUE(model.size() >= 3);
+        std::string transcript;
+        for (const ModelMessage& m : model) transcript += m.content + "\n";
+        ASSERT_TRUE(transcript.find("RESULT [write_file]:") != std::string::npos);
     }
 
     eng.clear_session();

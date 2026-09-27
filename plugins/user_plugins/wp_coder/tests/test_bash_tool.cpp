@@ -42,7 +42,7 @@ fs::path make_tmp_tree() {
 
 void init_tools(const fs::path& project) {
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
@@ -138,7 +138,7 @@ TEST(bash_without_data_dir_says_output_is_lost) {
     /* path_data_dir не задан — spill некуда писать. Молча обрезанный вывод
      * выглядел бы как «команда столько вывела». */
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
@@ -178,7 +178,7 @@ TEST(bash_reports_live_progress_to_the_ui) {
     int progress_calls = 0;
     {
         HostCallbacks cb;
-        cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+        cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
         cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
         cb.llm_is_connected = []() { return false; };
         cb.path_data_dir = [&t]() -> std::string { return t.string(); };

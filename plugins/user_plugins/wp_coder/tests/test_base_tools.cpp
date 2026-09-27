@@ -20,13 +20,15 @@
 #include "../core/project.h"
 #include "../core/security.h"
 
+#include <filesystem>
 #include <string>
 
 using namespace coder;
+namespace fs = std::filesystem;
 
 static void init_engine_and_base() {
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
@@ -160,10 +162,22 @@ TEST(bash_inside_path_not_gated) {
         engine_state().project_dir = "/tmp/wp-test";
         engine_state().allowed_external_paths.clear();
     }
+    /* Каталог проекта создаётся ЗДЕСЬ, а не остаётся на волю другому
+     * тесту: команда ниже пишет в него, и без каталога падал бы сам
+     * `sh`, а тест проверял бы не гейт, а наличие каталога. Раньше падение
+     * выглядело как «тест прошёл, а `probe.txt` не создался», то есть как
+     * успех: тот же класс, что у отклонения №30. */
+    std::error_code ec;
+    fs::create_directories("/tmp/wp-test", ec);
+    ASSERT_TRUE(!ec);
     /* Команда безобидная и не выходит за пределы проекта: её выполнение
      * допустимо, значит отказа в разрешении быть не должно. */
     std::string r = run_exec("echo hi > /tmp/wp-test/probe.txt");
     ASSERT_TRUE(r.find("Доступ") == std::string::npos);
+    /* И правда записала: иначе проверка «не сработал гейт» прошла бы и при
+     * отказе, просто потому что команда не выполнилась. */
+    ASSERT_TRUE(fs::exists("/tmp/wp-test/probe.txt"));
+    fs::remove("/tmp/wp-test/probe.txt", ec);
 }
 
 /* Аргумент вида --path=/outside тоже должен ловиться. */

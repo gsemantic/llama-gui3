@@ -15,6 +15,7 @@
 #include "skills_manager.h"
 #include "tool_protocol.h"
 #include "permission_engine.h"
+#include "message.h"
 
 #include <string>
 #include <vector>
@@ -63,12 +64,6 @@ struct TodoItem {
 inline const char* kTodoStatuses[] = {"pending", "in_progress", "completed",
                                      "cancelled"};
 inline const char* kTodoPriorities[] = {"low", "medium", "high"};
-
-/* Одно сообщение многоходовой истории агента. */
-struct ChatMsg {
-    std::string role;    // "user" | "assistant"
-    std::string content;
-};
 
 /* Состояние агента (FSM, 2.3). Переходы:
  *   Idle → Planning → Executing ⇄ WaitingPermission → Done | Aborted
@@ -180,10 +175,12 @@ struct EngineState {
     std::vector<PendingWrite> pending;
     std::string last_agent_task;
 
-    /* Многоходовая сессия текущей задачи. И5.7 переведёт её на
-     * std::vector<Message>; до тех пор она склеивается в сообщения и
-     * обратно через SessionStore (core/session_store.h). */
-    std::vector<ChatMsg> session;
+    /* Многоходовая сессия текущей задачи — И5.7: структура, а не список
+     * строк. Один ход агента = одно сообщение с частями внутри, поэтому
+     * «последний ответ модели» больше не ищется эвристикой по префиксу
+     * «RESULT [x]:», а адресуется частью. Для модели история собирается
+     * в реплики функцией to_model_messages (core/message.h). */
+    std::vector<Message> session;
     /* Идентификатор сохраняемой сессии (И5.6). Пусто — сессия ещё ни разу
      * не записывалась; под локом не меняется иначе, чем сбросом. */
     std::string session_id;
@@ -253,9 +250,10 @@ inline bool is_path_allowed(const std::string& abs_path,
 
 /* Callback-типы для взаимодействия с хостом (LLM, пути, настройки). */
 struct HostCallbacks {
-    /* LLM: многоходовой запрос. messages — история диалога без system. */
+    /* LLM: многоходовой запрос. messages — история диалога без system,
+     * собранная из сессии (to_model_messages). */
     std::function<bool(const std::string& sys_prompt,
-                       const std::vector<ChatMsg>& messages,
+                       const std::vector<ModelMessage>& messages,
                        LlmReply& out)> llm_chat;
 
     /* LLM: одногилый запрос (legacy fallback, если хост не поддерживает
@@ -373,16 +371,27 @@ public:
      * при разрешении, иначе текст отказа (и переводит агента в ожидание). */
     std::string check_external_permission(const std::string& abs_path);
 
+    /* Сжатие истории, если она превысила бюджет.
+     *
+     * Единственная безопасная точка входа: state_.mtx берётся ровно один
+     * раз внутри. Вызывать из кода, который уже держит лок, нельзя —
+     * мьютекс нерекурсивный (engine.h), повторный захват вешает GUI
+     * (D1). Правило сжатия — в compress_history (core/message.h): там
+     * текст, а здесь только лок и бюджет. */
+    void trim_history_if_needed();
+
     /* Настройки. */
     void load_settings();
     void save_settings();
 
-    /* Сжатие слишком длинной сессии: старые RESULT-сообщения заменяются
-     * кратким заголовком. Выполняется внутри SessionStore::trim(). */
-    void trim_session_test();
-
     /* Тестовый доступор: текущая сессия диалога (для юнит-тестов). */
-    const std::vector<ChatMsg>& session_for_test() const { return state_.session; }
+    const std::vector<Message>& session_for_test() const {
+        return state_.session;
+    }
+
+    /* Тестовый вызов сжатия: тот же trim_history_if_needed, но без
+     * проверки «нужно ли» — тест проверяет правило, а не условие входа. */
+    void trim_session_test();
 
     /* FSM (2.3): переход состояния. Публикует observer-событие
      * AgentEvent::Status «state: <имя>» — видно в окне AI Coder. */

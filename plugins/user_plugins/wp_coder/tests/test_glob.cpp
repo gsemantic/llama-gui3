@@ -51,7 +51,7 @@ void touch(const fs::path& p, const std::string& body = "x") {
 
 void init_tools(const fs::path& project) {
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};

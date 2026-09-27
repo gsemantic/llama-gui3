@@ -138,7 +138,7 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
     /* Multi-turn: парсим JSON от llm_chat_messages (ok/content/usage).
      * Fallback на llm_complete_ex при старом хосте без llm_chat_messages. */
     cb.llm_chat = [](const std::string& sys_prompt,
-                     const std::vector<coder::ChatMsg>& messages,
+                     const std::vector<coder::ModelMessage>& messages,
                      coder::LlmReply& out) -> bool {
         if (!g_api || !g_host) return false;
 

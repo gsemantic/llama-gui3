@@ -592,3 +592,125 @@ TEST(ids_are_unique_under_concurrent_use) {
     const auto last = std::unique(sorted.begin(), sorted.end());
     ASSERT_EQ(last - sorted.begin(), static_cast<long>(sorted.size()));
 }
+
+/* ======================================================================
+ * И5.8: условие завершения хода
+ *
+ * Проверяется ТАБЛИЦЕЙ, а не тремя тестами: условие — это перечисление
+ * «почему задача ещё не закрыта», и ценность проверки в том, что перечислены
+ * все причины, а не две из них. Одна пропущенная причина выглядит как
+ * «цикл просто иногда идёт дальше», и найти её можно только по симптому.
+ *
+ * Таблица собирается из настоящих объектов (ответ свёрнут из событий,
+ * сообщение склеено через turn_to_message), а не из ручных структур: тогда
+ * проверка ловит и рассинхрон между свёрткой и вердиктом, а не только
+ * опечатку в самой функции.
+ * ====================================================================== */
+
+namespace {
+
+/* Ответ с указанной причиной остановки и текстом нужной длины. */
+LlmResponse response_with(const std::string& finish, size_t text_len) {
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(std::string(text_len, 'x')));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish(finish));
+    return r;
+}
+
+/* Ход из ответа: ровно так, как его собирает цикл. */
+Message turn_of(const LlmResponse& response, const std::string& parent) {
+    return turn_to_message(response, parent);
+}
+
+struct VerdictCase {
+    const char* what;
+    LlmResponse response;
+    Message turn;
+    std::string last_user_id;
+    TurnVerdict expected;
+};
+
+}  // namespace
+
+TEST(turn_verdict_tells_every_reason_the_task_is_not_over) {
+    const std::string kUser = "msg_000000000001";
+    const std::string kLong = std::string(400, 'x');
+
+    /* Ход с вызовом инструмента: даже при длинном тексте и «stop» от хоста
+     * задача не закрыта. Проверяется вторая копия finish — ту, что
+     * проставляет адаптер (core/llm_source.h). */
+    LlmResponse with_call = response_with("tool-calls", 400);
+    LlmResponse::reduce(with_call, LlmEvent::tool_call(
+        "call_0", "list_skills", json::JsonValue::object()));
+    Message call_turn = turn_of(with_call, kUser);
+    /* Часть осталась незакрытой — как в момент, когда инструмент ещё
+     * работает. */
+    ASSERT_TRUE(call_turn.has_open_tool_part());
+
+    std::vector<VerdictCase> cases = {
+        {"finish = tool-calls", response_with("tool-calls", 400),
+         turn_of(response_with("tool-calls", 400), kUser), kUser,
+         TurnVerdict::NeedsTools},
+        /* Любая другая причина остановки (length, stop, «eos») задачу не
+         * отменяет: закрывать должна причина, а не её отсутствие. */
+        {"причина остановки не tool-calls", response_with("length", 400),
+         turn_of(response_with("length", 400), kUser), kUser,
+         TurnVerdict::Completed},
+        {"finish пуст", response_with("", 400),
+         turn_of(response_with("", 400), kUser), kUser, TurnVerdict::NeedsTools},
+        /* Незакрытый вызов при finish=tool-calls: первым срабатывает
+         * условие 1, и это неважно — закрывать нельзя ни так, ни иначе. */
+        {"вызов без исхода", response_with("tool-calls", 400), call_turn, kUser,
+         TurnVerdict::NeedsTools},
+        {"ход отвечает не на последнюю реплику",
+         response_with("stop", 400),
+         turn_of(response_with("stop", 400), kUser), "msg_000000000009",
+         TurnVerdict::NotLastUser},
+        {"текст короче порога", response_with("stop", 10),
+         turn_of(response_with("stop", 10), kUser), kUser, TurnVerdict::TooShort},
+        {"нормальный итог", response_with("stop", 400),
+         turn_of(response_with("stop", 400), kUser), kUser, TurnVerdict::Completed},
+    };
+
+    for (const VerdictCase& c : cases) {
+        const TurnVerdict got = turn_verdict(c.response, c.turn, c.last_user_id);
+        if (got != c.expected) {
+            std::cerr << "  причина «" << c.what << "»: ждали "
+                      << turn_verdict_name(c.expected) << ", получили "
+                      << turn_verdict_name(got) << std::endl;
+        }
+        ASSERT_EQ((int)got, (int)c.expected);
+        ASSERT_TRUE(turn_completes_task(c.response, c.turn, c.last_user_id) ==
+                    (c.expected == TurnVerdict::Completed));
+    }
+}
+
+TEST(turn_verdict_sees_an_open_tool_part_even_with_a_final_finish) {
+    /* Порядок условий: незакрытая часть важнее «stop». Иначе задача
+     * закроется по тексту, потеряв результат инструмента. */
+    const std::string kUser = "msg_000000000001";
+    LlmResponse r = response_with("stop", 400);
+    Message turn = turn_of(r, kUser);
+    /* Ровно то состояние, в котором оказывается ход с вызовом: finish
+     * приведён адаптером к «tool-calls», но проверим и второй случай —
+     * когда причина остановки «stop», а вызов не закрыт. */
+    LlmResponse open = response_with("stop", 400);
+    LlmResponse::reduce(open, LlmEvent::tool_call(
+        "call_0", "list_skills", json::JsonValue::object()));
+    Message open_turn = turn_of(open, kUser);
+    ASSERT_TRUE(open_turn.has_open_tool_part());
+    ASSERT_EQ((int)turn_verdict(open, open_turn, kUser),
+              (int)TurnVerdict::ToolStillOpen);
+
+    /* Закрытый вызов тех же данных — оснований продолжать нет. */
+    LlmResponse::reduce(open, LlmEvent::tool_result("call_0", ToolOutput()));
+    sync_tool_parts(open_turn, open);
+    ASSERT_FALSE(open_turn.has_open_tool_part());
+    ASSERT_EQ((int)turn_verdict(open, open_turn, kUser),
+              (int)TurnVerdict::Completed);
+    /* И turn (без вызовов) тоже закрыт — вывод не зависит от лишних
+     * частей, а проверка не падает на пустой. */
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::Completed);
+}

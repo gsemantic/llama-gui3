@@ -80,13 +80,13 @@ void Engine::submit(const std::string& prompt) {
         } else if (state_.continue_conversation && !state_.session.empty()) {
             /* Продолжение сессии: добавляем сообщение к существующему контексту.
              * План и предыдущие результаты сохраняются — модель знает историю. */
-            state_.session.push_back({"user", prompt});
+            state_.session.push_back(Message::user(prompt));
             std::cerr << "[wp_coder] submit: continue session, msgs="
                       << state_.session.size() << std::endl;
         } else {
             /* Новая задача: очищаем сессию и начинаем заново. */
             state_.session.clear();
-            state_.session.push_back({"user", prompt});
+            state_.session.push_back(Message::user(prompt));
             /* И4.6: план прошлой задачи в промпте новой только сбивает —
              * модель сверялась бы с чужими пунктами. */
             state_.todos.clear();
@@ -166,7 +166,7 @@ void Engine::save_session() {
     const std::string dir = cb_.path_data_dir ? cb_.path_data_dir() : "";
     if (dir.empty()) return;
 
-    std::vector<ChatMsg> snap;
+    std::vector<Message> snap;
     std::string session_id;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -183,21 +183,15 @@ void Engine::save_session() {
         state_.session_id = session_id;
     }
 
-    /* Мост в модель сообщений И5.4. Преобразование БЕЗОПАСНО в обе
-     * стороны: каждое сообщение ChatMsg становится одной текстовой
-     * частью, а to_model_messages возвращает ту же строку. Оно теряет
-     * ТОЛЬКО то, чего в ChatMsg ещё нет (частей, parent_id, состояния
-     * вызова), и появится как только И5.7 переведёт цикл на
-     * std::vector<Message>. */
+    /* И5.7: моста больше нет. Сессия ИСТОРИЯ структуры, и в файл уходит
+     * та же структура — с теми же идентификаторами, частями, parent_id и
+     * состоянием вызовов. До И5.7 здесь был копирующий мост
+     * ChatMsg → Message, который терял всё, чего в строке не было, и
+     * выдавал новые идентификаторы при каждом сохранении: два сообщения
+     * с одним parent_id в файле выглядели бы валидно и разъехались бы. */
     SessionFile file;
     file.session_id = session_id;
-    for (const ChatMsg& m : snap) {
-        Message msg;
-        msg.id = ids().next_msg();
-        msg.role = m.role;
-        msg.parts.push_back(MessagePart::text(m.content));
-        file.messages.push_back(std::move(msg));
-    }
+    file.messages = std::move(snap);
 
     const std::string path = SessionArchive::file_path(dir, session_id);
     std::string error;
@@ -228,20 +222,14 @@ void Engine::load_session() {
         std::cerr << "[wp_coder] session: " << w << std::endl;
     }
 
-    /* Сообщения → реплики модели: единственный путь, которым история
-     * попадает обратно в цикл. Разбиение ходов с вызовами инструментов
-     * делает to_model_messages, а не цикл. */
-    const std::vector<ModelMessage> model_msgs =
-        to_model_messages(file.messages);
-    std::vector<ChatMsg> loaded;
-    loaded.reserve(model_msgs.size());
-    for (const ModelMessage& m : model_msgs) {
-        loaded.push_back({m.role, m.content});
-    }
-
+    /* И5.7: сообщения возвращаются в сессию как есть — с частями,
+     * parent_id и состоянием вызовов. Разбирать их в строки (to_model_
+     * messages) больше не нужно: результат вызова инструмента,
+     * пришедший из resume, обязан остаться результатом, иначе следующий
+     * шаг агента не поймёт, что уже сделано. */
     std::lock_guard<std::mutex> lk(state_.mtx);
     if (!state_.session.empty()) return;      /* не затираем текущую */
-    state_.session = std::move(loaded);
+    state_.session = file.messages;
     state_.session_id = file.session_id;
 }
 
@@ -645,7 +633,7 @@ void Engine::run_task(std::string task) {
         state_.last_tokens_per_second = 0;
         state_.steps = 0;
         if (state_.session.empty())
-            state_.session.push_back({"user", task});
+            state_.session.push_back(Message::user(task));
         std::cerr << "[wp_coder] run_task: session_msgs=" << state_.session.size()
                   << " continue=" << state_.continue_conversation << std::endl;
     }
@@ -755,12 +743,20 @@ void Engine::worker_main() {
     }
 }
 
+void Engine::trim_history_if_needed() {
+    /* Снаружи лока НЕ держим: захват state_.mtx — внутри. Именно из-за
+     * внешнего лока в AgentLoop раньше был дедлок (D1). */
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    compress_history(state_.session, state_.session_budget);
+}
+
 /* ======================================================================
  * Тестовый метод trim_session_test (для unit-тестов).
  * ====================================================================== */
 
 void Engine::trim_session_test() {
-    SessionStore(state_).trim();
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    compress_history(state_.session, state_.session_budget);
 }
 
 /* ======================================================================

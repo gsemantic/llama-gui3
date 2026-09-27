@@ -41,7 +41,7 @@ fs::path make_tmp_tree() {
 
 void init_engine(const fs::path& project) {
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};
@@ -152,7 +152,7 @@ TEST(universal_limit_says_so_when_there_is_nowhere_to_spill) {
     /* path_data_dir не задан — spill некуда, и молча обрезанный вывод
      * выглядел бы как полный. */
     HostCallbacks cb;
-    cb.llm_chat = [](const std::string&, const std::vector<ChatMsg>&, LlmReply&) { return false; };
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) { return false; };
     cb.llm_complete = [](const std::string&, const std::string&, std::string&) { return false; };
     cb.llm_is_connected = []() { return false; };
     cb.chat_event = [](const std::string&) {};

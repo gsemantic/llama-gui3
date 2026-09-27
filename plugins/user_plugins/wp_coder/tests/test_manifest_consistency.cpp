@@ -111,7 +111,18 @@ TEST(manifest_plugin_json_has_version) {
     ASSERT_TRUE(!j.empty());
     std::string v = json_field(j, "version");
     ASSERT_TRUE(!v.empty());
-    ASSERT_TRUE(v == "0.9.0");
+    /* Здесь НЕТ прибитого числа. Версия меняется каждую итерацию, и
+     * проверка «равно 0.9.0» протухает сама собой: на следующем релизе
+     * она падает, её правят — и через год никто не помнит, что она
+     * вообще проверяла. Тот же класс, что у протухшего `HEAD` в
+     * напоминалке (отклонение №19). Согласие манифеста с той версией,
+     * из которой собран бинарник, проверяет отдельный тест
+     * manifest_code_version_matches_manifest, а с CHANGELOG —
+     * plan_readme_and_changelog_agree_on_the_version. Здесь остаётся
+     * форма: пустая или непохожая на версию строка ломает разбор. */
+    ASSERT_TRUE(v.find('.') != std::string::npos);
+    ASSERT_TRUE(v.find_first_of("abcdefghijklmnopqrstuvwxyz ") ==
+                std::string::npos);
 }
 
 TEST(manifest_repo_copy_matches_plugin_json) {
@@ -156,8 +167,12 @@ TEST(manifest_code_version_matches_manifest) {
 #ifdef WP_CODER_VERSION
     const char* code_version = WP_CODER_VERSION;
 #else
-    const char* code_version = "0.9.0";
+    /* Макрос не пришёл только при сборке вне CMake. Значение тогда
+     * неизвестно, и сравнивать не с чем: проверять тут нечего, и
+     * выдумывать «ожидаемую» версию значило бы проверять вхолостую. */
+    const char* code_version = nullptr;
 #endif
+    if (!code_version) return;
     std::string j = read_file(plugin_root() / "plugin.json");
     ASSERT_TRUE(json_field(j, "version") == std::string(code_version));
 }
@@ -166,6 +181,7 @@ TEST(manifest_changelog_documents_current_version) {
     std::string c = read_file(plugin_root() / "CHANGELOG.md");
     ASSERT_TRUE(!c.empty());
     ASSERT_TRUE(c.find("## [0.9.0]") != std::string::npos);
+    ASSERT_TRUE(c.find("## [0.10.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.8.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.7.0]") != std::string::npos);
     ASSERT_TRUE(c.find("## [0.5.0]") != std::string::npos);

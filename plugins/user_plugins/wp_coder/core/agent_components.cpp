@@ -1,4 +1,5 @@
-// agent_components.cpp (Фаза D1) — реализация компонентов без goto
+// agent_components.cpp (Фаза D1) — реализация компонентов без goto.
+// И5.7: цикл работает с событиями, история — со сообщениями с частями.
 
 #include "agent_components.h"
 #include "prompts.h"
@@ -6,6 +7,7 @@
 #include "engine.h"
 #include "limits.h"
 #include "json_utils.h"
+#include "llm_source.h"
 
 #include <sstream>
 #include <vector>
@@ -29,121 +31,9 @@ using limits::kResultBudget;
  * тоже слишком короткий для продуктивного шага агента. */
 constexpr int kStuckThreshold = 3;
 constexpr size_t kShortResponseLen = 200;
-/* Минимальная длина текстового ответа, который может считаться ИТОГОМ.
- * Короче — это «начало работы» (заголовок, рассуждение), а не финал. */
-constexpr size_t kFinalAnswerMinLen = 300;
-
-/* ======================================================================
- * SessionStore
- * ====================================================================== */
-
-SessionStore::SessionStore(EngineState& state) : state_(state) {}
-
-void SessionStore::clear() {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    state_.session.clear();
-}
-
-void SessionStore::push_user(const std::string& content) {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    state_.session.push_back({"user", content});
-}
-
-void SessionStore::push_assistant(const std::string& content) {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    state_.session.push_back({"assistant", content});
-}
-
-std::vector<ChatMsg> SessionStore::snapshot() const {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    return state_.session;
-}
-
-bool SessionStore::empty() const {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    return state_.session.empty();
-}
-
-std::vector<ChatMsg> SessionStore::messages() const {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    return state_.session;
-}
-
-void SessionStore::trim() {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    auto& s = state_.session;
-    size_t total = 0;
-    for (const auto& m : s) total += m.content.size();
-    if (total <= state_.session_budget) return;
-
-    auto make_stub = [](const std::string& content) -> std::string {
-        std::string c = content;
-        std::string tool;
-        size_t colon = c.find(']');
-        if (c.rfind("RESULT [", 0) == 0 && colon != std::string::npos) {
-            tool = c.substr(8, colon - 8);
-        }
-        std::string first;
-        size_t nl = c.find('\n');
-        if (nl != std::string::npos && nl + 1 < c.size()) {
-            first = text::utf8_prefix(c.substr(nl + 1),
-                                      std::min<size_t>(60, c.size() - nl - 1));
-            size_t nl2 = first.find('\n');
-            if (nl2 != std::string::npos) first.resize(nl2);
-        }
-        if (first.empty()) first = "(без вывода)";
-        std::string r = "[RESULT " + tool + " сжат]: " + first;
-        if (r.size() > 90) { r = text::utf8_prefix(r, 90); r += "…"; }
-        return r;
-    };
-
-    for (size_t i = 1; i < s.size(); ++i) {
-        if (total <= state_.session_budget) break;
-        if (s[i].role != "user") continue;
-        if (s[i].content.rfind("RESULT [", 0) != 0) continue;
-        std::string stub = make_stub(s[i].content);
-        total -= s[i].content.size();
-        s[i].content = stub;
-        total += stub.size();
-    }
-
-    size_t last = s.size() > 0 ? s.size() - 1 : 0;
-    for (size_t i = 1; i < s.size() && i < last; ++i) {
-        if (total <= state_.session_budget) break;
-        if (s[i].role != "assistant") continue;
-        std::string stub;
-        if (s[i].content.rfind("[ПЛАН]", 0) == 0) stub = "[ПЛАН (счат)]";
-        else {
-            stub = text::utf8_prefix(s[i].content, 60);
-            if (s[i].content.size() > 60) stub += "…";
-        }
-        total -= s[i].content.size();
-        s[i].content = stub;
-        total += stub.size();
-    }
-}
-
-void SessionStore::trim_if_needed() {
-    /* Снаружи лока НЕ держим: весь захват state_.mtx — внутри trim().
-     * Именно из-за внешнего лока в AgentLoop раньше был дедлок. */
-    trim();
-}
-
-size_t SessionStore::total_chars() const {
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    size_t total = 0;
-    for (const auto& m : state_.session) total += m.content.size();
-    return total;
-}
-
-bool SessionStore::over_budget() const {
-    /* session_budget тоже меняется из UI-потока, поэтому читаем его
-     * под тем же мьютексом, что и историю. */
-    std::lock_guard<std::mutex> lk(state_.mtx);
-    size_t total = 0;
-    for (const auto& m : state_.session) total += m.content.size();
-    return total > state_.session_budget;
-}
+/* Порог «итога» живёт в limits.h (limits::kMinFinalAnswerLen): условие
+ * завершения считает его в turn_verdict (core/message.h, И5.8), и второе
+ * место с этим числом разъехалось бы с первым. */
 
 /* ======================================================================
  * PermissionGate
@@ -240,21 +130,40 @@ void PermissionGate::wait(std::unique_lock<std::mutex>& lk) {
     });
 }
 
+PermissionOutcome permission_outcome(EngineState& state, const std::string& path) {
+    /* Ответ пользователя — это список разрешённых путей, а не флаг:
+     * allow_once/allow_always кладут путь туда, reject() — нет. Спрашивать
+     * «какое было решение» отдельным флагом значило бы завести второе
+     * место, где живёт один и тот же факт, и они разъедутся.
+     *
+     * Лок внутри: вызывающий цикла лока НЕ держит (state_.mtx
+     * нерекурсивный). Именно эта функция заменила в цикле безусловное
+     * добавление пути в allowed_external_paths: после отказа путь
+     * попадал в список и повторный вызов проходил уже без вопроса —
+     * то есть отказ не означал ничего (дефект, найденный при И5.7). */
+    std::string project;
+    bool allowed = false;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        project = state.project_dir;
+        allowed = is_path_allowed(path, project, state.allowed_external_paths);
+    }
+    return allowed ? PermissionOutcome::Granted : PermissionOutcome::Rejected;
+}
+
 /* ======================================================================
  * ToolRunner
  * ====================================================================== */
 
-std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue& args) {
+ToolOutcome ToolRunner::run(const std::string& tool_name,
+                            const json::JsonValue& args) {
     const ToolDef* def = ToolsRegistry::instance().find(tool_name);
     if (!def) {
-        std::string unknown = "[ошибка] неизвестный инструмент: " + tool_name
+        ToolOutcome outcome;
+        outcome.error = "[ошибка] неизвестный инструмент: " + tool_name
             + "\nДоступные инструменты: " + ToolsRegistry::instance().join_tools();
         this->push_event_(AgentEvent::Error, (tool_name + " — неизвестный инструмент").c_str());
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            state_.session.push_back({"user", "RESULT [" + tool_name + "]:\n" + unknown});
-        }
-        return unknown;
+        return outcome;
     }
 
     /* И1.7: enforcement режимов — ДО fingerprint и ДО вызова.
@@ -267,7 +176,9 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
     }
     if (!refusal.empty()) {
         this->push_event_(AgentEvent::Error, refusal);
-        return refusal;
+        ToolOutcome outcome;
+        outcome.error = refusal;
+        return outcome;
     }
 
     /* И2.5: разрешение по ключу инструмента. Идёт ПОСЛЕ проверки
@@ -281,14 +192,16 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
     PermissionEngine& perms = engine().permissions();
     const PermissionAction perm_action = perms.evaluate(perm_key, perm_pattern);
     if (perm_action == PermissionAction::Deny) {
-        std::string refusal =
+        std::string denial =
             "[запрещено] Инструмент " + tool_name + " запрещён правилом"
             " разрешений (ключ «" + perm_key + "»). Не ищи обход: другой"
             " инструмент с тем же эффектом тоже запрещён."
             "\nНЕ ПОВТОРЯЙ вызов. Скажи пользователю, что действие"
             " запрещено настройкой.";
-        this->push_event_(AgentEvent::Error, refusal);
-        return refusal;
+        this->push_event_(AgentEvent::Error, denial);
+        ToolOutcome outcome;
+        outcome.error = denial;
+        return outcome;
     }
     if (perm_action == PermissionAction::Ask) {
         std::string metadata = tool_name;
@@ -304,7 +217,9 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
                 + "\nНЕ ПОВТОРЯЙ вызов и не ищи обход. Спроси пользователя,"
                   " что делать дальше, или перейди к другим задачам.";
             this->push_event_(AgentEvent::Error, refusal);
-            return refusal;
+            ToolOutcome outcome;
+            outcome.error = refusal;
+            return outcome;
         }
     }
 
@@ -346,9 +261,12 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
             this->push_event_(AgentEvent::Error,
                 "Инструмент " + tool_name + " вызван 3 раза подряд с"
                 " одинаковыми аргументами — пользователь прервал зацикливание.");
-            return "[отказ] зацикливание вызова " + tool_name +
-                   ": пользователь не разрешил повтор. НЕ ПОВТОРЯЙ тот же"
-                   " вызов — смени подход или спроси пользователя.";
+            ToolOutcome outcome;
+            outcome.error =
+                "[отказ] зацикливание вызова " + tool_name +
+                ": пользователь не разрешил повтор. НЕ ПОВТОРЯЙ тот же"
+                " вызов — смени подход или спроси пользователя.";
+            return outcome;
         }
         /* Разрешено: сбрасываем счётчик, иначе следующий такой же вызов
          * снова спросил бы (а после «всегда» это просто шум). */
@@ -365,7 +283,14 @@ std::string ToolRunner::run(const std::string& tool_name, const json::JsonValue&
     std::string label = tool_name;
     if (!out.title.empty()) label += " (" + out.title + ")";
     this->push_event_(AgentEvent::Tool, label + " -> " + out.output);
-    return out.output;
+    /* И5.7: наружу отдаётся ToolOutput целиком, а не строка вывода.
+     * Часть сообщения хранит заголовок, метаданные и признак усечения
+     * (core/message.h), и файл сессии их тоже сохраняет — раньше всё это
+     * доходило только до UI, а в истории оставалась голая строка. */
+    ToolOutcome outcome;
+    outcome.ok = true;
+    outcome.output = std::move(out);
+    return outcome;
 }
 
 bool ToolRunner::is_loop_guard(const std::string& fingerprint) const {
@@ -390,18 +315,36 @@ void ToolRunner::record_call(const std::string& fingerprint) {
  * Planner
  * ====================================================================== */
 
+/* Признак плана в истории. Живёт здесь, а не в цикле и не в разборе
+ * частей: план — это обычное текстовое сообщение ассистента с
+ * характерным началом, и проверять его должна одна функция. Иначе
+ * «есть ли план» и «как план выглядит» разъедутся (D12). */
+namespace {
+
+bool message_is_plan(const Message& m) {
+    return m.is_assistant() && m.text().rfind("[ПЛАН]", 0) == 0;
+}
+
+const char* kPlanPrompt =
+    "Составь краткий пошаговый план решения задачи (без вызова "
+    "инструментов, без wp_action). Перечисли только шагам одним "
+    "нумерованным списком. Потом ты выполнишь их инструментами.";
+
+} // namespace
+
 bool Planner::plan(const std::string& sys_prompt) {
     if (!state_.use_planning) return false;
 
     /* Если в сессии уже есть план — не генерируем новый.
      * Раньше каждый submit() очищал сессию и план терялся,
      * теперь сессия сохраняется между запросами. */
+    std::vector<Message> history;
     bool plan_exists = false;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        for (const auto& msg : state_.session) {
-            if (msg.role == "assistant" &&
-                msg.content.rfind("[ПЛАН]", 0) == 0) {
+        history = state_.session;
+        for (const Message& msg : history) {
+            if (message_is_plan(msg)) {
                 plan_exists = true;
                 break;
             }
@@ -416,43 +359,30 @@ bool Planner::plan(const std::string& sys_prompt) {
     }
     std::cerr << "[wp_coder] planner: no existing plan, generating..." << std::endl;
 
-    std::vector<ChatMsg> plan_msgs;
-    {
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        plan_msgs = state_.session;
-        plan_msgs.push_back({"user",
-            "Составь краткий пошаговый план решения задачи (без вызова "
-            "инструментов, без wp_action). Перечисли только шагам одним "
-            "нумерованным списком. Потом ты выполнишь их инструментами."});
-    }
+    std::vector<ModelMessage> plan_msgs = to_model_messages(history);
+    plan_msgs.push_back({std::string(kRoleUser), kPlanPrompt});
+
     this->push_event_(AgentEvent::Status, "Составляю план...");
-    LlmReply plan_reply;
-    bool plan_ok = false;
-    if (cb_.llm_chat) {
-        plan_ok = cb_.llm_chat(sys_prompt, plan_msgs, plan_reply);
-    } else if (cb_.llm_complete) {
-        std::string last_user;
-        for (const auto& m : plan_msgs)
-            if (m.role == "user") last_user = m.content;
-        std::string resp;
-        plan_ok = cb_.llm_complete(sys_prompt, last_user, resp);
-        if (plan_ok) {
-            plan_reply.content = resp;
-            plan_reply.prompt_tokens = 0;
-            plan_reply.completion_tokens = 0;
-        }
-    }
-    if (plan_ok && !plan_reply.content.empty() &&
-        !state_.abort_requested.load()) {
+    std::vector<LlmEvent> events;
+    const bool plan_ok =
+        llm_source::fetch(cb_, sys_prompt, plan_msgs, events);
+    const LlmResponse plan = llm_source::fold(events);
+    if (plan_ok && !plan.text().empty() && !state_.abort_requested.load()) {
         {
             std::lock_guard<std::mutex> lk(state_.mtx);
-            state_.session.push_back({"assistant",
-                "[ПЛАН]\n" + plan_reply.content});
-            state_.total_prompt_tokens += plan_reply.prompt_tokens;
-            state_.total_completion_tokens += plan_reply.completion_tokens;
+            /* План — обычное сообщение ассистента с одной текстовой
+             * частью. Отдельного вида части у него нет: он не часть
+             * хода, а целый ход, и в транскрипт уходит как текст. */
+            Message plan_msg = Message::assistant(
+                last_user_message(state_.session) ? last_user_message(state_.session)->id
+                                                  : std::string());
+            plan_msg.parts.push_back(MessagePart::text("[ПЛАН]\n" + plan.text()));
+            state_.session.push_back(std::move(plan_msg));
+            state_.total_prompt_tokens += static_cast<int>(plan.usage().input);
+            state_.total_completion_tokens += static_cast<int>(plan.usage().output);
         }
         this->push_event_(AgentEvent::Assistant,
-            "План: " + plan_reply.content);
+            "План: " + plan.text());
         return true;
     } else if (!plan_ok && !state_.abort_requested.load()) {
         this->push_event_(AgentEvent::Error, "Не удалось составить план — работаю без него.");
@@ -463,6 +393,42 @@ bool Planner::plan(const std::string& sys_prompt) {
 /* ======================================================================
  * AgentLoop
  * ====================================================================== */
+
+namespace {
+
+/* Обрезка результата инструмента до kResultBudget — главный способ
+ * экономии токенов: полный результат может быть 5–10 КБ, и он уходит на
+ * КАЖДОМ следующем шаге. Модели достаточно начала для решения; нужно
+ * больше — вызовет повторно.
+ *
+ * ToolOutput.truncated здесь НЕ ставится: этот флаг означает «инструмент
+ * усек вывод, остаток в файле» (И4.10), а у нас остатка нигде нет. О том,
+ * что вывод обрезан, говорит сам текст. */
+ToolOutput cap_result(ToolOutput out) {
+    if (out.output.size() <= kResultBudget) return out;
+    const size_t full = out.output.size();
+    out.output = text::utf8_prefix(out.output, kResultBudget);
+    out.output += "\n[...обрезано, всего " + std::to_string(full) +
+                  " символов. Вызови инструмент повторно, если нужно больше.]";
+    return out;
+}
+
+/* Хвостовое напоминание (И5.9, порт prompt.ts:1281).
+ *
+ * Текст один на два места, где кончается бюджет шагов: напоминание на
+ * последнем шаге и форсированный итог после него. Два разных текста
+ * разъехались бы, и модель получала бы «не вызывай инструменты» и
+ * «инструменты нельзя» — фразы, отличающиеся одним словом и означающие
+ * одно и то же. Детектор застревания сюда НЕ относится: у него своя
+ * причина («ты не прогрессируешь»), и путать её с исчерпанием шагов
+ * модель не должна. */
+const char* kLastStepReminder =
+    "Это последний шаг. Инструменты больше вызывать НЕЛЬЗЯ — бюджет шагов "
+    "исчерпан, и следующий твой ответ станет ответом пользователю. Дай "
+    "текстовый итог по результатам проделанной работы: что сделано, что "
+    "не сделано и что нужно от пользователя.";
+
+} // namespace
 
 bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
@@ -481,62 +447,89 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             return true;
         }
 
-        std::vector<ChatMsg> msgs;
+        /* И5.9: у цикла есть ПРЕДУПРЕЖДЕНИЕ о последнем шаге, а не только
+         * жёсткий конец. max_steps остаётся предохранителем (о нём ниже), но
+         * решение «шаги кончились» больше не принимается счётчиком: на
+         * последнем шаге модель получает напоминание и обязана дать
+         * текстовый итог вместо нового вызова инструмента (порт
+         * prompt.ts:1281).
+         *
+         * Напоминание уходит в историю ДО сборки запроса, чтобы модель
+         * увидела его в том же контексте, в котором будет отвечать. На
+         * первом шаге (step == 0) оно не добавляется: там ещё нечего
+         * заканчивать, и напоминание было бы враньём. */
+        const bool is_last_step = (step + 1 >= state_.max_steps);
+        if (is_last_step && step > 0) append_note(kLastStepReminder);
+
+        /* История — снимок под локом, сборка реплик для модели — вне
+         * лока: to_model_messages ходит по всем частям, а держать
+         * state_.mtx на всё время сборки нельзя (UI ждёт тот же
+         * мьютекс, и это тот висящий GUI, который закрыл D1). */
+        std::vector<Message> history;
         {
             std::lock_guard<std::mutex> lk(state_.mtx);
-            msgs = state_.session;
+            history = state_.session;
         }
+        const std::vector<ModelMessage> model_msgs = to_model_messages(history);
 
-        LlmReply reply;
-        bool ok = false;
-        auto t0 = std::chrono::steady_clock::now();
+        /* Родитель хода — последняя реплика пользователя. Именно на неё
+         * отвечает ход, и именно её сравнивает условие завершения
+         * (И5.8). Пусто — ход без родителя (тест, пустая сессия): такое
+         * условие трактует отдельно, а не считает «есть родитель». */
+        std::string parent_id;
+        if (const Message* last_user = last_user_message(history)) {
+            parent_id = last_user->id;
+        }
 
         /* Диагностика: размер контекста, отправляемого в LLM. */
         {
             size_t total_chars = 0;
-            for (const auto& m : msgs) total_chars += m.content.size();
-            std::cout << "[wp_coder] step " << (step + 1) << ": msgs=" << msgs.size()
+            for (const ModelMessage& m : model_msgs) total_chars += m.content.size();
+            std::cout << "[wp_coder] step " << (step + 1) << ": msgs=" << model_msgs.size()
                       << " chars=" << total_chars << std::endl;
         }
 
         std::cerr << "[wp_coder] agent_loop: step " << (step+1) << " calling LLM..." << std::endl;
-        if (cb_.llm_chat) {
-            ok = cb_.llm_chat(sys_prompt, msgs, reply);
-        } else if (cb_.llm_complete) {
-            std::string last_user;
-            for (const auto& m : msgs)
-                if (m.role == "user") last_user = m.content;
-            std::string resp;
-            ok = cb_.llm_complete(sys_prompt, last_user, resp);
-            if (ok) {
-                reply.content = resp;
-                reply.finish_reason = "stop";
-                reply.prompt_tokens = 0;
-                reply.completion_tokens = 0;
-            }
-        }
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<LlmEvent> events;
+        const bool ok = llm_source::fetch(cb_, sys_prompt, model_msgs, events);
         auto t1 = std::chrono::steady_clock::now();
-        double llm_s = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1000.0;
+        const double llm_s =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1000.0;
 
+        /* Свёртка событий — единственное, что цикл делает с ответом.
+         * Дальше он работает с текстом, вызовами, finish и метриками, а
+         * не с блоками и префиксами: до И5.7 здесь был разбор строки
+         * extract_action/parse_action и склейка «RESULT [x]:». */
+        LlmResponse response = llm_source::fold(events);
+
+        /* Метрики хода. Источник — usage из события Finish (И5.2): ровно то,
+         * что прислал провайдер, посчитанное один раз и без перекрытия
+         * счётчиков. Складывать prompt с кэшем «вручную» больше негде.
+         *
+         * Копия, а не ссылка: ниже в свёртку добавляются ToolResult и
+         * ToolError, и ссылка на член, который сейчас будут трогать, —
+         * ловушка на ровно ту ошибку, от которой здесь защищаются. */
+        const Usage usage = response.usage();
         {
             std::lock_guard<std::mutex> lk(state_.mtx);
             state_.steps = step + 1;
             state_.llm_total_time += llm_s;
-            state_.total_prompt_tokens += reply.prompt_tokens;
-            state_.total_completion_tokens += reply.completion_tokens;
+            state_.total_prompt_tokens += static_cast<int>(usage.input);
+            state_.total_completion_tokens += static_cast<int>(usage.output);
         }
 
         /* A4: usage токенов шага. */
-        {
-            std::string usage_line = "step " + std::to_string(step + 1) + ": "
-                + std::to_string(reply.prompt_tokens) + "+"
-                + std::to_string(reply.completion_tokens) + " tok, "
-                + std::to_string((int)llm_s) + "s";
-            this->push_event_(AgentEvent::Status, usage_line);
-        }
+        this->push_event_(AgentEvent::Status,
+            "step " + std::to_string(step + 1) + ": "
+            + std::to_string(usage.input) + "+" + std::to_string(usage.output)
+            + " tok, " + std::to_string((int)llm_s) + "s");
 
-        if (!ok || reply.content.empty()) {
-            std::string err = reply.error.empty() ? "не ответил" : reply.error;
+        /* Ответа нет — это не пустой ход, а сбой: иначе модель молча
+         * получила бы пустую историю и повторила бы тот же запрос. */
+        if (!ok || response.empty()) {
+            const std::string err =
+                response.error().empty() ? "не ответил" : response.error();
             std::string diag;
             {
                 std::lock_guard<std::mutex> lk(state_.mtx);
@@ -544,159 +537,135 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                      + " step=" + std::to_string(step + 1);
             }
             this->push_event_(AgentEvent::Error,
-                (std::string("[ошибка] LLM: ") + err + " (" + diag + ")").c_str());
+                ("[ошибка] LLM: " + err + " (" + diag + ")").c_str());
             full_response = full_response.empty()
                 ? "[ошибка] LLM: " + err : full_response;
             return false;
         }
 
+        /* ОДИН ход — ОДНО сообщение (И5.7). Внутри: размышление, текст,
+         * вызовы, в том порядке, в каком пришли события. Раньше тот же ход
+         * разбрасывался по нескольким сообщениям, и текст после результата
+         * инструмента модель читала как отдельную реплику. */
+        Message turn = turn_to_message(response, parent_id);
         {
             std::lock_guard<std::mutex> lk(state_.mtx);
-            state_.session.push_back({"assistant", reply.content});
+            state_.session.push_back(turn);
         }
+        /* Записать ход обратно после того, как закрылись части вызовов.
+         * Лок внутри: вызывающий цикла лока не держит, а держать его на
+         * всю работу инструмента нельзя (UI ждёт тот же мьютекс). */
+        const auto commit_turn = [this, &turn](void) {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            if (Message* stored = find_message(state_.session, turn.id)) {
+                *stored = turn;
+            }
+        };
 
-        /* Извлекаем вызов инструмента ДО stuck-детектора: если модель
-         * вызвала инструмент — она прогрессирует, независимо от длины ответа.
-         * Раньше короткие tool call-ы (< 200 символов) ошибочно считались
-         * признаком застревания, и после 3 таких вызовов агент прерывался
-         * с ошибкой "LLM: не ответил". */
-        std::string rest;
-        std::string block = extract_action(reply.content, rest);
-
-        /* Детектор застревания: учитываем ТОЛЬКО короткие текстовые ответы
-         * БЕЗ вызова инструмента. Tool call = прогресс → сброс счётчика. */
-        if (reply.content.size() < kShortResponseLen && block.empty()) {
+        /* Детектор застревания: короткий текст БЕЗ вызова инструмента.
+         * Проверка вызовов идёт по событиям, а не по «нашёлся ли блок в
+         * строке»: раньше короткий вызов инструмента (< 200 символов)
+         * ошибочно считался застреванием, и после трёх таких вызовов агент
+         * падал с ошибкой «LLM: не ответил». */
+        if (response.text().size() < kShortResponseLen &&
+            response.tool_calls().empty()) {
             ++stuck_counter;
             if (stuck_counter >= kStuckThreshold) {
                 this->push_event_(AgentEvent::Status,
                     "Модель застряла — запрашиваю итоговый ответ.");
-                {
-                    std::lock_guard<std::mutex> lk(state_.mtx);
-                    state_.session.push_back({"user",
-                        "Ты делаешь очень короткие ответы и не прогрессируешь. "
-                        "Инструменты больше вызывать НЕЛЬЗЯ. "
-                        "Дай итоговый ответ по результатам проделанной работы."});
-                }
-                std::vector<ChatMsg> final_msgs;
-                {
-                    std::lock_guard<std::mutex> lk(state_.mtx);
-                    final_msgs = state_.session;
-                }
-                LlmReply final_reply;
-                bool f_ok = false;
-                if (cb_.llm_chat)
-                    f_ok = cb_.llm_chat(sys_prompt, final_msgs, final_reply);
-                if (f_ok && !final_reply.content.empty()) {
-                    std::string f_rest;
-                    extract_action(final_reply.content, f_rest);
-                    std::string f_text = f_rest.empty() ? final_reply.content : f_rest;
-                    if (!f_text.empty()) {
-                        if (!full_response.empty()) full_response += "\n\n";
-                        full_response += f_text;
-                        this->push_event_(AgentEvent::Assistant, f_text);
-                    }
-                }
+                commit_turn();
+                ask_for_summary(sys_prompt,
+                    "Ты делаешь очень короткие ответы и не прогрессируешь. "
+                    "Инструменты больше вызывать НЕЛЬЗЯ. "
+                    "Дай итоговый ответ по результатам проделанной работы.",
+                    full_response);
                 return true;
             }
         } else {
-            stuck_counter = 0;  // tool call или длинный ответ = прогресс
+            stuck_counter = 0;  // вызов инструмента или длинный ответ = прогресс
         }
 
-        if (reply.finish_reason == "length") {
+        if (response.finish_reason() == "length") {
             this->push_event_(AgentEvent::Status,
                 "Внимание: модель упёрлась в лимит токенов (finish=length). "
                 "Разбей задачу на шаги.");
-
-            SessionStore(state_).trim_if_needed();
         }
 
-        /* Автосжатие: даже без finish=length, если сессия превысила бюджет,
-         * сжимаем старые RESULT — иначе модель теряет контекст.
-         *
-         * ВАЖНО: здесь нельзя брать state_.mtx перед вызовом trim() —
-         * trim() берёт тот же нерекурсивный мьютекс. Такая конструкция
-         * раньше приводила к дедлоку воркер-треда и зависанию UI.
-         * Проверка бюджета и сжатие — внутри SessionStore. */
-        SessionStore(state_).trim_if_needed();
-        if (!rest.empty()) {
+        /* Текст хода — пользователю. Это response.text(), а не «строка без
+         * блока»: блок вызова сюда не попадает в принципе, его разбор — забота
+         * адаптера (core/llm_source.h). */
+        if (!response.text().empty()) {
             if (!full_response.empty()) full_response += "\n\n";
-            full_response += rest;
-            this->push_event_(AgentEvent::Assistant, rest);
+            full_response += response.text();
+            this->push_event_(AgentEvent::Assistant, response.text());
+        }
 
-            if (!block.empty()) {
+        /* Вызовы инструментов. Аргументы приходят разобранными (И5.1/И5.3),
+         * поэтому ни parse_action, ни проекция в 8 слотов здесь не нужны:
+         * новый параметр инструмента доходит до обработчика сам. */
+        const size_t call_count = response.tool_calls().size();
+        for (size_t i = 0; i < call_count; ++i) {
+            /* Копия, а не ссылка: reduce() меняет сам вектор вызовов, и
+             * ссылка на его элемент повисла бы. */
+            const LlmToolCall call = response.tool_calls()[i];
+
+            /* Вызов, закрытый ошибкой ещё в адаптере (мусор в блоке,
+             * аргументы без имени инструмента), выполнять нельзя: части уже
+             * несёт его исход, и модель увидит его в транскрипте. */
+            if (!call.runnable()) continue;
+
+            if (MessagePart* part = find_tool_part(turn, call.call_id)) {
+                part->set_running();
+            }
+
+            ToolRunner tool_runner(state_, cb_, this->push_event_);
+            const ToolOutcome outcome =
+                tool_runner.run(call.name, call.arguments);
+            if (outcome.ok) {
+                LlmResponse::reduce(response, LlmEvent::tool_result(
+                    call.call_id, cap_result(std::move(outcome.output))));
+            } else {
+                LlmResponse::reduce(response, LlmEvent::tool_error(
+                    call.call_id, outcome.error));
+            }
+            /* Состояние вызова переносится в часть по call_id. Обе копии
+             * (свёртка ответа и история) обязаны говорить одно и то же: иначе
+             * файл сессии сохранит «не начат» для отработавшего вызова, а
+             * условие завершения (И5.8) не наступит. */
+            sync_tool_parts(turn, response);
+
+            if (state_.abort_requested.load()) {
+                full_response += "\n\n[прервано пользователем]";
                 {
                     std::lock_guard<std::mutex> lk(state_.mtx);
-                    auto& s = state_.session;
-                    if (!s.empty() && s.back().role == "assistant") {
-                        std::string condensed = block;
-                        if (condensed.size() > 1200) { condensed = text::utf8_prefix(condensed, 1200); condensed += "…"; }
-                        s.back().content = condensed;
-                    }
+                    state_.session.clear();
                 }
+                return true;
             }
-        }
 
-        if (block.empty()) {
-            /* Преждевременный финал: текст без вызова инструмента, но и не
-             * настоящий итог (короткий — «заголовок»/«начало работы»). Не
-             * завершаем задачу — даём модели напоминание и продолжаем цикл.
-             * Если модель реально застрянет, сработает stuck-детектор и
-             * запросит принудительный итоговый ответ. */
-            if (reply.content.size() < kFinalAnswerMinLen) {
-                this->push_event_(AgentEvent::Status,
-                    "Модель не вызвала инструмент и не дала итог — продолжаю.");
-                {
-                    std::lock_guard<std::mutex> lk(state_.mtx);
-                    state_.session.push_back({"user",
-                        "[напоминание] Твой последний ответ не содержал вызова "
-                        "инструмента и слишком короток для итога. Продолжай задачу: "
-                        "вызови следующий инструмент (блок wp_action) либо, если "
-                        "задача завершена, дай ИТОГОВЫЙ ответ не короче 500 символов."});
-                }
-                continue;
-            }
-            final_given = true;
-            this->push_event_(AgentEvent::Status, "Готово (финальный ответ).");
-            return true;
-        }
-
-        /* И1.2/И1.3: аргументы — JsonValue целиком, без проекции в
-         * 8 фиксированных слотов. Новый параметр инструмента доходит
-         * до обработчика без правок этого файла. */
-        json::JsonValue args;
-        if (!parse_action(block, args)) {
-            this->push_event_(AgentEvent::Error, (std::string("[ошибка разбора wp_action] блок:\n") + block).c_str());
-            full_response += "\n\n[ошибка разбора wp_action]";
-            return false;
-        }
-        const std::string tool_name = args.get_string("tool");
-
-        ToolRunner tool_runner(state_, cb_, this->push_event_);
-        std::string result = tool_runner.run(tool_name, args);
-
-        std::string perm_path;
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            if (state_.state == AgentState::WaitingPermission)
-                perm_path = state_.pending_permission_path;
-        }
-
-        if (!perm_path.empty()) {
+            /* Внешний путь: PermissionGate перевёл движок в ожидание. */
+            std::string perm_path;
             {
                 std::lock_guard<std::mutex> lk(state_.mtx);
-                std::string trimmed_result = result;
-                if (trimmed_result.size() > kResultBudget) {
-                    trimmed_result = text::utf8_prefix(trimmed_result, kResultBudget);
-                    trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
-                                    + " символов. Вызови инструмент повторно, если нужно больше.]";
+                if (state_.state == AgentState::WaitingPermission) {
+                    perm_path = state_.pending_permission_path;
                 }
-                state_.session.push_back({"user", "RESULT [" + tool_name + "]:\n" + trimmed_result});
+            }
+            if (perm_path.empty()) continue;
+
+            /* Ход записывается ДО ожидания: следующий запрос к модели уже
+             * должен видеть отказ по этому вызову, иначе модель повторит
+             * его вслепую. */
+            commit_turn();
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
                 state_.waiting_in_sync = true;
             }
-            this->push_event_(AgentEvent::Status, "Ожидание разрешения: " + perm_path);
-            if (cb_.chat_event)
+            this->push_event_(AgentEvent::Status,
+                "Ожидание разрешения: " + perm_path);
+            if (cb_.chat_event) {
                 cb_.chat_event("[ai-coder] ⏸ ожидание разрешения: " + perm_path);
-
+            }
             {
                 std::unique_lock<std::mutex> lk(state_.mtx);
                 state_.permission_cv.wait(lk, [this] {
@@ -705,7 +674,6 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 });
                 state_.waiting_in_sync = false;
             }
-
             if (state_.shutting_down) {
                 full_response += "\n\n[агент остановлен]";
                 return false;
@@ -719,89 +687,147 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 return true;
             }
 
-            this->push_event_(AgentEvent::Status, "Доступ разрешён — continuaю.");
-            {
-                std::lock_guard<std::mutex> lk(state_.mtx);
-                state_.session.push_back({"user",
-                    "(пользователь разрешил доступ к " + perm_path
-                    + "; разрешение действует. Выполни инструмент ещё раз "
-                    "с теми же аргументами.)"});
-                state_.allowed_external_paths.push_back(perm_path);
-            }
-            continue;
+            /* Решение пользователя читается из списка разрешённых путей, а
+             * не из флага: allow_once/allow_always кладут путь в список,
+             * reject() — нет. Раньше здесь стояло безусловное добавление
+             * пути в allowed_external_paths, и после ОТКАЗА повторный вызов
+             * проходил уже без вопроса — то есть отказ не означал ничего. */
+            const bool granted =
+                permission_outcome(state_, perm_path) == PermissionOutcome::Granted;
+            this->push_event_(AgentEvent::Status, granted
+                ? "Доступ разрешён — продолжаю."
+                : "Доступ запрещён пользователем — продолжаю без него.");
+            append_note(granted
+                ? ("(пользователь разрешил доступ к " + perm_path
+                   + "; разрешение действует. Выполни инструмент ещё раз "
+                     "с теми же аргументами.)")
+                : ("(пользователь ОТКАЗАЛ в доступе к " + perm_path
+                   + ". Не повторяй этот вызов: он запрещён. Скажи "
+                     "пользователю, что нужно для работы, или предложи то же "
+                     "самое внутри проекта.)"));
+            break;  /* ход встал на ожидание: следующий вызов — в след. ходе */
         }
 
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            if (state_.abort_requested.load()) {
-                full_response += "\n\n[прервано пользователем]";
-                state_.session.clear();
-                return true;
-            }
-            /* Обрезаем RESULT до kResultBudget символов — это главный способ
-             * экономии токенов. Полный результат может быть 5-10К+ символов,
-             * и он отправляется на КАЖДОМ следующем шаге. Модели достаточно
-             * начала для принятия решения; если нужно больше — вызовет repeat. */
-            std::string trimmed_result = result;
-            if (trimmed_result.size() > kResultBudget) {
-                trimmed_result = text::utf8_prefix(trimmed_result, kResultBudget);
-                trimmed_result += "\n[...обрезано, всего " + std::to_string(result.size())
-                                + " символов. Вызови инструмент повторно, если нужно больше.]";
-            }
-            state_.session.push_back({"user", "RESULT [" + tool_name + "]:\n" + trimmed_result});
+        /* Всё, что осталось незакрытым (ход встал на ожидание разрешения),
+         * закрывается отказом. Незакрытая часть в истории означала бы, что
+         * условие завершения (И5.8) не наступит никогда.
+         *
+         * Обход по индексу, а не по ссылке: reduce() добавляет вызов, если
+         * такого call_id не было, и range-for с кэшированным end() после
+         * этого прочитал бы за границей. */
+        bool closed = false;
+        for (size_t i = 0; i < response.tool_calls().size(); ++i) {
+            if (response.tool_calls()[i].finished) continue;
+            const std::string id = response.tool_calls()[i].call_id;
+            LlmResponse::reduce(response, LlmEvent::tool_error(
+                id, "вызов не выполнен: ход остановлен ожиданием разрешения"));
+            closed = true;
         }
+        if (closed) sync_tool_parts(turn, response);
+        commit_turn();
+
+        /* Условие завершения — ПОСЛЕ выполнения вызовов (И5.8). Проверять его
+         * раньше нельзя: незакрытая часть-вызов означает, что результат ещё
+         * не пришёл, и задача закрылась бы, потеряв его. */
+        std::string current_user_id;
+        {
+            /* Последняя реплика пользователя читается ЗДЕСЬ, а не берётся из
+             * снимка в начале хода: новое сообщение могло прийти посреди
+             * работы инструмента, и тогда этот ход отвечает на прежнее
+             * (условие 3 в turn_verdict). */
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            const std::vector<Message> current = state_.session;
+            if (const Message* last = last_user_message(current)) {
+                current_user_id = last->id;
+            }
+        }
+        const TurnVerdict verdict =
+            turn_verdict(response, turn, current_user_id);
+        if (verdict == TurnVerdict::Completed) {
+            final_given = true;
+            this->push_event_(AgentEvent::Status, "Готово (финальный ответ).");
+            return true;
+        }
+        if (verdict == TurnVerdict::TooShort) {
+            /* Преждевременный финал: текст без вызова инструмента, но и не
+             * настоящий итог (короткий — «заголовок»/«начало работы»). Не
+             * завершаем задачу — даём модели напоминание и продолжаем цикл.
+             * Если модель реально застрянет, сработает stuck-детектор и
+             * запросит принудительный итоговый ответ. */
+            this->push_event_(AgentEvent::Status,
+                "Модель не вызвала инструмент и не дала итог — продолжаю.");
+            append_note(
+                "[напоминание] Твой последний ответ не содержал вызова "
+                "инструмента и слишком короток для итога. Продолжай задачу: "
+                "вызови следующий инструмент (блок wp_action) либо, если "
+                "задача завершена, дай ИТОГОВЫЙ ответ не короче 500 символов.");
+        }
+
+        /* Автосжатие: даже без finish=length, если история превысила бюджет,
+         * сжимаем старые результаты — иначе модель теряет контекст.
+         *
+         * ВАЖНО: здесь нельзя брать state_.mtx перед вызовом: сжатие берёт
+         * тот же нерекурсивный мьютекс. Такая конструкция раньше приводила к
+         * дедлоку воркер-треда и зависанию UI (D1). */
+        engine().trim_history_if_needed();
     }
 
+    /* Предохранитель (И5.9). Обычного пути сюда не приводит: на последнем
+     * шаге модель получила напоминание и ответила текстом, и условие
+     * завершения (И5.8) закрыло задачу. Сюда попадают два случая: модель на
+     * последнем шаге всё-таки вызвала инструмент (напоминание она
+     * проигнорировала) или цикл оборвался на отмене. В обоих нужен ответ
+     * пользователю, а не молчание. */
     if (!final_given && !state_.abort_requested.load()) {
         this->push_event_(AgentEvent::Status,
-            "Лимит шагов исчерпан — прошу итоговый ответ.");
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            state_.session.push_back({"user",
-                "Лимит шагов ReAct исчерпан. Инструменты больше вызывать НЕЛЬЗЯ. "
-                "Дай пользователю итоговый ответ по результатам проделанной работы."});
-        }
-        std::vector<ChatMsg> msgs;
-        {
-            std::lock_guard<std::mutex> lk(state_.mtx);
-            msgs = state_.session;
-        }
-        LlmReply reply;
-        bool ok = false;
-        if (cb_.llm_chat) {
-            ok = cb_.llm_chat(sys_prompt, msgs, reply);
-        } else if (cb_.llm_complete) {
-            std::string last_user;
-            for (const auto& m : msgs)
-                if (m.role == "user") last_user = m.content;
-            std::string resp;
-            ok = cb_.llm_complete(sys_prompt, last_user, resp);
-            if (ok) {
-                reply.content = resp;
-                reply.finish_reason = "stop";
-                reply.prompt_tokens = 0;
-                reply.completion_tokens = 0;
-            }
-        }
-        if (ok && !reply.content.empty()) {
-            std::string rest;
-            std::string block = extract_action(reply.content, rest);
-            std::string final_text = rest.empty() ? reply.content : rest;
-            if (!final_text.empty()) {
-                if (!full_response.empty()) full_response += "\n\n";
-                full_response += final_text;
-                this->push_event_(AgentEvent::Assistant, final_text);
-            }
-            {
-                std::lock_guard<std::mutex> lk(state_.mtx);
-                state_.steps += 1;
-                state_.total_prompt_tokens += reply.prompt_tokens;
-                state_.total_completion_tokens += reply.completion_tokens;
-            }
-        }
+            "Шаги исчерпаны, а текстового ответа так и нет — прошу итоговый.");
+        ask_for_summary(sys_prompt, kLastStepReminder, full_response);
     }
 
     return final_given;
+}
+
+void AgentLoop::append_note(const std::string& text) {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    state_.session.push_back(Message::user(text));
+}
+
+bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
+                                const std::string& reminder,
+                                std::string& full_response) {
+    /* Напоминание — обычная реплика пользователя: так её видела модель и
+     * раньше, и иначе пришлось бы заводить второе правило разбора ролей. */
+    Message note;
+    std::vector<ModelMessage> msgs;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        note = Message::user(reminder);
+        state_.session.push_back(note);
+        const std::vector<Message> history = state_.session;
+        msgs = to_model_messages(history);
+    }
+
+    std::vector<LlmEvent> events;
+    const bool ok = llm_source::fetch(cb_, sys_prompt, msgs, events);
+    const LlmResponse answer = llm_source::fold(events);
+    if (!ok || answer.text().empty()) return false;
+
+    /* Ответ уходит и в результат задачи, и в историю. Раньше он шёл
+     * только в результат, и вопрос «а что ты сделал?» после задачи
+     * получал пустоту: последняя в истории реплика — напоминание. */
+    Message msg = Message::assistant(note.id);
+    msg.parts.push_back(MessagePart::text(answer.text()));
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.session.push_back(std::move(msg));
+        state_.steps += 1;
+        state_.total_prompt_tokens += static_cast<int>(answer.usage().input);
+        state_.total_completion_tokens += static_cast<int>(answer.usage().output);
+    }
+    if (!full_response.empty()) full_response += "\n\n";
+    full_response += answer.text();
+    this->push_event_(AgentEvent::Assistant, answer.text());
+    return true;
 }
 
 /* ======================================================================

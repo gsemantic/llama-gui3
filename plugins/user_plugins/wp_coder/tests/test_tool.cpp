@@ -406,12 +406,20 @@ TEST(tool_runner_refuses_tool_in_research_mode) {
                       [&](AgentEvent::Kind k, const std::string& text) {
         if (k == AgentEvent::Error) events.push_back(text);
     });
-    std::string r = runner.run("write_file", args_with("write_file", "path", "x.txt"));
-    ASSERT_TRUE(r.find("запрещено режимом") != std::string::npos);
+    /* И5.7: ToolRunner отдаёт исход (результат ИЛИ отказ), а не строку:
+     * отказ отличается от пустого вывода, и раньше «пусто» значило бы
+     * «успех без вывода». */
+    const ToolOutcome outcome =
+        runner.run("write_file", args_with("write_file", "path", "x.txt"));
+    ASSERT_FALSE(outcome.ok);
+    ASSERT_TRUE(outcome.error.find("запрещено режимом") != std::string::npos);
     /* Отказ виден в UI-логе, и он НЕ выглядит как успешный вызов. */
     ASSERT_EQ(events.size(), (size_t)1);
     /* Проверка режима идёт ДО вызова: отпечаток не попадает в историю
      * (иначе три одинаковых отказа сочлись бы зацикливанием). */
     std::lock_guard<std::mutex> lk(st.mtx);
     ASSERT_TRUE(st.recent_calls.empty());
+    /* И история не тронута: её ведёт цикл, у которого есть сообщение и
+     * вызов, а не ToolRunner. */
+    ASSERT_TRUE(st.session.empty());
 }

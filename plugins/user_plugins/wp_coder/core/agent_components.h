@@ -1,16 +1,23 @@
 #pragma once
 
 /*
- * agent_components.h — Компоненты ReAct-цикла (Фаза D1).
+ * agent_components.h — Компоненты ReAct-цикла (Фаза D1, И5.7).
  *
  * Монолитный Engine::run_task разбит на независимые классы:
- *   SessionStore   — история сессии (add/trim/snapshot)
  *   PermissionGate — разрешения на доступ к файлам
  *   ToolRunner     — запуск инструментов с валидацией и guard
  *   Planner        — планирование (B1)
  *   AgentLoop      — основной ReAct-цикл
  *
  * Используем AgentEvent::Kind из engine.h для событий.
+ *
+ * И5.7: класса SessionStore здесь больше нет, и это не переименование.
+ * Он управлял историей как списком строк, а историей стал список
+ * сообщений с частями (core/message.h) — и методы «снимок/сообщения/
+ * обрезка» превратились в свободные функции над std::vector<Message>
+ * (find_message, model_history_chars, compress_history). Класс остался
+ * бы оболочкой над одной строкой, а состояние у него и так одно —
+ * EngineState, который и так общий.
  */
 
 #include <string>
@@ -20,38 +27,13 @@
 #include <functional>
 
 #include "engine.h"
+#include "llm_event.h"
+#include "message.h"
 
 namespace coder {
 
 /* Callback для событий агента (лог в UI). */
 using AgentEventCallback = std::function<void(AgentEvent::Kind, const std::string&)>;
-
-/* Управляет историей многоходовой сессии агента. */
-class SessionStore {
-public:
-    explicit SessionStore(EngineState& state);
-
-    void clear();
-    void push_user(const std::string& content);
-    void push_assistant(const std::string& content);
-    std::vector<ChatMsg> snapshot() const;
-    bool empty() const;
-    void trim();
-    /* Сжимает историю, только если она превышает session_budget.
-     *
-     * Единственная безопасная точка входа для вызывающего кода: мьютекс
-     * берётся ровно один раз внутри. НЕЛЬЗЯ вызывать из кода, который уже
-     * держит state_.mtx — state_.mtx нерекурсивный (state_.mtx в engine.h),
-     * повторный захват приводит к дедлоку и зависанию всего GUI, потому что
-     * UI читает то же состояние под тем же мьютексом. */
-    void trim_if_needed();
-    bool over_budget() const;
-    size_t total_chars() const;
-    std::vector<ChatMsg> messages() const;
-
-private:
-    EngineState& state_;
-};
 
 /* Управляет разрешениями на доступ к файлам за пределами проекта. */
 class PermissionGate {
@@ -73,6 +55,20 @@ private:
     AgentEventCallback push_event_;
 };
 
+/* Исход вызова инструмента: результат ИЛИ отказ (И5.7).
+ *
+ * Раньше ToolRunner::run возвращал std::string, и ToolOutput (И4.10)
+ * терялся по дороге: заголовок, метаданные и признак усечения доходили
+ * только до UI, а в историю попадала голая строка. Часть сообщения
+ * хранит ToolOutput целиком (core/message.h), поэтому наружу нужен и
+ * результат, и отказ — а «пустой вывод» как признак отказа не годится:
+ * инструмент может закончиться успехом и не напечатать ничего. */
+struct ToolOutcome {
+    bool ok = false;              /* true — результат, false — отказ */
+    ToolOutput output;
+    std::string error;
+};
+
 /* Выполняет инструменты: enforcement режима, guard против зацикливания,
  * валидация аргументов по схеме, запуск. */
 class ToolRunner {
@@ -81,8 +77,14 @@ public:
                AgentEventCallback push_event)
         : state_(state), cb_(cb), push_event_(std::move(push_event)) {}
 
-    /* Основной путь И1: типизированные аргументы. */
-    std::string run(const std::string& tool_name, const json::JsonValue& args);
+    /* Основной путь И1: типизированные аргументы.
+     *
+     * Исторью НЕ занимается: результат возвращается вызывающему, а в
+     * сессию его кладёт цикл, у которого есть идентификатор сообщения и
+     * вызова. Раньше неизвестный инструмент писал в сессию сам, а цикл
+     * писал туда же вторую строку — то есть один и тот же отказ
+     * попадал в историю дважды, и модель видела его как два результата. */
+    ToolOutcome run(const std::string& tool_name, const json::JsonValue& args);
     bool is_loop_guard(const std::string& fingerprint) const;
     void record_call(const std::string& fingerprint);
 
@@ -107,6 +109,24 @@ private:
     AgentEventCallback push_event_;
 };
 
+/* Ответ пользователя на вопрос о внешнем пути (И5.7).
+ *
+ * Отдельный тип, а не bool: «разрешено» и «отказано» — противоположные
+ * исходы, и путать их нельзя. Источник ответа — список разрешённых
+ * путей (см. permission_outcome), а не флаг: флаг был бы вторым местом
+ * одного и того же факта. */
+enum class PermissionOutcome { Granted, Rejected };
+
+/* Что на самом деле решил пользователь (И5.7).
+ *
+ * Список разрешённых путей и есть ответ: allow_once/allow_always кладут
+ * путь туда, reject() — нет. Отдельный флаг означал бы второе место, где
+ * живёт один и тот же факт, и места разъедутся.
+ *
+ * Лок берётся внутри: вызывающий цикла лока НЕ держит (state_.mtx
+ * нерекурсивный). */
+PermissionOutcome permission_outcome(EngineState& state, const std::string& path);
+
 /* Основной ReAct-цикл агента. */
 class AgentLoop {
 public:
@@ -117,6 +137,21 @@ public:
     bool run(const std::string& sys_prompt, std::string& full_response);
 
 private:
+    /* Реплика к модели, которую ввёл не пользователь, а цикл: напоминание
+     * «продолжай», «инструменты больше нельзя». Кладётся в историю
+     * сообщением пользователя — так её видела модель и раньше. */
+    void append_note(const std::string& text);
+
+    /* Форсированный итоговый ход: напоминание в историю, вопрос модели,
+     * её ответ — в историю и в результат задачи.
+     *
+     * Одна функция на оба случая (застревание и исчерпание шагов): они
+     * устроены одинаково, и раньше это был один и тот же код,
+     * скопированный дважды. Возвращает false, если модель не ответила. */
+    bool ask_for_summary(const std::string& sys_prompt,
+                         const std::string& reminder,
+                         std::string& full_response);
+
     EngineState& state_;
     HostCallbacks& cb_;
     AgentEventCallback push_event_;
