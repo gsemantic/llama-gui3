@@ -163,6 +163,11 @@ cd /home/Alex/projects/llama-b7472-bin-ubuntu-x64/llama-gui/build/wp_coder_build
   `permission_suggested_pattern`, `check_tool_mode_policy`.
 - `core/agent_components.cpp` — единственная enforcement-точка
   (`ToolRunner::run`), детектор зацикливания, цикл агента.
+- `core/llm_source.h` — единственное место, где ответ хоста разбирается
+  на события, и запасной путь «хост без `llm_chat`». Правка протокола
+  вызова инструмента или полей ответа хоста идёт здесь; цикл их не знает.
+- `core/message.h` — сообщение и части, сборка истории для модели
+  (`to_model_messages`) и условие завершения хода (`turn_verdict`).
 - `core/text_edit.h` — формат файла и каскад заменителей; всё, что
   читает или пишет текст файла, идёт через него.
 - `core/glob.h` — язык шаблонов и обход дерева; `Options.max_depth`

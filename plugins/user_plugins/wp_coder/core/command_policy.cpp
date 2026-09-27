@@ -372,15 +372,24 @@ void parse_list(const std::string& s, std::vector<ParsedCommand>& out, int depth
     flush();
 }
 
-size_t count_of(const char* const* list) {
-    size_t n = 0;
-    while (list[n]) ++n;
-    return n;
-}
-
-bool in_list(const char* const* list, size_t n, const std::string& name) {
-    for (size_t i = 0; i < n; ++i) {
-        if (name == list[i]) return true;
+/* Таблицы политики — std::vector, а не массивы указателей (найдено на
+ * границе И5, чинится отдельным коммитом поверх граничного).
+ *
+ * Массив `const char* kX[] = {...}` без явного nullptr читался до первого
+ * нулевого указателя, то есть ЗА пределами своего объявления: сколько
+ * «записей» в списке разрешённых программ, решал линкер, раскладкой
+ * .rodata. В сборке с -O2 сразу за таблицей разрешённых лежала таблица
+ * ЗАПРЕЩЁННЫХ, и в allowlist попадали bash, docker, cron, ssh, deploy —
+ * то есть «закрытый список» переставал быть закрытым, и отказ
+ * /srv/app/deploy.sh превращался в разрешение. В сборке без оптимизации
+ * следом случайно оказывался ноль, и всё выглядело исправным: тот же
+ * класс, что у бинарника месячной давности (D22), только у данных.
+ *
+ * Теперь размер таблицы задаёт компилятор: «забытый терминатор»
+ * невозможен не по соглашению, а по типам. */
+bool in_list(const std::vector<const char*>& list, const std::string& name) {
+    for (const char* item : list) {
+        if (item && name == item) return true;
     }
     return false;
 }
@@ -397,7 +406,7 @@ bool in_list(const char* const* list, size_t n, const std::string& name) {
  * Второй слой (PermissionEngine) по умолчанию спрашивает пользователя на
  * каждую команду bash, поэтому широкий allowlist означает много вопросов,
  * а не много вреда. */
-const char* kAllowedBinaries[] = {
+const std::vector<const char*> kAllowedBinaries = {
     /* Файлы и текст. */
     "cat", "ls", "less", "more", "head", "tail", "wc", "grep", "egrep", "fgrep",
     "rg", "ag", "ack", "find", "fd", "tree", "file", "stat", "du", "df", "diff",
@@ -438,7 +447,7 @@ const char* kAllowedBinaries[] = {
  * собранных плагином команд (deploy.sh, sudo mariadb, php8.1 -l,
  * '/usr/local/bin/composer') сюда не попадает: имя программы там
  * выбрал код, а allowlist к таким командам не применяется. */
-const char* kForbiddenBinaries[] = {
+const std::vector<const char*> kForbiddenBinaries = {
     "dd", "mkfs", "fdisk", "sfdisk", "cfdisk", "shred", "badblocks", "wipefs",
     "hdparm", "partprobe", "mkswap",
     "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "ash", "busybox",
@@ -450,7 +459,7 @@ const char* kForbiddenBinaries[] = {
 /* Переменные окружения, меняющие смысл запуска. execve разворачивает их
  * ДО того, как что-либо проверили, поэтому подмена PATH или
  * LD_PRELOAD обходит любую проверку команды. */
-const char* kForbiddenEnvVars[] = {
+const std::vector<const char*> kForbiddenEnvVars = {
     "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "IFS", "BASH_ENV",
     "ENV", "SHELL", "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "PERL5LIB",
     "RUBYOPT", "NODE_OPTIONS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF",
@@ -461,7 +470,7 @@ const char* kForbiddenEnvVars[] = {
 /* Флаги, принимающие значение отдельным аргументом. Нужны, чтобы
  * «первый не-флаг» оказался подкомандой, а не её значением:
  * `git -C /path status` → status, а не /path. */
-const char* kValuedFlags[] = {
+const std::vector<const char*> kValuedFlags = {
     "-C", "-c", "-u", "-p", "-f", "-o", "-m", "-d", "-e", "-n", "-w", "-i",
     "-r", "-s", "-a", "-t", "-g", "-U",
     "--path", "--user", "--file", "--output", "--message", "--config",
@@ -472,7 +481,7 @@ const char* kValuedFlags[] = {
 };
 
 bool flag_takes_value(const std::string& f) {
-    return in_list(kValuedFlags, count_of(kValuedFlags), f);
+    return in_list(kValuedFlags, f);
 }
 
 /* Значение, которое политика не может разрешить в путь: переменная,
@@ -496,11 +505,11 @@ bool is_dangerous_target(const std::string& p) {
     if (p.empty()) return false;
     if (is_unknown_path(p)) return true;
 
-    static const char* kSafeDevices[] = {
+    static const std::vector<const char*> kSafeDevices = {
         "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty",
         "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/fd/",
     };
-    static const size_t ns = count_of(kSafeDevices);
+    static const size_t ns = kSafeDevices.size();
     for (size_t i = 0; i < ns; ++i) {
         std::string pre = kSafeDevices[i];
         if (p == pre) return false;
@@ -508,18 +517,18 @@ bool is_dangerous_target(const std::string& p) {
     }
 
     /* Блочные устройства: /dev/sda, /dev/nvme0n1, /dev/hda, /dev/vda. */
-    static const char* kDevices[] = {"/dev/sd", "/dev/nvme", "/dev/hd", "/dev/vd"};
-    static const size_t nd = count_of(kDevices);
+    static const std::vector<const char*> kDevices = {"/dev/sd", "/dev/nvme", "/dev/hd", "/dev/vd"};
+    static const size_t nd = kDevices.size();
     for (size_t i = 0; i < nd; ++i) {
         if (p.compare(0, std::string(kDevices[i]).size(), kDevices[i]) == 0)
             return true;
     }
 
-    static const char* kPrefixes[] = {
+    static const std::vector<const char*> kPrefixes = {
         "/etc", "/boot", "/proc", "/sys", "/root/.ssh", "/usr/bin", "/usr/sbin",
         "/usr/lib", "/bin", "/sbin", "/lib", "/lib64", "/var/run/sudo",
     };
-    static const size_t n = count_of(kPrefixes);
+    static const size_t n = kPrefixes.size();
     for (size_t i = 0; i < n; ++i) {
         std::string pre = kPrefixes[i];
         if (p == pre) return true;
@@ -573,9 +582,7 @@ CommandPolicy& command_policy() {
 }
 
 CommandPolicy::CommandPolicy() {
-    for (size_t i = 0; i < count_of(kAllowedBinaries); ++i) {
-        allowed_.insert(kAllowedBinaries[i]);
-    }
+    for (const char* binary : kAllowedBinaries) allowed_.insert(binary);
     /* Базовое правило — Ask, а не Allow. Смысл: «решает allowlist».
      * Если бы база была Allow, правило сработало бы раньше проверки
      * списка и allowlist перестал бы существовать. Явный Allow от
@@ -678,11 +685,10 @@ std::string CommandPolicy::host_from_url(const std::string& arg) {
 /* --- Валидаторы (И3.4) --- */
 
 std::string CommandPolicy::check_env(const ParsedCommand& c) const {
-    static const size_t n = count_of(kForbiddenEnvVars);
     for (const auto& e : c.env) {
         size_t eq = e.find('=');
         std::string name = (eq == std::string::npos) ? e : e.substr(0, eq);
-        if (in_list(kForbiddenEnvVars, n, name)) {
+        if (in_list(kForbiddenEnvVars, name)) {
             return "установка переменной окружения " + name +
                    " перед командой запрещена: она меняет смысл запуска"
                    " (путь поиска, пути библиотек, поведение"
@@ -727,13 +733,13 @@ std::string CommandPolicy::check_git(const ParsedCommand& c) const {
      * список из трёх-четырёх неполон ровно настолько же, насколько
      * неполон был исходный blocklist из девяти подстрок. */
     if (c.first_positional() == "config") {
-        static const char* kHookKeys[] = {
+        static const std::vector<const char*> kHookKeys = {
             "pager", "editor", "sshcommand", "alias", "hookspath", "askpass",
             "credential.helper", "diff.external", "difftool", "mergetool",
             "fsmonitor", "filter", "uploadpack", "receivepack", "core.pager",
             "core.editor", "sequence.editor", "protocol.allow",
         };
-        static const size_t nh = count_of(kHookKeys);
+        static const size_t nh = kHookKeys.size();
         for (const auto& a : c.args) {
             std::string lower = a;
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
@@ -780,15 +786,14 @@ std::string CommandPolicy::check_network(const ParsedCommand& c) const {
     const std::string prog = c.program();
 
     /* Флаги, превращающие «скачать» в «выгрузить» или «съесть файл». */
-    static const char* kUploadFlags[] = {
+    static const std::vector<const char*> kUploadFlags = {
         "-K", "--config", "-T", "--upload-file", "--upload-files", "-d",
         "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F",
         "--form", "--form-string", "--post-file", "--post-data",
     };
-    static const size_t nu = count_of(kUploadFlags);
     for (size_t i = 0; i < c.args.size(); ++i) {
         const std::string& a = c.args[i];
-        if (in_list(kUploadFlags, nu, a)) {
+        if (in_list(kUploadFlags, a)) {
             return prog + " " + a + " запрещён: это выгрузка данных на"
                    " сторонний хост или чтение произвольного файла"
                    " конфигурации, а не скачивание";
@@ -882,12 +887,11 @@ std::string CommandPolicy::check_interpreter(const ParsedCommand& c) const {
 }
 
 std::string CommandPolicy::check_awk(const ParsedCommand& c) const {
-    static const char* kAawks[] = {"awk", "gawk", "mawk", "nawk"};
-    static const size_t na = count_of(kAawks);
+    static const std::vector<const char*> kAawks = {"awk", "gawk", "mawk", "nawk"};
     const std::vector<std::string> names = c.variants();
     bool is_awk = false;
     for (const auto& v : names) {
-        if (in_list(kAawks, na, v)) { is_awk = true; break; }
+        if (in_list(kAawks, v)) { is_awk = true; break; }
     }
     if (!is_awk) return "";
     /* У awk нет флага с программой — она всегда positional, поэтому
@@ -987,7 +991,7 @@ std::string CommandPolicy::check_one(const ParsedCommand& c, bool strict) const 
     /* --- Уровень 1: кодовые запреты. Правило их НЕ отменяет. --- */
     bool forbidden = false;
     for (const auto& v : c.variants()) {
-        if (in_list(kForbiddenBinaries, count_of(kForbiddenBinaries), v)) {
+        if (in_list(kForbiddenBinaries, v)) {
             forbidden = true;
             break;
         }
