@@ -1272,6 +1272,12 @@ void register_base_tools() {
                                              ? ctx.callbacks().path_data_dir()
                                              : "";
             opt.spill_path = shell::next_spill_path(data_dir, "bash");
+            /* И6.7: «стоп» обязан убивать команду, а не только ожидание. Без
+             * этого агент уходил на следующий шаг, а команда в фоне
+             * продолжала работать и писать файлы. */
+            if (AbortToken* token = ctx.abort()) {
+                opt.should_cancel = [token]() { return token->aborted(); };
+            }
             /* Живой признак жизни: раз в секунду в ленту приложения.
              * Без него «docker build» две минуты выглядит как зависание,
              * и пользователь жмёт «стоп» на живом процессе. */
@@ -1294,6 +1300,13 @@ void register_base_tools() {
                  << " ms=" << static_cast<long long>(stats.elapsed_ms);
             if (stats.timed_out) {
                 meta << " timed_out=true\n";
+            }
+            /* Отмена видна модели отдельным флагом: exit_code после SIGTERM
+             * (143 или -1) не позволяет отличить «пользователь нажал стоп»
+             * от «команда упала сама», а разница важна — в первом случае
+             * повторять команду бессмысленно, во втором разбирать ошибку. */
+            if (stats.cancelled) {
+                meta << " cancelled=true\n";
             }
             if (stats.dropped_bytes > 0) {
                 meta << " shown_from=" << stats.dropped_bytes << " (хвост)\n";

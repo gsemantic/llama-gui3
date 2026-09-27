@@ -252,6 +252,22 @@ private:
     Usage usage_;
 };
 
+/* --- И6.8: что сломалось ---
+ *
+ * Не «ошибка» одним словом. Отмена пользователем и отказ провайдера — разные
+ * вещи: первое не повторяют, второе повторяют, и обе должны быть видны в
+ * UI и в транскрипте раздельно. Список закрытый: новый вид — это правка
+ * этого перечисления, а не новая строка в тексте ошибки. */
+enum class FailureKind {
+    None = 0,   /* сбоя нет */
+    Provider,   /* провайдер не ответил: сеть, таймаут, отказ хоста */
+    Tool,       /* упал инструмент: у вызова есть ToolError */
+    Aborted     /* пользователь нажал «стоп» */
+};
+
+/* Человекочитаемое имя — для UI и логов, чтобы не собирать его в строках. */
+const char* failure_kind_name(FailureKind kind);
+
 /* --- И5.3: свёртка событий в ответ ---
  *
  * Один вызов инструмента, собранный из потока событий. Это НЕ сессионная
@@ -311,6 +327,23 @@ public:
     const Usage& usage() const { return usage_; }
     /* Текст ProviderError. */
     const std::string& error() const { return error_; }
+
+    /*
+     * ЧТО именно сломалось (И6.8).
+     *
+     * Одного текста ошибки мало: «прервано пользователем» и «провайдер
+     * отказал» — разные события с разными последствиями. Первое — намерение
+     * пользователя, и повторять ход бессмысленно; второе — сбой, и ход надо
+     * повторить. Сливая их в «ошибка», цикл объявлял задачу выполненной
+     * после отказа провайдера, а UI показывал одно и то же сообщение и про
+     * «стоп», и про HTTP 429.
+     *
+     * Вид хранится здесь, а не в отдельном флаге движка, потому что ответ
+     * УЖЕ знает, какое событие его породило, — повторная классификация
+     * разбирала бы текст ошибки заново и рано или поздно разошлась бы с
+     * событием.
+     */
+    FailureKind failure() const { return failure_; }
     const std::vector<LlmToolCall>& tool_calls() const { return calls_; }
 
     /* Ответ без ошибки провайдера и без незакрытых вызовов. */
@@ -341,9 +374,32 @@ private:
     std::string reasoning_tail_;
     std::string finish_reason_;
     std::string error_;
+    /* И6.8: вид сбоя. Ставится тем же событием, что и текст. */
+    FailureKind failure_ = FailureKind::None;
     Usage usage_;
     std::vector<LlmToolCall> calls_;
     long long text_deltas_ = 0;
 };
+
+/* Равенство ответов для тестов (И5.9). Вид сбоя (И6.8) входит в сравнение:
+ * два ответа с одинаковым текстом ошибки, но разным видом сбоя, — разные
+ * ответы, и сверка обоих путей обязана это замечать. */
+inline bool operator==(const LlmResponse& a, const LlmResponse& b) {
+    return a.text() == b.text()
+        && a.reasoning() == b.reasoning()
+        && a.finish_reason() == b.finish_reason()
+        && a.error() == b.error()
+        && a.failure() == b.failure()
+        && a.usage().input == b.usage().input
+        && a.usage().output == b.usage().output
+        && a.usage().cache_read == b.usage().cache_read
+        && a.usage().cache_write == b.usage().cache_write
+        && a.usage().reasoning == b.usage().reasoning
+        && a.usage().total == b.usage().total
+        && a.tool_calls().size() == b.tool_calls().size();
+}
+inline bool operator!=(const LlmResponse& a, const LlmResponse& b) {
+    return !(a == b);
+}
 
 } // namespace coder

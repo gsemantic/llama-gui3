@@ -97,6 +97,10 @@ void Engine::submit(const std::string& prompt) {
         state_.response_ready = false;
         state_.last_response.clear();
         state_.abort_requested.store(false);
+        /* И6.7: СВОЙ токен на ход. Переиспользовать общий нельзя: второе
+         * нажатие «стоп» отменило бы следующую задачу, и отмену нельзя
+         * было бы снять вообще. */
+        state_.turn_abort = std::make_shared<AbortToken>();
         state_.inbox.push(prompt);
         state_.cv.notify_all();
         std::cerr << "[wp_coder] submit: inbox_size=" << state_.inbox.size()
@@ -112,6 +116,10 @@ void Engine::request_abort() {
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.abort_requested.store(true);
+        /* Токен отменяется здесь, а не читается инструментами по флагу:
+         * отмена должна БУДИТЬ ожидание, а poll каждые 100 мс в цикле
+         * команды — это отмена, которой нельзя дождаться. */
+        if (state_.turn_abort) state_.turn_abort->abort();
         /* Не переводим FSM здесь: wait()-предикаты включают abort_requested,
          * поток разбудится и AgentLoop/cleanup сам переведёт в Aborted. */
         state_.permission_cv.notify_all();
@@ -627,6 +635,12 @@ void Engine::run_task(std::string task) {
         state_.last_response.clear();
         state_.response_ready = false;
         state_.abort_requested.store(false);
+        /* И6.7: свой токен на ход — см. комментарий в submit(). */
+        state_.turn_abort = std::make_shared<AbortToken>();
+        /* И6.8: исход сбрасывается на каждый ход, иначе «стоп» прошлой
+         * задачи окрашивал бы новую как прерванную. */
+        state_.outcome = TaskOutcome::None;
+        state_.outcome_reason.clear();
         state_.llm_total_time = 0;
         state_.total_prompt_tokens = 0;
         state_.total_completion_tokens = 0;
@@ -652,9 +666,12 @@ void Engine::run_task(std::string task) {
                 state_.once_path.clear();
             }
 
-            /* FSM: итоговое состояние — прервано пользователем или завершено. */
-            state_.state = state_.abort_requested.load()
-                ? AgentState::Aborted : AgentState::Done;
+            /* И6.8: итоговое состояние выводится из записанного исхода, а
+             * не вычисляется здесь заново. Пока исход не задан, задача
+             * считается не начатой: иначе ранний выход (LLM не подключён,
+             * пустой ход) попадал бы в Done, то есть неудача выглядела бы
+             * как успех. */
+            state_.state = terminal_state_for(state_.outcome);
 
             state_.last_response = full_response.empty() ? "(пустой ответ)" : full_response;
 
@@ -678,6 +695,14 @@ void Engine::run_task(std::string task) {
     };
 
     if (!cb_.llm_is_connected || !cb_.llm_is_connected()) {
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            /* И6.8: это сбой, а не успех. Раньше здесь был AgentState::Done,
+             * и список последних задач показывал выполненную задачу, которой
+             * не было. */
+            state_.outcome = TaskOutcome::Failed;
+            state_.outcome_reason = "LLM не подключён";
+        }
         push_event(AgentEvent::Error, "[ошибка] LLM не подключён");
         full_response = "[ошибка] LLM не подключён";
         cleanup();
@@ -714,8 +739,33 @@ void Engine::run_task(std::string task) {
             push_event(k, text);
         });
         std::cerr << "[wp_coder] run_task: calling agent_loop.run()..." << std::endl;
-        agent_loop.run(sys, full_response);
-        std::cerr << "[wp_coder] run_task: agent_loop.run() done" << std::endl;
+        const bool loop_ok = agent_loop.run(sys, full_response);
+        std::cerr << "[wp_coder] run_task: agent_loop.run() done, ok=" << loop_ok
+                  << std::endl;
+
+        /*
+         * И6.8: исход выводится ЗДЕСЬ, из того, что вернул цикл.
+         *
+         * Раньше terminus брался из abort_requested, и любой сбой
+         * (провайдер не ответил, пустой ход) попадал в Done — то есть в
+         * списке последних задач стояла «выполненная» задача, которой не
+         * было, а модель повторяла бы тот же запрос, не понимая, что он
+         * не сработал.
+         */
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            if (state_.outcome == TaskOutcome::None) {
+                if (state_.abort_requested.load()) {
+                    state_.outcome = TaskOutcome::Aborted;
+                    state_.outcome_reason = "прервано пользователем";
+                } else if (loop_ok) {
+                    state_.outcome = TaskOutcome::Completed;
+                } else {
+                    state_.outcome = TaskOutcome::Failed;
+                    state_.outcome_reason = "ход агента не состоялся";
+                }
+            }
+        }
     }
 
     cleanup();

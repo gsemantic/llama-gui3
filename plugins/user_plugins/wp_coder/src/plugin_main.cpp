@@ -20,6 +20,9 @@
 #include "core/module_api.h"
 #include "core/json_utils.h"
 #include "ui/coder_window.h"
+#include "host_bridge/llm_stream_probe.h"
+#include "host_bridge/llm_blocking.h"
+#include "host_bridge/llm_stream_shim.h"
 
 /* Модули. */
 #include "modules/wordpress/wp_module.h"
@@ -135,6 +138,40 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
         g_api->free_string(g_host, r);
         return true;
     };
+    /* И6.4: потоковый путь. Слот заполняется ТОЛЬКО если у хоста есть поле
+     * llm_chat_stream; на старом хосте он остаётся пустым, и это не ошибка —
+     * вызывающий обязан уйти на блокирующий llm_chat. Проверка один раз при
+     * инициализации: она читает структуру хоста, а тот живёт всё время работы
+     * плагина и не меняет version.
+     *
+     * ВАЖНО: колбэки живут дольше вызова, поэтому вызывающий обязан дождаться
+     * on_done до возврата из ll_plugin_shutdown — хост делает dlclose сразу
+     * после вызова, и колбэк в выгруженный код читает освобождённую память. */
+    if (coder::host::has_llm_chat_stream(g_api)) {
+        const LlamaHostApi* api_snapshot = g_api;
+        LlamaPluginHost* host_snapshot = g_host;
+        cb.llm_chat_stream = [api_snapshot, host_snapshot](
+                                 const std::string& sys_prompt,
+                                 const std::vector<coder::ModelMessage>& messages,
+                                 const std::string& request_json,
+                                 std::function<void(void*)> on_started,
+                                 std::function<void(const char*, int)> on_delta,
+                                 std::function<void(const char*, const char*, const char*)> on_tool_delta,
+                                 std::function<void(const std::string&)> on_done) -> bool {
+            return coder::host::call_llm_chat_stream(
+                api_snapshot, host_snapshot, sys_prompt, messages,
+                request_json, on_started, on_delta, on_tool_delta, on_done);
+        };
+        /* И6.6: отмена настоящая только если хост умеет. На старом хосте
+         * слот пустой, и LlmClient называет это ограничение вслух. */
+        if (coder::host::has_llm_chat_cancel(g_api)) {
+            const LlamaHostApi* api_snapshot = g_api;
+            cb.llm_chat_cancel = [api_snapshot](void* handle) {
+                coder::host::cancel_llm_chat_stream(api_snapshot, handle);
+            };
+        }
+    }
+
     /* Multi-turn: парсим JSON от llm_chat_messages (ok/content/usage).
      * Fallback на llm_complete_ex при старом хосте без llm_chat_messages. */
     cb.llm_chat = [](const std::string& sys_prompt,
@@ -143,21 +180,14 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
         if (!g_api || !g_host) return false;
 
         /* Проверяем, поддерживает ли хост llm_chat_messages (по size). */
-        bool has_chat = false;
-        if (g_api->size >= offsetof(LlamaHostApi, llm_chat_messages) +
-                              sizeof(decltype(g_api->llm_chat_messages)))
-            has_chat = g_api->llm_chat_messages != nullptr;
+        const bool has_chat =
+            coder::host::has_llm_chat_messages(g_api);
 
         if (has_chat) {
-            /* Собираем JSON-массив сообщений. */
-            std::string json = "[";
-            for (size_t i = 0; i < messages.size(); ++i) {
-                if (i) json += ",";
-                json += "{\"role\":\"" + coder::json::escape(messages[i].role) +
-                        "\",\"content\":\"" +
-                        coder::json::escape(messages[i].content) + "\"}";
-            }
-            json += "]";
+            /* JSON-массив сообщений собирает единственная реализация
+             * (src/llm_stream_shim.cpp): стриминговый путь пользуется ею же,
+             * и две копии разошлись бы при первом же новом поле реплики. */
+            const std::string json = coder::host::messages_to_json(messages);
 
             /* Парсим {"ok":1,"content":"...","finish_reason":"...","prompt_tokens":N,"completion_tokens":N}
              * или {"ok":0,"error":"..."}. Общий парсер — core/json_utils.h (4.6). */
@@ -189,55 +219,54 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
             };
 
             for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-                /* 2.2: вызов в отдельном потоке с таймаутом — «Стоп» прерывает
-                 * ожидание, не дожидаясь ответа провайдера. Захватываем копии
-                 * строк: поток может продолжить работу в фоне после таймаута
-                 * (хост не поддерживает отмену — API llm_chat_cancel нет). */
-                std::string json_copy = json;
-                std::string sys_copy = coder::text::sanitize_utf8(sys_prompt);
-                std::future<char*> call_future = std::async(std::launch::async,
-                    [json_copy, sys_copy]() -> char* {
-                        return g_api->llm_chat_messages(g_host,
-                            sys_copy.empty() ? nullptr : sys_copy.c_str(),
-                            json_copy.c_str());
-                    });
-                int timeout_ms = coder::engine().state().llm_timeout_ms;
-                auto deadline = std::chrono::steady_clock::now()
-                              + std::chrono::milliseconds(timeout_ms);
-                char* raw = nullptr;
-                for (;;) {
-                    if (coder::engine().state().abort_requested.load()) {
-                        out.error = "Прервано пользователем";
-                        return false;
-                    }
-                    auto status = call_future.wait_for(std::chrono::milliseconds(100));
-                    if (status == std::future_status::ready) {
-                        raw = call_future.get();
-                        break;
-                    }
-                    if (std::chrono::steady_clock::now() >= deadline) {
-                        out.error = "Таймаут LLM-вызова ("
-                                  + std::to_string(timeout_ms / 1000) + " с)";
-                        return false;
-                    }
+                /* И6.6: вызов хоста отменён быть не может (поля
+                 * llm_chat_messages_cancel в ABI нет) — останавливается только
+                 * ожидание. Раньше здесь стоял std::async, чей future в
+                 * деструкторе БЛОКИРУЕТ до конца задачи, то есть «Стоп» и
+                 * «таймаут» ждали провайдера целиком; и ответ никогда не
+                 * освобождался. Оба дефекта закрыты в host_bridge/llm_blocking
+                 * и проверяются тестом — дефект, который не видно, обязан
+                 * быть вынесен туда, где его можно проверить. */
+                const int timeout_ms = coder::engine().state().llm_timeout_ms;
+                std::string resp;
+                const coder::host::BlockingOutcome outcome =
+                    coder::host::call_llm_chat_messages(
+                        g_api, g_host,
+                        coder::text::sanitize_utf8(sys_prompt), json,
+                        []() { return coder::engine().state().abort_requested.load(); },
+                        timeout_ms, resp);
+
+                if (outcome == coder::host::BlockingOutcome::Aborted) {
+                    out.error = "Прервано пользователем";
+                    return false;
                 }
+                if (outcome == coder::host::BlockingOutcome::TimedOut) {
+                    if (!coder::host::has_llm_chat_messages(g_api)) {
+                        /* Хост старый: блокирующего вызова у него нет. Не
+                         * «таймаут» — это правда о хосте, и притворяться
+                         * иначе означало бы искать причину не там. */
+                        out.error = "Хост не поддерживает блокирующий вызов LLM";
+                        return false;
+                    }
+                    out.error = "Таймаут LLM-вызова ("
+                              + std::to_string(timeout_ms / 1000) + " с)";
+                    return false;
+                }
+                /* Строка хоста уже освобождена в call_llm_chat_messages и
+                 * вернулась копией: ни strdup, ни free_string здесь больше
+                 * не нужны, и двойного освобождения быть не может. */
+                const std::string& body = resp;
                 std::string error_text;
-                if (!raw) {
-                    error_text = "LLM-вызов вернул null (сеть/хост)";
-                } else {
-                    std::string resp(raw);
-                    g_api->free_string(g_host, raw);
-                    if (find_int(resp, "ok") == 1) {
-                        out.content = find_str(resp, "content");
-                        out.finish_reason = find_str(resp, "finish_reason");
+                if (find_int(body, "ok") == 1) {
+                        out.content = find_str(body, "content");
+                        out.finish_reason = find_str(body, "finish_reason");
                         if (out.finish_reason.empty()) out.finish_reason = "stop";
-                        out.prompt_tokens = find_int(resp, "prompt_tokens");
-                        out.completion_tokens = find_int(resp, "completion_tokens");
-                        return true;
-                    }
-                    error_text = find_str(resp, "error");
-                    if (error_text.empty()) error_text = "LLM-ошибка (ok=0)";
+                        out.prompt_tokens = find_int(body, "prompt_tokens");
+                    out.completion_tokens = find_int(body, "completion_tokens");
+                    return true;
                 }
+                error_text = find_str(body, "error");
+                if (error_text.empty()) error_text = "LLM-ошибка (ok=0)";
 
                 if (attempt < kMaxAttempts - 1 && is_retryable_error(error_text)) {
                     std::string msg = "[retry] LLM: " + error_text

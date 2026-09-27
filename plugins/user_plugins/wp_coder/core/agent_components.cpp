@@ -810,7 +810,22 @@ bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
     std::vector<LlmEvent> events;
     const bool ok = llm_source::fetch(cb_, sys_prompt, msgs, events);
     const LlmResponse answer = llm_source::fold(events);
-    if (!ok || answer.text().empty()) return false;
+    if (!ok || answer.text().empty()) {
+        /* И6.8: хвостовой ход — тоже ход. Раньше он просто возвращал false,
+         * и задача, у которой сломался именно он, выглядела выполненной по
+         * результату основного цикла. */
+        const std::string err = answer.error().empty() ? "не ответил"
+                                                       : answer.error();
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            if (state_.outcome == TaskOutcome::None) {
+                state_.outcome = TaskOutcome::Failed;
+                state_.outcome_reason = "хвостовой ход: " + err;
+            }
+        }
+        this->push_event_(AgentEvent::Error, ("[ошибка] " + err).c_str());
+        return false;
+    }
 
     /* Ответ уходит и в результат задачи, и в историю. Раньше он шёл
      * только в результат, и вопрос «а что ты сделал?» после задачи

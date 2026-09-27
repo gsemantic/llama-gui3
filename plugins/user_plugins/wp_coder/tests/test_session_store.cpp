@@ -21,6 +21,8 @@
  */
 
 #include "test_framework.h"
+
+#include <chrono>
 #include "test_printers.h"
 #include "../core/id_prefix.h"
 #include "../core/json_utils.h"
@@ -406,8 +408,29 @@ TEST(session_current_file_breaks_ties_by_id_not_by_name) {
     const std::string ninth = (dir / "ses_000000000009.json").string();
     ASSERT_TRUE(SessionArchive::save(tenth, s, &error));
     ASSERT_TRUE(SessionArchive::save(ninth, s, &error));
-    /* Записи подряд: времена, скорее всего, равны, и выбор обязан быть
-     * детерминированным. */
+
+    /* Равенство времён ЗАДАЁТСЯ, а не предполагается.
+     *
+     * Прежде здесь стояло «времена, скорее всего, равны» — и на ФС с
+     * наносекундной точностью вторая запись получала время позже, выбор
+     * решался временем, и тест падал примерно в одном прогоне из десяти.
+     * Тест, результат которого зависит от точности файловой системы, —
+     * это не проверка развязки по номеру, а лотерея.
+     */
+    const fs::file_time_type tie =
+        fs::file_time_type::clock::now() - std::chrono::hours(1);
+    fs::last_write_time(tenth, tie, ec);
+    fs::last_write_time(ninth, tie, ec);
+    /* Сравнение через count(): ASSERT_EQ печатает значения в поток, а
+     * file_time_type печатать нечем — такая проверка просто не собралась бы. */
+    ASSERT_EQ(fs::last_write_time(tenth, ec).time_since_epoch().count(),
+              fs::last_write_time(ninth, ec).time_since_epoch().count());
+
+    ASSERT_EQ(SessionArchive::current_file(data_dir), tenth);
+
+    /* Выигрывает БОЛЬШИЙ номер, а не «тот, что попался последним при обходе
+     * каталога»: порядок directory_iterator не определён, и проверка на
+     * ничьей обязана быть устойчива к нему. */
     ASSERT_EQ(SessionArchive::current_file(data_dir), tenth);
 
     std::error_code rm;

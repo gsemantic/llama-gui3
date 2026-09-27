@@ -10,6 +10,7 @@
  * уменьшает число лишних шагов и даёт честные метрики из usage.
  */
 
+#include "abort.h"
 #include "module_api.h"
 #include "tools_registry.h"
 #include "skills_manager.h"
@@ -23,15 +24,20 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <memory>
 #include <queue>
 #include <thread>
 #include <functional>
 
 namespace coder {
 
-/* Тип события агента для лога в UI. */
+/* Тип события агента для лога в UI.
+ *
+ * И6.8: отмена и сбой — РАЗНЫЕ виды, а не один «Error». «Стоп» — это
+ * намерение пользователя, и UI обязан показать «прервано», а не «ошибка»:
+ * иначе человек, нажавший кнопку, читает о том, что у него сломалось. */
 struct AgentEvent {
-    enum Kind { Assistant, Tool, Status, Error } kind;
+    enum Kind { Assistant, Tool, Status, Error, Aborted } kind;
     std::string text;
 };
 
@@ -66,7 +72,7 @@ inline const char* kTodoStatuses[] = {"pending", "in_progress", "completed",
 inline const char* kTodoPriorities[] = {"low", "medium", "high"};
 
 /* Состояние агента (FSM, 2.3). Переходы:
- *   Idle → Planning → Executing ⇄ WaitingPermission → Done | Aborted
+ *   Idle → Planning → Executing ⇄ WaitingPermission → Done | Aborted | Error
  * Вместо разрозненных флагов running/waiting_for_permission. */
 enum class AgentState {
     Idle,               // задачи нет, worker ждёт
@@ -74,7 +80,11 @@ enum class AgentState {
     Executing,          // AgentLoop: ReAct-цикл (вызовы инструментов)
     WaitingPermission,  // ожидание решения пользователя по доступу
     Done,               // задача завершена успешно
-    Aborted             // прервано пользователем или фатальная ошибка
+    /* И6.8: отмена пользователем и сбой разведены. Раньше «фатальная ошибка»
+     * тоже попадала в Aborted, а задача, провалился без единого ответа,
+     * вообще объявлялась Done — то есть неудача выглядела как успех. */
+    Aborted,            // прервано пользователем
+    Error               // сбой: провайдер недоступен, ход пуст, инструмент упал
 };
 
 /* Человекочитаемое имя состояния (для статуса в UI). */
@@ -86,6 +96,7 @@ inline const char* agent_state_name(AgentState s) {
         case AgentState::WaitingPermission: return "Ожидание разрешения";
         case AgentState::Done:              return "Готово";
         case AgentState::Aborted:           return "Прервано";
+        case AgentState::Error:             return "Ошибка";
     }
     return "?";
 }
@@ -101,6 +112,47 @@ struct LlmReply {
 };
 
 /* Общее состояние движка (защищается mtx, кроме атомарных флагов). */
+/* И6.8: чем закончилась задача. */
+enum class TaskOutcome {
+    None = 0,   /* задача ещё идёт */
+    Completed,  /* ход завершён, ответ получен */
+    Aborted,    /* пользователь нажал «стоп» */
+    Failed      /* сбой: провайдер, пустой ход, упавший инструмент */
+};
+
+/* И6.8: названия исходов различаются, потому что по ним UI рисует строку в
+ * списке последних задач. Совпавшие строки означали бы, что «прервано» и
+ * «ошибка» выглядят одинаково, — то есть различение было бы сделано, но не
+ * показано. */
+inline const char* task_outcome_name(TaskOutcome outcome) {
+    switch (outcome) {
+        case TaskOutcome::None:      return "идёт";
+        case TaskOutcome::Completed: return "выполнено";
+        case TaskOutcome::Aborted:   return "прервано";
+        case TaskOutcome::Failed:    return "ошибка";
+    }
+    return "неизвестно";
+}
+
+/*
+ * И6.8: исход → терминальное состояние.
+ *
+ * Отдельная функция, а не переключатель внутри cleanup() в run_task: там он
+ * был на три строчки глубже лямбды, и единственный способ его проверить
+ * был — прогнать весь синглтон Engine целиком, что тест делал в первый раз:
+ * он зависал на остаточной очереди предыдущего теста. Правило вынесено,
+ * потому что его и надо проверять: «сбой не выглядит как успех».
+ */
+inline AgentState terminal_state_for(TaskOutcome outcome) {
+    switch (outcome) {
+        case TaskOutcome::Aborted: return AgentState::Aborted;
+        case TaskOutcome::Failed:  return AgentState::Error;
+        case TaskOutcome::Completed:
+        case TaskOutcome::None:    return AgentState::Done;
+    }
+    return AgentState::Done;
+}
+
 struct EngineState {
     mutable std::mutex mtx;
     std::condition_variable permission_cv;
@@ -172,6 +224,18 @@ struct EngineState {
      * worker-поток должен выйти из цикла. */
     bool shutting_down = false;
     std::atomic<bool> abort_requested{false};
+    /* И6.7: токен ОТМЕННОГО хода. Отдельный от abort_requested потому, что
+     * у отмены есть владелец и время жизни: ход начался — ход кончился.
+     * Общий флаг жил бы вечно, и отмену нельзя было бы снять, а второе
+     * нажатие «стоп» отменило бы СЛЕДУЮЩУЮ задачу. nullptr — ход без
+     * токена (тесты, служебные вызовы): отменять нечем, и это не ошибка. */
+    std::shared_ptr<AbortToken> turn_abort;
+    /* И6.8: чем закончилась задача. Одно поле вместо вывода «состояние !=
+     * Executing»: по состоянию нельзя отличить успех от сбоя, а именно
+     * это и нужно UI, и именно это терялось. */
+    TaskOutcome outcome = TaskOutcome::None;
+    /* Почему — одной строкой для показа пользователю и для лога. */
+    std::string outcome_reason;
     std::vector<PendingWrite> pending;
     std::string last_agent_task;
 
@@ -261,6 +325,45 @@ struct HostCallbacks {
     std::function<bool(const std::string& sys_prompt,
                        const std::string& user_prompt,
                        std::string& resp)> llm_complete;
+
+    /*
+     * LLM: потоковый запрос (И6.4). Слот заполняется, только если у хоста
+     * есть поле llm_chat_stream (проба в ll_plugin_init), иначе остаётся
+     * пустым — и это НЕ ошибка: хост старый, и вызывающий обязан уйти на
+     * блокирующий llm_chat. Типы здесь только std::function: ядро плагина
+     * от ABI хоста не зависит (D-7), мост живёт в src/llm_stream_shim.cpp.
+     *
+     * Вызов возвращает false, если хост не умеет стриминг ИЛИ поток не
+     * запустился; тогда on_done НЕ зовётся. Иначе on_done придёт ровно
+     * один раз, и до него колбэки ещё будут приходить.
+     *
+     * kind в on_delta: 0 = текст, 1 = «размышление» (LLAMA_STREAM_DELTA_*).
+     */
+    std::function<bool(const std::string& sys_prompt,
+                       const std::vector<ModelMessage>& messages,
+                       const std::string& request_json,
+                       /* handle этого потока (И6.6). Сообщается ДО входа в
+                        * хоста, потому что отменять можно только живой
+                        * поток. handle перестаёт быть действительным после
+                        * on_done, и отмена старого handle обязана быть
+                        * безвредной, а не аварийной. */
+                       std::function<void(void* handle)> on_started,
+                       std::function<void(const char* text, int kind)> on_delta,
+                       std::function<void(const char* call_id,
+                                          const char* tool_name,
+                                          const char* fragment)> on_tool_delta,
+                       std::function<void(const std::string& result_json)> on_done)> llm_chat_stream;
+
+    /*
+     * И6.6: прервать ЖИВОЙ поток. handle — тот же, что передан в
+     * llm_chat_stream; второго идентификатора быть не может, иначе отмена
+     * не найдёт свой поток и тихо ничего не сделает.
+     *
+     * Слот пуст, если хост старый (нет поля в ABI) — тогда отмена означает
+     * «перестать ждать», а не «остановить генерацию», и это различие
+     * названо прямо в llm_client.h.
+     */
+    std::function<void(void* handle)> llm_chat_cancel;
 
     /* Проверка подключения LLM. */
     std::function<bool()> llm_is_connected;

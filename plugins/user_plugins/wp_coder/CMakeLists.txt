@@ -37,6 +37,7 @@ set(CORE_SOURCES
     core/agent_components.cpp
     core/llm_event.cpp
     core/llm_source.cpp
+    core/llm_client.cpp
     core/message.cpp
     core/id_prefix.cpp
     core/session_store.cpp
@@ -67,11 +68,23 @@ set(UI_SOURCES
     ui/coder_window.cpp
 )
 
+# --- Мост к ABI хоста (host_bridge) ---
+# Единственное место в плагине, которому законно знать про LlamaHostApi.
+# Лежит отдельно от src/ (там только точка входа, правило из И0.9) и
+# отдельно от core/ (D-7: ядро от хоста не зависит). Проверяется тестом
+# test_manifest_consistency.cpp: core/ не включает plugins/plugin_api.h.
+set(HOST_BRIDGE_SOURCES
+    host_bridge/llm_stream_probe.cpp
+    host_bridge/llm_stream_shim.cpp
+    host_bridge/llm_blocking.cpp
+)
+
 # --- Плагин (.so) ---
 add_library(wp_coder SHARED
     ${MODULE_SOURCES}
     ${UI_SOURCES}
     src/plugin_main.cpp
+    ${HOST_BRIDGE_SOURCES}
 )
 
 target_include_directories(wp_coder PRIVATE
@@ -175,6 +188,13 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_output_truncation.cpp
         tests/test_llm_events.cpp
         tests/test_llm_source.cpp
+        tests/test_llm_client.cpp
+        tests/test_llm_stream_abi.cpp
+        tests/test_llm_blocking.cpp
+        tests/test_shell_cancel.cpp
+        tests/test_terminal_outcomes.cpp
+        tests/test_paths_parity.cpp
+        ${HOST_BRIDGE_SOURCES}
         tests/test_message.cpp
         tests/test_session_store.cpp
         tests/test_iteration_iv_invariants.cpp
@@ -190,6 +210,7 @@ if(WP_CODER_BUILD_TESTS)
     )
     target_include_directories(wp_coder_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/host_bridge
         ${PROJECT_ROOT}/include
         ${PROJECT_ROOT}/libs/headless_browser/include
     )

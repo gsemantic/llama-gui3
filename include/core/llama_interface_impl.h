@@ -25,6 +25,9 @@ namespace impl {
     using ChatCompletionResponse = llama_gui::core::ChatCompletionResponse;
     using EmbeddingRequest = llama_gui::core::EmbeddingRequest;
     using EmbeddingResponse = llama_gui::core::EmbeddingResponse;
+    /* И6.6: отмена одного потока приходит снаружи (плагин), а живёт в core —
+     * потому что ею пользуется сам curl-поток хоста. */
+    using StreamCancel = llama_gui::core::StreamCancel;
 }
 
 /**
@@ -103,7 +106,9 @@ public:
     json get_slots_status() const;
 
     // Chat completion
-    void create_chat_completion_streaming(const ChatCompletionRequest& request, StreamCallback callback);
+    void create_chat_completion_streaming(const ChatCompletionRequest& request,
+                                          StreamCallback callback,
+                                          StreamCancel* cancel = nullptr);
     std::future<ChatCompletionResponse> create_chat_completion_async(const ChatCompletionRequest& request);
 
     // Embedding
@@ -179,10 +184,31 @@ private:
     
     // Slot management
     std::atomic<int> next_slot_id_{0};
+
+    /*
+     * И6.2: что умеет сервер. Хранится как int, потому что atomic не
+     * работает с перечислением без перегрузки. Unknown означает «проверяем
+     * ещё» и НЕ кэшируется: см. classify_tools_response — сетевой сбой не
+     * должен выключать нативный вызов навсегда.
+     */
+    std::atomic<int> tools_support_{static_cast<int>(ToolsSupport::Unknown)};
     
     // Internal methods
     void initialize_curl();
     void cleanup_curl();
+
+    /*
+     * Запомнить вывод о поддержке tools. Unknown НЕ запоминается: иначе
+     * один сетевой сбой навсегда переводил бы сервер в «не умеет», и агент
+     * молча ушёл бы на текстовый протокол вызова инструмента.
+     */
+    void remember_tools_support(ToolsSupport support);
+
+    // Что сервер умеет (И6.2) — для вызывающего, который решает, слать ли
+    // tools. Unknown означает «ещё не проверено», а не «не умеет».
+    ToolsSupport tools_support() const {
+        return static_cast<ToolsSupport>(tools_support_.load());
+    }
     
     // Slot operations
     bool save_slot_kv_cache_impl(int slot_id, const std::string& filename);

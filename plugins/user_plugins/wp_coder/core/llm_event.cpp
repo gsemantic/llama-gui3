@@ -179,6 +179,16 @@ const char* llm_event_kind_name(LlmEventKind kind) {
     return "unknown";
 }
 
+const char* failure_kind_name(FailureKind kind) {
+    switch (kind) {
+        case FailureKind::None:     return "нет";
+        case FailureKind::Provider: return "провайдер";
+        case FailureKind::Tool:     return "инструмент";
+        case FailureKind::Aborted:  return "прервано";
+    }
+    return "неизвестно";
+}
+
 /* --- Фабрики --- */
 
 LlmEvent LlmEvent::step_start() {
@@ -552,6 +562,13 @@ void LlmResponse::reduce(LlmResponse& state, const LlmEvent& event) {
             c->error = event.error();
             c->finished = true;
             c->failed = true;
+            /* И6.8: упавший инструмент — это тоже сбой хода, но не
+             * провайдера. Разница видна пользователю: отказ провайдера
+             * повторяют, упавший инструмент — смотрят, что он писал в
+             * ответе. */
+            if (state.failure_ == FailureKind::None) {
+                state.failure_ = FailureKind::Tool;
+            }
             break;
         }
 
@@ -579,6 +596,11 @@ void LlmResponse::reduce(LlmResponse& state, const LlmEvent& event) {
 
         case LlmEventKind::ProviderError:
             state.error_ = event.error();
+            /* И6.8: вид сбоя ставится ЗДЕСЬ, тем же событием, что и текст.
+             * Классифицировать текст ошибки в другом месте означало бы
+             * второй разбор того же самого — и рано или поздно он разошёлся
+             * бы с событием (например, «429» в сообщении пользователя). */
+            state.failure_ = FailureKind::Provider;
             break;
 
         case LlmEventKind::kCount:

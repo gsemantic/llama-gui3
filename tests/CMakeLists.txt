@@ -89,6 +89,43 @@ if(ENABLE_LLAMA_BENCH)
 endif()
 add_test(NAME UiAuditor COMMAND test_ui_auditor)
 
+# Chat request tests: тело POST /v1/chat/completions и вывод о поддержке
+# tools (И6.2). Обе функции чистые — ни сети, ни состояния.
+add_executable(test_chat_request core/test_chat_request.cpp)
+target_link_libraries(test_chat_request PRIVATE core nlohmann_json::nlohmann_json)
+target_include_directories(test_chat_request PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME ChatRequest COMMAND test_chat_request)
+
+# AST symbols tests: символы файла для плагина (И6.3). Словарь видов и формат
+# проверяются без грамматик; сквозная проверка — только при TREE_SITTER_FOUND.
+add_executable(test_ast_symbols core/test_ast_symbols.cpp)
+target_link_libraries(test_ast_symbols PRIVATE plugin_core core nlohmann_json::nlohmann_json)
+target_include_directories(test_ast_symbols PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+# Link grammar libraries BEFORE tree-sitter (linker resolves left-to-right)
+if(TREE_SITTER_FOUND)
+    foreach(LANG c cpp python rust)
+        string(TOUPPER ${LANG} LANG_UPPER)
+        if(TREE_SITTER_${LANG_UPPER}_FOUND)
+            target_link_libraries(test_ast_symbols PRIVATE ${TREE_SITTER_${LANG_UPPER}_LIBRARY})
+        endif()
+    endforeach()
+    target_link_libraries(test_ast_symbols PRIVATE tree-sitter)
+    target_compile_definitions(test_ast_symbols PRIVATE TREE_SITTER_FOUND=1)
+endif()
+add_test(NAME AstSymbols COMMAND test_ast_symbols)
+
+# LLM stream bridge tests: раскладка чанков провайдера на колбэки плагина.
+# Мост чистый (сети нет), поэтому проверяется без PluginManager и сервера.
+add_executable(test_llm_stream_bridge core/test_llm_stream_bridge.cpp
+    ${CMAKE_SOURCE_DIR}/src/plugins/llm_stream_bridge.cpp)
+target_link_libraries(test_llm_stream_bridge PRIVATE plugin_core nlohmann_json::nlohmann_json)
+target_include_directories(test_llm_stream_bridge PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+add_test(NAME LlmStreamBridge COMMAND test_llm_stream_bridge)
+
 # Plugin loader tests (loads build/plugins/libhello_plugin.so via PluginManager)
 if(BUILD_PLUGINS)
     add_executable(test_plugin_loader core/test_plugin_loader.cpp)
@@ -117,6 +154,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_plugin_loader test_menu_restore test_ui_auditor
+    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_llm_stream_bridge test_plugin_loader test_menu_restore test_ui_auditor
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

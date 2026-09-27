@@ -219,6 +219,54 @@ TEST(src_dir_contains_only_entry_point_and_readme) {
     ASSERT_EQ(cpp_count, 1);
 }
 
+TEST(core_does_not_depend_on_the_host_abi) {
+    /* D-7: wp_coder_core от хоста не зависит, только колбэки. Проза не
+     * работает — работает проверка: она ищет include host-заголовка в core/.
+     *
+     * Исключение ОДНО и названное: host_bridge/ — мост к ABI, которому
+     * законно знать про LlamaHostApi (проба полей, проброс колбэков).
+     * Именно поэтому он вынесен в отдельный каталог, а не положен в core/:
+     * исключение с именем можно обсудить, а размытое «ну почти» — нет.
+     * Если в core/ начнёт проникать plugin_api.h, это перестанет быть
+     * Проверяются core/ и modules/ — те группы, что собираются в
+     * wp_coder_core и не должны знать про ABI. ui/ исключён не по
+     * недосмотру: окна плагина обязаны обращаться к хосту (видимость
+     * окна — g_api->window_set_visible), и это их прямая работа. D-7 и
+     * говорила про wp_coder_core, а не про весь плагин.
+     * мостом и станет зависимостью ядра от хоста. */
+    for (const char* sub : {"core", "modules"}) {
+        const fs::path dir = plugin_root() / sub;
+        if (!fs::exists(dir)) continue;
+        for (const auto& e : fs::recursive_directory_iterator(dir)) {
+            if (!e.is_regular_file()) continue;
+            const std::string ext = e.path().extension().string();
+            if (ext != ".cpp" && ext != ".h") continue;
+            const std::string body = read_file(e.path());
+            if (body.find("plugins/plugin_api.h") == std::string::npos) continue;
+            std::cerr << "  " << sub << "/ знает про ABI хоста: "
+                      << e.path().filename().string()
+                      << " (мост обязан жить в host_bridge/)" << std::endl;
+            ASSERT_TRUE(false);
+        }
+    }
+}
+
+TEST(host_bridge_is_the_only_place_that_knows_the_host_abi) {
+    /* Обратная сторона предыдущей проверки: мост существует и компилируется.
+     * Без неё проверка «в core/ чисто» прошла бы и при полном отсутствии
+     * моста — то есть была бы зелёной вхолостую. */
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_probe.h"));
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_probe.cpp"));
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_shim.h"));
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_shim.cpp"));
+
+    /* И мост обязан знать: иначе это просто пустой каталог с красивым
+     * именем, а знание об ABI осталось бы в plugin_main.cpp. */
+    const std::string probe =
+        read_file(plugin_root() / "host_bridge" / "llm_stream_probe.cpp");
+    ASSERT_TRUE(probe.find("LlamaHostApi") != std::string::npos);
+}
+
 TEST(no_removed_symbols_in_sources) {
     /* Удалённый код ссылался на несуществующий ABI. Эти имена не должны
      * появляться снова: их нет ни в одном заголовке проекта. */

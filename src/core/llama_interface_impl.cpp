@@ -1,4 +1,6 @@
 #include "../include/core/llama_interface_impl.h"
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -10,7 +12,178 @@ namespace fs = std::filesystem;
 
 namespace llama_gui {
 namespace core {
+
+ToolsSupport classify_tools_response(long http_code, const std::string& body)
+{
+    const bool ok = (http_code >= 200 && http_code < 300);
+    if (ok) return ToolsSupport::Supported;
+
+    /* Главное правило функции: код 0 (не получили ответ вовсе) и любой код
+     * вне списка ниже — это Unknown, а НЕ Rejected. Один сетевой сбой не
+     * должен навсегда выключить нативный вызов: агент поехал бы по
+     * текстовому протоколу и не сказал бы об этом. Поэтому маркеры
+     * ищутся ТОЛЬКО в кодах, где сервер осмысленно отказал, и никогда —
+     * в теле, которое пришло без кода. */
+    if (http_code == 400 || http_code == 422 || http_code == 501) {
+        /* Маркеры обязаны быть в нижнем регистре: тело приводится к нему
+         * для сравнения, и маркер в исходном виде не нашёлся бы НИКОГДА —
+         * то есть отказ сервера молча считался бы неизвестным, и tools
+         * слались бы снова и снова. */
+        static const char* kMarkers[] = {
+            "tools param", "tool_choice", "tool_calls",
+            "unsupported tool", "invalid tool", "tools are not", "no tools"
+        };
+        std::string lower = body;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+        for (const char* marker : kMarkers) {
+            if (lower.find(marker) != std::string::npos) return ToolsSupport::Rejected;
+        }
+    }
+    return ToolsSupport::Unknown;
+}
+
+std::vector<ToolCall> parse_tool_calls(const json& array)
+{
+    std::vector<ToolCall> out;
+    if (!array.is_array()) return out;
+    for (const auto& c : array) {
+        if (!c.is_object()) continue;
+        ToolCall call;
+        call.id = c.value("id", "");
+        call.type = c.value("type", "function");
+        if (c.contains("function") && c["function"].is_object()) {
+            call.name = c["function"].value("name", "");
+            /* arguments приходит строкой и может быть неполным — поэтому
+             * как есть, без попытки разобрать. */
+            call.arguments = c["function"].value("arguments", "");
+        }
+        if (call.name.empty()) continue;
+        out.push_back(std::move(call));
+    }
+    return out;
+}
+
+json build_chat_body(const ChatCompletionRequest& request, bool stream)
+{
+    json body;
+    body["model"] = request.model;
+    body["stream"] = stream;
+    body["max_tokens"] = request.max_tokens;
+    body["temperature"] = request.temperature;
+    body["top_p"] = request.top_p;
+
+    json messages = json::array();
+    for (const auto& msg : request.messages) {
+        json m;
+        switch (msg.role) {
+            case MessageRole::User:      m["role"] = "user"; break;
+            case MessageRole::Assistant: m["role"] = "assistant"; break;
+            case MessageRole::System:    m["role"] = "system"; break;
+        }
+        m["content"] = msg.content;
+        /* Вызовы едут в теле реплики ассистента: без них модель не видит,
+         * что она уже вызывала инструмент, и на следующем шаге вызовет
+         * его снова. */
+        if (!msg.tool_calls.empty()) {
+            json calls = json::array();
+            for (const auto& call : msg.tool_calls) {
+                json c;
+                c["id"] = call.id;
+                c["type"] = call.type.empty() ? "function" : call.type;
+                c["function"]["name"] = call.name;
+                c["function"]["arguments"] = call.arguments;
+                calls.push_back(std::move(c));
+            }
+            m["tool_calls"] = std::move(calls);
+        }
+        messages.push_back(std::move(m));
+    }
+    body["messages"] = std::move(messages);
+
+    /* Дальше — только то, что отличается от нейтрального. Пробел в
+     * значении здесь не «мы не знаем», а «здесь нужны настройки сервера»,
+     * и его ставят явно (см. объявление). */
+    if (request.top_k != 0)          body["top_k"] = request.top_k;
+    if (request.min_p != 0.0f)       body["min_p"] = request.min_p;
+    if (request.repeat_penalty != 1.0f) body["repeat_penalty"] = request.repeat_penalty;
+    if (request.presence_penalty != 0.0f)  body["presence_penalty"] = request.presence_penalty;
+    if (request.frequency_penalty != 0.0f) body["frequency_penalty"] = request.frequency_penalty;
+    if (request.mirostat_mode != 0) {
+        body["mirostat"] = request.mirostat_mode;
+        body["mirostat_tau"] = request.mirostat_tau;
+        body["mirostat_eta"] = request.mirostat_eta;
+    }
+    if (!request.stop.empty()) body["stop"] = request.stop;
+    if (!request.grammar.empty()) body["grammar"] = request.grammar;
+
+    /* И6.2: поля уходят только когда их наполнили. Пустой tools означает
+     * «сервер ничего не узнает», а не «сервер не умеет» — иначе каждый
+     * запрос без инструментов рисковал бы получить 400. */
+    if (!request.tools.empty()) {
+        json tools = json::array();
+        for (const auto& t : request.tools) {
+            json fn;
+            fn["name"] = t.name;
+            if (!t.description.empty()) fn["description"] = t.description;
+            fn["parameters"] = t.parameters.is_null()
+                ? json{{"type", "object"}, {"properties", json::object()}}
+                : t.parameters;
+            json entry;
+            entry["type"] = t.type.empty() ? "function" : t.type;
+            entry["function"] = std::move(fn);
+            tools.push_back(std::move(entry));
+        }
+        body["tools"] = std::move(tools);
+        if (!request.tool_choice.empty()) body["tool_choice"] = request.tool_choice;
+    }
+    if (!request.response_format.type.empty()) {
+        if (request.response_format.schema.is_null()) {
+            body["response_format"] = json{{"type", request.response_format.type}};
+        } else {
+            body["response_format"] = json{
+                {"type", request.response_format.type},
+                {"json_schema", request.response_format.schema}};
+        }
+    }
+    return body;
+}
+
+} // namespace core
+} // namespace llama_gui
+
+namespace llama_gui {
+namespace core {
 namespace impl {
+
+using llama_gui::core::build_chat_body;
+using llama_gui::core::classify_tools_response;
+using llama_gui::core::parse_tool_calls;
+
+namespace {
+
+/* Текст ошибки из тела ответа: у llama-server это {"error":{"message":...}},
+ * у облака — {"error":"..."}. Оба приходят на 4xx/5xx, и раньше код
+ * ответа отбрасывался целиком. */
+std::string error_text_from_body(const std::string& body, long http_code)
+{
+    if (body.empty()) return "HTTP " + std::to_string(http_code);
+    try {
+        const json j = json::parse(body);
+        if (j.contains("error")) {
+            if (j["error"].is_string()) return j["error"].get<std::string>();
+            if (j["error"].is_object() && j["error"].contains("message")) {
+                return j["error"]["message"].get<std::string>();
+            }
+        }
+    } catch (const std::exception&) {
+        /* Не JSON — отдаём как есть, ограничив длину: тело на 500 может
+         * быть простынёй, и в ошибку агента она не должна уходить целиком. */
+    }
+    return body.size() > 500 ? body.substr(0, 500) : body;
+}
+
+} // namespace
 
 using json = nlohmann::json;
 
@@ -40,8 +213,24 @@ LlamaInterfaceImpl::~LlamaInterfaceImpl()
 
 bool impl::LlamaInterfaceImpl::initialize(const std::string& server_url)
 {
+    /* Смена адреса — смена сервера, а значит и его возможностей. Оставленный
+     * прошлый вывод «tools не умеет» выключил бы нативный вызов у нового
+     * сервера, который их умеет, и это молча уехало бы в текстовый
+     * протокол. */
+    if (server_url_ != server_url) {
+        tools_support_.store(static_cast<int>(ToolsSupport::Unknown));
+    }
     server_url_ = server_url;
     return is_server_healthy();
+}
+
+void impl::LlamaInterfaceImpl::remember_tools_support(ToolsSupport support)
+{
+    /* Unknown не запоминается намеренно: сетевой сбой или нечитаемый ответ
+     * — это отсутствие данных, а не доказательство неумения. Запомнив его,
+     * мы одним сбоем навсегда перевели бы агента на текстовый протокол. */
+    if (support == ToolsSupport::Unknown) return;
+    tools_support_.store(static_cast<int>(support));
 }
 
 void impl::LlamaInterfaceImpl::apply_ssl_options(CURL* curl) const
@@ -116,43 +305,21 @@ llama_gui::core::json llama_gui::core::impl::LlamaInterfaceImpl::get_slots_statu
 
 void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
     const ChatCompletionRequest& request,
-    StreamCallback callback)
+    StreamCallback callback,
+    StreamCancel* cancel)
 {
-    // Build JSON request body
-    json body;
-    body["model"] = request.model;
-    body["stream"] = true;
-    body["max_tokens"] = request.max_tokens;
-    body["temperature"] = request.temperature;
-    body["top_p"] = request.top_p;
-    body["top_k"] = request.top_k;
-    body["min_p"] = request.min_p;
-    body["repeat_penalty"] = request.repeat_penalty;
-    body["presence_penalty"] = request.presence_penalty;
-    body["frequency_penalty"] = request.frequency_penalty;
-    body["mirostat"] = request.mirostat_mode;
-    body["mirostat_tau"] = request.mirostat_tau;
-    body["mirostat_eta"] = request.mirostat_eta;
-
-    // Build messages array
-    json messages = json::array();
-    for (const auto& msg : request.messages) {
-        json m;
-        switch (msg.role) {
-            case MessageRole::User:      m["role"] = "user"; break;
-            case MessageRole::Assistant: m["role"] = "assistant"; break;
-            case MessageRole::System:    m["role"] = "system"; break;
-        }
-        m["content"] = msg.content;
-        messages.push_back(m);
-    }
-    body["messages"] = messages;
-
-    if (!request.stop.empty()) {
-        body["stop"] = request.stop;
+    /* И6.2. Известный отказ в tools не отправляется вовсе: один пробный
+     * запрос без них ушёл бы, а каждый следующий — уже знал бы. Неизвестное
+     * состояние отправляет как есть: иначе сервер, умеющий tools, никогда
+     * не был бы проверен. */
+    ChatCompletionRequest effective = request;
+    if (!request.tools.empty() &&
+        tools_support_.load() == static_cast<int>(ToolsSupport::Rejected)) {
+        effective.tools.clear();
+        effective.tool_choice.clear();
     }
 
-    std::string post_fields = body.dump();
+    std::string post_fields = build_chat_body(effective, true).dump();
     std::string url = server_url_ + "/v1/chat/completions";
 
     streaming_active_ = true;
@@ -167,7 +334,7 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
     }
 
     // Run streaming request in a separate thread to not block UI
-    std::thread([this, url, post_fields, stream_data, callback]() {
+    std::thread([this, url, post_fields, stream_data, callback, effective, cancel]() {
         CURL* curl = curl_easy_init();
         if (!curl) {
             std::cerr << "[LlamaInterface] Failed to init curl for streaming" << std::endl;
@@ -198,20 +365,36 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
             StreamCallback callback;
             std::string line_buffer;
             std::shared_ptr<StreamingData> stream_data;
+            /* И6.2: сколько чанков реально дошло. Ноль означает, что ответ
+             * не начался, и потому отказ сервера можно отличить от потока,
+             * который уже идёт, и повторить запрос без tools. */
+            int chunks_delivered = 0;
+            /* Тело ответа при отказе: код 400 приходит с JSON, а не с SSE,
+             * и без него причина отказа не читается. */
+            std::string raw_body;
+            /* И6.6: отмена по требованию. Живой указатель: он действует, пока
+             * идёт поток, и владелец (плагин) держит флаг дольше вызова. */
+            StreamCancel* cancel = nullptr;
         };
 
         StreamContext ctx;
         ctx.callback = callback;
         ctx.stream_data = stream_data;
+        ctx.cancel = cancel;
 
         // Progress-callback прерывает запрос ещё на этапе соединения (до данных)
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
             +[](void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
                 auto* sc = static_cast<StreamContext*>(clientp);
-                if (sc && sc->stream_data->completed.load()) {
+                if (sc == nullptr) return 0;
+                if (sc->stream_data->completed.load()) {
                     return 1; // Немедленно прервать transfer
                 }
+                /* И6.6: отмена прерывает и попытку соединения — иначе поток,
+                 * который ещё не начал передаваться, дождался бы её начала,
+                 * и пользователь увидел бы «Стоп не сработал». */
+                if (sc->cancel && sc->cancel->requested()) return 1;
                 return 0;
             });
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
@@ -221,14 +404,22 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
                 size_t total = size * nmemb;
                 auto* sc = static_cast<StreamContext*>(userdata);
 
-                // Если запрос остановлен пользователем — прерываем передачу,
-                // чтобы сервер перестал генерировать. Возврат значения,
-                // отличного от total, заставляет curl завершить transfer.
-                if (sc->stream_data->completed.load()) {
+                // Если запрос остановлен пользователем ИЛИ пришла отмена по
+                // требованию — прерываем передачу, чтобы сервер перестал
+                // генерировать. Возврат значения, отличного от total,
+                // заставляет curl завершить transfer, и llama-server теряет
+                // клиента и освобождает слот. Без этого «Стоп» останавливал
+                // бы только чтение, а генерация продолжала жечь токены.
+                if (sc->stream_data->completed.load() ||
+                    (sc->cancel && sc->cancel->requested())) {
                     return 0;
                 }
 
                 sc->line_buffer.append(ptr, total);
+                /* Копия тела держится только до конца запроса и нужна лишь
+                 * для чтения причины отказа, поэтому ограничена: на 500
+                 * сервер может прислать простыню. */
+                if (sc->raw_body.size() < 4096) sc->raw_body.append(ptr, total);
 
                 // Process complete SSE lines
                 while (true) {
@@ -255,6 +446,7 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
                     // Pass the raw JSON data to the callback
                     // (the caller's callback expects to parse it itself)
                     sc->callback(data, false);
+                    ++sc->chunks_delivered;
 
                     // Повторно проверяем флаг остановки после обработки чанка
                     if (sc->stream_data->completed.load()) {
@@ -267,10 +459,45 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
 
         CURLcode res = curl_easy_perform(curl);
 
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
         if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
             std::cerr << "[LlamaInterface] Streaming curl error: "
                       << curl_easy_strerror(res) << std::endl;
         }
+
+        /* И6.2: отказ именно из-за tools и ни одного доставленного чанка —
+         * повторяем запрос без них и запоминаем. Повтор делается здесь, а не
+         * отдельным запросом-зондом: зонд стоил бы токены на ровно том же
+         * сервере, который и так должен ответить. Ограничение «ни одного
+         * чанка» не формальность: начатый поток отказом быть не может, а
+         * повтор после доставки продублировал бы текст пользователю. */
+        const ToolsSupport support = classify_tools_response(http_code, ctx.raw_body);
+        if (support == ToolsSupport::Rejected && ctx.chunks_delivered == 0 &&
+            !effective.tools.empty() &&
+            tools_support_.load() != static_cast<int>(ToolsSupport::Rejected)) {
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            /* Снимаем регистрацию до повтора: иначе список потоков рос бы на
+             * каждом отказе, и следующая остановка гасила бы вчерашний. */
+            {
+                std::lock_guard<std::mutex> lock(streaming_mutex_);
+                for (auto it = active_streams_.begin(); it != active_streams_.end(); ++it) {
+                    if (it->get() == stream_data.get()) {
+                        active_streams_.erase(it);
+                        break;
+                    }
+                }
+            }
+            streaming_active_ = false;
+            std::cerr << "[LlamaInterface] Server rejected tools ("
+                      << error_text_from_body(ctx.raw_body, http_code)
+                      << ") - retrying without them" << std::endl;
+            create_chat_completion_streaming(effective, callback);
+            return;
+        }
+        if (!effective.tools.empty()) remember_tools_support(support);
 
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
@@ -286,6 +513,14 @@ void impl::LlamaInterfaceImpl::create_chat_completion_streaming(
             }
         }
 
+        /* Отказ сервера виден в логе, а не выглядит пустым ответом: мост
+         * отличит его от короткого ответа по отсутствию закрывающего
+         * finish_reason, но текст причины нужен и ему. */
+        if (http_code != 0 && (http_code < 200 || http_code >= 300)) {
+            std::cerr << "[LlamaInterface] Streaming HTTP " << http_code << ": "
+                      << error_text_from_body(ctx.raw_body, http_code) << std::endl;
+        }
+
         // Signal completion (is_final). Если остановлено пользователем,
         // ChatInterface сам добавит частичный ответ — здесь не дублируем.
         callback("", true);
@@ -298,38 +533,26 @@ std::future<ChatCompletionResponse> impl::LlamaInterfaceImpl::create_chat_comple
 {
     auto promise = std::make_shared<std::promise<ChatCompletionResponse>>();
 
-    // Build JSON request body
-    json body;
-    body["model"] = request.model;
-    body["stream"] = false;
-    body["max_tokens"] = request.max_tokens;
-    body["temperature"] = request.temperature;
-    body["top_p"] = request.top_p;
-    body["top_k"] = request.top_k;
-
-    json messages = json::array();
-    for (const auto& msg : request.messages) {
-        json m;
-        switch (msg.role) {
-            case MessageRole::User:      m["role"] = "user"; break;
-            case MessageRole::Assistant: m["role"] = "assistant"; break;
-            case MessageRole::System:    m["role"] = "system"; break;
-        }
-        m["content"] = msg.content;
-        messages.push_back(m);
+    /* И6.2: тот же отказ, что и в потоковом пути, и то же решение — убрать
+     * tools и повторить один раз, а не падать и не «успешно» вернуть
+     * пустой ответ. */
+    ChatCompletionRequest effective = request;
+    if (!request.tools.empty() &&
+        tools_support_.load() == static_cast<int>(ToolsSupport::Rejected)) {
+        effective.tools.clear();
+        effective.tool_choice.clear();
     }
-    body["messages"] = messages;
 
-    std::string post_fields = body.dump();
+    std::string post_fields = build_chat_body(effective, false).dump();
     std::string url = server_url_ + "/v1/chat/completions";
 
-    std::thread([this, url, post_fields, promise]() {
+    std::thread([this, url, post_fields, promise, effective]() {
         CURL* curl = curl_easy_init();
         ChatCompletionResponse response;
 
         if (!curl) {
-            response.choices.push_back({});
-            response.choices[0].finish_reason = "error";
+            response.ok = false;
+            response.error = "не удалось создать curl-соединение";
             promise->set_value(response);
             return;
         }
@@ -361,7 +584,30 @@ std::future<ChatCompletionResponse> impl::LlamaInterfaceImpl::create_chat_comple
 
         CURLcode res = curl_easy_perform(curl);
 
-        if (res == CURLE_OK) {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        response.http_code = http_code;
+
+        if (!effective.tools.empty()) {
+            const ToolsSupport support = classify_tools_response(http_code, response_body);
+            if (support == ToolsSupport::Rejected &&
+                tools_support_.load() != static_cast<int>(ToolsSupport::Rejected)) {
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+                std::cerr << "[LlamaInterface] Server rejected tools ("
+                          << error_text_from_body(response_body, http_code)
+                          << ") - retrying without them" << std::endl;
+                /* Повтор уходит отдельным запросом, а не циклом: вложенность
+                 * дала бы вторую попытку с tools, а она уже доказала своё. */
+                promise->set_value(create_chat_completion_async(effective).get());
+                return;
+            }
+            remember_tools_support(support);
+        }
+
+        const bool http_ok = (http_code >= 200 && http_code < 300);
+
+        if (res == CURLE_OK && http_ok) {
             try {
                 auto j = nlohmann::json::parse(response_body);
                 if (j.contains("choices") && !j["choices"].empty()) {
@@ -372,6 +618,13 @@ std::future<ChatCompletionResponse> impl::LlamaInterfaceImpl::create_chat_comple
                         response.choices.push_back({});
                         response.choices[0].message.content = choice["message"].value("content", "");
                         response.choices[0].message.role = MessageRole::Assistant;
+                        /* И6.2: нативный вызов. Пока его не читать, ход с
+                         * вызовом выглядел бы пустым ответом, и цикл закрыл
+                         * бы задачу, не выполнив инструмент. */
+                        if (choice["message"].contains("tool_calls")) {
+                            response.choices[0].message.tool_calls =
+                                parse_tool_calls(choice["message"]["tool_calls"]);
+                        }
                         response.choices[0].finish_reason = choice.value("finish_reason", "stop");
                     }
                 }
@@ -381,11 +634,24 @@ std::future<ChatCompletionResponse> impl::LlamaInterfaceImpl::create_chat_comple
                 }
             } catch (const std::exception& e) {
                 std::cerr << "[LlamaInterface] JSON parse error: " << e.what() << std::endl;
+                response.ok = false;
+                response.error = std::string("не удалось разобрать ответ сервера: ") + e.what();
             }
         } else {
-            std::cerr << "[LlamaInterface] Async request failed: " << curl_easy_strerror(res) << std::endl;
-            response.choices.push_back({});
-            response.choices[0].finish_reason = "error";
+            /* И6.2: отказ сервера больше не выглядит как пустой ответ. Раньше
+             * здесь ставился finish_reason="error" при пустом content, и
+             * вызывающий не мог отличить «сервер отказал» от «модель молчит»
+             * — а на этом выводе строилась бы неверная догадка про tools. */
+            if (res != CURLE_OK) {
+                response.error = std::string("ошибка соединения: ") + curl_easy_strerror(res);
+                std::cerr << "[LlamaInterface] Async request failed: "
+                          << curl_easy_strerror(res) << std::endl;
+            } else {
+                response.error = error_text_from_body(response_body, http_code);
+                std::cerr << "[LlamaInterface] Async HTTP " << http_code << ": "
+                          << response.error << std::endl;
+            }
+            response.ok = false;
         }
 
         curl_slist_free_all(headers);

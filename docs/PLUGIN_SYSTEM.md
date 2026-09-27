@@ -137,7 +137,8 @@ LLAMA_PLUGIN_EXPORT void ll_plugin_render(void) {
 | Диалоги | `dialog_info`, `dialog_warning`, `dialog_error`, `dialog_confirmation` | Модальные диалоги |
 | Настройки | `settings_get`, `settings_set` | Persist в settings.ini, значения — JSON-строки |
 | Состояние | `state_get`, `state_set` | In-memory хранилище плагинов |
-| Чат / LLM | `chat_send_message`, `chat_add_message`, `llm_is_connected`, `llm_complete` | Отправка сообщений, блокирующее завершение |
+| Чат / LLM | `chat_send_message`, `chat_add_message`, `llm_is_connected`, `llm_complete`, `llm_chat_messages`, `llm_chat_stream` | Отправка сообщений, блокирующее и потоковое завершение |
+| Символы | `llm_ast_symbols` | Символы файла через tree-sitter хоста |
 | RAG | `rag_search`, `rag_process_document`, `rag_embedding`, `rag_index_count`, `rag_build_prompt` | Гибридный поиск, индексация, эмбеддинги |
 | Пути | `path_config_dir`, `path_data_dir`, `path_plugins_dir` | Директории приложения |
 | Освобождение | `free_string`, `free_float_array` | Освобождение памяти хоста |
@@ -147,6 +148,51 @@ LLAMA_PLUGIN_EXPORT void ll_plugin_render(void) {
 - `chat_send_message(message)` — отправляет сообщение так, как если бы его ввёл пользователь (проходит полный конвейер `send_message`, включая проверку загрузки модели).
 - `chat_add_message(role, content)` — добавляет сообщение напрямую в историю без запуска конвейера. `role`: `"user"` или `"assistant"`.
 - `llm_complete(prompt, &out)` — **блокирующий** вызов; возвращает 1 при успехе и заполняет `*out` строкой (освободить через `free_string`). Если локальный сервер недоступен, хост автоматически отправляет запрос подключённому облачному провайдеру (настройки `cloud_provider` + API-ключ из `.env`), а при неудаче возвращает 0.
+- `llm_chat_messages(system_prompt, messages_json)` — **блокирующий** multi-turn вызов. `messages_json` — массив `[{"role":"system"|"user"|"assistant","content":"..."}]`. Возвращает malloc'd JSON (освободить через `free_string`): `{"ok":1,"content":"...","finish_reason":"stop","prompt_tokens":N,"completion_tokens":N}` либо `{"ok":0,"error":"..."}`. `nullptr` — только на нечитаемых аргументах; обрыв сети приходит как `ok:0`, чтобы плагин мог отличить его от пустого ответа.
+- `llm_chat_stream(system_prompt, messages_json, request_json, user_data, on_delta, on_tool_delta, on_done)` — тот же запрос, но **дельты приходят по мере поступления**: `on_delta(user_data, text, kind)`, где `kind` — `LLAMA_STREAM_DELTA_TEXT` или `LLAMA_STREAM_DELTA_REASONING`; `on_tool_delta(user_data, call_id, tool_name, json_fragment)` — куски аргументов нативного вызова инструмента. `on_done(user_data, result_json)` вызывается **ровно один раз** и отдаёт тот же JSON, что и `llm_chat_messages`. Возвращает 1, если поток запущен, и 0, если отклонён на аргументах (тогда `on_done` не зовётся). `request_json` — необязательные параметры генерации: `{"max_tokens":N,"temperature":x,"top_p":x,"top_k":N,"stop":["..."]}`; отсутствующее поле означает «как у `llm_chat_messages`».
+
+  Обрыв потока до закрывающего `finish_reason` приходит как `ok:0`, а не как успешный пустой ответ: иначе агент закрыл бы задачу там, где модель просто не дописала ответ.
+
+  **Стриминг нельзя отменить**: API отмены у хоста нет. Плагин может перестать читать дельты, но генерация продолжится.
+
+  **Колбэки живут дольше вызова.** Они приходят из потока хоста, поэтому после возврата 1 хост будет звать код плагина ещё какое-то время. Плагин обязан дождаться `on_done` **до** возврата из `ll_plugin_shutdown`: хост выгружает библиотеку (`dlclose`) сразу после вызова, а колбэк в выгруженный код — это вызов по освобождённой памяти, без сообщения об ошибке. Для агента это значит, что `stop()` обязан дождаться потока, а не просто поставить флаг отмены.
+
+### Символы: `llm_ast_symbols`
+
+- `llm_ast_symbols(path, language)` — символы **одного файла** через tree-sitter, malloc'd JSON (освободить через `free_string`):
+  `{"ok":1,"ast":true,"language":"cpp","symbols":[{"kind":"function","name":"foo","parent":"","line":10,"end_line":42}]}`
+  `kind` — из закрытого словаря: `function`, `class`, `method`, `namespace`, `enum`, `typedef`, `macro`, `block`, `unknown`.
+- `language` может быть пустым — тогда ход определяется по расширению. Непустой `language` приоритетнее (файл может прийти без расширения).
+- **Список файлов не принимается.** Обход дерева — дело вызывающего: у него свои правила пропуска каталогов и лимиты, а второй обход внутри хоста разошёлся бы с первым.
+
+```c
+char* raw = g_api->llm_ast_symbols(g_host, path, NULL);
+json result = json::parse(raw);
+g_api->free_string(g_host, raw);
+if (!result["ok"]) { /* отказ: файл не тот, язык не определён */ }
+else if (!result["ast"]) {
+    /* Грамматики нет (в llama-gui web-грамматики слабые и могут не быть
+       собраны). Это НЕ ошибка: символов не будет, и у вызывающего должен
+       быть запасной путь. Причина — в result["reason"]. */
+}
+else { /* result["symbols"] — массив */ }
+```
+
+Поле `ast` проверять **обязательно**. Грамматики для `c/cpp/python/rust` линкуются всегда, а для `php/js/css/html` — слабым символом, и если исходников нет, язык молча выпадает из разбора. Без проверки `ast` плагин решит, что файл разобран и символов нет, и потеряет обзор проекта для этих языков без единого сообщения.
+
+### Проверка наличия поля: `offsetof`
+
+Структура `LlamaHostApi` растёт **только в конец**, и поле `size` в начале структуры позволяет плагину узнать, что хост новее. Плагин обязан проверять это **до** вызова, а не после:
+
+```c
+if (g_api->size >= offsetof(LlamaHostApi, llm_chat_stream) +
+                  sizeof(g_api->llm_chat_stream) &&
+    g_api->llm_chat_stream != nullptr) {
+    /* поле есть и валидно */
+}
+```
+
+Поле, вставленное в середину структуры, сдвигает всё после себя: собранный ранее `.so` читал бы вместо строки мусор и падал — без единого сообщения об ошибке. Поэтому новые поля добавляются только в конец, и каждое сопровождается такой проверкой на стороне плагина.
 
 ### RAG
 

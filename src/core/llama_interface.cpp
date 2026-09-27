@@ -20,8 +20,9 @@ bool LlamaInterface::initialize(const std::string& server_url) {
 
 void LlamaInterface::create_chat_completion_streaming(
     const ChatCompletionRequest& request,
-    StreamCallback callback) {
-    pImpl->create_chat_completion_streaming(request, callback);
+    StreamCallback callback,
+    StreamCancel* cancel) {
+    pImpl->create_chat_completion_streaming(request, callback, cancel);
 }
 
 std::future<ChatCompletionResponse> LlamaInterface::create_chat_completion_async(

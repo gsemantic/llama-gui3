@@ -31,14 +31,61 @@ enum class MessageRole {
 };
 
 /**
+ * @brief Нативный вызов инструмента в раскладке OpenAI
+ *
+ * arguments — СЫРОЙ JSON: провайдер присылает его по кускам и на
+ * последнем может быть неполным. Разбирать его здесь нельзя — единственный
+ * разбор аргументов у потребителя.
+ */
+struct ToolCall {
+    std::string id;          /* провайдер может не прислать — остаётся индекс */
+    std::string type = "function";
+    std::string name;
+    std::string arguments;
+};
+
+/**
  * @brief Сообщение в чате
  */
 struct ChatMessage {
     MessageRole role;
     std::string content;
-    
+    /*
+     * Нативный вызов инструмента (И6.2). Пусто, пока провайдер не умеет
+     * tools; тогда вызов приходит текстом и разбирает плагин.
+     */
+    std::vector<ToolCall> tool_calls;
+
     ChatMessage() = default;
     ChatMessage(MessageRole r, const std::string& c) : role(r), content(c) {}
+};
+
+/**
+ * @brief Один инструмент, объявленный серверу (И6.2)
+ *
+ * Раскладка OpenAI, потому что её понимает llama-server с --jinja
+ * (в b7472 --jinja включён по умолчанию). parameters — JSON Schema:
+ * {"type":"object","properties":{...},"required":[...]}. Схема инструмента
+ * и есть контракт: сервер отдаёт аргументы, которые не обязаны соответствовать
+ * задумке, если схема расплывчата.
+ */
+struct ToolSpec {
+    std::string type = "function";
+    std::string name;
+    std::string description;
+    json parameters;
+};
+
+/**
+ * @brief Чем ограничен ответ (И6.2)
+ *
+ * Пустой type = не ограничивать, и тогда в тело запроса поле не уходит
+ * вовсе. Иначе сервер без json_object отвечает 400, и это должно быть
+ * видно, а не молчаливый возврат к тексту.
+ */
+struct ResponseFormat {
+    std::string type;        /* "", "text", "json_object" */
+    json schema;             /* для {"type":"json_schema", ...} */
 };
 
 /**
@@ -64,6 +111,15 @@ struct ChatCompletionRequest {
 
     bool stop_on_newline = false;
     bool stream = false;
+
+    /*
+     * И6.2. Пустой tools — поля в тело запроса не уходят, и поведение
+     * ровно прежнее: сервер ничего не узнаёт и не может отказать.
+     */
+    std::vector<ToolSpec> tools;
+    /* "", "auto", "none", "required" или {"type":"function","name":...} */
+    std::string tool_choice;
+    ResponseFormat response_format;
 
     // Additional llama.cpp parameters
     int threads = 4; // CPU threads
@@ -99,16 +155,88 @@ struct ChatCompletionResponse {
     std::string object;
     int64_t created;
     std::string model;
-    
+
     struct ChatChoice {
         int index;
         ChatMessage message;
         std::string finish_reason;
     };
-    
+
     std::vector<ChatChoice> choices;
     json usage;
+
+    /*
+     * И6.2. Пока локальный клиент отбрасывал код ответа, отказ сервера был
+     * неотличим от пустого ответа: choices пуст, error пуст, и вызывающий
+     * решал, что модель просто ничего не сказала. На этом и строилась бы
+     * неверная догадка «tools не поддерживаются».
+     *
+     * ok=false означает, что запрос НЕ выполнен: error содержит причину,
+     * http_code — её код. ok=true при пустом choices — модель ответила, и
+     * ответ действительно пуст.
+     */
+    bool ok = true;
+    long http_code = 0;
+    std::string error;
 };
+
+/**
+ * @brief Что сервер умеет из OpenAI-совместимых полей
+ *
+ * Три состояния, а не два, потому что «не знаю» и «не умеет» ведут себя
+ * по-разному: второе выключает нативный вызов навсегда, первое — только
+ * до следующей попытки. Свести их — значит одним сетевым сбоем навсегда
+ * отключить tools.
+ */
+enum class ToolsSupport {
+    Unknown = 0,   /* не проверяли или не смогли проверить */
+    Supported,     /* сервер принял запрос с tools */
+    Rejected       /* сервер отказал именно из-за tools */
+};
+
+/*
+ * Решение по ответу сервера о поддержке tools — ЧИСТАЯ функция.
+ *
+ * Почему по ответу, а не по версии: llama-server сообщает об отсутствии
+ * поддержки явно («tools param requires --jinja flag», «Invalid tool_choice»)
+ * кодом 400, а версию не сообщает вовсе. Проверять «по версии» значило бы
+ * хардкодить знание о сборке сервера, которое протухает молча.
+ *
+ * Ключевое правило: сетевой сбой (http_code == 0) — это Unknown, а НЕ
+ * Rejected. Иначе один неудачный запрос навсегда выключил бы нативный
+ * вызов, и агент поехал бы на текстовом протоколе, не сказав об этом.
+ */
+ToolsSupport classify_tools_response(long http_code, const std::string& body);
+
+/*
+ * Тело POST /v1/chat/completions — единственное место, где собирается
+ * запрос. Два вызова (потоковый и блокирующий) раньше собирали тело
+ * отдельно и разошлись: в потоковый уходили min_p/repeat_penalty/top_k,
+ * в блокирующий — нет, то есть один и тот же ход агента набирался с
+ * разным сэмплированием в зависимости от пути.
+ *
+ * Поле уходит в тело, только если отличается от нейтрального значения.
+ * Это не экономия, а способ сказать «здесь нужны настройки сервера» явно:
+ * блокирующий путь плагина выставляет min_p=0 и repeat_penalty=1, и поле
+ * молча пропадает из запроса вместо того, чтобы ехать нулём и обрезать
+ * низковероятные токены у агента, пишущего код.
+ */
+json build_chat_body(const ChatCompletionRequest& request, bool stream);
+
+/*
+ * Нативные вызовы из ответа провайдера. Аргументы остаются СЫРЫМ JSON:
+ * провайдер шлёт их по кускам и на последнем может быть неполным, а
+ * разбор аргументов принадлежит потребителю (плагин валидирует по схеме
+ * инструмента, core/tool.h).
+ *
+ * Вызов без имени отбрасывается: исполнить его нечем, и пропущенный молча
+ * оставил бы в ответе пустой вызов, который цикл счёл бы выполненным.
+ *
+ * Провайдер нумерует вызовы индексом, а не строкой (находка И5.1): у
+ * вызова без id остаётся индекс в name-free виде, поэтому порядок
+ * сохраняется по порядку в массиве, а не по идентификатору.
+ */
+std::vector<ToolCall> parse_tool_calls(const json& array);
 
 /**
  * @brief Запрос на эмбеддинг
@@ -210,11 +338,31 @@ struct RequestParams {
 };
 
 /**
+ * @brief Отмена одного потока (И6.6)
+ *
+ * Флаг, а не «всё сразу»: stop_streaming_requests() рвёт ВСЕ потоки хоста,
+ * и плагин, отменяя свой ход, не должен останавливать ещё и чат приложения.
+ *
+ * Проверяется в колбэках записи и прогресса, поэтому отмена прерывает
+ * передачу по-настоящему: локальный сервер теряет клиента и освобождает
+ * слот. «Перестать читать» без этого оставляло бы генерацию впустую.
+ */
+class StreamCancel {
+public:
+    void request() { flag_.store(true, std::memory_order_release); }
+    bool requested() const { return flag_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<bool> flag_{false};
+};
+
+/**
  * @brief Интерфейс для взаимодействия с llama.cpp сервером
  */
 class LlamaInterface {
 public:
     using StreamCallback = std::function<void(const std::string& chunk, bool is_final)>;
+
 
 public:
     explicit LlamaInterface(const std::string& server_url = "http://localhost:8081");
@@ -228,7 +376,10 @@ public:
     bool initialize(const std::string& server_url);
 
     // Основные методы
-    void create_chat_completion_streaming(const ChatCompletionRequest& request, StreamCallback callback);
+    /* cancel — необязателен; без него поток нельзя отменить по требованию. */
+    void create_chat_completion_streaming(const ChatCompletionRequest& request,
+                                          StreamCallback callback,
+                                          StreamCancel* cancel = nullptr);
     std::future<ChatCompletionResponse> create_chat_completion_async(const ChatCompletionRequest& request);
     EmbeddingResponse create_embedding(const EmbeddingRequest& request);
     
