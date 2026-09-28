@@ -185,6 +185,7 @@ const char* failure_kind_name(FailureKind kind) {
         case FailureKind::Provider: return "провайдер";
         case FailureKind::Tool:     return "инструмент";
         case FailureKind::Aborted:  return "прервано";
+        case FailureKind::ContextOverflow: return "контекст исчерпан";
     }
     return "неизвестно";
 }

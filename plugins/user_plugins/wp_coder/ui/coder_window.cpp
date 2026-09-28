@@ -408,17 +408,44 @@ void render_extras() {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Сбросить план и историю диалога.\nСледующий запрос начнётся с чистого листа.");
 
-    /* Размер сессии. */
+    /* Размер сессии (И7.2).
+     *
+     * Показываются ТОКЕНЫ и источник числа, а не символы: сжимать
+     * контекст по символам — значит угадывать (chars/4 — оценка, и у
+     * кириллицы токен короче, у кода длиннее). Источник назван прямо,
+     * потому что «оценка» и «измерено провайдером» выглядели бы
+     * одинаково, а значимость у них разная.
+     *
+     * Порог показывается, только если он известен: без лимимов модели
+     * (их берутся из настроек — в ABI хоста их нет) выдуманное число
+     * выглядело бы как обещание, и «не влезает» пришлось бы ловить по
+     * факту отказа провайдера. Пока порога нет, подпись говорит об
+     * этом словами. */
     {
         std::lock_guard<std::mutex> lk(st.mtx);
         if (!st.session.empty()) {
-            /* Считается по транскрипту для модели, а не по сырым частям:
-             * в панели должно быть видно тот размер, который реально уйдёт
-             * провайдеру (model_history_chars, core/message.h). */
-            const size_t total = coder::model_history_chars(st.session);
+            const compaction::ContextUsage used = compaction::context_usage(
+                st.measured_input_tokens, st.session);
+            const long long room =
+                compaction::usable(st.model_limits, st.compaction_config);
             ImGui::SameLine();
-            ImGui::TextDisabled("ctx: %zuK / %zuK",
-                total / 1024, st.session_budget / 1024);
+            if (room > 0) {
+                ImGui::TextDisabled("ctx: %lld ток / %lld (%s)",
+                                    used.tokens, room,
+                                    compaction::token_source_name(used.source));
+            } else {
+                ImGui::TextDisabled("ctx: %lld ток (%s, лимит не задан)",
+                                    used.tokens,
+                                    compaction::token_source_name(used.source));
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Сколько токенов занял последний запрос к модели.\n"
+                    "«измерено» — число от провайдера, «оценка» — chars/4.\n"
+                    "Лимит окна берётся из настроек плагина:\n"
+                    "wp_coder.context_limit, wp_coder.input_limit,\n"
+                    "wp_coder.max_output_tokens, wp_coder.compaction_auto,\n"
+                    "wp_coder.compaction_reserved.");
         }
     }
 

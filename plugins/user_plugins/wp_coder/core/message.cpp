@@ -310,18 +310,6 @@ std::string part_to_model_text(const MessagePart& p) {
     return std::string();
 }
 
-/* Реплика ассистента: сам вызов. */
-std::string tool_call_text(const MessagePart& p) {
-    if (!p.raw_call().empty()) return p.raw_call();
-    if (p.tool_name().empty()) return std::string();
-    /* Нативный вызов приходит без блока: собираем JSON из аргументов. Это
-     * тоже текст самой модели, а не новый формат. */
-    json::JsonValue block = p.args();
-    if (!block.is_object()) block = json::JsonValue::object();
-    block.set("tool", p.tool_name());
-    return block.dump();
-}
-
 /* Реплика пользователя: результат или отказ. Формат тот же, что был до
  * И5 («RESULT [инструмент]:»), и модель о нём знает из системного
  * промпта — новая строка формата не заводится. */
@@ -333,6 +321,20 @@ std::string tool_result_text(const MessagePart& p) {
 }
 
 } // namespace
+
+/* Реплика ассистента: сам вызов. Вне анонимного пространства — им
+ * пользуется и сводка компакшна (И7.4), и второй сборщик означал бы
+ * второй протокол вызова (см. объявление в message.h). */
+std::string tool_call_text(const MessagePart& p) {
+    if (!p.raw_call().empty()) return p.raw_call();
+    if (p.tool_name().empty()) return std::string();
+    /* Нативный вызов приходит без блока: собираем JSON из аргументов. Это
+     * тоже текст самой модели, а не новый формат. */
+    json::JsonValue block = p.args();
+    if (!block.is_object()) block = json::JsonValue::object();
+    block.set("tool", p.tool_name());
+    return block.dump();
+}
 
 std::vector<ModelMessage> to_model_messages(const std::vector<Message>& history) {
     std::vector<ModelMessage> out;

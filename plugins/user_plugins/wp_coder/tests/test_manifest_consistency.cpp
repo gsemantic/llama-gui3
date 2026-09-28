@@ -528,4 +528,11 @@ TEST(limits_file_is_single_source_of_truth) {
     ASSERT_EQ((int)limits::kMaxGrepMatches, 200);
     ASSERT_EQ((int)limits::kMaxSteps, 12);
     ASSERT_EQ((int)limits::kSessionBudget, 60000);
+    /* Буфер компакшна живёт в limits.h с И7.1, а не в compaction.h:
+     * константа, объявленная в двух местах, — это расхождение,
+     * которого не будет ровно до того дня, когда одно из них
+     * забудут обновить. Значение закреплено, потому что 20 000 —
+     * число из порта (COMPACTION_BUFFER), и его правка означает
+     * отклонение от него, а не «подстройку под нагрузку». */
+    ASSERT_EQ((int)limits::kCompactionBuffer, 20000);
 }

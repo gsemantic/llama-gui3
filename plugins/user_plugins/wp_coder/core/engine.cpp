@@ -545,6 +545,53 @@ void Engine::load_settings() {
         state_.session_budget = budget > 0 ? static_cast<size_t>(budget) : 60000;
     }
 
+    /* И7.2: лимиты модели и настройки компакшна.
+     *
+     * У хоста их взять нечем — в ABI нет ни окна, ни лимита ответа, — а
+     * без них сравнивать нечего, и переполнение не объявляется никогда
+     * (compaction::is_overflow). Поэтому это настройки плагина, и
+     * значение по умолчанию — «не задано» (0), а не догадка: выдуманное
+     * окно выглядело бы в панели как настоящее и молча ломало бы
+     * компакшн, выкидывая из истории то, что ещё помещалось.
+     *
+     * Мусор и отрицательные значения → 0 («не задано»), а не дефолт:
+     * стойкое неверное значение лимита хуже его отсутствия, потому что
+     * отсутствие видно, а неверное число принимается за правду. */
+    {
+        const auto read_num = [this](const char* key) -> long long {
+            const std::string t = setting_get(cb_, key, "");
+            if (t.empty()) return 0;
+            try { return std::stoll(t); } catch (...) { return 0; }
+        };
+        state_.model_limits.context = read_num("wp_coder.context_limit");
+        state_.model_limits.input = read_num("wp_coder.input_limit");
+        state_.model_limits.max_output = read_num("wp_coder.max_output_tokens");
+        if (state_.model_limits.context < 0) state_.model_limits.context = 0;
+        if (state_.model_limits.input < 0) state_.model_limits.input = 0;
+        if (state_.model_limits.max_output < 0) state_.model_limits.max_output = 0;
+        const std::string auto_key = setting_get(cb_, "wp_coder.compaction_auto", "true");
+        state_.compaction_config.auto_compact = auto_key != "false";
+        const long long reserved = read_num("wp_coder.compaction_reserved");
+        state_.compaction_config.reserved = reserved > 0 ? reserved : 0;
+        /* tail_turns: 0 = «хвоста нет» (сжимается всё) — поэтому
+         * «не задано» здесь -1, а не 0, и разбирать ключ надо ОТДЕЛЬНО:
+         * read_num отдаёт 0 и за отсутствие ключа, и за нечисловую мусор,
+         * и за честный ноль, а различать их обязательно. Иначе у любого,
+         * кто не трогал настройку, дефолтом было бы «сжимать всё» —
+         * то есть переполнение приводило бы к потере всей истории, и
+         * выглядело бы это как «компакшн не настроен». */
+        const auto read_or_unset = [this](const char* key) -> long long {
+            const std::string t = setting_get(cb_, key, "");
+            if (t.empty()) return -1;
+            try { return std::stoll(t); } catch (...) { return -1; }
+        };
+        const long long tail_turns =
+            read_or_unset("wp_coder.compaction_tail_turns");
+        state_.compaction_config.tail_turns = tail_turns < 0 ? -1 : tail_turns;
+        const long long keep = read_num("wp_coder.compaction_preserve_recent_tokens");
+        state_.compaction_config.preserve_recent_tokens = keep > 0 ? keep : 0;
+    }
+
     state_.allowed_external_paths.clear();
     std::string paths_json = setting_get(cb_, "wp_coder.allowed_external_paths", "[]");
     {
@@ -624,6 +671,31 @@ void Engine::save_settings() {
  * goto устранен: cleanup вынесен в lambda.
  * ====================================================================== */
 
+void reset_task_metrics(EngineState& state) {
+    /* Метрики задачи обнуляются на каждом запуске, иначе панель показывала
+     * бы метрики ПРОШЛОЙ задачи: счётчики, скорость, число шагов.
+     *
+     * Отдельная функция, а не строки внутри run_task (И6.8): run_task
+     * достижим только через worker синглона, и тест на нём зависает на
+     * общей очереди предыдущего теста — то есть проверял бы не своё.
+     * Здесь правило видно и его можно проверить, не запуская агента.
+     *
+     * Лок НЕ берётся: вызывающий (run_task) уже держит state_.mtx, а он
+     * нерекурсивный и общий с UI — тот же класс, что в permission_outcome.
+     *
+     * И7.2: сюда же — измерение контекста. Оно относится к ПОСЛЕДНЕМУ
+     * запросу, а тот сделан был другой историей; оставить его — значит
+     * показать в панели «измерено 40 000 токенов» для пустой истории, а
+     * компакшн позже сравнил бы чужое измерение с новой историей. До
+     * первого хода задачи работает оценка chars/4. */
+    state.llm_total_time = 0;
+    state.total_prompt_tokens = 0;
+    state.total_completion_tokens = 0;
+    state.last_tokens_per_second = 0;
+    state.steps = 0;
+    state.measured_input_tokens = 0;
+}
+
 void Engine::run_task(std::string task) {
     task = text::sanitize_utf8(task);
     auto start_time = std::chrono::steady_clock::now();
@@ -641,11 +713,7 @@ void Engine::run_task(std::string task) {
          * задачи окрашивал бы новую как прерванную. */
         state_.outcome = TaskOutcome::None;
         state_.outcome_reason.clear();
-        state_.llm_total_time = 0;
-        state_.total_prompt_tokens = 0;
-        state_.total_completion_tokens = 0;
-        state_.last_tokens_per_second = 0;
-        state_.steps = 0;
+        reset_task_metrics(state_);
         if (state_.session.empty())
             state_.session.push_back(Message::user(task));
         std::cerr << "[wp_coder] run_task: session_msgs=" << state_.session.size()

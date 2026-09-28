@@ -39,6 +39,41 @@ inline constexpr size_t kMinFinalAnswerLen = 300;
 inline constexpr size_t kMaxOutputLines = 2000;    // строк в RESULT
 inline constexpr size_t kMaxOutputBytes = 50 * 1024;  // байт в RESULT
 
+/* Компакшн (И7.1, порт session/overflow.ts): сколько токенов истории
+ * оставляется под саму сводку, когда провайдер не задал резерв явно.
+ * Живёт здесь, а не в core/compaction.h, по той же причине, что и
+ * остальные лимиты: константы, разъехавшиеся по файлам, разъезжаются
+ * и по значениям (шапка этого файла). */
+inline constexpr long long kCompactionBuffer = 20000;
+
+/* Сколько символов приходится на токен в оценке chars/4 (И7.2, порт
+ * util/token.ts). Живёт рядом с буфером по той же причине: это число
+ * решает, когда история начнёт считаться большой, и оно обязано быть
+ * одно. */
+inline constexpr long long kCharsPerToken = 4;
+
+/* Результат инструмента в сводке (И7.4, порт
+ * compaction.ts: TOOL_OUTPUT_MAX_CHARS). Сводка не должна раздуваться тем
+ * же выводом, ради устранения которого её и затеяли. */
+inline constexpr long long kSummaryToolOutputChars = 2000;
+
+/* Сколько токенов ждём от сводки (И7.5, порт SUMMARY_OUTPUT_TOKENS).
+ *
+ * Ограничить генерацию числом мы не можем: блокирующий путь не передаёт
+ * max_tokens, а текстовый протокол и подавно. Поэтому предел держится
+ * двумя руками: промпт просит краткости (kCompactionSystemPrompt), а
+ * эта константа — предохранитель, который обрезает слишком длинный
+ * ответ по границе строки и помечает результат флагом
+ * summary_truncated. Обрезка молча была бы хуже: сводка в 40 000 токенов
+ * съела бы ровно то место, ради которого её составили. */
+inline constexpr long long kCompactionSummaryMaxChars = 16000;
+
+/* Границы хвоста, который остаётся при компакшне (И7.3, порт
+ * compaction.ts: MIN/MAX_PRESERVE_RECENT_TOKENS). Снизу — чтобы у модели
+ * осталось хоть что-то, сверху — чтобы сводка не вытеснила всё. */
+inline constexpr long long kMinPreserveRecentTokens = 2000;
+inline constexpr long long kMaxPreserveRecentTokens = 15000;
+
 /* shell (И4.8). 120 с — как в opencode; раньше было 60, и `docker build`
  * на нормальном проекте не успевал. */
 inline constexpr unsigned kShellTimeoutSec = 120;

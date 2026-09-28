@@ -11,6 +11,7 @@
  */
 
 #include "abort.h"
+#include "compaction.h"
 #include "module_api.h"
 #include "tools_registry.h"
 #include "skills_manager.h"
@@ -213,6 +214,23 @@ struct EngineState {
     int max_steps = 12;            // лимит шагов ReAct на задачу (kMaxSteps)
     size_t session_budget = 60000; // бюджет символов истории сессии (kSessionBudget)
 
+    /* --- И7.2: учёт контекста ---
+     *
+     * measured_input_tokens — input-токены ПОСЛЕДНЕГО запроса, какие их
+     * прислал провайдер. Не сумма за сессию: сумма росла бы монотонно и
+     * рано или поздно объявила бы переполнение в пустой истории. Ноль —
+     * «провайдер usage не прислал» (первый запрос, старый хост), и это
+     * не то же самое, что «контекст пуст»: тогда считается оценка.
+     *
+     * Лимиты и настройки — из настроек плагина (load_settings), потому что
+     * у хоста их взять нечем: в ABI нет ни окна модели, ни лимита ответа.
+     * Нулевое значение везде означает «не задано» — и тогда переполнение
+     * не объявляется вовсе (compaction::is_overflow), то есть агент
+     * работает как раньше, без тихой порчи истории. */
+    long long measured_input_tokens = 0;
+    compaction::ModelLimits model_limits;
+    compaction::CompactionConfig compaction_config;
+
     /* Агент. */
     std::deque<AgentEvent> events;
     std::queue<std::string> inbox;
@@ -274,6 +292,18 @@ struct EngineState {
     std::string repo_map_cache_root;
     std::string repo_map_cache_result;
 };
+
+/* Обнуление метрик задачи (И7.2).
+ *
+ * Отдельная функция, а не строки внутри run_task: run_task достижим
+ * только через worker-поток синглтона, и тест на нём зависал бы на
+ * общей очереди предыдущего теста — то есть проверял бы не своё (та же
+ * причина, по которой в И6.8 правило «исход → состояние» вынесено из
+ * лямбды cleanup()).
+ *
+ * Лок НЕ берётся: вызывающий уже держит state_.mtx, а он нерекурсивный
+ * и общий с UI-потоком. */
+void reset_task_metrics(EngineState& state);
 
 /* Проверка, находится ли путь за пределами project_dir. */
 inline bool is_path_outside(const std::string& abs_path, const std::string& project_dir) {

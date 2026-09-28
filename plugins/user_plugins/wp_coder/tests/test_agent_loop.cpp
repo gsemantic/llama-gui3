@@ -184,6 +184,9 @@ struct LoopFixture {
         engine_state().todos.clear();
         engine_state().recent_calls.clear();
         engine_state().allowed_external_paths.clear();
+        /* И7.2: измерение контекста тоже состояние синглона, и без
+         * сброса тест унаследовал бы измерение чужого хода. */
+        engine_state().measured_input_tokens = 0;
         engine_state().abort_requested.store(false);
         engine_state().shutting_down = false;
         engine_state().state = AgentState::Executing;
@@ -648,4 +651,76 @@ TEST(agent_loop_forces_a_summary_when_the_last_step_still_calls_tools) {
         }
     }
     ASSERT_TRUE(answered);
+}
+
+
+/* ======================================================================
+ * И7.2: цикл отдаёт измерение контекста
+ * ====================================================================== */
+
+TEST(loop_records_the_input_tokens_the_host_reported) {
+    /* Кто именно измеряет контекст: хост присылает usage.input = 100
+     * (FakeHost), цикл обязан положить это в состояние, а не размазать
+     * по трём своим счётчикам. Проверяется через эффект, а не вызовом
+     * record_turn_usage напрямую: функция внутренняя, и тест, зовущий
+     * её вручную, не сказал бы ничего о цикле. */
+    LoopFixture fx;
+    fx.host.replies = {long_answer("Навыки: wp, python, devops.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    ASSERT_EQ(engine_state().measured_input_tokens, 100LL);
+    /* И измерение видно ровно таким, каким его вернёт панели: измеренным,
+     * а не оценкой. */
+    const compaction::ContextUsage used =
+        compaction::context_usage(engine_state().measured_input_tokens,
+                                  engine_state().session);
+    ASSERT_TRUE(used.measured());
+    ASSERT_EQ(used.tokens, 100LL);
+}
+
+TEST(loop_leaves_the_measurement_empty_when_the_host_sends_no_usage) {
+    /* Хост без метрик (старый хост, провайдер без usage) — это НЕ
+     * «контекст занял 0 токенов»: такая ошибка выглядела бы в панели как
+     * «контекст не вырос» и надолго отключила бы сжатие. */
+    LoopFixture fx;
+    fx.host.replies = {long_answer("Навыки: wp, python, devops.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    /* Хост, который не присылает usage. */
+    HostCallbacks quiet = cb;
+    quiet.llm_chat = [&fx](const std::string& sys,
+                           const std::vector<ModelMessage>& msgs,
+                           LlmReply& out) {
+        fx.host.replies.push_back(long_answer("Навыки: wp, python, devops."));
+        LlmReply r;
+        const bool ok = fx.host.chat(sys, msgs, r);
+        out.content = r.content;
+        out.finish_reason = r.finish_reason;
+        out.prompt_tokens = 0;      /* провайдер метрики не прислал */
+        out.completion_tokens = 0;
+        return ok;
+    };
+    engine().init(quiet);
+
+    std::string response;
+    AgentLoop loop(engine_state(), quiet,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    ASSERT_EQ(engine_state().measured_input_tokens, 0LL);
+    /* Тогда панель обязана показать оценку, а не ноль. */
+    const compaction::ContextUsage used =
+        compaction::context_usage(engine_state().measured_input_tokens,
+                                  engine_state().session);
+    ASSERT_FALSE(used.measured());
+    ASSERT_TRUE(used.tokens > 0);
 }

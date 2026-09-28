@@ -332,6 +332,34 @@ const char* kPlanPrompt =
 
 } // namespace
 
+namespace {
+
+/* Учёт токенов хода (И7.2).
+ *
+ * ОДНО место на три точки вызова — планировщик, цикл и хвостовой ход.
+ * Списком по три строки в каждой точке они и раньше дублировались, и
+ * добавление четвёртого счётчика (measured_input_tokens) в трёх местах
+ * рано или поздно разъехалось бы: забыть — значит компакшн получит
+ * устаревшее измерение и будет считать контекст по чужому запросу.
+ *
+ * Лок берётся внутри — вызывающие цикла лока НЕ держат (state_.mtx
+ * нерекурсивный, общий с UI: та же причина, что у permission_outcome).
+ *
+ * Считается именно input, а не total: контекстом является то, что ушло
+ * В модель, а ответ следующего шага будет другим. */
+void record_turn_usage(EngineState& state, const Usage& usage) {
+    std::lock_guard<std::mutex> lk(state.mtx);
+    state.total_prompt_tokens += static_cast<int>(usage.input);
+    state.total_completion_tokens += static_cast<int>(usage.output);
+    if (usage.input > 0) state.measured_input_tokens = usage.input;
+}
+
+} // namespace
+
+/* ======================================================================
+ * Planner
+ * ====================================================================== */
+
 bool Planner::plan(const std::string& sys_prompt) {
     if (!state_.use_planning) return false;
 
@@ -378,9 +406,10 @@ bool Planner::plan(const std::string& sys_prompt) {
                                                   : std::string());
             plan_msg.parts.push_back(MessagePart::text("[ПЛАН]\n" + plan.text()));
             state_.session.push_back(std::move(plan_msg));
-            state_.total_prompt_tokens += static_cast<int>(plan.usage().input);
-            state_.total_completion_tokens += static_cast<int>(plan.usage().output);
         }
+        /* Вне блока выше: record_turn_usage берёт лок сам, а state_.mtx
+         * нерекурсивный (правило 1 в SESSION_START.md). */
+        record_turn_usage(state_, plan.usage());
         this->push_event_(AgentEvent::Assistant,
             "План: " + plan.text());
         return true;
@@ -515,9 +544,9 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             std::lock_guard<std::mutex> lk(state_.mtx);
             state_.steps = step + 1;
             state_.llm_total_time += llm_s;
-            state_.total_prompt_tokens += static_cast<int>(usage.input);
-            state_.total_completion_tokens += static_cast<int>(usage.output);
         }
+        /* Учёт токенов — вне блока, лок берёт record_turn_usage. */
+        record_turn_usage(state_, usage);
 
         /* A4: usage токенов шага. */
         this->push_event_(AgentEvent::Status,
@@ -836,9 +865,9 @@ bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.session.push_back(std::move(msg));
         state_.steps += 1;
-        state_.total_prompt_tokens += static_cast<int>(answer.usage().input);
-        state_.total_completion_tokens += static_cast<int>(answer.usage().output);
     }
+    /* Вне блока: record_turn_usage берёт state_.mtx сам. */
+    record_turn_usage(state_, answer.usage());
     if (!full_response.empty()) full_response += "\n\n";
     full_response += answer.text();
     this->push_event_(AgentEvent::Assistant, answer.text());

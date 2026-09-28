@@ -41,6 +41,7 @@ set(CORE_SOURCES
     core/message.cpp
     core/id_prefix.cpp
     core/session_store.cpp
+    core/compaction.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -197,6 +198,7 @@ if(WP_CODER_BUILD_TESTS)
         ${HOST_BRIDGE_SOURCES}
         tests/test_message.cpp
         tests/test_session_store.cpp
+        tests/test_compaction.cpp
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp
