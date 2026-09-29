@@ -86,6 +86,12 @@ SessionFile full_session() {
     done.metadata.set("lines", 404);
     done.truncated = true;
     turn.parts.back().set_result(done);
+    /* Вывод, убранный прореживанием (И7.9): в файле он остаётся целиком,
+     * а модель видит метку. Метка обязана пережить перезагрузку, иначе
+     * восстановленная сессия вернула бы в контекст текст, который
+     * прореживание убрало, и переполнение вернулось бы молча — ровно по
+     * той причине, по которой его чинили. */
+    turn.parts.back().clear_output();
     turn.parts.push_back(MessagePart::text("файл прочитан"));
     s.messages.push_back(turn);
 
@@ -115,6 +121,14 @@ SessionFile full_session() {
     service.parts.push_back(MessagePart::retry(2, 1500));
     service.parts.push_back(
         MessagePart::compaction("сводка", {"msg_000000000010"}));
+    /* Реплика автопродолжения (И7.7) — отдельно сообщением и с ролью
+     * пользователя: в файле сессии её читать должна не одна строка, а
+     * весь список частей, и «потерялась при перезагрузке» проявилось бы
+     * не сбойом, а тихой порчей (слова плагина стали бы словами
+     * человека). */
+    Message resume = Message::compaction_continue();
+    resume.id = "msg_000000000015";
+    s.messages.push_back(resume);
     service.parts.push_back(
         MessagePart::subtask("ses_000000000002", "wp_explore"));
     s.messages.push_back(service);
@@ -138,6 +152,7 @@ void compare(const MessagePart& a, const MessagePart& b) {
     ASSERT_EQ(a.files().dump(), b.files().dump());
     ASSERT_EQ(a.task_id(), b.task_id());
     ASSERT_EQ(a.subagent(), b.subagent());
+    ASSERT_EQ(a.output_cleared(), b.output_cleared());
     ASSERT_EQ(std::to_string(a.attempt()), std::to_string(b.attempt()));
     ASSERT_EQ(std::to_string(a.next_attempt_in_ms()),
               std::to_string(b.next_attempt_in_ms()));

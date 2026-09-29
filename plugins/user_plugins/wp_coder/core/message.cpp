@@ -3,6 +3,8 @@
 #include "message.h"
 #include "json_utils.h"
 #include "limits.h"
+#include "prompts.h"   /* kCompactionContinueText: единственный источник текста
+                       * реплики автопродолжения (И7.7) */
 
 namespace coder {
 namespace {
@@ -58,6 +60,11 @@ const char* part_kind_name(PartKind k) {
         case PartKind::Patch:      return "patch";
         case PartKind::Retry:      return "retry";
         case PartKind::Compaction: return "compaction";
+        /* Имя вида — это тег в файле сессии и в JSON для UI (И7.7).
+         * Оно совпадает с маркером порта (metadata.compaction_continue),
+         * и менять его молча нельзя: сессия, записанная старой версией,
+         * перестанет читаться, а читается она этим же кодом. */
+        case PartKind::CompactionContinue: return "compaction_continue";
         case PartKind::Subtask:    return "subtask";
     }
     return "unknown";
@@ -135,6 +142,12 @@ MessagePart MessagePart::compaction(std::string summary,
     return p;
 }
 
+MessagePart MessagePart::compaction_continue() {
+    MessagePart p(PartKind::CompactionContinue);
+    p.text_ = kCompactionContinueText;
+    return p;
+}
+
 MessagePart MessagePart::subtask(std::string task_id, std::string subagent) {
     MessagePart p(PartKind::Subtask);
     p.task_id_ = std::move(task_id);
@@ -146,7 +159,8 @@ MessagePart MessagePart::subtask(std::string task_id, std::string subagent) {
 
 const std::string& MessagePart::text() const {
     if (kind_ != PartKind::Text && kind_ != PartKind::Reasoning &&
-        kind_ != PartKind::Compaction) {
+        kind_ != PartKind::Compaction &&
+        kind_ != PartKind::CompactionContinue) {
         return empty_string();
     }
     return text_;
@@ -238,6 +252,15 @@ MessagePart& MessagePart::set_result(ToolOutput out) {
     return *this;
 }
 
+MessagePart& MessagePart::clear_output() {
+    /* Только на ЗАВЕРШЁННОМ вызове: у работающего инструмента вывода ещё
+     * нет, а у отказавшего он и так короткий, и метка «очищено» на отказе
+     * сбила бы с толку. Возврат ссылки — как у соседних переходов. */
+    if (!is_tool_part(*this) || state_ != ToolState::Completed) return *this;
+    output_cleared_ = true;
+    return *this;
+}
+
 MessagePart& MessagePart::set_error(std::string error) {
     if (!is_tool_part(*this)) return *this;
     error_ = std::move(error);
@@ -264,6 +287,12 @@ Message Message::assistant(std::string parent_id) {
     m.id = ids().next_msg();
     m.role = kRoleAssistant;
     m.parent_id = std::move(parent_id);
+    return m;
+}
+
+Message Message::compaction_continue() {
+    Message m = Message::user(std::string());
+    m.parts.push_back(MessagePart::compaction_continue());
     return m;
 }
 
@@ -307,16 +336,27 @@ namespace {
  * реплики (см. tool_call_text / tool_result_text). */
 std::string part_to_model_text(const MessagePart& p) {
     if (p.kind() == PartKind::Text) return p.text();
+    /* Реплика автопродолжения — инструкция, а не пометка (И7.7), поэтому
+     * она УХОДИТ модели вопреки правилу «служебные виды молчат». Если бы
+     * она молчала, агент после сжатия останавливался бы на сводке, и
+     * выглядело бы это как «сжатие прошло, задача закрыта». */
+    if (p.kind() == PartKind::CompactionContinue) return p.text();
     return std::string();
 }
 
 /* Реплика пользователя: результат или отказ. Формат тот же, что был до
  * И5 («RESULT [инструмент]:»), и модель о нём знает из системного
- * промпта — новая строка формата не заводится. */
+ * промпта — новая строка формата не заводится.
+ *
+ * Очищенный прореживанием результат (И7.9) отдаётся одной меткой вместо
+ * текста: метка названа в kBaseSystemPrompt, и именно поэтому модель знает,
+ * что текст убран из-за объёма и его надо получить повторным вызовом, а не
+ * выдумать. Само свойство — на части, а не здесь: строка рендерится зря,
+ * если часть не очищена, и наоборот. */
 std::string tool_result_text(const MessagePart& p) {
-    const std::string body = p.state() == ToolState::Error
-        ? p.error()
-        : p.output().output;
+    const std::string body = p.output_cleared()
+        ? limits::kClearedToolOutput
+        : (p.state() == ToolState::Error ? p.error() : p.output().output);
     return "RESULT [" + p.tool_name() + "]:\n" + body;
 }
 
@@ -366,6 +406,29 @@ std::vector<ModelMessage> to_model_messages(const std::vector<Message>& history)
                     flush();
                     out.push_back({std::string(kRoleUser),
                                    tool_result_text(p)});
+                }
+                continue;
+            }
+            if (p.is(PartKind::Compaction)) {
+                /* Сводка лежит в ПОЛЬЗОВАТЕЛЬСКОМ сообщении (так её
+                 * создаёт сжатие, И7.8), но по происхождению это ответ
+                 * агента-сводщика. Поэтому в транскрипте она становится
+                 * отдельной репликой ассистента, а не куском
+                 * пользовательской.
+                 *
+                 * Репликой, а не склейкой: склеенная со сводкой
+                 * пользовательская реплика означала бы «человек попросил
+                 * составить сводку» — а на такое модель отвечает не
+                 * продолжением работы, а новым заданием, то есть агент
+                 * после сжатия начал бы СНОВА. Роль здесь не украшение:
+                 * она сообщает, кому принадлежит написанное.
+                 *
+                 * Пустой текст не отправляется (тот же протокольный
+                 * страх, что у пустых кусков в message.h): сообщение без
+                 * содержимого половина провайдеров считает ошибкой. */
+                flush();
+                if (!p.text().empty()) {
+                    out.push_back({std::string(kRoleAssistant), p.text()});
                 }
                 continue;
             }

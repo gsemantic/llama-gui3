@@ -107,7 +107,8 @@ std::vector<PartKind> all_kinds() {
     return {
         PartKind::Text,      PartKind::Reasoning,   PartKind::Tool,
         PartKind::StepStart, PartKind::StepFinish,  PartKind::Patch,
-        PartKind::Retry,     PartKind::Compaction,  PartKind::Subtask,
+        PartKind::Retry,     PartKind::Compaction,  PartKind::CompactionContinue,
+        PartKind::Subtask,
     };
 }
 
@@ -125,6 +126,7 @@ std::vector<MessagePart> sample_parts() {
         MessagePart::patch("a1b2c3", files),
         MessagePart::retry(2, 1500),
         MessagePart::compaction("сводка", {"msg_1", "msg_2"}),
+        MessagePart::compaction_continue(),
         MessagePart::subtask("ses_child", "wp_explore"),
     };
 }
@@ -141,6 +143,7 @@ std::map<std::string, std::vector<std::string>> expected_filled() {
         {"patch",      {"snapshot_hash", "files"}},
         {"retry",      {"attempt", "next_attempt_in_ms"}},
         {"compaction", {"text", "replaced_ids"}},
+        {"compaction_continue", {"text"}},
         {"subtask",    {"task_id", "subagent"}},
     };
 }
@@ -170,13 +173,92 @@ TEST(message_part_kinds_are_named_and_closed) {
         ASSERT_TRUE(std::string(name) != "unknown");
         names.insert(name);
     }
-    /* Девять видов: пять уже работают, четыре (Patch, Retry, Compaction,
-     * Subtask) объявлены заранее под И7, И8, И10 и И12.6 — чтобы файл
-     * сессии не пришлось менять по формату при их появлении. */
-    ASSERT_EQ(names.size(), size_t(9));
-    ASSERT_EQ(all_kinds().size(), size_t(9));
+    /* Десять видов: шесть работают, четыре (Patch, Retry, Subtask и
+     * запись сжатой истории) объявлены заранее под И10, И12.6, И8 и
+     * 7.10 — чтобы файл сессии не пришлось менять по формату при их
+     * появлении. */
+    ASSERT_EQ(names.size(), size_t(10));
+    ASSERT_EQ(all_kinds().size(), size_t(10));
     ASSERT_EQ(std::string(part_kind_name(static_cast<PartKind>(99))),
               std::string("unknown"));
+}
+
+TEST(every_part_kind_is_in_the_test_table) {
+    /* Список видов в тесте написан руками, а перечисление в switch — в
+     * коде, и до И7.7 они разошлись бы молча: новый вид добавлялся в
+     * enum, таблица проверок о нём не знала, и «девять видов» оставалось
+     * верным числом при десяти. Проверка обходит enum по имени до
+     * «unknown» и требует, чтобы каждый вид был в таблице — иначе вид,
+     * для которого никто не придумал проверку, просто не проверяется.
+     *
+     * Имя намеренно кириллицей: тесты этого файла английские, а названия
+     * проверок читаются в выводе, где английский «every_part_kind…» рядом
+     * с кучей таких же не отличить от прочих. */
+    std::set<PartKind> listed;
+    for (PartKind k : all_kinds()) listed.insert(k);
+    for (int i = 0;; ++i) {
+        const PartKind k = static_cast<PartKind>(i);
+        if (std::string(part_kind_name(k)) == "unknown") break;
+        if (!listed.count(k)) {
+            std::cerr << "  вид части " << part_kind_name(k)
+                      << " не в таблице all_kinds(): для него нет ни"
+                      << " проверки полей, ни round-trip. Добавь его в"
+                      << " all_kinds(), sample_parts() и expected_filled()."
+                      << std::endl;
+        }
+        ASSERT_TRUE(listed.count(k) == 1);
+    }
+    ASSERT_EQ(listed.size(), size_t(10));
+}
+
+TEST(an_unfinished_call_hides_its_output_from_everyone) {
+    /* Механизм, на котором держится правило «прореживание не трогает
+     * незавершённые вызовы» (И7.9): у вызова, который ещё не отработал,
+     * вывода НЕТ — не «вывод есть, но его нельзя показывать».
+     *
+     * Проверка живёт здесь, а не рядом с прореживанием, потому что
+     * обеспечено оно здесь: аксессор output() отдаёт пустой результат для
+     * любого состояния, кроме completed. Правило держится один раз и для
+     * всех вызывающих (UI, сводка, оценка объёма), а не в каждом по
+     * своему разу — иначе оно разъехалось бы при первом же новом
+     * читателе history.
+     *
+     * Первая версия проверки жила рядом с прореживанием и строила фикстуру
+     * «работающий вызов с непустым output» — такого вызова не существует,
+     * set_result кладёт результат и сразу переводит вызов в completed.
+     * Фикстура проходила при любом коде, то есть проверяла себя. */
+    ToolOutput out;
+    out.title = "bash";
+    out.output = "вывод на 4000 символов";
+
+    MessagePart running = MessagePart::tool("call_0", "bash").set_result(out);
+    running.set_running();
+    ASSERT_EQ(std::string(running.state_name()), std::string("running"));
+    ASSERT_TRUE(running.output().output.empty());
+    /* Работающий вызов — ещё не исход: has_result() ложно, и это тот же
+     * признак, на котором стоит условие завершения хода (И5.8). */
+    ASSERT_FALSE(running.has_result());
+
+    MessagePart pending = MessagePart::tool("call_1", "bash");
+    ASSERT_TRUE(pending.output().output.empty());
+
+    /* Отказ — тоже не вывод, а error(), и путать их нельзя. */
+    MessagePart failed = MessagePart::tool("call_2", "bash").set_error("нет");
+    ASSERT_TRUE(failed.output().output.empty());
+    ASSERT_EQ(failed.error(), std::string("нет"));
+
+    /* Завершённый — единственный, у кого вывод есть. */
+    MessagePart done = MessagePart::tool("call_3", "bash").set_result(out);
+    ASSERT_EQ(done.output().output, std::string("вывод на 4000 символов"));
+}
+
+TEST(the_continuation_kind_is_named_as_in_the_port) {
+    /* Имя вида — это тег в файле сессии и в JSON для UI. Оно совпадает с
+     * маркером порта (metadata.compaction_continue), и переименование
+     * молча отрезало бы от UI и файла сессии всё, что по этому имени
+     * ищется: тот же класс, что версия в четырёх файлах (D12). */
+    ASSERT_EQ(std::string(part_kind_name(PartKind::CompactionContinue)),
+              std::string("compaction_continue"));
 }
 
 TEST(message_part_carries_only_its_own_payload) {

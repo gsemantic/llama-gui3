@@ -590,6 +590,13 @@ void Engine::load_settings() {
         state_.compaction_config.tail_turns = tail_turns < 0 ? -1 : tail_turns;
         const long long keep = read_num("wp_coder.compaction_preserve_recent_tokens");
         state_.compaction_config.preserve_recent_tokens = keep > 0 ? keep : 0;
+        /* Прореживание вывода инструментов (И7.9). Выключено по умолчанию,
+         * как и в порте, и по той же причине: оно меняет то, что видит
+         * модель, а не то, что видит пользователь. Включает его тот, кто
+         * готов, что модель увидит метки вместо старых выводов и, если
+         * понадобится, вызовет инструмент заново. */
+        state_.compaction_config.prune =
+            setting_get(cb_, "wp_coder.compaction_prune", "false") == "true";
     }
 
     state_.allowed_external_paths.clear();
@@ -866,6 +873,128 @@ void Engine::trim_history_if_needed() {
      * внешнего лока в AgentLoop раньше был дедлок (D1). */
     std::lock_guard<std::mutex> lk(state_.mtx);
     compress_history(state_.session, state_.session_budget);
+}
+
+/* ======================================================================
+ * Автосжатие по порогу окна (И7.10)
+ * ====================================================================== */
+
+namespace {
+
+/* Снимок того, что нужно решению, и без лока: дальше идёт запрос к
+ * модели, а держать state_.mtx на всё время сжатия нельзя (D1). */
+struct CompactionSnapshot {
+    compaction::ModelLimits limits;
+    compaction::CompactionConfig cfg;
+    size_t budget = 0;
+    long long measured = 0;
+    std::vector<Message> history;
+};
+
+} // namespace
+
+void Engine::compact_history_if_needed(const compaction::SummaryTurn& turn) {
+    CompactionSnapshot snap;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        snap.limits = state_.model_limits;
+        snap.cfg = state_.compaction_config;
+        snap.budget = state_.session_budget;
+        snap.measured = state_.measured_input_tokens;
+        snap.history = state_.session;
+    }
+    if (snap.history.empty()) return;
+
+    /* Записать историю обратно. reset_measured обязателен после сводки:
+     * измеренные токены относятся к ПРЕЖНЕЙ истории, и без сброса
+     * переполнение объявлялось бы снова и снова, то есть агент сжимал бы
+     * историю на каждом шаге, платя за запрос к модели. Молчаливое
+     * повторение дороже всего: выглядело бы как «сжатие не помогает». */
+    const auto commit = [this](std::vector<Message> next, bool reset_measured) {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.session = std::move(next);
+        if (reset_measured) state_.measured_input_tokens = 0;
+    };
+
+    /* 1. Прореживание вывода (И7.9). Дёшево, без запроса к модели, и
+     *    часто одного этого хватает: окно переполнено старыми
+     *    результатами grep, а не содержанием разговора. */
+    bool pruned = false;
+    if (snap.cfg.prune) {
+        const std::vector<MessagePart*> parts =
+            compaction::prune_candidates(snap.history);
+        if (!parts.empty()) {
+            for (MessagePart* p : parts) p->clear_output();
+            pruned = true;
+            push_event(AgentEvent::Status,
+                "Прореживаю вывод старых инструментов: " +
+                 std::to_string(parts.size()) + " вызов.");
+        }
+    }
+
+    /* 2. Переполнение ли окна. Число — измеренное провайдером, если оно
+     *    есть, иначе оценка (И7.2); лимиты неизвестны → переполнения
+     *    нет, и сжатие не запускается ни при каких символах. */
+    const long long used =
+        compaction::context_usage(snap.measured, snap.history).tokens;
+    if (!compaction::is_overflow(snap.limits, snap.cfg, used)) {
+        /* Окно цело, но локальный бюджет символов никуда не делся: он
+         * ограничивает файл сессии, а не модель. Сжатие здесь стоило бы
+         * запроса к модели ради того, чего модель не заметит, поэтому
+         * работает только аварийная обрезка. */
+        if (pruned) commit(std::move(snap.history), false);
+        if (model_history_chars(snap.history) > snap.budget) {
+            trim_history_if_needed();
+        }
+        return;
+    }
+
+    push_event(AgentEvent::Status,
+        "Контекст переполнен (" + std::to_string(used) + " токенов) — "
+        "составляю сводку истории.");
+
+    const compaction::Selection sel =
+        compaction::select_to_compact(snap.history, snap.limits, snap.cfg);
+    const compaction::CompactionResult r =
+        compaction::summarize(sel.head, turn);
+
+    if (r.outcome != compaction::CompactionOutcome::Continue) {
+        /* Сводка не вышла — пользователю говорится ПОЧЕМУ, иначе обрезка
+         * выглядела бы капризом: сообщения исчезают, а человек не знает,
+         * что сломалось. */
+        push_event(AgentEvent::Status,
+            "Сводка не получилась (" + r.reason +
+            "). Обрезаю вывод по строкам — работа после этого будет "
+            "потеряна частично.");
+        if (pruned) commit(std::move(snap.history), false);
+        trim_history_if_needed();
+        return;
+    }
+
+    const size_t was = snap.history.size();
+    std::vector<Message> next =
+        compaction::compacted_history(sel, r.summary, snap.cfg);
+    commit(std::move(next), true);
+    save_session();
+
+    push_event(AgentEvent::Status,
+        "Сводка готова: " + std::to_string(was - sel.tail.size()) +
+        " сообщений свёрнуто, в истории осталось " +
+        std::to_string(sel.tail.size() + 2) + ".");
+
+    /* 3. Локальный бюджет символов. Сводка может не уложиться в него
+     *    сама по себе (например, сводщик ответил длиннее ожидаемого), и
+     *    тогда без аварийной обрезки файл сессии продолжит расти. */
+    std::vector<Message> current;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        current = state_.session;
+    }
+    if (model_history_chars(current) > snap.budget) {
+        push_event(AgentEvent::Status,
+            "Сводка не поместилась в локальный бюджет — обрезаю по строкам.");
+        trim_history_if_needed();
+    }
 }
 
 /* ======================================================================

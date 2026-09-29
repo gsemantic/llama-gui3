@@ -18,6 +18,8 @@
  * что ему прислали. Ни сети, ни провайдера.
  */
 
+#include "../core/prompts.h"   /* kCompactionSystemPrompt: запрос сводки виден по системному промпту */
+
 #include "test_framework.h"
 #include "test_printers.h"
 #include "test_support.h"
@@ -71,11 +73,34 @@ struct FakeHost {
     /* Что сделать перед ответом: имитация того, что пользователь написал
      * в чат, пока агент работал. */
     std::function<void()> on_chat;
+    /* Сколько входных токенов «померил» провайдер. По умолчанию 100: у
+     * настоящего провайдера это правда, а тесты переполнения окна (И7.10)
+     * обязаны подставлять своё число, иначе измеренное значение спрячет
+     * оценку, а переполнение не наступит никогда. */
+    long long prompt_tokens = 100;
+    /* Ответ на запрос СВОДКИ. Пусто — такого запроса не бывает, и ветка
+     * не трогает остальные тесты. */
+    std::string compaction_reply;
+    int compaction_calls = 0;
 
-    bool chat(const std::string&, const std::vector<ModelMessage>& msgs,
+    bool chat(const std::string& sys, const std::vector<ModelMessage>& msgs,
               LlmReply& out) {
         if (on_chat) on_chat();
         requests.push_back(msgs);
+        if (!compaction_reply.empty() && sys == kCompactionSystemPrompt) {
+            out.content = compaction_reply;
+            out.finish_reason = "stop";
+            out.prompt_tokens = prompt_tokens;
+            out.completion_tokens = 20;
+            ++compaction_calls;
+            /* После сжатия провайдер меряет СЛЕДУЮЩИЙ запрос, а он уже
+             * маленький. Без этого тест утверждал бы, что цикл сжимает
+             * историю на каждом шаге, — но только потому, что имитатор
+             * продолжает врать про 15000 токенов. Повторное сжатие на
+             * реальных числах проверяется у движка отдельной проверкой. */
+            prompt_tokens = 500;
+            return true;
+        }
         if (fail) {
             out.error = error;
             return false;
@@ -87,7 +112,7 @@ struct FakeHost {
         out.content = replies[std::min(next, replies.size() - 1)];
         ++next;
         out.finish_reason = "stop";
-        out.prompt_tokens = 100;
+        out.prompt_tokens = prompt_tokens;
         out.completion_tokens = 20;
         return true;
     }
@@ -187,6 +212,14 @@ struct LoopFixture {
         /* И7.2: измерение контекста тоже состояние синглона, и без
          * сброса тест унаследовал бы измерение чужого хода. */
         engine_state().measured_input_tokens = 0;
+        /* И7.10: то же и про окно с настройками сжатия. Без сброса тест
+         * унаследовал бы чужие лимиты (и сжатие молча выключилось бы, если
+         * у кого-то стоял compaction_auto=false) — и проверял бы не цикл,
+         * а чужую настройку. Числа нулевые: лимиты неизвестны → сжатия
+         * нет, и это состояние ПО УМОЛЧАНИЮ для тестов, которые про сжатие
+         * не думают. */
+        engine_state().model_limits = compaction::ModelLimits();
+        engine_state().compaction_config = compaction::CompactionConfig();
         engine_state().abort_requested.store(false);
         engine_state().shutting_down = false;
         engine_state().state = AgentState::Executing;
@@ -657,6 +690,115 @@ TEST(agent_loop_forces_a_summary_when_the_last_step_still_calls_tools) {
 /* ======================================================================
  * И7.2: цикл отдаёт измерение контекста
  * ====================================================================== */
+
+/* ======================================================================
+ * И7.10: цикл действительно сжимает
+ * ======================================================================
+ *
+ * Проверки движка (test_engine.cpp) доказывают, что сжатие работает, когда
+ * его позвали. Эта доказывает, что его зовут: мутация «цикл по-прежнему
+ * вызывает старую обрезку строк» ломала ровно эту проверку и больше
+ * ничего — то есть весь конвейер можно было откатить к обрезке, оставив
+ * все тесты зелёными. Класс тот же, что D2: средство есть, о нём никто
+ * не сказал.
+ *
+ * Переполнение устраивается ИЗМЕРЕНИЕМ: провайдер сообщает 15000 входных
+ * токенов при окне в 1000. Оценкой это не сделать — context_usage берёт
+ * измеренное, когда оно есть (И7.2), и подставленная оценка была бы
+ * немедленно спрятана. */
+
+TEST(the_loop_compacts_when_the_provider_reports_a_full_window) {
+    LoopFixture fx;
+    fx.host.compaction_reply = "## Цель\n- посчитать навыки";
+    fx.host.prompt_tokens = 15000;
+    /* Первый ход — вызов инструмента, второй — итог: цикл дойдёт до
+     * конца, и проверка не будет висеть на числе шагов. */
+    fx.host.replies = {call_block("repo_map", ""),
+                       long_answer("Навыки: wp, python, devops.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    /* Окно: вход ограничен провайдером отдельно (input = 3000), резерв под
+     * сводку равен лимиту ответа (1000), то есть usable = 2000 токенов.
+     * Измеренные 15000 переполняют его сразу.
+     *
+     * Числа выбраны по формуле usable(), а не на глаз: без явного input
+     * вычитается ПОЛНЫЙ лимит ответа, и при context = 21000 получается
+     * usable = 20000, то есть переполнение не наступает никогда. */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().model_limits.context = 100000;
+        engine_state().model_limits.input = 3000;
+        engine_state().model_limits.max_output = 1000;
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    /* Сводщика спросили — и спросили по-портовски: с промптом сводки. */
+    ASSERT_TRUE(fx.host.compaction_calls >= 1);
+    /* Ровно одно сжатие: провайдер после него сообщает 500 токенов. */
+    ASSERT_EQ(fx.host.compaction_calls, 1);
+
+    /* И в истории появилась сжатая форма: сводка впереди, а последняя
+     * реплика пользователя — синтетическое продолжение. Без этой проверки
+     * «сводку попросили» прошло бы и при «попросили, но в историю не
+     * положили». */
+    const std::vector<Message> history = fx.history();
+    ASSERT_TRUE(!history.empty());
+    ASSERT_TRUE(history.front().parts[0].is(PartKind::Compaction));
+    ASSERT_EQ(history.front().parts[0].text(),
+              std::string("## Цель\n- посчитать навыки"));
+    int continuations = 0;
+    for (const Message& m : history) {
+        for (const MessagePart& p : m.parts) {
+            if (p.is(PartKind::CompactionContinue)) ++continuations;
+        }
+    }
+    ASSERT_EQ(continuations, 1);
+    /* Последняя реплика пользователя — именно продолжение: на неё
+     * отвечает ход, который цикл завершил итогом. Если бы это был ответ
+     * человека, условие завершения хода (И5.8) не сошлось бы. */
+    const Message* last_user = last_user_message(history);
+    ASSERT_TRUE(last_user != nullptr);
+    ASSERT_TRUE(last_user->parts[0].is(PartKind::CompactionContinue));
+}
+
+TEST(the_loop_does_not_ask_for_a_summary_while_the_window_has_room) {
+    /* Обратная сторона: сжатие не должно становиться новым источником
+     * расходов. При окне 200000 токенов цикл не спрашивает сводку ни
+     * разу, сколько бы шагов ни прошло. */
+    LoopFixture fx;
+    fx.host.compaction_reply = "## Цель\n- посчитать навыки";
+    fx.host.prompt_tokens = 100;
+    fx.host.replies = {call_block("repo_map", ""),
+                       long_answer("Навыки: wp, python, devops.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().model_limits.context = 200000;
+        engine_state().model_limits.max_output = 1000;
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    ASSERT_EQ(fx.host.compaction_calls, 0);
+    const std::vector<Message> history = fx.history();
+    for (const Message& m : history) {
+        for (const MessagePart& p : m.parts) {
+            ASSERT_FALSE(p.is(PartKind::Compaction));
+            ASSERT_FALSE(p.is(PartKind::CompactionContinue));
+        }
+    }
+}
 
 TEST(loop_records_the_input_tokens_the_host_reported) {
     /* Кто именно измеряет контекст: хост присылает usage.input = 100

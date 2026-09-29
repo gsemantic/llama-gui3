@@ -17,6 +17,7 @@
 #include "core/engine.h"
 #include "core/json_utils.h"   /* text::utf8_prefix/is_valid_utf8 */
 #include "core/prompts.h"   /* kCompactionSystemPrompt: строки формата */
+#include "core/session_store.h"   /* round-trip порядка (И7.8) */
 
 #include "test_framework.h"
 #include "test_support.h"
@@ -703,6 +704,16 @@ Message assistant_with(const std::string& tag, MessagePart part) {
     return m;
 }
 
+/* Обёртка сводки от прошлого сжатия — во что сжимается старая голова
+ * истории. Живёт здесь, а не рядом с И7.6: пользуются и транскрипт
+ * (эта задача), и сводщик (следующая). */
+Message summary_wrapper(const std::string& tag, const std::string& summary) {
+    Message m = Message::user(std::string());
+    m.id = "msg_user_" + tag;
+    m.parts.push_back(MessagePart::compaction(summary, {}));
+    return m;
+}
+
 MessagePart completed_tool(const std::string& name, const std::string& body) {
     MessagePart p = MessagePart::tool("call_1", name);
     ToolOutput out;
@@ -833,19 +844,25 @@ TEST(summary_transcript_marker_follows_the_role) {
     ASSERT_TRUE(text.find("[User]: [Assistant]:") == std::string::npos);
 }
 
-TEST(summary_transcript_carries_the_previous_summary) {
-    /* Обёртка сводки от прошлого сжатия обязана попасть в новую сводку:
-     * иначе повторное сжатие забыло бы всё, что было до него, а именно
-     * ради этого сжатие и делается. */
+TEST(the_previous_summary_is_not_part_of_the_conversation) {
+    /* И7.4 сначала требовала обратного: строка `[User]: <сводка>` в
+     * транскрипте. И7.6 завела прошлой сводке ОТДЕЛЬНУЮ полосу
+     * (<prior-summary>), и держать её ещё и в разговоре нельзя: там она
+     * читалась бы словами человека, а промпт одновременно просит считать
+     * разговор новее сводки. Два утверждения об одном тексте, и
+     * выигрывает более свежее — то есть предписывающее отбросить старое.
+     *
+     * Проверка именно ОТСУТСТВИЯ строки, а не «сводки нет в выводе вообще»:
+     * сам текст обязан дойти до сводщика, и проверяет это уже тест
+     * the_previous_summary_reaches_the_new_summarizer (И7.6). */
     std::vector<Message> h;
-    Message wrapper = Message::user("сводка прошлого раза");
-    wrapper.parts.push_back(
-        MessagePart::compaction("искали причину падения теста", {}));
-    h.push_back(wrapper);
+    h.push_back(summary_wrapper("c", "искали причину падения теста"));
     h.push_back(assistant_with("a", MessagePart::text("нашёл")));
     const std::string text = serialize_for_summary(h);
-    ASSERT_TRUE(has_line(text, "[User]: искали причину падения теста"));
-    ASSERT_TRUE(has_line(text, "[Assistant]: нашёл"));
+    ASSERT_TRUE(text.find("искали причину падения теста") == std::string::npos);
+    /* Сообщение-обёртка не оставляет и пустой дыры: блок целиком пуст, и
+     * разделитель между сообщениями не ставится. */
+    ASSERT_EQ(text, std::string("[Assistant]: нашёл"));
 }
 
 TEST(summary_transcript_has_no_holes_for_empty_messages) {
@@ -887,6 +904,65 @@ const char* kFormatMarkers[] = {
     "[User]:", "[Assistant]:", "[Assistant reasoning]:",
     "[Assistant tool call]:", "[Tool result]:", "[Tool error]:",
 };
+
+/* Содержимое между двумя метками. Пустая строка — метки нет либо текста
+ * между ними нет, и различать это проверка обязана сама (иначе
+ * «тег есть, но сводка не доехала» прошло бы как успех). */
+std::string between(const std::string& text, const std::string& open,
+                    const std::string& close) {
+    const size_t a = text.find(open + "\n");
+    if (a == std::string::npos) return std::string();
+    const size_t b = text.find("\n" + close, a);
+    if (b == std::string::npos) return std::string();
+    return text.substr(a + open.size() + 1, b - (a + open.size() + 1));
+}
+
+/* Сводщик-заглушка, который ЗАПОМИНАЕТ то, что ему передали. Проверять
+ * доставку прошлой сводки иначе нечем: наружу summarize() отдаёт только
+ * итог, и «сводщик получил» — это утверждение о том, чего в результате
+ * нет. */
+struct CapturingTurn {
+    std::string system;
+    std::string user_prompt;
+    int replies = 0;
+    int messages = 0;
+    /* Была ли прошлая сводка и какая (И7.11: итеративность целиком). */
+    bool calls_had_prior = false;
+    std::string prior_text;
+    std::string answer = "## Цель\n- починить тест";
+
+    SummaryTurn fn() {
+        CapturingTurn* self = this;
+        return [self](const std::string& sys, const std::vector<ModelMessage>& m,
+                      std::string& text, std::string&) {
+            ++self->replies;
+            self->messages = static_cast<int>(m.size());
+            self->system = sys;
+            self->prior_text = between(self->user_prompt + "\n\n" +
+                                           (m.empty() ? "" : m[0].content),
+                                       "<prior-summary>", "</prior-summary>");
+            self->calls_had_prior = m.size() == 1 &&
+                                    m[0].content.find("<prior-summary>") !=
+                                        std::string::npos;
+            self->user_prompt.clear();
+            for (const ModelMessage& mm : m) {
+                if (!self->user_prompt.empty()) self->user_prompt += "\n\n";
+                self->user_prompt += mm.content;
+            }
+            text = self->answer;
+            return true;
+        };
+    }
+};
+
+/* Разговор без следов прошлого сжатия. */
+std::vector<Message> plain_history() {
+    std::vector<Message> h;
+    h.push_back(user_with_text("u", "почини тест"));
+    h.push_back(assistant_with("a", MessagePart::text("смотрю")));
+    return h;
+}
+
 
 TEST(the_summarizer_prompt_names_every_line_format) {
     const std::string sys = kCompactionSystemPrompt;
@@ -937,13 +1013,277 @@ TEST(the_summarizer_prompt_separates_the_previous_summary) {
     ASSERT_TRUE(again.find("<conversation>") < open);
 }
 
+/* ======================================================================
+ * И7.6 — итеративность: прошлая сводка доезжает до нового сводщика
+ * ======================================================================
+ *
+ * Главная проверка здесь смотрит на ТО, ЧТО ПЕРЕДАНО СВОДЩИКУ, а не на
+ * результат summarize(): результат одинаков — сводка — независимо от
+ * того, видел сводщик прошлую сводку или нет. Проверка по результату
+ * была бы зелёной ровно на том дефекте, ради которого задача и
+ * существует: второе сжатие выкинуло бы всю работу до первого, сводка
+ * получилась бы правдоподобной, и заметить это было бы негде. */
+
+TEST(the_previous_summary_reaches_the_new_summarizer) {
+    /* Повторное сжатие: в голове истории лежит обёртка сводки от
+     * прошлого раза, а разговор — только то, что было после неё. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("c", "искали причину падения теста"));
+    h.push_back(user_with_text("u", "тест всё ещё падает"));
+    h.push_back(assistant_with("a", MessagePart::text("смотрю git log")));
+
+    CapturingTurn cap;
+    const CompactionResult r = summarize(h, cap.fn());
+    ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Continue);
+    ASSERT_EQ(cap.replies, 1);
+    /* Промпт сводщика — не системный промпт агента, и реплика ровно одна.
+     * Обещание из комментария к the_answer_becomes_the_summary («сводщик
+     * получает ровно одну реплику и промпт сводщика») там проверялось
+     * ничем: тест смотрел на исход, а не на то, что ушло в модель. */
+    ASSERT_EQ(cap.system, std::string(kCompactionSystemPrompt));
+    ASSERT_EQ(cap.messages, 1);
+    /* Прошлая сводка лежит МЕЖДУ метками, а не «где-то в промпте»: слово
+     * <prior-summary> есть и в инструкции, и проверка на вхождение
+     * удовлетворялась бы инструкцией. */
+    ASSERT_EQ(between(cap.user_prompt, "<prior-summary>", "</prior-summary>"),
+              std::string("искали причину падения теста"));
+    /* И — главное — в разговоре её НЕТ: дважды отданная сводка с
+     * разными пометками («реплика человека» против «сводка прошлого
+     * разговора») дают сводщику два утверждения об одном тексте. */
+    ASSERT_EQ(between(cap.user_prompt, "<conversation>", "</conversation>"),
+              std::string("[User]: тест всё ещё падает\n"
+                          "\n"
+                          "[Assistant]: смотрю git log"));
+    /* Разговор новее сводки, и это сказано словами: именно на порядке
+     * сводщик спотыкается. */
+    ASSERT_TRUE(cap.user_prompt.find("<conversation>") <
+                cap.user_prompt.find("<prior-summary>"));
+}
+
+TEST(the_first_compaction_has_no_prior_summary_tag) {
+    /* Пустой тег читается как «сводка была, но потерялась», поэтому его
+     * не должно быть вовсе — и тем более в виде пары меток с пустым
+     * содержимым. */
+    CapturingTurn cap;
+    const CompactionResult r = summarize(plain_history(), cap.fn());
+    ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Continue);
+    ASSERT_TRUE(cap.user_prompt.find("<prior-summary>") == std::string::npos);
+    ASSERT_TRUE(cap.user_prompt.find("<conversation>") != std::string::npos);
+}
+
+TEST(the_newest_summary_replaces_the_older_one) {
+    /* Две сводки подряд: вторая составлена с первой в <prior-summary> и
+     * по объявленному правилу слияния содержит её целиком. Отдать сводщику
+     * ПЕРВУЮ = выбросить всё, сделанное между сжатиями, причём молча:
+     * промпт отработал бы и выдал правдоподобную сводку. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("first", "чинили дедлок в SessionStore"));
+    h.push_back(summary_wrapper("second",
+        "## Цель\n- починить тест\n\n## Сделано\n- дедлок устранён"));
+    h.push_back(user_with_text("u", "теперь падает другое"));
+
+    CapturingTurn cap;
+    const CompactionResult r = summarize(h, cap.fn());
+    ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Continue);
+    const std::string prior =
+        between(cap.user_prompt, "<prior-summary>", "</prior-summary>");
+    ASSERT_TRUE(prior.find("теперь падает другое") == std::string::npos);
+    ASSERT_TRUE(prior.find("дедлок устранён") != std::string::npos);
+    /* Старая сводка не всплывает и в разговоре — иначе модель получила бы
+     * «человека, который говорил про дедлок» впереди собственной цели. */
+    ASSERT_TRUE(cap.user_prompt.find("чинили дедлок") == std::string::npos);
+}
+
+TEST(an_empty_summary_wrapper_does_not_hide_the_older_one) {
+    /* Пустая обёртка получается только из правки файла сессии руками.
+     * Считать её сводкой значило бы объявить «прошлого сжатия не было»,
+     * то есть тихо потерять всё, что до него; всё сказанное после неё и
+     * так лежит в разговоре. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("first", "чинили дедлок"));
+    h.push_back(summary_wrapper("broken", ""));
+    h.push_back(user_with_text("u", "продолжаем"));
+
+    CapturingTurn cap;
+    const CompactionResult r = summarize(h, cap.fn());
+    ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Continue);
+    ASSERT_EQ(between(cap.user_prompt, "<prior-summary>", "</prior-summary>"),
+              std::string("чинили дедлок"));
+}
+
+TEST(a_summary_left_alone_stops_and_says_why) {
+    /* Переполнение, а новых ходов нет: история уже сведена до обёртки.
+     * Повторное сжатие тут нечем делать, и объявлять Continue значило бы
+     * «работа продолжается ни на чём». Отказ обязан быть С ДВУМЯ разными
+     * причинами: «пустой разговор» и «после сжатия новых ходов нет»
+     * выглядят для пользователя одинаково, а приводят к разному — во
+     * втором случае переполнение вернётся на следующем шаге. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("c", "всё, что было, уже в сводке"));
+    CapturingTurn cap;
+    const CompactionResult r = summarize(h, cap.fn());
+    ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
+    ASSERT_TRUE(r.reason.find("новых ходов нет") != std::string::npos);
+    ASSERT_TRUE(r.summary.empty());
+    /* Сводщик не зовётся вовсе: незачем платить за запрос, результат
+     * которого всё равно пришлось бы выбросить. */
+    ASSERT_EQ(cap.replies, 0);
+
+    CapturingTurn empty;
+    const CompactionResult e = summarize({}, empty.fn());
+    ASSERT_TRUE(e.reason.find("разговор пуст") != std::string::npos);
+}
+
+TEST(the_previous_summary_is_read_from_the_history_not_the_caller) {
+    /* Функция доступна и сама по себе — ею пользуется и summarize(), и
+     * тот, кто будет показывать сводку в UI (И11). Значит, её поведение
+     * проверяется самостоятельно, а не только через промпт. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("a", "первая"));
+    h.push_back(user_with_text("u", "между"));
+    h.push_back(summary_wrapper("b", "вторая"));
+    ASSERT_EQ(previous_summary(h), std::string("вторая"));
+    ASSERT_EQ(previous_summary(plain_history()), std::string(""));
+    ASSERT_EQ(previous_summary({}), std::string(""));
+}
+
+/* ======================================================================
+ * И7.7 — автопродолжение
+ * ======================================================================
+ *
+ * Реплика «Continue if you have next steps…» обязана попасть в ДВА места
+ * и не попасть в третье, и каждое требование проверяется отдельно,
+ * потому что все три выглядели бы одинаково, пока всё работает:
+ *
+ *   - транскрипт для МОДЕЛИ: обязана уйти, иначе после сжатия работа
+ *     останавливается, а выглядит это как «сжатие прошло, задача
+ *     закрыта» — потеря работы выглядит выполненной работой;
+ *   - сводка для следующего сжатия: обязана НЕ уйти, иначе сводщик
+ *     прочитает «человек попросил продолжать» (там `[User]` — это
+ *     человек, и промпт прямо запрещает приписывать ему лишнего);
+ *   - файл сессии: обязана сохраниться, иначе после перезагрузки она
+ *     станет обычной репликой пользователя (проверяет
+ *     session_file_roundtrip_keeps_every_part).
+ *
+ * Проверка «ушла» и «не ушла» в одном тесте — не экономия, а защита от
+ * подмены: правка, убирающая часть из обоих мест разом, оставила бы
+ * зелёным любой из двух тестов по отдельности. */
+
+TEST(the_continuation_reaches_the_model_and_not_the_summarizer) {
+    const Message resume = Message::compaction_continue();
+    /* Роль пользователя — сознательное решение, а не деталь: от неё
+     * зависят условие завершения хода (И5.8) и выбор хвоста при
+     * следующем сжатии. Отдельная роль «от плагина» потребовала бы
+     * учить её быть пользователем во всех местах, где пользователь
+     * значит «начало хода». */
+    ASSERT_TRUE(resume.is_user());
+    ASSERT_EQ(resume.parts.size(), size_t(1));
+    ASSERT_TRUE(resume.parts[0].is(PartKind::CompactionContinue));
+
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("c", "сводка прошлого раза"));
+    h.push_back(assistant_with("a", MessagePart::text("продолжаю")));
+    h.push_back(resume);
+
+    /* Модели уходит ровно текст константы: одна реплика пользователя,
+     * дословно, без обёрток.
+     *
+     * Три реплики, а не две: обёртка сводки тоже уходит модели, отдельной
+     * репликой ассистента — это работа 7.8, и здесь важно лишь, что она
+     * стоит ДО продолжения, а не после. */
+    const std::vector<ModelMessage> msgs = to_model_messages(h);
+    ASSERT_EQ(msgs.size(), size_t(3));
+    ASSERT_EQ(msgs[0].role, std::string(kRoleAssistant));
+    ASSERT_EQ(msgs[0].content, std::string("сводка прошлого раза"));
+    ASSERT_EQ(msgs[1].role, std::string(kRoleAssistant));
+    ASSERT_EQ(msgs[2].role, std::string(kRoleUser));
+    ASSERT_EQ(msgs[2].content, std::string(kCompactionContinueText));
+
+    /* В сводку она не попадает: там `[User]` — это человек, а это слова
+     * плагина. Проверка именно ОТСУТСТВИЯ, а не «сводка не испортилась»:
+     * иначе правка, убирающая часть и из сводки, и из транскрипта,
+     * прошла бы здесь, и потерялась бы работа после сжатия. */
+    const std::string transcript = serialize_for_summary(h);
+    ASSERT_TRUE(transcript.find("Continue if you have next steps") ==
+                std::string::npos);
+    ASSERT_TRUE(has_line(transcript, "[Assistant]: продолжаю"));
+}
+
+TEST(after_compaction_the_last_user_message_is_the_continuation) {
+    /* От этого равенства зависит условие завершения хода: модель отвечает
+     * на последнюю реплику пользователя, и без реплики-продолжения ход не
+     * отвечает ни на что — задача не закрылась бы, но и не продолжилась,
+     * а просто остановилась бы без внятной причины. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("c", "сводка"));
+    h.push_back(user_with_text("u", "старая задача"));
+    const Message resume = Message::compaction_continue();
+    h.push_back(resume);
+    h.push_back(assistant_with("z", MessagePart::text("взялся")));
+    const Message* last = last_user_message(h);
+    ASSERT_TRUE(last != nullptr);
+    ASSERT_EQ(last->id, resume.id);
+}
+
+TEST(the_tail_starts_where_the_work_resumed) {
+    /* Хвост обязан начинаться с реплики-продолжения: всё, что после неё,
+     * агент делает уже в сжатой сессии, и обрезать хвост раньше значило бы
+     * оставить его работать без того, с чего он продолжил. Размеры — в
+     * токенах (оценка chars/4), как и во всём блоке И7.3.
+     *
+     * Проверка не пустая ровно настолько, насколько не пуст порог: старый
+     * ход на 8000 токенов в 1000 не влезает даже своим хвостом, поэтому
+     * границу может задать только начало следующего хода.
+     *
+     * Проверка держит ГРАНИЦУ хвоста, а не «считается ли реплика
+     * продолжения ходом»: мутация на второе не ломает ничего, потому что
+     * разрез хода приходит к той же границе (см. комментарий в
+     * starts_a_turn). Хвост, начинающийся с реплики продолжения, —
+     * свойство, за которое отвечает выбор хвоста, и оно проверяемо. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("c", "сводка"));
+    h.push_back(user_turn("a", 4000));
+    h.push_back(answer_turn("msg_user_a", "a", 4000));
+    const Message resume = Message::compaction_continue();
+    h.push_back(resume);
+    h.push_back(answer_turn("msg_continue", "z", 40));
+
+    const Selection sel =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(1000));
+    ASSERT_EQ(sel.tail.size(), size_t(2));
+    ASSERT_EQ(std::string(first_id(sel.tail)), resume.id);
+    ASSERT_EQ(std::string(last_id(sel.tail)), std::string("msg_assist_z"));
+    /* Голова уходит в сводку вместе со старым ходом, а реплика
+     * продолжения — нет: уйди она в сводку, работа возобновилась бы с
+     * голой сводки и без повода продолжать. */
+    ASSERT_EQ(sel.head.size(), size_t(3));
+    ASSERT_EQ(std::string(first_id(sel.head)), std::string("msg_user_c"));
+}
+
+TEST(a_lone_continuation_is_not_a_conversation_to_summarize) {
+    /* Обёртка прошлого сжатия плюс реплика «продолжай», а новых ходов
+     * нет. Сводить нечего, и сводщик зовёться не должен: его ответ всё
+     * равно пришлось бы выбросить, а место под запрос платилось бы
+     * впустую. Причина — та, что видит пользователь, а не «нечего
+     * сжимать» вообще: переполнение после этого вернётся на
+     * следующем же шаге. */
+    std::vector<Message> h;
+    h.push_back(summary_wrapper("c", "всё, что было, уже в сводке"));
+    h.push_back(Message::compaction_continue());
+    CapturingTurn cap;
+    const CompactionResult r = summarize(h, cap.fn());
+    ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
+    ASSERT_TRUE(r.reason.find("новых ходов нет") != std::string::npos);
+    ASSERT_EQ(cap.replies, 0);
+}
+
 TEST(the_answer_becomes_the_summary) {
     SummaryTurn turn = [](const std::string&, const std::vector<ModelMessage>&,
                           std::string& text, std::string&) {
         text = "## Цель\n- починить тест";
         return true;
     };
-    const CompactionResult r = summarize("[User]: задача", "", turn);
+    const CompactionResult r = summarize(plain_history(), turn);
     ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Continue);
     ASSERT_EQ(r.summary, std::string("## Цель\n- починить тест"));
     ASSERT_EQ(r.reason, std::string(""));
@@ -966,7 +1306,7 @@ TEST(answering_compact_means_the_context_is_exhausted) {
             t = word;
             return true;
         };
-        const CompactionResult r = summarize("[User]: задача", "", turn);
+        const CompactionResult r = summarize(plain_history(), turn);
         ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Compact);
         ASSERT_EQ((int)r.failure, (int)FailureKind::ContextOverflow);
         ASSERT_TRUE(r.summary.empty());
@@ -983,7 +1323,7 @@ TEST(a_failed_turn_stops_without_touching_the_history) {
         error = "провайдер недоступен";
         return false;
     };
-    const CompactionResult r = summarize("[User]: задача", "", turn);
+    const CompactionResult r = summarize(plain_history(), turn);
     ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
     ASSERT_EQ((int)r.failure, (int)FailureKind::Provider);
     /* Причина обязана быть видна: молчаливый отказ от сжатия выглядит как
@@ -1001,7 +1341,7 @@ TEST(a_summarizer_calling_a_tool_is_denied_by_name) {
         t = "смотрю файл\n```json\n{\"tool\": \"read_file\", \"path\": \"a.cpp\"}\n```";
         return true;
     };
-    const CompactionResult r = summarize("[User]: задача", "", turn);
+    const CompactionResult r = summarize(plain_history(), turn);
     ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
     ASSERT_EQ((int)r.failure, (int)FailureKind::Tool);
     ASSERT_TRUE(r.reason.find("read_file") != std::string::npos);
@@ -1017,7 +1357,7 @@ TEST(an_empty_answer_stops_instead_of_becoming_a_summary) {
             t = answer;
             return true;
         };
-        const CompactionResult r = summarize("[User]: задача", "", turn);
+        const CompactionResult r = summarize(plain_history(), turn);
         ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
         ASSERT_TRUE(r.reason.find("пустой") != std::string::npos);
         ASSERT_TRUE(r.summary.empty());
@@ -1040,7 +1380,7 @@ TEST(a_too_long_summary_is_cut_at_a_line_and_flagged) {
         t = huge;
         return true;
     };
-    const CompactionResult r = summarize("[User]: задача", "", turn);
+    const CompactionResult r = summarize(plain_history(), turn);
     ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Continue);
     ASSERT_TRUE(r.summary_truncated);
     ASSERT_TRUE(!r.reason.empty());
@@ -1053,7 +1393,7 @@ TEST(a_too_long_summary_is_cut_at_a_line_and_flagged) {
 TEST(no_summarizer_means_stop_not_a_crash) {
     /* Пустая функция — не «сработает по умолчанию», а отказ с причиной:
      * вызывающий обязан узнать, что сводщика нечем кормить, а не упасть. */
-    const CompactionResult r = summarize("[User]: задача", "", nullptr);
+    const CompactionResult r = summarize(plain_history(), nullptr);
     ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
     ASSERT_TRUE(r.reason.find("недоступен") != std::string::npos);
 }
@@ -1066,12 +1406,912 @@ TEST(nothing_to_summarize_is_a_stop_with_a_reason) {
         t = "сводка";
         return true;
     };
-    const CompactionResult r = summarize("", "", turn);
+    const CompactionResult r = summarize({}, turn);
     ASSERT_EQ((int)r.outcome, (int)CompactionOutcome::Stop);
     ASSERT_TRUE(r.reason.find("нечего сжимать") != std::string::npos);
     ASSERT_TRUE(r.summary.empty());
 }
 
+/* ======================================================================
+ * И7.8 — что история становится после сжатия
+ * ======================================================================
+ *
+ * Проверяется не «функция вернула что-то», а форма получившейся истории,
+ * потому что форма здесь и есть смысл: [обёртка(сводка), …хвост…,
+ * продолжение]. Ошибка в любом из трёх мест выглядит одинаково — агент
+ * что-то делает, — но означает разное: без сводки он не помнит, что
+ * было; без хвоста он не помнит, над чем работает; без продолжения он
+ * останавливается на сводке и выглядит закончившим. */
+
+namespace {
+
+/* Готовая «сжатая» история: три хода, порог на один, чтобы хвостом
+ * уцелел только последний. */
+Selection selection_with_tail() {
+    std::vector<Message> h = history_of_turns(3, 40);
+    const Selection sel =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(100));
+    return sel;
+}
+
+/* Идентификаторы одной строкой: ASSERT_EQ печатает значения через
+ * operator<<, а для вектора строк его нет, и ошибка выводилась бы
+ * «no match for operator<<» вместо того, что отличалось. */
+std::string joined(const std::vector<std::string>& ids) {
+    std::string out;
+    for (const std::string& id : ids) {
+        if (!out.empty()) out += ",";
+        out += id;
+    }
+    return out;
+}
+
+std::string ids_of(const std::vector<Message>& v) {
+    std::vector<std::string> out;
+    for (const Message& m : v) out.push_back(m.id);
+    return joined(out);
+}
+
+} // anonymous namespace
+
+TEST(a_compacted_history_is_summary_then_tail_then_continuation) {
+    const Selection sel = selection_with_tail();
+    ASSERT_TRUE(sel.head.size() > 1 && sel.tail.size() > 0);   /* фикстура */
+
+    const CompactionConfig cfg;
+    const std::vector<Message> h =
+        compacted_history(sel, "## Цель\n- починить тест", cfg);
+
+    /* Обёртка первая, хвост следом, продолжение последним. */
+    ASSERT_EQ(h.size(), sel.tail.size() + 2);
+    ASSERT_TRUE(h.front().is_user());
+    ASSERT_EQ(h.front().parts.size(), size_t(1));
+    ASSERT_TRUE(h.front().parts[0].is(PartKind::Compaction));
+    ASSERT_EQ(h.front().parts[0].text(), std::string("## Цель\n- починить тест"));
+    for (size_t i = 0; i < sel.tail.size(); ++i) {
+        ASSERT_EQ(h[i + 1].id, sel.tail[i].id);
+    }
+    ASSERT_TRUE(h.back().parts[0].is(PartKind::CompactionContinue));
+
+    /* Головы в результате нет НИКАК: «сжатая история» с остатками старой
+     * головы выглядела бы сжатой, а модель платила бы за оба куска. */
+    /* Обёртка — единственное новое сообщение, и идентификатор у неё
+     * свой; совпадение с головой означало бы, что хвост или обёртка
+     * притащили старое сообщение. */
+    for (const Message& m : h) {
+        ASSERT_TRUE(m.id == h.front().id || m.id == h.back().id ||
+                    ids_of(sel.tail).find(m.id) != std::string::npos);
+    }
+    /* Что именно свёрнуто — перечислено в части сводки, и перечислено
+     * САМО из головы: ручной список разошёлся бы с головой при первом же
+     * изменении, и UI показывал бы «свёрнуто вот это» мимо. */
+    const std::vector<std::string>& replaced = h.front().parts[0].replaced_ids();
+    ASSERT_EQ(joined(replaced), ids_of(sel.head));
+}
+
+TEST(the_order_after_compaction_is_not_by_id_and_that_is_fine) {
+    /* Порядок массива после сжатия НЕ хронологический: у обёртки
+     * идентификатор свежее всех (её создали последней), а стоит она
+     * первой. Это не небрежность, а единственный способ поставить сводку
+     * перед хвостом; проверяется, чтобы правка «на всякий случай
+     * отсортируем» не выглядела безобидной. */
+    const Selection sel = selection_with_tail();
+    const CompactionConfig cfg;
+    const std::vector<Message> h =
+        compacted_history(sel, "сводка", cfg);
+    ASSERT_TRUE(sel.tail.size() > 1);
+
+    /* Обёртка создана ПОЗЖЕ хвоста (её идентификатор больше) и стоит
+     * РАНЬШЕ. Это и есть «порядок не хронологический». */
+    ASSERT_TRUE(id_number(h.front().id) > id_number(h[1].id));
+    /* Реплика продолжения — самая свежая из всех и стоит в конце: с неё
+     * агент продолжает, и по времени она последняя, то есть здесь
+     * порядок всё-таки хронологический. */
+    ASSERT_TRUE(id_number(h.back().id) > id_number(h.front().id));
+    /* Массив НЕ отсортирован по идентификатору — и именно поэтому
+     * сортировка «для надёжности» при загрузке сломала бы историю (см.
+     * следующий тест). Проверка отрицательная намеренно: показан порядок,
+     * а не запрет на будущую правку. */
+    bool sorted_by_id = true;
+    for (size_t i = 1; i < h.size(); ++i) {
+        if (id_number(h[i - 1].id) > id_number(h[i].id)) sorted_by_id = false;
+    }
+    ASSERT_FALSE(sorted_by_id);
+}
+
+TEST(a_compacted_history_survives_the_session_file) {
+    /* ЛОВУШКА, на которую задача и наведена: идентификаторы у нас
+     * монотонны и сортируемы (id_prefix.h), и до сжатия порядок массива
+     * совпадал с порядком по id. Стоит кому-то отсортировать сообщения при
+     * загрузке — «для надёжности», — сводка уедет в КОНЕЦ, и агент после
+     * перезагрузки получит сначала хвост, потом сводку: работа продолжится,
+     * но память окажется перепутана, и ход будет отвечать не на ту
+     * реплику. Загрузчик порядок ФАЙЛА сохраняет, и это держится здесь. */
+    const Selection sel = selection_with_tail();
+    const CompactionConfig cfg;
+    const std::vector<Message> h =
+        compacted_history(sel, "## Цель\n- починить тест", cfg);
+
+    SessionFile file;
+    file.session_id = "ses_000000000001";
+    file.messages = h;
+    const json::JsonValue js = SessionArchive::to_json(file);
+    SessionFile loaded;
+    std::string error;
+    std::vector<std::string> warnings;
+    ASSERT_TRUE(SessionArchive::from_json(js, loaded, &error, &warnings));
+    ASSERT_TRUE(warnings.empty());
+    ASSERT_EQ(ids_of(loaded.messages), ids_of(h));
+    /* И то, что модель увидит после перезагрузки, — то же самое: сводка
+     * впереди, продолжение последним. */
+    const std::vector<ModelMessage> before = to_model_messages(h);
+    const std::vector<ModelMessage> after = to_model_messages(loaded.messages);
+    ASSERT_EQ(after.size(), before.size());
+    for (size_t i = 0; i < before.size(); ++i) {
+        ASSERT_EQ(after[i].role, before[i].role);
+        ASSERT_EQ(after[i].content, before[i].content);
+    }
+    ASSERT_TRUE(after.front().content.find("починить тест") != std::string::npos);
+}
+
+TEST(the_summary_reaches_the_model_as_an_assistant_turn) {
+    /* Сводка по происхождению написана агентом-сводщиком, и модель должна
+     * видеть её как ответ ассистента. Склеенная с пользовательской
+     * репликой сводка означала бы «человек попросил составить сводку», а
+     * на такое модель отвечает новым заданием, то есть агент после
+     * сжатия начал бы с нуля. */
+    const Selection sel = selection_with_tail();
+    const CompactionConfig cfg;
+    const std::vector<Message> h =
+        compacted_history(sel, "## Цель\n- починить тест", cfg);
+
+    const std::vector<ModelMessage> msgs = to_model_messages(h);
+    ASSERT_TRUE(msgs.size() >= 3);
+    ASSERT_EQ(msgs[0].role, std::string(kRoleAssistant));
+    ASSERT_EQ(msgs[0].content, std::string("## Цель\n- починить тест"));
+    /* Хвост после сводки, продолжение — последним. */
+    ASSERT_EQ(msgs[1].role, std::string(kRoleUser));
+    ASSERT_EQ(msgs.back().role, std::string(kRoleUser));
+    ASSERT_EQ(msgs.back().content, std::string(kCompactionContinueText));
+    /* Обёртка осталась пользовательским сообщением: роль — про
+     * происхождение в ИСТОРИИ, а текст сводки уходит отдельной репликой
+     * ассистента. Проверяется явно, потому что «сводка пришла
+     * пользователю» — ровно та правка, которая всё ломает, и выглядит
+     * она вполне разумно. */
+    ASSERT_TRUE(h.front().is_user());
+}
+
+TEST(an_empty_summary_is_not_compacted_at_all) {
+    /* Сжатие без сводки не применяется: обёртка с пустым текстом заняла бы
+     * место головы, а головы нигде больше нет — работа до первого сжатия
+     * исчезла бы целиком, и заметить это можно было бы только по тому,
+     * что агент перестал помнить, зачем он здесь. */
+    const Selection sel = selection_with_tail();
+    const CompactionConfig cfg;
+    const std::vector<Message> h = compacted_history(sel, "", cfg);
+    ASSERT_EQ(ids_of(h), ids_of(sel.head) + "," + ids_of(sel.tail));
+    ASSERT_EQ(h.size(), sel.head.size() + sel.tail.size());
+    for (size_t i = 0; i < sel.tail.size(); ++i) {
+        ASSERT_EQ(h[sel.head.size() + i].id, sel.tail[i].id);
+    }
+    /* Сводки в истории нет вообще: пустой обёртки тоже быть не должно. */
+    for (const Message& m : h) {
+        for (const MessagePart& p : m.parts) {
+            ASSERT_FALSE(p.is(PartKind::Compaction));
+        }
+    }
+}
+
+TEST(an_empty_tail_still_leaves_a_usable_history) {
+    /* Хвост может не уцелеть — например, если не влезает даже свежий
+     * ход (решение 4 в compaction.h). Тогда история состоит из сводки и
+     * продолжения, и это рабочая история, а не пустая. */
+    const std::vector<Message> h = history_of_turns(2, 4000);
+    const Selection sel =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(10));
+    ASSERT_TRUE(sel.tail.empty());
+
+    const CompactionConfig cfg;
+    const std::vector<Message> out =
+        compacted_history(sel, "## Цель\n- всё в сводке", cfg);
+    ASSERT_EQ(out.size(), size_t(2));
+    ASSERT_TRUE(out.front().parts[0].is(PartKind::Compaction));
+    ASSERT_TRUE(out.back().parts[0].is(PartKind::CompactionContinue));
+    ASSERT_EQ(to_model_messages(out).size(), size_t(2));
+}
+
+TEST(turning_auto_compaction_off_means_no_continuation) {
+    /* Настройка «никогда не сжимать» означает и «не продолжать
+     * автоматически»: реплика-продолжение существует ради того, чтобы
+     * работа не встала после сжатия, и при выключенном сжатии её в
+     * истории быть не должно. */
+    const Selection sel = selection_with_tail();
+    CompactionConfig cfg;
+    cfg.auto_compact = false;
+    const std::vector<Message> h = compacted_history(sel, "сводка", cfg);
+    ASSERT_EQ(h.size(), sel.tail.size() + 1);
+    for (const Message& m : h) {
+        for (const MessagePart& p : m.parts) {
+            ASSERT_FALSE(p.is(PartKind::CompactionContinue));
+        }
+    }
+}
+
+/* ======================================================================
+ * И7.9 — прореживание вывода инструментов
+ * ======================================================================
+ *
+ * Проверяется политика (что можно очистить) и отдельно — что очищенное
+ * видно модели меткой, а не пустотой. Разделение существенное: политика
+ * ничего не меняет, поэтому проверка «список пуст» ничего не сказала бы
+ * о том, что модель увидит, а правка рендера не изменила бы ни одной
+ * политики.
+ *
+ * Про устройство фикстур. Очистить можно только то, что стоит ДО
+ * второго с конца хода: два последних хода (текущий и предыдущий)
+ * защищены счётом реплик пользователя независимо от размера. Значит,
+ * чтобы что-то очистить, нужны минимум три хода. Первая версия этих
+ * проверок строила историю из двух ходов и «находила», что прореживать
+ * нечего, — то есть проверяла бы фикстуру, а не код. И вторая ошибка
+ * того же рода: общий completed_tool() даёт всем частям call_id
+ * «call_1», и по идентификатору старый вызов от свежего не отличить. */
+
+namespace {
+
+/* Завершённый вызов заданного размера (в токенах) со СВОИМ
+ * идентификатором. */
+MessagePart big_tool(const std::string& call_id, const std::string& name,
+                     long long tokens) {
+    MessagePart p = MessagePart::tool(call_id, name);
+    ToolOutput out;
+    out.title = name;
+    out.output = std::string(chars_of(tokens), 'o');
+    p.set_result(out);
+    return p;
+}
+
+Message tool_turn(const std::string& tag, const std::string& call_id,
+                  const std::string& name, long long tokens) {
+    Message m = Message::assistant("msg_user_prev");
+    m.id = "msg_assist_" + tag;
+    m.parts.push_back(big_tool(call_id, name, tokens));
+    return m;
+}
+
+void append_turn_with_tool(std::vector<Message>& h, const std::string& tag,
+                           const std::string& call_id,
+                           const std::string& name, long long tokens) {
+    h.push_back(user_turn(tag, 1));
+    h.push_back(tool_turn(tag, call_id, name, tokens));
+}
+
+/* Идентификаторы очищенных вызовов одной строкой, в порядке истории. */
+std::string cleared_calls(const std::vector<Message>& h) {
+    std::string out;
+    for (const Message& m : h) {
+        for (const MessagePart& p : m.parts) {
+            if (!p.output_cleared()) continue;
+            if (!out.empty()) out += ",";
+            out += p.call_id();
+        }
+    }
+    return out;
+}
+
+/* Четыре хода, у каждого свой вызов такого размера. */
+std::vector<Message> four_turns(long long tokens) {
+    std::vector<Message> h;
+    append_turn_with_tool(h, "0", "call_0", "bash", tokens);
+    append_turn_with_tool(h, "1", "call_1", "read_file", tokens);
+    append_turn_with_tool(h, "2", "call_2", "bash", tokens);
+    append_turn_with_tool(h, "3", "call_3", "read_file", tokens);
+    return h;
+}
+
+/* Четыре хода, где вывод сосредоточен в самом старом и в первом из
+ * просматриваемых: защита съедает второй, очищается первый. */
+std::vector<Message> old_and_protected(long long old_tokens) {
+    std::vector<Message> h;
+    append_turn_with_tool(h, "0", "call_old", "bash", old_tokens);
+    append_turn_with_tool(h, "1", "call_keep", "read_file",
+                          limits::kPruneProtectTokens);
+    append_turn_with_tool(h, "2", "call_f2", "bash", 50000);
+    append_turn_with_tool(h, "3", "call_f3", "read_file", 50000);
+    return h;
+}
+
+} // anonymous namespace
+
+TEST(fresh_tool_output_is_never_pruned) {
+    /* Пока объём просмотренного вывода не перевалил защиту, не очищается
+     * ничего — даже очень старые выводы. Иначе агент лишился бы того, что
+     * разбирает прямо сейчас, и получал бы метки вместо данных, на
+     * которые сам же сослался двумя шагами раньше. */
+    std::vector<Message> small = four_turns(5000);
+    ASSERT_TRUE(prune_candidates(small).empty());
+    std::vector<Message> mid = four_turns(15000);
+    ASSERT_TRUE(prune_candidates(mid).empty());
+    /* Ровно на пороге защиты — тоже ещё ничего: «не меньше порога» и
+     * «больше порога» — разные вещи, и сдвиг на единицу меняет,
+     * очищается ли хоть что-то. */
+    std::vector<Message> exact = four_turns(10000);
+    ASSERT_TRUE(prune_candidates(exact).empty());
+}
+
+TEST(old_output_goes_when_the_tail_is_still_untouched) {
+    /* Защита — 40000 токенов самых свежих просмотренных выводов. Ставим
+     * ровно 40000 свежих и 30000 старых: свежие уцелеют (счёт дошёл до
+     * порога и не превысил), старый вызов очистится. */
+    std::vector<Message> h = old_and_protected(30000);
+    const std::vector<MessagePart*> c = prune_candidates(h);
+    ASSERT_EQ(c.size(), size_t(1));
+    ASSERT_EQ(c[0]->call_id(), std::string("call_old"));
+    c[0]->clear_output();
+    ASSERT_EQ(cleared_calls(h), std::string("call_old"));
+
+    /* Вывод в части ОСТАЁТСЯ: его показывают UI и файл сессии, а модели
+     * уходит метка. Стертый текст означал бы, что перезагруженная сессия
+     * потеряла данные, которых не было никогда. */
+    ASSERT_EQ(c[0]->output().output.size(), chars_of(30000));
+    ASSERT_TRUE(c[0]->has_result());
+}
+
+TEST(the_last_two_turns_are_never_touched_however_big) {
+    /* Два последних хода защищены счётом реплик пользователя, а не
+     * размером: 100000 токенов вывода в них остаются целыми. Очистить их
+     * — значит оборвать рассуждение, на которое агент ссылается сейчас.
+     *
+     * Счёт защиты при этом их вывод НЕ расходует: обход пропускает эти
+     * ходы целиком, не начисляя токены. Иначе одна и та же цифра
+     * означала бы разное в зависимости от того, откуда начинали считать,
+     * и «защищено 40000» перестало бы быть правдой. */
+    std::vector<Message> h = four_turns(100000);
+    const std::vector<MessagePart*> c = prune_candidates(h);
+    /* Очищаются первый и второй ходы с начала — то есть все, кроме двух
+     * последних, как бы ни были велики их выводы. */
+    ASSERT_EQ(c.size(), size_t(2));
+    ASSERT_EQ(c[0]->call_id(), std::string("call_1"));
+    ASSERT_EQ(c[1]->call_id(), std::string("call_0"));
+    for (MessagePart* p : c) p->clear_output();
+    /* Список идёт по ИСТОРИИ, а не в том порядке, в каком обход отбирал:
+     * обход идёт от конца. */
+    ASSERT_EQ(cleared_calls(h), std::string("call_0,call_1"));
+}
+
+TEST(a_small_saving_is_not_worth_the_markers) {
+    /* Порог снизу отвечает на вопрос «а стоит ли», а не «что нельзя»: меток
+     * «очищено» в промпте вышло бы больше пользы, чем выгоды от них. */
+    std::vector<Message> cheap = old_and_protected(15000);
+    ASSERT_TRUE(prune_candidates(cheap).empty());
+    /* А 30000 — уже выгода. Разница между этими двумя случаями и есть
+     * весь смысл порога: при 15000 очистка «съела» бы два вывода и
+     * оставила бы две метки, ради которых нечего было начинать. */
+    std::vector<Message> h = old_and_protected(30000);
+    const std::vector<MessagePart*> c = prune_candidates(h);
+    ASSERT_EQ(c.size(), size_t(1));
+    c[0]->clear_output();
+    ASSERT_EQ(cleared_calls(h), std::string("call_old"));
+}
+
+TEST(already_cleared_output_is_skipped_and_costs_nothing) {
+    /* Повторный запуск на уже прореженной истории не предлагает ничего:
+     * очищенные вызовы стоят в модели десятком токенов, поэтому защита
+     * ими не расходуется, а сами они повторно не очищаются. */
+    std::vector<Message> h = four_turns(30000);
+    std::vector<MessagePart*> c = prune_candidates(h);
+    ASSERT_EQ(c.size(), size_t(1));
+    ASSERT_EQ(c[0]->call_id(), std::string("call_0"));
+    c[0]->clear_output();
+    ASSERT_EQ(cleared_calls(h), std::string("call_0"));
+    ASSERT_TRUE(prune_candidates(h).empty());
+
+    /* За очищенным может лежать НЕОЧИЩЕННЫЙ гигант — так бывает, если
+     * сессию правили руками. Обход обязан его увидеть: остановка на
+     * границе (как в порте) оставила бы его в контексте навсегда, и
+     * переполнение вернулось бы при том, что прореживание «уже отработало».
+     *
+     * Арифметика: очищенный вызов 50000 не в счёт, оставшийся 50000
+     * переваливает защиту 40000 и очищается. */
+    std::vector<Message> patched = four_turns(50000);
+    patched[3].parts[0].clear_output();
+    std::vector<MessagePart*> again = prune_candidates(patched);
+    ASSERT_EQ(again.size(), size_t(1));
+    ASSERT_EQ(again[0]->call_id(), std::string("call_0"));
+
+    /* И обратная сторона того же правила: очищенный вывод не расходует
+     * защиту, поэтому неочищенный рядом с ним остаётся целым.
+     *
+     * Арифметика: очищенный 30000 + неочищенный 25000. Считай очищенный —
+     * набралось бы 55000, и 25000 вышли бы за защиту 40000 и были бы
+     * очищены (порог «а стоит ли» 20000 пройден); не считаем — 25000, всё
+     * под защитой, список пуст. Числа подобраны так, чтобы различала и
+     * вторая проверка снизу: при 15000 выигрыш был бы ниже порога и
+     * список оказался бы пустым в обоих случаях, то есть проверка
+     * прошла бы при любом коде. Разница одна, и она и есть смысл
+     * правила: место в контексте занимает метка, а не удалённый текст. */
+    std::vector<Message> neighbour = four_turns(30000);
+    neighbour[3].parts[0].clear_output();
+    neighbour[1].parts[0] = big_tool("call_0", "bash", 25000);
+    ASSERT_TRUE(prune_candidates(neighbour).empty());
+}
+
+TEST(the_skill_body_is_never_pruned) {
+    /* Вывод skill — это инструкция, по которой агент работает. Очистить
+     * его значит не освободить место, а сломать работу на середине, причём
+     * модель об этом даже не узнает: получит метку и продолжит «по
+     * инструкции», которой нет. */
+    std::vector<Message> h = four_turns(50000);
+    /* Промежуточный вызов — инструкция навыка, а не прочий вывод, и
+     * размером он не меньше прочих. */
+    h[3].parts[0] = big_tool("call_1", "skill", 50000);
+    std::vector<MessagePart*> c = prune_candidates(h);
+    /* Очистился только не-skill; skill не тронут, хотя он старше
+     * очищенного и такой же большой. */
+    for (const MessagePart* p : c) {
+        ASSERT_TRUE(p->tool_name() != std::string("skill"));
+    }
+    for (MessagePart* p : c) p->clear_output();
+    ASSERT_EQ(cleared_calls(h), std::string("call_0"));
+}
+
+TEST(a_failed_tool_call_is_never_pruned) {
+    /* Отказ и так короткий, а метка «очищено» на отказе выглядела бы как
+     * поломка инструмента: модель решила бы, что вызов не удался из-за
+     * объёма, и повторила бы его — то есть потратила ещё и деньги. */
+    std::vector<Message> h = four_turns(50000);
+    /* Второй ход с начала — отказ с длинным пояснением вместо вывода. */
+    h[3].parts[0] = MessagePart::tool("call_err", "bash")
+                        .set_error(std::string(chars_of(50000), 'e'));
+    std::vector<MessagePart*> c = prune_candidates(h);
+    ASSERT_EQ(c.size(), size_t(1));
+    ASSERT_EQ(c[0]->call_id(), std::string("call_0"));
+    for (MessagePart* p : c) p->clear_output();
+    /* Отказ не тронут: у него нет вывода, а метка «очищено» выглядела бы
+     * как поломка инструмента, и модель повторила бы вызов. */
+    ASSERT_EQ(cleared_calls(h), std::string("call_0"));
+}
+
+TEST(pruning_stops_at_the_summary) {
+    /* Всё, что старше сводки, уже выкинуто из истории (7.8), и трогать там
+     * нечего. Если бы обход пошёл дальше, он набрал бы токены по остаткам
+     * и решил бы, что пора чистить, — метки появились бы там, где модели
+     * всё равно ничего не достаётся. */
+    std::vector<Message> h;
+    append_turn_with_tool(h, "z", "call_z", "bash", 60000);
+    h.push_back(summary_wrapper("c", "сводка"));
+    append_turn_with_tool(h, "0", "call_0", "bash", 30000);
+    append_turn_with_tool(h, "1", "call_1", "read_file", 40000);
+    append_turn_with_tool(h, "2", "call_2", "bash", 50000);
+    append_turn_with_tool(h, "3", "call_3", "read_file", 50000);
+
+    const std::vector<MessagePart*> c = prune_candidates(h);
+    ASSERT_EQ(c.size(), size_t(1));
+    ASSERT_EQ(c[0]->call_id(), std::string("call_0"));
+}
+
+TEST(a_cleared_result_reaches_the_model_as_a_marker) {
+    /* Модель должна увидеть метку, а не пустоту: пустой RESULT выглядел бы
+     * как инструмент без вывода, и агент решил бы, что команда ничего не
+     * нашла. Строка названа в системном промпте — иначе модель приняла бы
+     * её за содержимое и стала бы рассуждать о тексте, которого нет
+     * (ровно класс D2, только для другой строки формата). */
+    Message turn = Message::assistant("msg_user_1");
+    turn.id = "msg_assist_1";
+    turn.parts.push_back(big_tool("call_1", "grep_search", 1000));
+    turn.parts[0].clear_output();
+
+    Message whole = Message::assistant("msg_user_1");
+    whole.id = "msg_assist_2";
+    whole.parts.push_back(big_tool("call_2", "grep_search", 1000));
+
+    const std::vector<ModelMessage> msgs = to_model_messages({turn});
+    ASSERT_EQ(msgs.size(), size_t(2));
+    ASSERT_EQ(msgs[0].role, std::string(kRoleAssistant));
+    ASSERT_EQ(msgs[1].role, std::string(kRoleUser));
+    ASSERT_EQ(msgs[1].content,
+              std::string("RESULT [grep_search]:\n") +
+                  limits::kClearedToolOutput);
+    ASSERT_TRUE(std::string(kBaseSystemPrompt).find(
+                    limits::kClearedToolOutput) != std::string::npos);
+
+    /* Не очищенный результат метку не получает — иначе очистка была бы
+     * неотличима от пустого вывода. */
+    ASSERT_TRUE(to_model_messages({whole})[1].content.find("ooo") !=
+                std::string::npos);
+    ASSERT_TRUE(to_model_messages({whole})[1].content.find(
+                    limits::kClearedToolOutput) == std::string::npos);
+    /* И оценка объёма меняется — именно ради этого очистка и нужна:
+     * метка короткая, иначе прореживание ничего бы не освободило и
+     * считалось бы вхолостую. */
+    /* Метка — 35 символов, вместе с меткой строки RESULT это меньше
+     * сотни токенов, а очищенный вывод стоил тысячу: очистка обязана
+     * освобождать место, иначе прореживание работало бы вхолостую. */
+    const long long marker_only = estimate_history_tokens({turn});
+    ASSERT_TRUE(marker_only < 100LL);
+    ASSERT_TRUE(estimate_history_tokens({whole}) > 1000LL);
+}
+
+TEST(clearing_keeps_the_result_and_the_state) {
+    /* clear_output() не трогает ни вывод, ни состояние: у очищенного вызова
+     * по-прежнему есть результат, по которому видно, что вызов был и что
+     * он удался. Это нужно UI («очищено, но отработало»), это нужно
+     * условию завершения хода (И5.8) — и это то, что отличает очистку от
+     * потери вызова. */
+    MessagePart p = big_tool("call_1", "read_file", 10);
+    ASSERT_FALSE(p.output_cleared());
+    p.clear_output();
+    ASSERT_TRUE(p.output_cleared());
+    ASSERT_TRUE(p.has_result());
+    ASSERT_EQ(std::string(p.state_name()), std::string("completed"));
+    /* Повторная отметка ничего не ломает: вызов могут отметить и снова. */
+    p.clear_output();
+    ASSERT_TRUE(p.output_cleared());
+
+    /* На незавершённом и отказавшем вызове отметки нет: там либо нет
+     * вывода, либо метка выглядела бы как поломка. */
+    ASSERT_FALSE(MessagePart::tool("call_x", "bash")
+                     .clear_output().output_cleared());
+    ASSERT_FALSE(MessagePart::tool("call_y", "bash")
+                     .set_error("отказ").clear_output().output_cleared());
+    /* И не на части другого вида: очищать нечего, а молчаливый no-op
+     * здесь опаснее отказа (тот же аргумент, что у set_result). */
+    ASSERT_FALSE(MessagePart::text("просто текст")
+                     .clear_output().output_cleared());
+}
+
+TEST(the_prune_flag_is_read_from_settings) {
+    /* Прореживание выключено по умолчанию, как в порте: оно меняет то, что
+     * видит модель, а не то, что видит пользователь. */
+    LimitsGuard guard;
+    {
+        std::map<std::string, std::string> v;
+        HostCallbacks cb = settings_host(v);
+        engine().init(cb);
+        engine().load_settings();
+    }
+    ASSERT_FALSE(engine_state().compaction_config.prune);
+    {
+        std::map<std::string, std::string> v;
+        v["wp_coder.compaction_prune"] = "true";
+        HostCallbacks cb = settings_host(v);
+        engine().init(cb);
+        engine().load_settings();
+    }
+    ASSERT_TRUE(engine_state().compaction_config.prune);
+    /* Мусор → выключено, а не включено: лишнее слово в настройке, которая
+     * стирает данные из контекста, не должно включать стирание. */
+    {
+        std::map<std::string, std::string> v;
+        v["wp_coder.compaction_prune"] = "да";
+        HostCallbacks cb = settings_host(v);
+        engine().init(cb);
+        engine().load_settings();
+    }
+    ASSERT_FALSE(engine_state().compaction_config.prune);
+}
+
+/* ======================================================================
+ * И7.11 — границы
+ * ======================================================================
+ *
+ * Задача эта про границы, и границы у сжатия трёх видов:
+ *
+ *   - ВЫБОР ХВОСТА. Ровно на пороге ход уцелеет целиком, на один токен
+ *     больше — уйдёт в сводку. Проверка на «примерно» здесь бесполезна:
+ *     ошибка на единицу токенов стоит либо лишнего запроса к модели, либо
+ *     обрезанного хвоста, и обе не видны ни в одном «среднем» тесте.
+ *   - ПОРОГ ОКНА. Ровно usable — уже переполнение. Проверено ещё в 7.1
+ *     (overflow_starts_exactly_at_the_threshold), и повторять то же самое
+ *     второй раз незачем: повторная проверка того же утверждения создаёт
+ *     впечатление покрытия, а не покрытия.
+ *   - ПОВТОРНОЕ СЖАТИЕ. Сжатая история сжимается снова, и это единственный
+ *     способ проверить, что сводка не копится и не теряется: на второй
+ *     итерации встречаются сразу и часть compaction, и реплика
+ *     продолжения, и прошлая сводка.
+ *
+ * Размеры в проверках считаются ЧЕРЕЗ estimate_history_tokens, а не
+ * вписаны числами: вписывание числа рядом с изменением оценки даёт
+ * проверку, которая падает не по делу. */
+
+namespace {
+
+/* Сколько токенов занимает один ход фикстуры — считается на живой
+ * истории, чтобы порог в проверках был честным. */
+long long one_turn_tokens() {
+    std::vector<Message> h = history_of_turns(1, 40);
+    return estimate_history_tokens(h);
+}
+
+/* Идентификаторы списком: ids_of() склеивает их в строку ради
+ * ASSERT_EQ, а здесь нужно сравнивать множества. */
+std::vector<std::string> id_list(const std::vector<Message>& v) {
+    std::vector<std::string> out;
+    for (const Message& m : v) out.push_back(m.id);
+    return out;
+}
+
+
+} // anonymous namespace
+
+TEST(selection_of_an_empty_history_is_not_a_crash) {
+    /* Пустая история — не «сжимать нечего», а «сессия только началась».
+     * Функция обязана вернуть пустой результат, а не историю из одного
+     * фантомного хвоста: такой хвост сжатие посчитало бы за работу,
+     * которой не было. */
+    const std::vector<Message> nothing;
+    const Selection sel =
+        select_to_compact(nothing, limits_with_usable(100000), keep_n_tokens(1000));
+    ASSERT_TRUE(sel.head.empty());
+    ASSERT_TRUE(sel.tail.empty());
+    ASSERT_EQ(sel.tail_tokens, 0LL);
+    /* И пустая история не проходит через сжатие как сжимаемая. */
+    const std::vector<Message> after =
+        compacted_history(sel, "", CompactionConfig());
+    ASSERT_EQ(after.size(), size_t(0));
+}
+
+TEST(a_lone_request_is_kept_whole_or_summarized_whole) {
+    /* Ход из ОДНОЙ реплики разделить нечем: разрез идёт со второго
+     * сообщения (решение 3), а второго нет — уцелел бы ровно тот же
+     * текст, который и не влезает. Значит выбор только один: целиком в
+     * хвост или целиком в сводку. Полумеры здесь означали бы, что модель
+     * получит половину задачи.
+     *
+     * Первая версия этой проверки утверждала, что одиночная реплика
+     * остаётся хвостом «при любом пороге». Это не так и не должно быть:
+     * порог в 1 токен меньше самой реплики, и единственный честный ответ —
+     * сжать её. Настоящий случай «реплика не потеряна» — соседняя
+     * проверка, где порог её вмещает. */
+    std::vector<Message> big;
+    big.push_back(user_turn("0", 1000));
+    const Selection over =
+        select_to_compact(big, limits_with_usable(100000), keep_n_tokens(1));
+    ASSERT_TRUE(over.tail.empty());
+    ASSERT_EQ(over.head.size(), size_t(1));
+
+    /* А когда реплика в порог вмещается — не «хвост из неё», а
+     * «сжимать нечего»: уцелела вся история, и решение 4 отдаёт её в
+     * голову с пустым хвостом. Проверка требовала хвоста и была неправа
+     * по той же причине: пустой хвост у полностью уцелевшей истории —
+     * это ответ «нечего сжимать», а ответ «сжать всё». */
+    std::vector<Message> small;
+    small.push_back(user_turn("0", 40));
+    const Selection fits =
+        select_to_compact(small, limits_with_usable(100000), keep_n_tokens(1000));
+    ASSERT_TRUE(fits.tail.empty());
+    ASSERT_EQ(fits.head.size(), size_t(1));
+}
+
+TEST(a_single_turn_too_big_for_the_tail_is_summarized_whole) {
+    /* Ход, который не влезает в порог ЦЕЛИКОМ, уходит в сводку, и хвост
+     * пуст. Это не «сжимать нечего»: обрезка внутри хода (решение 3)
+     * может оставить его кусок — но только если этот кусок влезает. Здесь
+     * не влезает даже ответ ассистента. */
+    std::vector<Message> h = history_of_turns(1, 4000);
+    const Selection sel =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(100));
+    ASSERT_TRUE(sel.tail.empty());
+    ASSERT_EQ(sel.head.size(), h.size());
+
+    /* И такая история после сжатия рабочая: сводка и продолжение. */
+    const std::vector<Message> after =
+        compacted_history(sel, "## Цель\n- всё в сводке", CompactionConfig());
+    ASSERT_EQ(after.size(), size_t(2));
+    ASSERT_TRUE(after.front().parts[0].is(PartKind::Compaction));
+    ASSERT_TRUE(after.back().parts[0].is(PartKind::CompactionContinue));
+}
+
+TEST(the_tail_boundary_is_inclusive) {
+    /* Порог ровно в один ход: ход уцелеет ЦЕЛИКОМ. На один токен меньше —
+     * не уцелеет ничего, потому что ни ход целиком, ни его ответ не
+     * влезают, а разрез хода идёт со второго сообщения.
+     *
+     * Считается на живой истории: если оценка изменится, проверка
+     * поедет вместе с ней, а не станет падать по не связанной с делом
+     * причине. */
+    std::vector<Message> h = history_of_turns(3, 40);
+    const long long turn_tokens = one_turn_tokens();
+    ASSERT_TRUE(turn_tokens > 0);
+
+    const Selection exact =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(turn_tokens));
+    ASSERT_EQ(exact.tail.size(), size_t(2));
+    ASSERT_EQ(estimate_history_tokens(exact.tail), turn_tokens);
+    ASSERT_EQ(std::string(last_id(exact.tail)), std::string("msg_assist_2"));
+
+    /* На один токен меньше ход целиком не влезает, но его ОТВЕТ влезает
+     * ровно — и уцелеет он один (решение 3). Проверка требовала пустого
+     * хвоста и была неправа: пустой хвост означал бы «не влезает даже
+     * свежий ход», а здесь влезает его половина. */
+    const Selection less =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(turn_tokens - 1));
+    ASSERT_EQ(less.tail.size(), size_t(1));
+    ASSERT_EQ(std::string(first_id(less.tail)), std::string("msg_assist_2"));
+    ASSERT_EQ(less.tail_tokens, turn_tokens - 1);
+}
+
+TEST(tail_turns_caps_the_candidates_and_the_budget_caps_the_result) {
+    /* Два ограничения независимы: tail_turns говорит «не больше N ходов»,
+     * порог — «столько-то токенов». Проверяются обе половины по отдельности,
+     * иначе ошибка в одной маскировалась бы другой. */
+    std::vector<Message> h = history_of_turns(5, 100);
+
+    /* tail_turns = 2, места с запасом: кандидатов два, и оба помещаются. */
+    CompactionConfig two;
+    two.tail_turns = 2;
+    two.preserve_recent_tokens = 100000;
+    const Selection wide =
+        select_to_compact(h, limits_with_usable(100000), two);
+    ASSERT_EQ(wide.tail.size(), size_t(4));
+    ASSERT_EQ(std::string(first_id(wide.tail)), std::string("msg_user_3"));
+
+    /* tail_turns = 1 при том же месте: кандидат один ход. */
+    CompactionConfig one = two;
+    one.tail_turns = 1;
+    const Selection narrow = select_to_compact(h, limits_with_usable(100000), one);
+    ASSERT_EQ(narrow.tail.size(), size_t(2));
+    ASSERT_EQ(std::string(first_id(narrow.tail)), std::string("msg_user_4"));
+
+    /* tail_turns = 1, но места хватает только на половину хода: уцелеет
+     * ответ без реплики пользователя, на которую он отвечал. */
+    CompactionConfig tight = one;
+    tight.preserve_recent_tokens =
+        estimate_history_tokens({answer_turn("msg_user_4", "4", 99)});
+    const Selection split = select_to_compact(h, limits_with_usable(100000), tight);
+    ASSERT_EQ(split.tail.size(), size_t(1));
+    ASSERT_EQ(std::string(first_id(split.tail)), std::string("msg_assist_4"));
+}
+
+TEST(the_second_compaction_replaces_the_first_summary) {
+    /* Итеративность целиком: сжатая история сжимается снова, и за один
+     * проход не остаётся НИ ОДНОЙ старой сводки. Три вещи, которые видно
+     * только здесь: сводка не копится (вторая заменяет первую), хвост
+     * остаётся хвостом, а сводщик видит прошлую сводку и новый разговор
+     * РАЗДЕЛЬНО — иначе он выбрал бы одно из двух и потерял бы другое. */
+    const CompactionConfig cfg;
+
+    /* Первое сжатие. */
+    std::vector<Message> first = history_of_turns(6, 100);
+    const Selection sel1 =
+        select_to_compact(first, limits_with_usable(100000), keep_n_tokens(200));
+    CapturingTurn cap1;
+    const CompactionResult r1 = summarize(sel1.head, cap1.fn());
+    ASSERT_EQ((int)r1.outcome, (int)CompactionOutcome::Continue);
+    std::vector<Message> after1 = compacted_history(sel1, r1.summary, cfg);
+    ASSERT_EQ(cap1.calls_had_prior, false);
+
+    /* Работа продолжается, история опять растёт. */
+    append_turn(after1, "6", 100);
+    append_turn(after1, "7", 100);
+    append_turn(after1, "8", 100);
+
+    /* Второе сжатие. */
+    const Selection sel2 =
+        select_to_compact(after1, limits_with_usable(100000), keep_n_tokens(200));
+    CapturingTurn cap2;
+    const CompactionResult r2 = summarize(sel2.head, cap2.fn());
+    ASSERT_EQ((int)r2.outcome, (int)CompactionOutcome::Continue);
+
+    /* Прошлая сводка дошла до сводщика отдельной полосой. */
+    ASSERT_TRUE(cap2.calls_had_prior);
+    ASSERT_EQ(cap2.prior_text, r1.summary);
+
+    const std::vector<Message> after2 = compacted_history(sel2, r2.summary, cfg);
+    /* Ровно одна сводка в истории, и она новая. */
+    int summaries = 0;
+    for (const Message& m : after2) {
+        for (const MessagePart& p : m.parts) {
+            if (!p.is(PartKind::Compaction)) continue;
+            ++summaries;
+            ASSERT_EQ(p.text(), r2.summary);
+        }
+    }
+    ASSERT_EQ(summaries, 1);
+    /* Продолжений тоже ровно одно: старое ушло в сводку вместе с головой. */
+    int continuations = 0;
+    for (const Message& m : after2) {
+        for (const MessagePart& p : m.parts) {
+            if (p.is(PartKind::CompactionContinue)) ++continuations;
+        }
+    }
+    ASSERT_EQ(continuations, 1);
+    ASSERT_TRUE(after2.back().parts[0].is(PartKind::CompactionContinue));
+}
+
+TEST(after_reordering_no_tail_message_is_duplicated_or_lost) {
+    /* Самое обидное последствие переупорядочивания — не потерять и не
+     * задвоить содержимое. Свёрнутое сообщение, попавшее и в сводку, и в
+     * хвост, стоило бы модели дважды пересказанного хода; выпавшее из
+     * хвоста — тихой потери работы. Проверяется сверкой множеств
+     * идентификаторов: оба хвоста — подмножества исходной истории, и
+     * вместе они не пересекаются. */
+    const CompactionConfig cfg;
+    std::vector<Message> h = history_of_turns(5, 60);
+    const Selection sel =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(100));
+    const std::vector<Message> after =
+        compacted_history(sel, "сводка", cfg);
+
+    const std::vector<std::string> head_ids = id_list(sel.head);
+    const std::vector<std::string> tail_ids = id_list(sel.tail);
+    ASSERT_TRUE(!head_ids.empty() && !tail_ids.empty());
+
+    /* Каждый идентификатор головы встречается в новой истории НЕ БОЛЬШЕ
+     * одного раза (в сводку он попал по тексту, но не отдельным
+     * сообщением). */
+    const std::vector<std::string> in_history = id_list(after);
+    for (const std::string& id : head_ids) {
+        int found = 0;
+        for (const std::string& got : in_history) {
+            if (got == id) ++found;
+        }
+        ASSERT_EQ(found, 0);
+    }
+    for (const std::string& id : tail_ids) {
+        int found = 0;
+        for (const std::string& got : in_history) {
+            if (got == id) ++found;
+        }
+        ASSERT_EQ(found, 1);
+    }
+    /* В новой истории ровно хвост плюс обёртка сводки и продолжение. */
+    ASSERT_EQ(in_history.size(), tail_ids.size() + 2);
+}
+
+TEST(tool_results_in_the_tail_survive_compaction) {
+    /* Сжатая история уходит модели, и хвост в ней обязан остаться
+     * целиком вместе с РЕЗУЛЬТАТАМИ вызовов: именно они и есть работа
+     * агента. Проверяется сверкой счетчиков, а не «строки похожи»:
+     * потерянный результат и задвоенный выглядели бы одинаково.
+     *
+     * Первая версия этой проверки искала в транскрипте «RESULT без
+     * вызова» — а такая пара в нашей модели невозможна: вызов и его
+     * результат живут в одной части, и to_model_messages порождает их
+     * вместе. Проверка была тавтологией и ловила бы что угодно, кроме
+     * настоящей поломки. */
+    std::vector<Message> h;
+    for (int i = 0; i < 6; ++i) {
+        h.push_back(user_turn(std::to_string(i), 1));
+        Message turn = Message::assistant("msg_user_" + std::to_string(i));
+        turn.id = "msg_assist_" + std::to_string(i);
+        turn.parts.push_back(big_tool("call_" + std::to_string(i), "bash", 800));
+        h.push_back(turn);
+    }
+    const Selection sel =
+        select_to_compact(h, limits_with_usable(100000), keep_n_tokens(1000));
+    ASSERT_TRUE(!sel.tail.empty());
+
+    /* Сколько результатов должно остаться в хвосте. */
+    int tail_results = 0;
+    for (const Message& m : sel.tail) {
+        for (const MessagePart& p : m.parts) {
+            if (p.is(PartKind::Tool) &&
+                p.state_name() == std::string("completed")) {
+                ++tail_results;
+            }
+        }
+    }
+    ASSERT_TRUE(tail_results > 0);
+
+    const std::vector<Message> after =
+        compacted_history(sel, "сводка", CompactionConfig());
+    const std::vector<ModelMessage> msgs = to_model_messages(after);
+    int results = 0;
+    for (const ModelMessage& m : msgs) {
+        if (m.content.rfind("RESULT [", 0) == 0) ++results;
+    }
+    ASSERT_EQ(results, tail_results);
+    /* И сводка пришла ровно один раз — впереди, отдельной репликой
+     * ассистента: задвоенная сводка означала бы, что ход пересказан
+     * дважды. */
+    int summaries = 0;
+    for (const ModelMessage& m : msgs) {
+        if (m.content == std::string("сводка")) ++summaries;
+    }
+    ASSERT_EQ(summaries, 1);
+    ASSERT_EQ(msgs[0].role, std::string(kRoleAssistant));
+    ASSERT_EQ(msgs[0].content, std::string("сводка"));
+}
 TEST(compaction_selection_reads_its_settings) {
     LimitsGuard guard;
     {

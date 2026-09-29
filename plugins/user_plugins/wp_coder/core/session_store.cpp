@@ -46,6 +46,11 @@ json::JsonValue part_to_json(const MessagePart& p) {
             if (!p.args().is_null()) v.set("args", p.args());
             if (!p.raw_call().empty()) v.set("raw", p.raw_call());
             v.set("state", std::string(p.state_name()));
+            /* Метка очищенного вывода переживает перезагрузку: без неё
+             * восстановленная сессия вернула бы в контекст текст, который
+             * прореживание убрало, и переполнение вернулось бы молча,
+             * ровно по той причине, по которой его чинили. */
+            if (p.output_cleared()) v.set("output_cleared", true);
             if (!p.output().output.empty() || !p.output().title.empty() ||
                 !p.output().metadata.is_null() || p.output().truncated) {
                 v.set("output", output_to_json(p.output()));
@@ -73,6 +78,13 @@ json::JsonValue part_to_json(const MessagePart& p) {
             v.set("replaced", ids);
             break;
         }
+        /* Реплика автопродолжения: вид пишется сам (part_kind_name), и
+         * остаётся только текст. Иначе после перезагрузки сессии она
+         * стала бы обычной репликой пользователя, и ни сводка, ни UI не
+         * смогли бы отличить слова плагина от слов человека. */
+        case PartKind::CompactionContinue:
+            v.set("text", p.text());
+            break;
         case PartKind::Subtask:
             v.set("task_id", p.task_id());
             v.set("subagent", p.subagent());
@@ -146,6 +158,15 @@ bool append_part_from_json(const json::JsonValue& v,
                                               replaced));
         return true;
     }
+    if (kind == "compaction_continue") {
+        /* Текст из файла НЕ читается, а берётся из kCompactionContinueText:
+         * это протокольная строка, и владелец у неё один. Иначе правильная
+         * копия и рассинхронизированная выглядели бы одинаково, а при
+         * пустом тексте на выходе получилась бы реплика пользователя без
+         * содержимого. */
+        out.push_back(MessagePart::compaction_continue());
+        return true;
+    }
     if (kind == "subtask") {
         out.push_back(MessagePart::subtask(v.get_string("task_id", ""),
                                             v.get_string("subagent", "")));
@@ -180,6 +201,11 @@ bool append_part_from_json(const json::JsonValue& v,
             case ToolState::Pending:
                 break;
         }
+        /* Метка ставится ПОСЛЕ состояния: clear_output() работает только на
+         * завершённом вызове, а до разбора состояния часть ещё «не
+         * начата». Раньше метка молча терялась бы — файл её содержал бы,
+         * а в истории её не было бы. */
+        if (v.has("output_cleared")) part.clear_output();
         out.push_back(std::move(part));
         return true;
     }

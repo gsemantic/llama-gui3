@@ -22,6 +22,8 @@
  *   - сообщение об ошибке называет, что делать, а не что не так.
  */
 
+#include "../core/json_utils.h"   /* text::is_valid_utf8: битые байты в документе */
+
 #include "test_framework.h"
 #include "test_support.h"
 
@@ -50,6 +52,31 @@ std::string read_plan() {
     std::ifstream f(plugin_root() / "AGENT_PARITY_PLAN.md", std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(f)),
                        std::istreambuf_iterator<char>());
+}
+
+/* Байтовая позиция первой негодной последовательности, и npos — если её
+ * нет. Сообщение об ошибке обязано называть ПОЗИЦИЮ: «файл плохой» не
+ * говорит, где чинить, а искать битый байт в файле на две тысячи строк
+ * вручную — работа, которой не должно быть. */
+size_t first_bad_utf8(const std::string& s) {
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t length = 0;
+        if (!text::utf8_sequence_at(s, pos, length)) return pos;
+        pos += length;
+    }
+    return std::string::npos;
+}
+
+/* Номер строки и колонка (в символах) по байтовой позиции. */
+void where_of(const std::string& s, size_t byte_pos, size_t& line,
+              size_t& column) {
+    line = 1;
+    column = 1;
+    for (size_t i = 0; i < byte_pos && i < s.size(); ++i) {
+        if (s[i] == '\n') { ++line; column = 1; }
+        else if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80) { ++column; }
+    }
 }
 
 std::vector<std::string> split_lines(const std::string& s) {
@@ -230,6 +257,61 @@ std::map<int, Iteration> parse_summary(const std::vector<std::string>& lines) {
 /* ======================================================================
  * 1. Маркеры §3 == сводная таблица §4
  * ====================================================================== */
+
+/* --- Документы читаются как текст ---
+ *
+ * Битый байт в плане выглядит как опечатка, а не как поломка: терминал
+ * показывает «�», и кажется, что виноват тот, кто режет строку для
+ * вывода. На деле битые байты попадают в файл при правке через
+ * скрипт (за это стоит проверить — за сессию такое случилось дважды), и
+ * единственная защита — механическая проверка.
+ *
+ * Две разные поломки, и их надо ловить обе:
+ *   - ОБОРВАННАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ: байты не образуют символ. Ловится
+ *     проверкой UTF-8.
+ *   - ПОДСТАВЛЕННЫЙ U+FFFD: символ формально валиден (это настоящий
+ *     код U+FFFD), поэтому проверка UTF-8 его пропускает. Ловится поиском
+ *     самого символа.
+ *
+ * Список документов — те, что новая сессия читает по правилу передачи
+ * сессии: план, напоминалка и журнал изменений. Все три хранят состояние
+ * работы, и в них «�» выглядит как мнение автора, а не как сбой. */
+
+TEST(документы_проекта_читаются_как_текст) {
+    const std::vector<std::string> docs = {"AGENT_PARITY_PLAN.md",
+                                           "SESSION_START.md",
+                                           "CHANGELOG.md"};
+    for (const std::string& name : docs) {
+        const fs::path f = plugin_root() / name;
+        std::ifstream in(f, std::ios::binary);
+        const std::string s((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+        ASSERT_TRUE(!s.empty());
+
+        const size_t bad = first_bad_utf8(s);
+        if (bad != std::string::npos) {
+            size_t line = 0;
+            size_t column = 0;
+            where_of(s, bad, line, column);
+            std::cerr << "  " << name << ": битая последовательность UTF-8 на "
+                      << "строке " << line << ", столбце " << column
+                      << " (байт " << bad << " из " << s.size() << ")\n";
+        }
+        ASSERT_TRUE(bad == std::string::npos);
+
+        const size_t fffd = s.find("\xEF\xBF\xBD");
+        if (fffd != std::string::npos) {
+            size_t line = 0;
+            size_t column = 0;
+            where_of(s, fffd, line, column);
+            std::cerr << "  " << name << ": подставленный символ U+FFFD на "
+                      << "строке " << line << ", столбце " << column
+                      << " — битые байты уже были заменены заглушкой, и по"
+                      << " одному этому файлу их уже не найти\n";
+        }
+        ASSERT_TRUE(fffd == std::string::npos);
+    }
+}
 
 TEST(plan_task_markers_match_the_summary_table) {
     const std::string text = read_plan();

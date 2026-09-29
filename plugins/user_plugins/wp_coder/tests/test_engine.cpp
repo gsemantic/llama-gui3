@@ -8,6 +8,8 @@
 #include "../core/tools_registry.h"
 #include "../core/shell.h"
 #include "../core/json_utils.h"
+#include "../core/prompts.h"   /* kCompactionSystemPrompt: сводщик получает свой промпт */
+#include "../core/session_store.h"   /* сжатая история переживает файл сессии */
 
 #include <map>
 #include <fstream>
@@ -469,6 +471,475 @@ TEST(history_compression_within_budget_changes_nothing) {
     ASSERT_EQ(eng.session_for_test()[0].text(), std::string("маленькая задача"));
     std::lock_guard<std::mutex> lk(eng.state().mtx);
     ASSERT_EQ(model_history_chars(eng.state().session), before);
+}
+
+/* ======================================================================
+ * Автосжатие по порогу окна (И7.10)
+ * ======================================================================
+ *
+ * Проверяется не «вызвался ли сводщик», а ЧТО СТАЛО С ИСТОРИЕЙ и что
+ * сказал пользователь. Сводщик приходит снаружи (см. engine.h), поэтому
+ * тест кормит его заготовкой и смотрит на три вещи: сколько запросов,
+ * какой формы история и какие события ушли в UI.
+ *
+ * События проверяются не по факту «было что-то», а по смыслу: молчание
+ * при сжатии означало бы, что у человека исчезла часть разговора без
+ * предупреждения — то есть ровно тот класс, который лечит И7.
+ */
+
+namespace {
+
+/* Движок — синглтон, и правило реентерабельности требует вернуть всё,
+ * что тест изменил: иначе следующий тест увидит чужие лимиты и историю. */
+struct CompactionGuard {
+    CompactionGuard()
+        : limits(engine().state().model_limits),
+          cfg(engine().state().compaction_config),
+          budget(engine().state().session_budget),
+          measured(engine().state().measured_input_tokens),
+          session(engine().state().session),
+          session_id(engine().state().session_id),
+          callbacks(engine().callbacks()),
+          events(engine().state().events.size()) {}
+    ~CompactionGuard() {
+        /* Колбэки восстанавливаются ТОЖЕ: тест, который зовёт init() со
+         * своим каталогом, оставил бы после себя замыкание на локальную
+         * переменную уже ушедшего теста, и следующий тест упал бы на
+         * мусоре вместо своей ошибки. Первая версия этого теста так и
+         * сделала — висячая ссылка, упавшая в СЛЕДУЮЩЕМ тесте. */
+        engine().callbacks() = callbacks;
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().model_limits = limits;
+        engine().state().compaction_config = cfg;
+        engine().state().session_budget = budget;
+        engine().state().measured_input_tokens = measured;
+        engine().state().session = session;
+        engine().state().session_id = session_id;
+        if (engine().state().events.size() > events) {
+            engine().state().events.resize(events);
+        }
+    }
+    compaction::ModelLimits limits;
+    compaction::CompactionConfig cfg;
+    size_t budget;
+    long long measured;
+    std::vector<Message> session;
+    std::string session_id;
+    HostCallbacks callbacks;
+    size_t events;
+};
+
+/* История из N ходов, каждый на tokens токенов вывода инструмента, и
+ * МАЛЕНЬКИЙ ответ в конце.
+ *
+ * Маленький хвост здесь не для красоты: аварийная обрезка (compress_history)
+ * по своему устройству не трогает первое и последнее сообщения — сжать
+ * задачу значит отнять у модели её цель, а сжать ход, который обсуждается
+ * прямо сейчас, значит стереть рассуждение. Поэтому сессия, у которой
+ * ПОСЛЕДНИЙ ход сам больше бюджета, обрезкой не сжимается в принципе, и
+ * проверка «довести до бюджета» на такой фикстуре проверяла бы не
+ * обрезку, а её ограничение. */
+void fill_window(std::vector<Message>& h, int turns, long long tokens) {
+    h.clear();
+    for (int i = 0; i < turns; ++i) {
+        Message u = Message::user("задача " + std::to_string(i));
+        h.push_back(u);
+        Message a = Message::assistant(u.id);
+        MessagePart p = MessagePart::tool("call_" + std::to_string(i), "bash");
+        ToolOutput out;
+        out.title = "bash";
+        out.output = std::string(tokens * 4, 'o');
+        p.set_result(out);
+        a.parts.push_back(p);
+        h.push_back(a);
+    }
+    Message last = Message::assistant(h.back().id);
+    last.parts.push_back(MessagePart::text("текущий ответ короткий"));
+    h.push_back(last);
+}
+
+/* Сводщик-заглушка: считает запросы и отдаёт заготовку. */
+struct CountingTurn {
+    int calls = 0;
+    std::string answer = "## Цель\n- починить тест";
+    std::string seen_system;
+
+    compaction::SummaryTurn fn() {
+        CountingTurn* self = this;
+        return [self](const std::string& sys,
+                      const std::vector<ModelMessage>& msgs,
+                      std::string& text, std::string& error) {
+            ++self->calls;
+            self->seen_system = sys;
+            if (self->answer.empty()) {
+                error = "сводщик молчит";
+                return false;
+            }
+            if (self->answer == "compact") {
+                text = "compact";
+                return true;
+            }
+            text = self->answer;
+            return true;
+        };
+    }
+};
+
+std::vector<std::string> status_events() {
+    std::vector<std::string> out;
+    for (const AgentEvent& e : engine().state().events) {
+        if (e.kind == AgentEvent::Status) out.push_back(e.text);
+    }
+    return out;
+}
+
+bool events_mention(const std::vector<std::string>& v, const std::string& sub) {
+    for (const std::string& s : v) {
+        if (s.find(sub) != std::string::npos) return true;
+    }
+    return false;
+}
+
+compaction::ModelLimits window_of(long long usable) {
+    compaction::ModelLimits l;
+    l.context = usable + 1000;
+    l.max_output = 1000;
+    return l;
+}
+
+} // anonymous namespace
+
+TEST(an_intact_window_is_left_alone_and_the_summarizer_is_not_asked) {
+    /* Главная проверка «сжатие не стало новым источником расходов»:
+     * запрос к модели не должен делаться, пока окно цело. Иначе агент
+     * платил бы за сводку на каждом шаге. */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 3, 1000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(200000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 60000;
+        engine().state().measured_input_tokens = 0;
+    }
+    CountingTurn turn;
+    engine().compact_history_if_needed(turn.fn());
+
+    ASSERT_EQ(turn.calls, 0);
+    std::lock_guard<std::mutex> lk(engine().state().mtx);
+    ASSERT_EQ(engine().state().session.size(), h.size());
+    ASSERT_EQ(engine().state().session[0].id, h[0].id);
+}
+
+TEST(an_overfull_window_becomes_a_summary_a_tail_and_a_continuation) {
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 6, 5000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(4000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 10000000;
+        engine().state().measured_input_tokens = 0;
+    }
+    CountingTurn turn;
+    engine().compact_history_if_needed(turn.fn());
+
+    ASSERT_EQ(turn.calls, 1);
+    /* Сводщик получил промпт СВОДЩИКА, а не агентский: иначе он
+     * составил бы сводку по правилам работы с инструментами. */
+    ASSERT_EQ(turn.seen_system, std::string(kCompactionSystemPrompt));
+
+    std::vector<Message> after;
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        after = engine().state().session;
+    }
+    /* Форма: сводка впереди, хвост следом, продолжение последним. */
+    ASSERT_TRUE(after.size() >= 2);
+    ASSERT_TRUE(after.front().parts[0].is(PartKind::Compaction));
+    ASSERT_EQ(after.front().parts[0].text(), std::string("## Цель\n- починить тест"));
+    ASSERT_TRUE(after.back().parts[0].is(PartKind::CompactionContinue));
+    /* Старые сообщения головы больше не в истории — это и есть сжатие. */
+    for (const Message& m : after) {
+        ASSERT_TRUE(m.id == after.front().id || m.id == after.back().id ||
+                    m.id.rfind("msg_user_", 0) != 0);
+    }
+    /* Измеренные токены сброшены: они относятся к ПРЕЖНЕЙ истории, и без
+     * сброса переполнение объявлялось бы снова на каждом шаге — агент
+     * сжимал бы историю до конца сессии, платя за запрос к модели. */
+    ASSERT_EQ(engine().state().measured_input_tokens, 0LL);
+
+    /* Пользователь узнал: и что сжимаем, и что вышло. */
+    const std::vector<std::string> ev = status_events();
+    ASSERT_TRUE(events_mention(ev, "Контекст переполнен"));
+    ASSERT_TRUE(events_mention(ev, "Сводка готова"));
+}
+
+TEST(compaction_does_not_repeat_itself_on_the_next_step) {
+    /* Ловушка D2: измеренные токены без сброса держат переполнение
+     * включённым, и агент сжимает историю на каждом шаге. Проверка на
+     * ВТОРОМ вызове сразу после успешного — ровно тот сценарий. */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 6, 5000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(4000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 10000000;
+        engine().state().measured_input_tokens = 30000;
+    }
+    CountingTurn turn;
+    engine().compact_history_if_needed(turn.fn());
+    ASSERT_EQ(turn.calls, 1);
+    const size_t after_first = engine().state().session.size();
+
+    engine().compact_history_if_needed(turn.fn());
+    /* Второго запроса нет: после сжатия оценка крошечная, а измеренное
+     * обнулено. */
+    ASSERT_EQ(turn.calls, 1);
+    ASSERT_EQ(engine().state().session.size(), after_first);
+}
+
+TEST(a_silent_summarizer_falls_back_to_the_line_trim_and_says_why) {
+    /* Сводка не вышла — обрезка по строкам всё равно нужна (иначе история
+     * продолжит расти в переполненное окно), но пользователь обязан
+     * узнать ПОЧЕМУ сообщения исчезают: иначе это выглядит как каприз
+     * плагина и портит работу. */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 6, 5000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(4000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 4000;   /* обрезке есть что делать */
+        engine().state().measured_input_tokens = 30000;
+    }
+    CountingTurn turn;
+    turn.answer = "";   /* сводщик не ответил */
+    engine().compact_history_if_needed(turn.fn());
+
+    ASSERT_EQ(turn.calls, 1);
+    const std::vector<std::string> ev = status_events();
+    ASSERT_TRUE(events_mention(ev, "Сводка не получилась"));
+    ASSERT_TRUE(events_mention(ev, "сводщик молчит"));
+    /* Свёрнутой сводки в истории нет — иначе компакт-обёртка без текста
+     * заняла бы место головы, и работа пропала бы целиком. */
+    for (const Message& m : engine().state().session) {
+        for (const MessagePart& p : m.parts) {
+            ASSERT_FALSE(p.is(PartKind::Compaction));
+        }
+    }
+    /* Аварийная обрезка всё же отработала. */
+    std::lock_guard<std::mutex> lk(engine().state().mtx);
+    ASSERT_TRUE(model_history_chars(engine().state().session) <= 4000);
+}
+
+TEST(a_summarizer_that_gives_up_is_told_the_session_keeps_going) {
+    /* Слово-выход «compact» от сводщика означает: даже под сводку места
+     * не хватило. Это НЕ повод ронять задачу и НЕ повод молчать. */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 6, 5000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(4000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 10000000;
+        engine().state().measured_input_tokens = 30000;
+    }
+    CountingTurn turn;
+    turn.answer = "compact";
+    engine().compact_history_if_needed(turn.fn());
+
+    ASSERT_EQ(turn.calls, 1);
+    const std::vector<std::string> ev = status_events();
+    ASSERT_TRUE(events_mention(ev, "Сводка не получилась"));
+    /* История не тронута сжатием, но и задача не помечена проваленной:
+     * это решение вызывающего, и оно здесь принималось неверно. */
+    ASSERT_TRUE(engine().state().outcome == TaskOutcome::None);
+}
+
+TEST(pruning_lands_even_when_the_window_is_intact) {
+    /* Прореживание (И7.9) не требует переполнения и не стоит запроса к
+     * модели, поэтому его метки обязаны дойти до истории при любом
+     * вызове — иначе политика была бы «вызвал и забыл». */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 6, 20000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(100000000);   /* цело */
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 10000000;
+        engine().state().measured_input_tokens = 0;
+    }
+    compaction::CompactionConfig cfg;
+    cfg.prune = true;
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().compaction_config = cfg;
+    }
+    CountingTurn turn;
+    engine().compact_history_if_needed(turn.fn());
+
+    ASSERT_EQ(turn.calls, 0);
+    int cleared = 0;
+    for (const Message& m : engine().state().session) {
+        for (const MessagePart& p : m.parts) {
+            if (p.output_cleared()) ++cleared;
+        }
+    }
+    /* Четыре хода просмотрены, два последних защищены, выгода проходит
+     * порог — значит очищены два самых старых вызова. */
+    ASSERT_EQ(cleared, 2);
+
+    /* Тот же вызов с выключенным прореживанием не метит НИЧЕГО. Проверка
+     * на ту же историю и то же окно: иначе «прореживание не хуже» было бы
+     * правдой только потому, что в первом случае оно что-то сделало. */
+    CompactionGuard off;
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().measured_input_tokens = 0;
+    }
+    CountingTurn quiet;
+    engine().compact_history_if_needed(quiet.fn());
+    int marked = 0;
+    for (const Message& m : engine().state().session) {
+        for (const MessagePart& p : m.parts) {
+            if (p.output_cleared()) ++marked;
+        }
+    }
+    ASSERT_EQ(marked, 0);
+}
+
+TEST(compact_under_a_local_budget_alone_never_asks_the_model) {
+    /* Локальный бюджет символов ограничивает файл сессии, а не модель.
+     * Превышение его без переполнения окна НЕ должно запускать сводку:
+     * она стоит запроса к модели ради того, чего модель не заметит. */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 4, 3000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(100000000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 1000;   /* локально мало */
+        engine().state().measured_input_tokens = 0;
+    }
+    CountingTurn turn;
+    engine().compact_history_if_needed(turn.fn());
+
+    ASSERT_EQ(turn.calls, 0);
+    std::lock_guard<std::mutex> lk(engine().state().mtx);
+    /* Аварийная обрезка отработала: локальный предел держится. */
+    ASSERT_TRUE(model_history_chars(engine().state().session) <= 1000);
+}
+
+/* Общий помощник фазовых тестов определён ниже по файлу; здесь он нужен
+ * раньше, чем там. */
+static fs::path make_tmp_project();
+
+TEST(a_compacted_session_is_written_to_disk) {
+    /* Свёрнутое состояние обязано пережить перезагрузку: иначе resume
+     * вернул бы прежнюю историю, и агент заплатил бы за ту же сводку
+     * заново — на следующем же шаге. */
+    fs::path tmp = make_tmp_project();
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&,
+                     LlmReply&) { return false; };
+    cb.llm_complete = [](const std::string&, const std::string&,
+                         std::string&) { return false; };
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    /* Захват ЗНАЧЕНИЕМ, а не ссылкой: tmp переживёт сам себя только до
+     * конца теста, а замыкание в колбэках движка живёт дольше (синглтон).
+     * Guard выше возвращает колбэки, но висячая ссылка успела бы
+     * сработать между restore и следующим тестом. */
+    const fs::path dir = tmp;
+    cb.path_data_dir = [dir]() -> std::string { return dir.string(); };
+
+    CompactionGuard guard;
+    engine().init(cb);
+    std::vector<Message> h;
+    fill_window(h, 6, 5000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().session_id.clear();
+        engine().state().model_limits = window_of(4000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 10000000;
+        engine().state().measured_input_tokens = 30000;
+    }
+    CountingTurn turn;
+    engine().compact_history_if_needed(turn.fn());
+    ASSERT_EQ(turn.calls, 1);
+
+    std::vector<Message> in_memory;
+    std::string session_id;
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        in_memory = engine().state().session;
+        session_id = engine().state().session_id;
+    }
+    /* Файл существует, и в нём ровно та же история в том же порядке:
+     * порядок после сжатия НЕ хронологический (7.8), и именно поэтому
+     * файл читается как есть, без сортировки по идентификатору. */
+    SessionFile file;
+    std::string error;
+    std::vector<std::string> warnings;
+    const std::string path = SessionArchive::file_path(tmp.string(), session_id);
+    ASSERT_TRUE(!path.empty());
+    ASSERT_TRUE(SessionArchive::load(path, file, &error, &warnings));
+    ASSERT_TRUE(warnings.empty());
+    ASSERT_EQ(file.messages.size(), in_memory.size());
+    for (size_t i = 0; i < in_memory.size(); ++i) {
+        ASSERT_EQ(file.messages[i].id, in_memory[i].id);
+    }
+    ASSERT_TRUE(file.messages[0].parts[0].is(PartKind::Compaction));
+    fs::remove_all(tmp);
+}
+
+TEST(compaction_is_safe_from_the_loop_pattern_with_a_model_call_inside) {
+    /* Тот же сценарий, что у обрезки (D1), но жёстче: сжатие делает
+     * ЗАПРОС К МОДЕЛИ между захватами state_.mtx. Если лок берётся до
+     * запроса или не отпускается, тест провалится по таймауту. */
+    CompactionGuard guard;
+    std::vector<Message> h;
+    fill_window(h, 6, 5000);
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().session = h;
+        engine().state().model_limits = window_of(4000);
+        engine().state().compaction_config = compaction::CompactionConfig();
+        engine().state().session_budget = 10000000;
+        engine().state().measured_input_tokens = 30000;
+    }
+    CountingTurn turn;
+    auto fut = std::async(std::launch::async, [&turn] {
+        for (int step = 0; step < 3; ++step) {
+            engine().compact_history_if_needed(turn.fn());
+        }
+    });
+    ASSERT_TRUE(fut.wait_for(std::chrono::seconds(10)) ==
+                std::future_status::ready);
+    fut.get();
+    /* Сводка случилась ровно один раз: три шага подряд не должны были
+     * сжимать историю трижды (см. предыдущую проверку). */
+    ASSERT_EQ(turn.calls, 1);
 }
 
 TEST(engine_settings_deploy_remote_dir_roundtrip) {

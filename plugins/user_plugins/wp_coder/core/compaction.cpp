@@ -124,7 +124,20 @@ struct TurnRange {
 };
 
 /* Реплика пользователя, породившая ход. Обёртка сводки (часть
- * compaction) ходом НЕ считается — см. решение 1 в compaction.h. */
+ * compaction) ходом НЕ считается — см. решение 1 в compaction.h.
+ *
+ * Реплика автопродолжения (И7.7) ходом считается, и это ОБЩЕЕ правило
+ * (пользовательская реплика без compaction-части), а не частный случай:
+ * так же и в порте.
+ *
+ * Отдельно записано то, что стоило проверки мутацией: это различение
+ * НЕ влияет на выбор хвоста. Мутация «реплика продолжения ходом не
+ * считается» не ломает ни одну проверку, потому что разрез хода
+ * (решение 3) приходит к той же границе: ход, не влезающий в порог,
+ * разрезается начиная со второго сообщения, и реплика продолжения
+ * оказывается началом уцелевшего куска в обоих случаях. Значит,
+ * свойство, которое реально держится, — не «считается ходом», а
+ * «хвост начинается с реплики продолжения»; оно и проверяется. */
 bool starts_a_turn(const Message& m) {
     if (!m.is_user()) return false;
     for (const MessagePart& p : m.parts) {
@@ -303,19 +316,30 @@ std::vector<std::string> lines_of(const Message& m) {
             }
             continue;
         }
-        if (p.is(PartKind::Text) || p.is(PartKind::Compaction)) {
-            /* Часть compaction — это прошлая сводка; новый сводщик обязан
-             * её увидеть, иначе повторное сжатие забыло бы всё, до него
-             * случившееся. */
+        if (p.is(PartKind::Text)) {
             if (!p.text().empty()) {
                 lines.push_back(std::string(as_user ? "[User]: " : "[Assistant]: ") +
                                 p.text());
             }
             continue;
         }
-        /* Служебные виды (StepStart, StepFinish, Retry, Patch, Subtask) в
-         * сводку не идут: они не несут содержания, а формат для них не
-         * описан ни здесь, ни в промпте сводщика. */
+        /* Часть compaction сюда НЕ попадает намеренно (И7.6): прошлая
+         * сводка идёт в сводщику отдельной полосой <prior-summary>, а как
+         * строка `[User]:` она читалась бы словами человека — при том,
+         * что промпт просит считать разговор новее сводки.
+         *
+         * Реплика автопродолжения (И7.7) не попадает по той же причине,
+         * что и она: `[User]: Continue if you have next steps…` — это
+         * слова плагина, поданные как слова человека, а промпт сводщика
+         * прямо запрещает приписывать человеку то, чего он не говорил.
+         * В порте она в сводку попадает, и это не ошибка там, где сводку
+         * видит только модель; у нас сводка — единственное, что увидит
+         * и человек в UI (И11), поэтому лишнее «человек сказал
+         * „продолжай“» в ней обманывало бы и его.
+         *
+         * Служебные виды (StepStart, StepFinish, Retry, Patch, Subtask)
+         * молчат по третьей причине: они не несут содержания, а формат
+         * для них не описан ни здесь, ни в промпте сводщика. */
     }
     return lines;
 }
@@ -336,6 +360,26 @@ std::string serialize_for_summary(const std::vector<Message>& history) {
     return out;
 }
 
+/* --- И7.6: прошлая сводка --- */
+
+std::string previous_summary(const std::vector<Message>& history) {
+    std::string out;
+    /* Обход до конца и присваивание, а не выход на первой найденной:
+     * берётся ПОСЛЕДНЯЯ непустая сводка, и она содержит все предыдущие
+     * (каждая следующая составлена с предыдущей в <prior-summary>, см.
+     * шапку compaction.h). Обратный порядок взял бы самую старую и
+     * выбросил бы всё, сделанное между сжатиями, — молча, потому что
+     * промпт сводщика отработал бы и выдал правдоподобную сводку. */
+    for (const Message& m : history) {
+        for (const MessagePart& p : m.parts) {
+            if (!p.is(PartKind::Compaction)) continue;
+            if (p.text().empty()) continue;
+            out = p.text();
+        }
+    }
+    return out;
+}
+
 /* --- И7.5: агент-сводщик --- */
 
 const char* compaction_outcome_name(CompactionOutcome o) {
@@ -348,13 +392,13 @@ const char* compaction_outcome_name(CompactionOutcome o) {
 }
 
 std::string compaction_user_prompt(const std::string& transcript,
-                                   const std::string& previous_summary) {
+                                   const std::string& prior) {
     std::string prompt = "Вот разговор до сих пор:\n\n<conversation>\n" +
                          transcript + "\n</conversation>\n\n";
-    if (!previous_summary.empty()) {
+    if (!prior.empty()) {
         prompt +=
             "Вот сводка разговора, который шёл ДО разговора выше:\n\n"
-            "<prior-summary>\n" + previous_summary + "\n</prior-summary>\n\n"
+            "<prior-summary>\n" + prior + "\n</prior-summary>\n\n"
             "Составь НОВУЮ сводку, объединяющую обе. Старая сводка после "
             "этого отбрасывается: всё, что ты в неё не перенесёшь, будет "
             "потеряно.\n\n"
@@ -415,8 +459,7 @@ std::string capped_summary(const std::string& summary, bool& truncated) {
 
 } // namespace
 
-CompactionResult summarize(const std::string& transcript,
-                           const std::string& previous_summary,
+CompactionResult summarize(const std::vector<Message>& history,
                            const SummaryTurn& turn) {
     CompactionResult result;
     if (!turn) {
@@ -425,12 +468,26 @@ CompactionResult summarize(const std::string& transcript,
         result.reason = "сводщик недоступен: нет функции запроса";
         return result;
     }
+    /* Порядок именно такой: сначала обе половины (разговор И прошлая
+     * сводка), потом проверка «есть ли что сжимать». Проверка по одной
+     * половине дала бы две разные причины для одного и того же отказа,
+     * а отказ виден пользователю именно причиной. */
+    const std::string previous = previous_summary(history);
+    const std::string transcript = serialize_for_summary(history);
     if (transcript.empty()) {
         /* Сводить нечего: пустая сводка хуже отсутствия сводки, и
          * Continue на пустом разговоре означал бы, что работа продолжается
-         * ни на чём. */
+         * ни на чём.
+         *
+         * Причины названы раздельно: «пустой разговор» и «после сжатия
+         * новых ходов нет» выглядят для пользователя одинаково (сжатия
+         * не было), а лечатся по-разному — во втором случае переполнение
+         * вернётся на следующем же шаге, и молчание сделало бы его
+         * возвращение загадкой. */
         result.outcome = CompactionOutcome::Stop;
-        result.reason = "нечего сжимать: разговор пуст";
+        result.reason = previous.empty()
+            ? "нечего сжимать: разговор пуст"
+            : "нечего сжимать: после прошлого сжатия новых ходов нет";
         return result;
     }
 
@@ -438,7 +495,7 @@ CompactionResult summarize(const std::string& transcript,
     std::string error;
     std::vector<ModelMessage> messages;
     messages.push_back({std::string(kRoleUser),
-                        compaction_user_prompt(transcript, previous_summary)});
+                        compaction_user_prompt(transcript, previous)});
     if (!turn(kCompactionSystemPrompt, messages, text, error)) {
         result.outcome = CompactionOutcome::Stop;
         result.failure = FailureKind::Provider;
@@ -489,6 +546,131 @@ CompactionResult summarize(const std::string& transcript,
         result.reason = "сводка обрезана по лимиту длины";
     }
     return result;
+}
+
+/* --- И7.8: что история становится после сжатия --- */
+
+std::vector<Message> compacted_history(const Selection& sel,
+                                       const std::string& summary,
+                                       const CompactionConfig& cfg) {
+    /* Сжатие без сводки НЕ применяется, и это не «пустая сводка».
+     * Обёртка с пустым текстом заняла бы место головы, а головы нигде
+     * больше нет: работа до первого сжатия исчезла бы целиком, и
+     * заметить это можно было бы только по тому, что агент перестал
+     * помнить, зачем он вообще здесь. Возврат истории целиком означает
+     * «сжатия не было»: переполнение вернётся на следующем же шаге, и
+     * это уже видно по счётчику, а не по памяти агента.
+     *
+     * Пустой summary вручную недостижим (summarize() на нём даёт Stop), но
+     * функция принимает строку и обязана быть защищена сама: вызывающий
+     * — движок, а доверять ему «сюда придут только хорошие значения»
+     * здесь нельзя (тот же класс, что с replace_all в 4.3). */
+    if (summary.empty()) {
+        std::vector<Message> whole(sel.head);
+        whole.insert(whole.end(), sel.tail.begin(), sel.tail.end());
+        return whole;
+    }
+
+    std::vector<Message> out;
+    out.reserve(sel.tail.size() + 2);
+
+    /* Обёртка сводки. Часть compaction хранит и сводку, и список
+     * свёрнутых сообщений — второй нужен UI («что заменила сводка»), и
+     * он выводится ЗДЕСЬ, из головы: перечислять его вручную означало бы
+     * второй способ сказать то же самое. */
+    Message wrapper = Message::user(std::string());
+    std::vector<std::string> replaced;
+    replaced.reserve(sel.head.size());
+    for (const Message& m : sel.head) replaced.push_back(m.id);
+    wrapper.parts.push_back(MessagePart::compaction(summary, std::move(replaced)));
+    out.push_back(std::move(wrapper));
+
+    /* Хвост — как есть, целиком: это ровно то, ради чего сжатие вообще
+     * делалось, и любая правка здесь означала бы потерю. */
+    out.insert(out.end(), sel.tail.begin(), sel.tail.end());
+
+    /* Реплика продолжения — по тому же правилу, что и в порте: только
+     * после АВТОсжатия. Ручное сжатие (его появится вместе с 7.10)
+     * добавит её вызовом сам, а здесь флаг пользователя «никогда не
+     * сжимать» означает ровно то же: никакого автопродолжения. */
+    if (cfg.auto_compact) out.push_back(Message::compaction_continue());
+    return out;
+}
+
+/* --- И7.9: прореживание вывода инструментов --- */
+
+namespace {
+
+/* Вывод, который прореживать нельзя (kPruneProtectedTools). */
+bool protected_tool(const std::string& name) {
+    for (const char* p : limits::kPruneProtectedTools) {
+        if (name == p) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+std::vector<MessagePart*> prune_candidates(std::vector<Message>& history) {
+    std::vector<MessagePart*> out;
+    /* Счётчик ходов идёт по репликам пользователя: ровно так же, как в
+     * порте, где это `msg.info.role === "user"`. Обёртка сводки — тоже
+     * пользовательская реплика, но обход всё равно остановится на ней
+     * (шаг 5), а начинается он с конца. */
+    int turns = 0;
+    long long fresh = 0;    /* объём САМЫХ СВЕЖИХ выводов, шаг 1 */
+    long long spare = 0;    /* сколько можно очистить, шаг 5 */
+
+    for (size_t mi = history.size(); mi-- > 0; ) {
+        Message& m = history[mi];
+        if (m.is_user()) ++turns;
+        if (turns < 2) continue;
+        /* Сводка: всё старше уже выкинуто из истории, и трогать там
+         * нечего (шаг 5). Проверка на части, а не на тексте: текст сводки
+         * может быть любым. */
+        bool is_summary = false;
+        for (const MessagePart& q : m.parts) {
+            if (q.is(PartKind::Compaction)) is_summary = true;
+        }
+        if (is_summary) break;
+
+        for (size_t pi = m.parts.size(); pi-- > 0; ) {
+            MessagePart& p = m.parts[pi];
+            if (!p.is(PartKind::Tool)) continue;
+            /* Только завершённые: у работающего вызова вывода ещё нет, а
+             * у отказавшего он и так короткий, и метка «очищено» на отказе
+             * выглядела бы как поломка инструмента. */
+            if (p.state() != ToolState::Completed) continue;
+            if (protected_tool(p.tool_name())) continue;
+            /* Уже очищенный вызов ПРОПУСКАЕТСЯ, а не обрывает обход.
+             *
+             * Метка в модели стоит десяток токенов, а не тысячи, поэтому
+             * очищенный вывод в счёт защиты не идёт: иначе защита
+             * расходовала бы место, которого в контексте уже нет, и
+             * прореживание вышло бы дальше, чем нужно.
+             *
+             * Обрывать обход здесь — правило из порта, и оно опирается на
+             * инвариант «за очищенным всё старше очищено». Инвариант
+             * держится, но проверка на мутациях показала, что правило
+             * неразличимо: обход, проскочивший очищенный вызов, набирает
+             * те же токены и предлагает тот же список. При этом
+             * ПРОПУСК лучше: сессию могли править руками, и тогда за
+             * очищенным может лежать неочищенный гигант, которого
+             * прореживание обязано снять, а не пропустить. */
+            if (p.output_cleared()) continue;
+            const long long size = estimate_tokens(p.output().output);
+            fresh += size;
+            if (fresh <= limits::kPruneProtectTokens) continue;
+            spare += size;
+            out.push_back(&p);
+        }
+    }
+
+    /* Не стоит — не чистим (шаг «а стоит ли»). Список либо весь, либо
+     * пуст: частичная очистка выглядела бы как «часть выводов пропала
+     * сама», и модель не отличила бы её от поломки. */
+    if (spare <= limits::kPruneMinimumTokens) return std::vector<MessagePart*>();
+    return out;
 }
 
 } // namespace compaction

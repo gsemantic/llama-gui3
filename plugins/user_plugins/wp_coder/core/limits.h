@@ -74,6 +74,39 @@ inline constexpr long long kCompactionSummaryMaxChars = 16000;
 inline constexpr long long kMinPreserveRecentTokens = 2000;
 inline constexpr long long kMaxPreserveRecentTokens = 15000;
 
+/* Прореживание вывода инструментов (И7.9, порт compaction.ts:
+ * PRUNE_PROTECT, PRUNE_MINIMUM, PRUNE_PROTECTED_TOOLS).
+ *
+ * Что делает прореживание: полный вывод КАЖДОГО вызова инструмента живёт
+ * в истории до конца сессии, и именно он, а не текст агента, съедает
+ * окно. Старые результаты удаляются из контекста целиком (остаётся одна
+ * строка-метка), и освобождённое место занимает хвост сжатия.
+ *
+ * kPruneProtectTokens — сколько ТОКЕНОВ вывода самых свежих вызовов
+ * остаётся нетронутыми: их агент разбирает прямо сейчас, и очистить их
+ * значило бы заставить его работать вслепую.
+ *
+ * kPruneMinimumTokens — снимать ли вообще. Ниже этой выгоды метка «очищено»
+ * в промпте обходится дороже, чем сэкономленные токены: модель получит
+ * несколько строк «[Old tool result content cleared]» вместо живого
+ * текста и начнёт гадать, что случилось. Порог ниже порога защиты
+ * намеренно: он отвечает на вопрос «а стоит ли», а тот — «что нельзя». */
+inline constexpr long long kPruneProtectTokens = 40000;
+inline constexpr long long kPruneMinimumTokens = 20000;
+
+/* Инструменты, чей вывод НЕЛЬЗЯ прореживать, — тело навыка. Оно и есть
+ * инструкция, и агент работает по ней прямо сейчас; очистить её значит
+ * не освободить место, а сломать работу на середине. */
+inline constexpr const char* kPruneProtectedTools[] = {"skill"};
+
+/* Чем вывод очищенного вызова выглядит для модели (И7.9, порт
+ * toolResult.ts: "[Old tool result content cleared]"). Строка на
+ * английском — та же линия, что у меток формата и слова-выхода `compact`:
+ * это протокол между плагином и моделью, взятый из порта дословно. Она
+ * названа в kBaseSystemPrompt, иначе модель приняла бы её за содержимое
+ * вывода и стала бы рассуждать о тексте, которого нет (ровно класс D2). */
+inline constexpr const char* kClearedToolOutput = "[Old tool result content cleared]";
+
 /* shell (И4.8). 120 с — как в opencode; раньше было 60, и `docker build`
  * на нормальном проекте не успевал. */
 inline constexpr unsigned kShellTimeoutSec = 120;
