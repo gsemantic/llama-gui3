@@ -21,6 +21,7 @@
 #include "../core/tool.h"
 #include "../core/tools_registry.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
@@ -549,7 +550,11 @@ TEST(engine_load_settings_loads_project_agents) {
     ASSERT_TRUE(reviewer != nullptr);
     ASSERT_EQ(reviewer->description, std::string("Ревьюер"));
     ASSERT_EQ(reviewer->prompt, std::string("Смотри код."));
-    ASSERT_EQ(AgentRegistry::instance().subagent_names().size(), (size_t)1);
+    /* В списке субагентов теперь есть и встроенные (И8.5), поэтому
+     * проверяем присутствие, а не число: число сделалось бы проверкой
+     * чужого факта. */
+    const std::vector<std::string> subs = AgentRegistry::instance().subagent_names();
+    ASSERT_TRUE(std::find(subs.begin(), subs.end(), "reviewer") != subs.end());
 
     /* Восстановление: Engine — синглтон, и подмена project_dir без
      * возврата уронила бы следующий тест, а не этот. */
@@ -1000,4 +1005,322 @@ TEST(agent_info_growing_ruleset_is_locked) {
     }
     ASSERT_TRUE(approve.find("approved_mtx_") != std::string::npos);
     ASSERT_TRUE(evaluate.find("approved_mtx_") != std::string::npos);
+}
+
+/* ======================================================================
+ * 5. Встроенные агенты (И8.5)
+ * ====================================================================== */
+
+TEST(builtin_agents_are_registered_in_a_fixed_order) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    /* Порядок задаётся таблицей и попадает в описание `task` (8.13),
+     * то есть в каждый ход: он не должен зависеть от того, в каком
+     * порядке отработал реестр. */
+    std::string order;
+    for (const auto& p : reg.all()) {
+        if (!order.empty()) order += ",";
+        order += p->name;
+    }
+    if (order != "wp_build,wp_plan,wp_general,wp_explore") {
+        std::cerr << "  порядок встроенных: " << order << std::endl;
+    }
+    ASSERT_EQ(order, std::string("wp_build,wp_plan,wp_general,wp_explore"));
+
+    /* У каждого есть описание (иначе он попал бы в список пустой
+     * строкой) и промпт (иначе модель не знала бы своей роли). */
+    for (const auto& p : reg.all()) {
+        if (p->description.empty()) {
+            std::cerr << "  у " << p->name << " нет описания" << std::endl;
+        }
+        ASSERT_TRUE(!p->description.empty());
+        if (p->prompt.empty()) {
+            std::cerr << "  у " << p->name << " нет промпта" << std::endl;
+        }
+        ASSERT_TRUE(!p->prompt.empty());
+        /* Промпт — роль, а не имя: подстановка имени дала бы агенту
+         * «системный промпт», состоящий из одной строки, и модель не
+         * знала бы, что делать. */
+        if (p->prompt == p->name) {
+            std::cerr << "  промпт " << p->name << " равен имени" << std::endl;
+        }
+        ASSERT_TRUE(p->prompt != p->name);
+        if (p->prompt.find("РОЛЬ") == std::string::npos) {
+            std::cerr << "  в промпте " << p->name
+                      << " не назван раздел роли" << std::endl;
+        }
+        ASSERT_TRUE(p->prompt.find("РОЛЬ") != std::string::npos);
+    }
+
+    /* Пользователь выбирает агента, субагенты зовёт инструмент task. */
+    const std::vector<std::string> prim = reg.primary_names();
+    ASSERT_TRUE(std::find(prim.begin(), prim.end(), "wp_build") != prim.end());
+    ASSERT_TRUE(std::find(prim.begin(), prim.end(), "wp_plan") != prim.end());
+    ASSERT_TRUE(std::find(prim.begin(), prim.end(), "wp_general") == prim.end());
+    const std::vector<std::string> subs = reg.subagent_names();
+    ASSERT_TRUE(std::find(subs.begin(), subs.end(), "wp_general") != subs.end());
+    ASSERT_TRUE(std::find(subs.begin(), subs.end(), "wp_explore") != subs.end());
+    /* Режим `subagent` — это «не показывать в выборе агента», и без
+     * обратной проверки смена режима на all прошла бы незамеченной:
+     * список субагентов пополнился бы, а список выбора — нет. */
+    ASSERT_TRUE(std::find(prim.begin(), prim.end(), "wp_general") == prim.end());
+    ASSERT_TRUE(std::find(prim.begin(), prim.end(), "wp_explore") == prim.end());
+    /* wp_build и wp_plan — режим all: их может звать и пользователь, и
+     * инструмент `task`; они есть в обоих списках. */
+}
+
+TEST(builtin_plan_agent_cannot_write) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    /* Критерий итерации: «wp_plan не может редактировать». Он держится
+     * на ПРАВИЛЕ, а не на просьбе в промпте: модель всё равно попробует
+     * позвать write_file, и отказ должен прийти от enforcement. */
+    Ruleset base;
+    base.add("*", "*", PermissionAction::Allow);
+    const auto plan = agent::Info::from_def(*reg.find("wp_plan"), base);
+    ASSERT_EQ(std::string(permission_action_name(plan->evaluate("write", "*"))),
+              std::string("запретить"));
+    ASSERT_TRUE(plan->denies_whole_key("write"));
+    /* Инструменты этой группы не показываются модели вовсе (И2.8) —
+     * иначе агент тратил бы шаг на заведомо отклонённый вызов. */
+    size_t hidden = 0;
+    for (const ToolDef& d : ToolsRegistry::instance().defs()) {
+        if (permission_key_of(d) == "write") ++hidden;
+    }
+    ASSERT_TRUE(hidden >= 5);
+
+    /* Остальное агент планирования НЕ сужает: он читает проект и ищет. */
+    ASSERT_EQ(std::string(permission_action_name(plan->evaluate("read", "/srv/a.php"))),
+              std::string("разрешить"));
+    ASSERT_EQ(std::string(permission_action_name(plan->evaluate("bash", "ls"))),
+              std::string("разрешить"));
+}
+
+TEST(builtin_agents_ask_by_default_and_keep_their_own_deltas) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    /* База разрешает ВСЁ, чтобы разницу давал только агент. */
+    Ruleset base;
+    base.add("*", "*", PermissionAction::Allow);
+    const auto build = agent::Info::from_def(*reg.find("wp_build"), base);
+    /* Агент без дельты не перекрывает базу. Первая версия встроенных
+     * несла правило «* → спросить» «на всякий случай», и оно приходило
+     * ПОСЛЕ базовых: агент без единой своей дельки отменял всё, что
+     * пользователь разрешил, и превращал сессию в «спрашивать всё».
+     * «Нет дельты» — это пустой список правил, а не правило по
+     * умолчанию. */
+    ASSERT_EQ(std::string(permission_action_name(build->evaluate("bash", "ls"))),
+              std::string("разрешить"));
+    ASSERT_EQ(std::string(permission_action_name(build->evaluate("write", "/tmp/a"))),
+              std::string("разрешить"));
+
+    /* А с пустой базой — по-прежнему «спросить»: не описанное поведение
+     * спрашивает (Ask по умолчанию, core/permission.h). */
+    const auto build_alone = agent::Info::from_def(*reg.find("wp_build"), Ruleset());
+    ASSERT_EQ(std::string(permission_action_name(
+                  build_alone->evaluate("bash", "ls"))),
+              std::string("спросить"));
+
+    /* wp_explore в 8.5 появлялся УЖЕ без права писать: агент, который
+     * читает проект, не должен ждать 8.6 с запретом. */
+    const auto explore = agent::Info::from_def(*reg.find("wp_explore"), base);
+    ASSERT_TRUE(explore->denies_whole_key("write"));
+    ASSERT_EQ(std::string(permission_action_name(explore->evaluate("read", "/srv/a"))),
+              std::string("разрешить"));
+}
+
+TEST(builtin_explore_agent_is_deny_all_with_a_read_only_list) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    /* База разрешает ВСЁ, чтобы разницу давал только агент: иначе
+     * запреты агента нечего было бы проверять. */
+    Ruleset base;
+    base.add("*", "*", PermissionAction::Allow);
+    const auto explore = agent::Info::from_def(*reg.find("wp_explore"), base);
+
+    /* «* → запретить», затем явный список: иначе агент-поиск был бы
+     * агентом с правами сессии и «ничего не меняя» держалось бы только
+     * на промпте. */
+    ASSERT_TRUE(explore->denies_whole_key("write"));
+    ASSERT_TRUE(explore->denies_whole_key("todo"));
+    ASSERT_TRUE(explore->denies_whole_key("git"));
+    ASSERT_TRUE(explore->denies_whole_key("rag"));
+    ASSERT_TRUE(explore->denies_whole_key("external_directory"));
+    ASSERT_FALSE(explore->denies_whole_key("read"));
+    ASSERT_FALSE(explore->denies_whole_key("bash"));
+
+    /* Разрешённое — по КЛЮЧАМ, а не по именам инструментов: enforcement
+     * спрашивает по ключу, и правило по имени инструмента не сработало
+     * бы ни на одном вызове. */
+    for (const char* key : {"read", "bash"}) {
+        ASSERT_EQ(std::string(permission_action_name(
+                      explore->evaluate(key, "любой"))),
+                  std::string("разрешить"));
+    }
+    /* Список разрешённого задан целиком: ищем именно то, чем агент
+     * пользуется, и убеждаемся, что чужого в каталоге не видно. */
+    size_t read_tools = 0, bash_tools = 0, hidden_write = 0;
+    std::vector<std::string> foreign;
+    for (const ToolDef& d : ToolsRegistry::instance().defs()) {
+        if (d.name.rfind("test_", 0) == 0) continue;
+        const std::string key = permission_key_of(d);
+        if (explore->denies_whole_key(key)) {
+            if (key == "write") ++hidden_write;
+            continue;
+        }
+        if (key == "read") { ++read_tools; continue; }
+        if (key == "bash") { ++bash_tools; continue; }
+        /* Единственное допустимое «видно» — чтение и bash. Абсолютные
+         * числа здесь ставить нельзя: реестр инструментов общий для всех
+         * тестов, и сколько там модульных инструментов, зависит от того,
+         * кто отработал раньше. Проверяются свойства, а не количество. */
+        foreign.push_back(d.name + " (" + key + ")");
+    }
+    if (!foreign.empty()) {
+        std::cerr << "  агенту-поиску видны посторонние инструменты:";
+        for (const std::string& n : foreign) std::cerr << " " << n;
+        std::cerr << std::endl;
+    }
+    ASSERT_TRUE(foreign.empty());
+    if (read_tools < 5) std::cerr << "  читающих инструментов: " << read_tools << std::endl;
+    if (bash_tools < 1) std::cerr << "  инструментов bash: " << bash_tools << std::endl;
+    if (hidden_write < 5) std::cerr << "  скрыто пишущих: " << hidden_write << std::endl;
+    ASSERT_TRUE(read_tools >= 5);
+    ASSERT_TRUE(bash_tools >= 1);
+    /* Все пять пишущих инструментов скрыты: агент-поиск не должен ни
+     * видеть их, ни получать отказ на каждом шаге. */
+    ASSERT_EQ(hidden_write, (size_t)5);
+
+    /* Промпт требует назвать тщательность: без этого субагент отвечает
+     * поверхностно, а вызывающий принимает это за полный обзор. */
+    const std::string prompt = explore->prompt();
+    /* Уровни проверяются как ОБЪЯВЛЕННЫЕ пункты («- quick — …»), а не
+     * как вхождения подстроки: слово «very thorough» есть и в
+     * напутствии «не выдавай quick за very thorough», и проверка на
+     * вхождение приняла бы промпт, в котором ни один уровень не
+     * объявлен. */
+    for (const char* level : {"quick", "medium", "very thorough"}) {
+        const std::string declared = std::string("- ") + level + " ";
+        if (prompt.find(declared) == std::string::npos) {
+            std::cerr << "  в промпте поиска не объявлен уровень " << level
+                      << std::endl;
+        }
+        ASSERT_TRUE(prompt.find(declared) != std::string::npos);
+    }
+    if (prompt.find("Тщательность:") == std::string::npos) {
+        std::cerr << "  в промпте поиска нет требования назвать тщательность"
+                  << std::endl;
+    }
+    ASSERT_TRUE(prompt.find("Тщательность:") != std::string::npos);
+}
+
+TEST(builtin_agents_are_overridden_by_config_in_place) {
+    const fs::path tmp = make_tmp_tree("override");
+    const fs::path dir = tmp / ".wpcode" / "agent";
+    write_file(dir / "wp_plan.md",
+               "---\ndescription: Мой планировщик\n---\nСвой промпт.\n");
+
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+    std::string order_before;
+    for (const auto& p : reg.all()) {
+        if (!order_before.empty()) order_before += ",";
+        order_before += p->name;
+    }
+
+    reg.load_directory(dir.string());
+
+    const auto plan = reg.find("wp_plan");
+    ASSERT_TRUE(plan != nullptr);
+    ASSERT_EQ(plan->description, std::string("Мой планировщик"));
+    ASSERT_EQ(plan->prompt, std::string("Свой промпт."));
+    /* Место не сдвинулось: порядок попадает в описание `task` в каждом
+     * ходе, и перестановка из-за одного файла конфига его ломала бы. */
+    std::string order_after;
+    for (const auto& p : reg.all()) {
+        if (!order_after.empty()) order_after += ",";
+        order_after += p->name;
+    }
+    ASSERT_EQ(order_after, order_before);
+    ASSERT_EQ(reg.size(), (size_t)4);
+
+    fs::remove_all(tmp);
+}
+
+TEST(engine_load_settings_registers_builtin_agents) {
+    /* Вызов доходит до места, где зовут: встроенные агенты обязаны
+     * появиться в реестре при инициализации движка, иначе они были бы
+     * описанием без пользователя. */
+    const fs::path tmp = make_tmp_tree("builtin");
+    const fs::path dir = tmp / ".wpcode" / "agent";
+    write_file(dir / "wp_plan.md",
+               "---\ndescription: Мой планировщик\n---\nСвой промпт.\n");
+
+    std::map<std::string, std::string> settings;
+    settings["wp_coder.project_dir"] = tmp.string();
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&, LlmReply&) {
+        return false;
+    };
+    cb.llm_complete = [](const std::string&, const std::string&, std::string&) {
+        return false;
+    };
+    cb.llm_is_connected = []() { return false; };
+    cb.path_data_dir = []() { return std::string(); };
+    cb.path_config_dir = []() { return std::string(); };
+    cb.settings_get = [&](const std::string& key, const std::string& def) -> std::string {
+        auto it = settings.find(key);
+        return it != settings.end() ? it->second : def;
+    };
+    cb.settings_set = [&](const std::string& key, const std::string& value) {
+        settings[key] = value;
+    };
+    cb.chat_event = [](const std::string&) {};
+
+    auto& eng = Engine::instance();
+    eng.init(cb);
+
+    for (const char* name : {"wp_build", "wp_plan", "wp_general", "wp_explore"}) {
+        if (AgentRegistry::instance().find(name) == nullptr) {
+            std::cerr << "  Engine::load_settings не зарегистрировал "
+                      << name << std::endl;
+        }
+        ASSERT_TRUE(AgentRegistry::instance().find(name) != nullptr);
+    }
+
+    /* Порядок регистрации виден и на живом движке: встроенные идут
+     * ПЕРЕД конфиг-агентами, и потому конфиг-агент с тем же именем
+     * перекрывает встроенного НА ЕГО МЕСТЕ. Наоборот — «встроенные
+     * после конфига» — значило бы, что пользовательский агент
+     * перезаписывается встроенным, и настройка проекта была бы
+     * бесполезной. */
+    const auto plan = AgentRegistry::instance().find("wp_plan");
+    ASSERT_TRUE(plan != nullptr);
+    ASSERT_EQ(plan->description, std::string("Мой планировщик"));
+    std::string order;
+    for (const auto& p : AgentRegistry::instance().all()) {
+        if (!order.empty()) order += ",";
+        order += p->name;
+    }
+    if (order != "wp_build,wp_plan,wp_general,wp_explore") {
+        std::cerr << "  порядок после загрузки конфига: " << order << std::endl;
+    }
+    ASSERT_EQ(order, std::string("wp_build,wp_plan,wp_general,wp_explore"));
+
+    /* Восстановление: реестр — синглтон, и оставленные в нём агенты
+     * видели бы следующие тесты. */
+    AgentRegistry::instance().clear();
+    settings.erase("wp_coder.project_dir");
+    eng.load_settings();
+    ASSERT_TRUE(AgentRegistry::instance().find("wp_build") != nullptr);
+
+    fs::remove_all(tmp);
 }

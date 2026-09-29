@@ -1,5 +1,6 @@
 #include "agent_registry.h"
 #include "limits.h"
+#include "prompts.h"
 #include "tool.h"
 #include "tools_registry.h"
 
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <iostream>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -783,6 +785,75 @@ std::vector<AgentLoadDiag> load_agents_from_directory(
         }
     }
     return diags;
+}
+
+void register_builtin_agents(AgentRegistry& reg) {
+    /* Порядок в этом списке — порядок в реестре, а он попадает в
+     * описание инструмента `task` (8.13). Список закрыт: новый
+     * встроенный агент обязан быть здесь, а не в коде, который его
+     * зовёт. */
+    struct Builtin {
+        const char* name;
+        const char* description;
+        AgentMode mode;
+        const char* prompt;
+        std::vector<PermissionEntry> permission;
+    };
+    /* «Нет дельты» у встроенного агента — это ПУСТОЙ список правил, а
+     * не правило «* → спросить». Правило приходит после базовых (см.
+     * 8.4), и catch-all от агента перекрыл бы всё, что настроил
+     * пользователь: агент без дельты тихо отменил бы пользовательские
+     * «всегда» и превратил сессию в «спрашивать всё». Найдено проверкой
+     * на агента, у которого дельты нет. */
+    const std::vector<Builtin> builtins = {
+        {"wp_build", "Исполнитель: доводит задачу до рабочего кода и проверяет "
+                     "результат. Агент по умолчанию.",
+         AgentMode::All, kAgentBuildPrompt, {}},
+        {"wp_plan", "Планировщик: изучает проект и составляет план правок. "
+                    "Файлы не меняет — инструментов правки у него нет.",
+         AgentMode::All, kAgentPlanPrompt,
+         {{"write", "*", PermissionAction::Deny}}},
+        {"wp_general", "Субагент для отдельной задачи: выполняет переданное и "
+                       "возвращает итог текстом.",
+         AgentMode::Subagent, kAgentGeneralPrompt, {}},
+        /* wp_explore (И8.6): «* → запретить», затем явный разрешённый
+         * список. Именно в таком порядке: правило по ключу приходит
+         * ПОСЛЕ catch-all, поэтому «прочитать» и не может быть, и не
+         * может быть запрещено.
+         *
+         * Список разрешённого задан КЛЮЧАМИ, а не именами инструментов,
+         * потому что enforcement спрашивает по ключу: `read_file`,
+         * `grep_search`, `glob`, `list` и (когда появится, И6.4/И13.5)
+         * `llm_ast_symbols` — это один ключ `read`. Список из порта
+         * называет ещё и `webfetch`, и `ast_symbols`: инструментов с
+         * такими именами у нас нет, и правило по несуществующему ключу
+         * было бы враньём в записи (и замечанием 8.3 в журнал). Ключи
+         * этих инструментов, когда они появятся, добавляются ЗДЕСЬ. */
+        {"wp_explore", "Субагент-поиск: читает проект и отвечает на вопрос, "
+                       "ничего не меняя.",
+         AgentMode::Subagent, kAgentExplorePrompt,
+         {{"*", "*", PermissionAction::Deny},
+          {"read", "*", PermissionAction::Allow},
+          {"bash", "*", PermissionAction::Allow}}},
+    };
+
+    for (const Builtin& b : builtins) {
+        AgentDef def;
+        def.name = b.name;
+        def.description = b.description;
+        def.mode = b.mode;
+        def.prompt = b.prompt;
+        def.permission = b.permission;
+        def.source_path = "встроенный";
+        /* Отказ встроенного агента — это дефект сборки плагина, а не
+         * ошибка пользователя: молча пропустить его значило бы узнать
+         * об отсутствии по отказу инструмента в худший момент. */
+        std::string why;
+        if (!reg.add(def, &why)) {
+            std::cerr << "[wp_coder] встроенный агент " << b.name
+                      << " не зарегистрирован: " << why << std::endl;
+        }
+    }
 }
 
 Ruleset normalized_agent_rules(const AgentDef& def,

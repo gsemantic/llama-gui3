@@ -522,6 +522,9 @@ void Engine::load_settings() {
      * (load_agents_from_directory молчит о нём), а набор агентов
      * переживает перечитывание настроек: замена по имени сохраняет
      * прежнего агента, если новый файл не прочитался. */
+    /* Встроенные агенты — ДО конфиг-агентов: тогда конфиг перекрывает
+     * встроенного на его месте, а не сдвигает его в конец списка. */
+    register_builtin_agents(AgentRegistry::instance());
     if (!state_.project_dir.empty()) {
         for (const AgentLoadDiag& d : AgentRegistry::instance().load_directory(
                  state_.project_dir + "/.wpcode/agent")) {
