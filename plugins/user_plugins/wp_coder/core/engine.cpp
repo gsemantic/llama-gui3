@@ -1,6 +1,7 @@
 // engine.cpp — AI-кодер с разбиением run_task на компоненты (Фаза D1)
 
 #include "agent_components.h"
+#include "agent_registry.h"
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
@@ -511,6 +512,22 @@ void Engine::load_settings() {
     if (state_.project_dir.empty()) {
         std::cout << "[wp_coder] ВНИМАНИЕ: корневой каталог проекта не задан — "
                   << "агент не будет знать, где находится код" << std::endl;
+    }
+    /* И8.2: конфиг-агенты проекта из `<project>/.wpcode/agent/*.md`.
+     *
+     * Загрузка живёт здесь, а не в плагине при старте, потому что
+     * каталог задаётся НАСТРОЙКОЙ проекта: у двух открытых проектов
+     * наборы агентов разные, и агент, загруженный до смены проекта,
+     * жил бы в чужом наборе. Отсутствие каталога — не ошибка
+     * (load_agents_from_directory молчит о нём), а набор агентов
+     * переживает перечитывание настроек: замена по имени сохраняет
+     * прежнего агента, если новый файл не прочитался. */
+    if (!state_.project_dir.empty()) {
+        for (const AgentLoadDiag& d : AgentRegistry::instance().load_directory(
+                 state_.project_dir + "/.wpcode/agent")) {
+            std::cout << "[wp_coder] агент: " << d.path << " — " << d.message
+                      << std::endl;
+        }
     }
     state_.php_bin          = setting_get(cb_, "wp_coder.php_bin", "");
     state_.wp_site_url      = setting_get(cb_, "wp_coder.site_url", "");

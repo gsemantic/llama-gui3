@@ -4,10 +4,13 @@
 #include "engine.h"
 #include "agent_components.h"
 #include "command_policy.h"
+#include "tools_registry.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 namespace coder {
 
@@ -451,6 +454,47 @@ std::string check_tool_mode_policy(const std::string& tool_name,
 
 std::string permission_key_of(const ToolDef& def) {
     return def.permission_key.empty() ? def.name : def.permission_key;
+}
+
+std::string canonical_permission_key(const std::string& name, bool* known) {
+    if (known) *known = false;
+    if (name.empty()) return name;
+
+    const std::vector<ToolDef> all = ToolsRegistry::instance().defs();
+    for (const ToolDef& d : all) {
+        if (d.name != name) continue;
+        if (known) *known = true;
+        return permission_key_of(d);
+    }
+    /* Имя уже является ключом («bash», «read», «write»): правило,
+     * написанное для группы, должно работать и когда инструментов в
+     * группе несколько (все пять пишущих инструментов — ключ
+     * «write», и «bash: запретить» не должен означать «один
+     * конкретный инструмент запрещён»). */
+    for (const ToolDef& d : all) {
+        if (permission_key_of(d) != name) continue;
+        if (known) *known = true;
+        return name;
+    }
+    /* Псевдонимы словаря порта: в opencode редактирование — это
+     * `edit`, и оно покрывает write/edit/patch одним ключом. У нас
+     * ключ этой группы называется `write` (см. permission_key у
+     * write_file/apply_patch/search_replace/edit_file/undo_edit), и
+     * менять его означало бы обнулить уже сохранённые правила
+     * пользователя в настройках. Поэтому приводим ЧУЖИЕ имена к
+     * нашему ключу, а не свой — к чужому. */
+    static const std::vector<std::pair<std::string, std::string>> kAliases = {
+        {"edit", "write"},
+        {"multiedit", "write"},
+        {"patch", "write"},
+        {"apply_patch", "write"},
+    };
+    for (const auto& kv : kAliases) {
+        if (kv.first != name) continue;
+        if (known) *known = true;
+        return kv.second;
+    }
+    return name;
 }
 
 std::string permission_pattern(const ToolDef& def, const json::JsonValue& args) {

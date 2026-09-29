@@ -88,14 +88,25 @@ const std::vector<Rule>& Ruleset::rules() const { return rules_; }
 
 PermissionAction Ruleset::evaluate(const std::string& permission,
                          const std::string& pattern) const {
+    bool matched = false;
+    return evaluate_matched(permission, pattern, &matched);
+}
+
+PermissionAction Ruleset::evaluate_matched(const std::string& permission,
+                                            const std::string& pattern,
+                                            bool* matched) const {
     /* Идём по всем правилам и запоминаем последнее подходящее — это и
      * есть last match wins. Обрываться на первом совпадении нельзя:
      * тогда «* → allow» в начале списка забил бы все точечные
      * исключения, дописанные позже. */
     PermissionAction result = PermissionAction::Ask;
+    bool found = false;
     for (const auto& r : rules_) {
-        if (rule_applies(r, permission, pattern)) result = r.action;
+        if (!rule_applies(r, permission, pattern)) continue;
+        result = r.action;
+        found = true;
     }
+    if (matched) *matched = found;
     return result;
 }
 
