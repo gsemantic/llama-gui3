@@ -155,6 +155,37 @@ PermissionOutcome permission_outcome(EngineState& state, const std::string& path
  * ToolRunner
  * ====================================================================== */
 
+namespace {
+
+/* И8.7: правила того, кто выполняет ход. nullptr — ход сессии, решения
+ * принимает PermissionEngine. Снимок (shared_ptr) берётся под локом и
+ * используется без него: agent::Info не копируется, а его правила
+ * заморожены, и блокировка state_.mtx на всё время решения брала бы
+ * общий мьютекс движка на пустой операции. */
+std::shared_ptr<agent::Info> scope_agent(EngineState& state) {
+    std::lock_guard<std::mutex> lk(state.mtx);
+    return state.scope.info;
+}
+
+/* Тот же снимок для СЧЁТЧИКА зацикливания: у вложенного хода он свой
+ * (RunScope::loop_calls), иначе вызовы субагента выглядели бы
+ * вызовами родителя. */
+std::shared_ptr<std::deque<std::string>> scope_calls_holder(EngineState& state) {
+    std::lock_guard<std::mutex> lk(state.mtx);
+    return state.scope.loop_calls;
+}
+
+/* Куда пишется отпечаток вызова: свой счётчик вложенного хода либо
+ * родительский state_.recent_calls. Ссылка действительна, пока
+ * ScopedAgentScope жив (держит holder), и всё обращение с ней — под
+ * state_.mtx. */
+std::deque<std::string>& scope_loop_calls(EngineState& state) {
+    const std::shared_ptr<std::deque<std::string>> own = scope_calls_holder(state);
+    return own ? *own : state.recent_calls;
+}
+
+} // namespace
+
 ToolOutcome ToolRunner::run(const std::string& tool_name,
                             const json::JsonValue& args) {
     const ToolDef* def = ToolsRegistry::instance().find(tool_name);
@@ -186,11 +217,23 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
      * вопрос пользователю про то, что всё равно нельзя, только путает)
      * и ДО отпечатка зацикливания (отказ — тоже результат вызова, и он
      * должен попасть в историю иначе три одинаковых отказа сочтутся
-     * дословно тем же, что три одинаковых успешных вызова). */
+     * дословно тем же, что три одинаковых успешных вызова).
+     *
+     * И8.7: решает ТЕКУЩИЙ агент, а не сессия. У субагента в
+     * agent::Info уже сложены правила сессии и его собственные (И8.4),
+     * поэтому тот же вопрос задаётся тому же объекту — а правила сессии
+     * отдельно спрашивать было бы вторым ответом на один вопрос.
+     * Снимок области берётся под локом, а решения — уже без него. */
     const std::string perm_key = permission_key_of(*def);
     const std::string perm_pattern = permission_pattern(*def, args);
     PermissionEngine& perms = engine().permissions();
-    const PermissionAction perm_action = perms.evaluate(perm_key, perm_pattern);
+    const std::shared_ptr<agent::Info> agent_rules = scope_agent(state_);
+    const auto evaluate = [&perms, &agent_rules](const std::string& key,
+                                                  const std::string& pattern) {
+        return agent_rules ? agent_rules->evaluate(key, pattern)
+                           : perms.evaluate(key, pattern);
+    };
+    const PermissionAction perm_action = evaluate(perm_key, perm_pattern);
     if (perm_action == PermissionAction::Deny) {
         std::string denial =
             "[запрещено] Инструмент " + tool_name + " запрещён правилом"
@@ -206,11 +249,11 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
     if (perm_action == PermissionAction::Ask) {
         std::string metadata = tool_name;
         if (perm_pattern != "*") metadata += " → " + perm_pattern;
+        const std::string suggested = permission_suggested_pattern(*def, perm_pattern);
         /* ask() блокирует worker-поток до решения пользователя и сам
          * возвращает состояние движка, которое до него перевёл. */
-        if (!perms.ask(perm_key, {perm_pattern},
-                       permission_suggested_pattern(*def, perm_pattern),
-                       metadata)) {
+        bool always = false;
+        if (!perms.ask(perm_key, {perm_pattern}, suggested, metadata, &always)) {
             std::string refusal =
                 "[отказ] Пользователь не разрешил: " + tool_name
                 + (perm_pattern == "*" ? "" : " (" + perm_pattern + ")")
@@ -220,6 +263,18 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
             ToolOutcome outcome;
             outcome.error = refusal;
             return outcome;
+        }
+        /* И8.7: ответ «всегда» пишется в правила ДВИЖКА, а правила
+         * агента заморожены при его сборке. Без этой строки субагент
+         * спросил бы то же самое при каждом следующем вызове — то есть
+         * кнопка «всегда» работала бы в сессии и не работала у
+         * субагента. Паттерн — ТОТ ЖЕ, что записан у сессии
+         * (suggested), иначе у ребёнка и у родителя окажутся разные
+         * правила об одном решении пользователя. Пустой suggested
+         * (у doom_loop он пуст намеренно) ничего не пишет — так же,
+         * как у сессии. */
+        if (always && !suggested.empty() && agent_rules) {
+            agent_rules->approve(perm_key, suggested);
         }
     }
 
@@ -238,16 +293,21 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
     std::string fp = tool_name + "\n" + args.dump();
     bool loop_detected = false;
     {
+        /* И8.7: счётчик — того, кто выполняет ход. У субагента он свой
+         * (RunScope::loop_calls), и общий счётчик видел бы три
+         * одинаковых чтения ребёнка как зацикливание РОДИТЕЛЯ: вопрос
+         * «зацикливание?» ушёл бы человеку про вызовы, которых он не
+         * видел, а отказ обрывал бы работу субагента. */
+        std::deque<std::string>& calls = scope_loop_calls(state_);
         std::lock_guard<std::mutex> lk(state_.mtx);
-        const size_t n = state_.recent_calls.size();
-        loop_detected = n >= 2 && state_.recent_calls[n - 1] == fp &&
-                        state_.recent_calls[n - 2] == fp;
-        state_.recent_calls.push_back(fp);
-        while (state_.recent_calls.size() > 2) state_.recent_calls.pop_front();
+        const size_t n = calls.size();
+        loop_detected = n >= 2 && calls[n - 1] == fp && calls[n - 2] == fp;
+        calls.push_back(fp);
+        while (calls.size() > 2) calls.pop_front();
     }  /* mtx отпущен — ask() берёт свой mtx_ */
     if (loop_detected) {
         bool allowed = true;
-        if (perms.evaluate("doom_loop", tool_name) == PermissionAction::Ask) {
+        if (evaluate("doom_loop", tool_name) == PermissionAction::Ask) {
             /* always_pattern пустой: повторять один и тот же вызов можно
              * сколько угодно, записывать это в постоянные правила нечего. */
             allowed = perms.ask("doom_loop", {tool_name}, "",
@@ -255,8 +315,9 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
         }
         if (!allowed) {
             {
+                std::deque<std::string>& calls = scope_loop_calls(state_);
                 std::lock_guard<std::mutex> lk(state_.mtx);
-                state_.recent_calls.clear();
+                calls.clear();
             }
             this->push_event_(AgentEvent::Error,
                 "Инструмент " + tool_name + " вызван 3 раза подряд с"
@@ -271,8 +332,9 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
         /* Разрешено: сбрасываем счётчик, иначе следующий такой же вызов
          * снова спросил бы (а после «всегда» это просто шум). */
         {
+            std::deque<std::string>& calls = scope_loop_calls(state_);
             std::lock_guard<std::mutex> lk(state_.mtx);
-            state_.recent_calls.clear();
+            calls.clear();
         }
         this->push_event_(AgentEvent::Status,
             "Зацикливание: " + tool_name + " вызван 3 раза подряд —"
@@ -590,7 +652,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
 
         /* Ответа нет — это не пустой ход, а сбой: иначе модель молча
          * получила бы пустую историю и повторила бы тот же запрос. */
-        if (!ok || response.empty()) {
+        if (!ok) {
             const std::string err =
                 response.error().empty() ? "не ответил" : response.error();
             std::string diag;
@@ -909,6 +971,174 @@ bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
     full_response += answer.text();
     this->push_event_(AgentEvent::Assistant, answer.text());
     return true;
+}
+
+/* ======================================================================
+ * Вложенный ход субагента (И8.7)
+ * ======================================================================
+ *
+ * ПОЧЕМУ ЭТО НЕ AgentLoop
+ *
+ * AgentLoop работает с СЕССИЕЙ: его история — state_.session, он зовёт
+ * Planner, компактит историю, ждёт разрешения и двигает состояние
+ * движка. У субагента своя история (своя, короткая, никуда не
+ * сохраняется — дочерняя сессия это 8.9), и всё перечисленное выше
+ * для него не просто лишнее, а ВРЕДНОЕ:
+ *   - своя история нужна, чтобы ход ребёнка не попал в историю
+ *     родителя (иначе родитель увидел бы чужой диалог в своей
+ *     транскрипте и счёл его своим);
+ *   - Planner звать нельзя: он пишет в state_.session, то есть
+ *     подмешивал бы родителю план ребёнка;
+ *   - compact_history_if_needed звать нельзя: сжатие сбрасывает
+ *     state_.session и измеренные токены — то есть СЖАЛО БЫ ИСТОРИЮ
+ *     РОДИТЕЛЯ посреди его хода, и ход, который к ней вернётся, был бы
+ *     уже другим;
+ *   - ожидание разрешения пользователя не нужно: ребёнок спрашивает
+ *     тем же PermissionEngine (ToolRunner::run — единственная
+ *     enforcement-точка), и этот вопрос пойдёт в общий диалог.
+ *
+ * Переиспользовать можно и нужно МЕХАНИКУ, и она здесь общая с
+ * родителем: llm_source::fetch + fold, ToolRunner::run, cap_result,
+ * sync_tool_parts, record_turn_usage. Политика (история, шаги, условие
+ * завершения, сжатие) — своя, и она здесь написана целиком.
+ *
+ * Условие завершения — тоже своё, а не turn_verdict: родительский ждёт
+ * ответа на последнюю реплику пользователя и считает короткий текст
+ * «началом работы» (kMinFinalAnswerLen). Субагенту реплика пользователя не
+ * адресована, а короткий ответ законен («класс AuthService, файл
+ * auth.php»), и цикл, вошедший в вечную переписку «продолжай» из-за
+ * длины текста, стоил бы дороже самой задачи.
+ */
+
+SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
+                                 AgentEventCallback push_event,
+                                 const std::string& sys_prompt,
+                                 const std::string& prompt, int max_steps) {
+    SubagentResult result;
+    /* Ноль шагов сюда не доходит, и предохранителя на него нет: лимит
+     * сессии задаёт load_settings и он не ниже единицы
+     * (`steps > 0 ? steps : 12`), а `steps` агента проверяется на
+     * положительность до вызова. Строка «на всякий случай» была бы
+     * недостижимым кодом (тот же класс, что снятая проверка в И7.1). */
+
+    /* История ребёнка — ЛОКАЛЬНАЯ. Родительский state_.session не
+     * читается и не пишется: ход субагента не часть диалога (его
+     * результатом станет одна строка в вызове `task` — 8.11). */
+    std::vector<Message> history;
+    history.push_back(Message::user(prompt));
+    const std::string root_id = history.front().id;
+
+    for (int step = 0; step < max_steps; ++step) {
+        if (state.abort_requested.load()) {
+            result.error = "[прервано пользователем] субагент остановлен";
+            return result;
+        }
+        ++result.steps;
+
+        std::vector<LlmEvent> events;
+        const bool ok = llm_source::fetch(
+            cb, sys_prompt, to_model_messages(history), events);
+        LlmResponse response = llm_source::fold(events);
+        /* Токены ребёнка — токены сессии: они оплачены тем же запросом и
+         * занимают то же окно. Метрики берутся из usage того же события
+         * Finish, что и у родителя (И7.2). */
+        record_turn_usage(state, response.usage());
+
+        if (!ok || response.empty()) {
+            /* Два разных отказа и два разных текста: «провайдер не
+             * ответил» (ok == false) и «ответил пустым» (ok == true, но
+             * свернулось ни текста, ни вызовов, ни ошибки). Второй был бы
+             * выглядеть как успешный субагент, который сказал «делать
+             * нечего» (И6.8). */
+            result.error = "[ошибка] субагент " + state.scope.agent + ": " +
+                (!ok ? (response.error().empty() ? "провайдер не ответил"
+                                                : response.error())
+                     : std::string("провайдер ответил пустым ответом"));
+            return result;
+        }
+
+        Message turn = turn_to_message(response, root_id);
+        history.push_back(turn);
+        /* Ход кладётся в историю ССЫЛКОЙ-КОПИЕЙ, а состояние его частей
+         * меняется на локальном `turn`. Поэтому после вызовов локальный
+         * ход копируется НАЗАД — по идентификатору, как это делает цикл
+         * родителя (commit_turn). Без этого запрос к модели ушёл бы с
+         * частью-вызовом в состоянии «работает» и без результата: модель
+         * получила бы вызов, на который не последовало ответа, и
+         * повторяла бы его. */
+        const auto commit_turn = [&history, &turn](void) {
+            if (Message* stored = find_message(history, turn.id)) {
+                *stored = turn;
+            }
+        };
+
+        bool aborted = false;
+        const size_t call_count = response.tool_calls().size();
+        for (size_t i = 0; i < call_count; ++i) {
+            const LlmToolCall call = response.tool_calls()[i];
+            if (!call.runnable()) continue;
+            if (MessagePart* part = find_tool_part(turn, call.call_id)) {
+                part->set_running();
+            }
+            /* Тот же ToolRunner и та же точка enforcement: у ребёнка
+             * решения принимают его правила (RunScope, И8.7), у
+             * родителя — правила сессии. Отдельный путь для субагента
+             * означал бы второе место, где решается «можно ли». */
+            ToolRunner runner(state, cb, push_event);
+            const ToolOutcome outcome = runner.run(call.name, call.arguments);
+            if (outcome.ok) {
+                LlmResponse::reduce(response, LlmEvent::tool_result(
+                    call.call_id, cap_result(std::move(outcome.output))));
+            } else {
+                LlmResponse::reduce(response,
+                    LlmEvent::tool_error(call.call_id, outcome.error));
+            }
+            sync_tool_parts(turn, response);
+            if (state.abort_requested.load()) {
+                aborted = true;
+                break;
+            }
+        }
+
+        /* Вызовы, до которых не дошли (обрыв на отмене), закрываются
+         * отказом: незакрытая часть означала бы, что ход нельзя
+         * закончить, и следующий запрос ушёл бы с незакрытым вызовом. */
+        for (size_t i = 0; i < response.tool_calls().size(); ++i) {
+            if (response.tool_calls()[i].finished) continue;
+            LlmResponse::reduce(response, LlmEvent::tool_error(
+                response.tool_calls()[i].call_id,
+                "вызов не выполнен: субагент остановлен"));
+        }
+        sync_tool_parts(turn, response);
+        commit_turn();
+
+        if (aborted) {
+            result.error = "[прервано пользователем] субагент остановлен";
+            return result;
+        }
+
+        /* Провайдер закончил не затем, чтобы звать инструменты, и всё
+         * закрыто — ход субагента закончен.
+         *
+         * Отдельной проверки «текст непуст» здесь нет, и она была бы
+         * мёртвой строкой: пустой текст при отсутствии вызовов и ошибки
+         * означает `response.empty()`, а этот случай разобран выше. Там,
+         * где свернулось только РАЗМЫШЛЕНИЕ, ответа действительно нет —
+         * но такой ответ невозможен через HostCallbacks (в LlmReply нет
+         * поля размышления, И6.1), и когда появится, его разберут здесь
+         * же, а не в ToolRunner. */
+        if (response.finish_reason() != "tool-calls" && !turn.has_open_tool_part()) {
+            result.ok = true;
+            result.text = response.text();
+            return result;
+        }
+    }
+
+    result.error = "[ошибка] субагент " + state.scope.agent +
+                   " не закончил задачу за " + std::to_string(max_steps) +
+                   " шагов и не дал итога. Попроси его о конкретном "
+                   "результате или сделай работу сам.";
+    return result;
 }
 
 /* ======================================================================

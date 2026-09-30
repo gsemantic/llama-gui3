@@ -79,6 +79,11 @@ bool PermissionEngine::has_agent_defaults() const {
     return defaults_installed_;
 }
 
+Ruleset PermissionEngine::rules_snapshot() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return rules_;
+}
+
 void PermissionEngine::set_wait_timeout_ms(int ms) {
     std::lock_guard<std::mutex> lk(mtx_);
     wait_timeout_ms_ = ms > 0 ? ms : 0;
@@ -184,7 +189,9 @@ void PermissionEngine::set_on_change(std::function<void()> cb) {
 bool PermissionEngine::ask(const std::string& permission,
                            const std::vector<std::string>& patterns,
                            const std::string& always_pattern,
-                           const std::string& metadata) {
+                           const std::string& metadata,
+                           bool* always_out) {
+    if (always_out) *always_out = false;
     PermissionRequest req;
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -217,6 +224,7 @@ bool PermissionEngine::ask(const std::string& permission,
      * mtx_, значило бы взять state_.mtx поверх mtx_ — обратный порядок
      * блокировок, то есть дедлок. */
     bool allowed = false;
+    bool always = false;
     {
         std::unique_lock<std::mutex> lk(mtx_);
         auto decided = [&] {
@@ -240,6 +248,7 @@ bool PermissionEngine::ask(const std::string& permission,
         for (auto& r : pending_) {
             if (r.id != req.id) continue;
             allowed = r.allowed;
+            always = r.always;
             break;
         }
         pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
@@ -260,6 +269,11 @@ bool PermissionEngine::ask(const std::string& permission,
         push_(allowed ? "[permission] " + permission + ": разрешено"
                       : "[permission] " + permission + ": отказ");
     }
+    /* И8.7: «всегда» — это запись в правила движка, а она происходит
+     * после освобождения mtx_ (см. reply). Сообщаем ответ вызывающему
+     * именно потому, что правила агента заморожены при сборке и без
+     * этого ответа он спросил бы то же самое снова. */
+    if (always_out) *always_out = always;
     return allowed;
 }
 
@@ -351,13 +365,12 @@ size_t PermissionEngine::pending_count() const {
 std::vector<std::string> PermissionEngine::visible_tools(
         const std::vector<ToolDef>& all) const {
     std::lock_guard<std::mutex> lk(mtx_);
-    std::vector<std::string> out;
-    out.reserve(all.size());
-    for (const auto& def : all) {
-        if (rules_.denies_all(permission_key_of(def))) continue;
-        out.push_back(def.name);
-    }
-    return out;
+    /* И8.7: фильтр один на всех — тот же вопрос задаётся и по правилам
+     * агента (каталог субагента), и копия этой функции разошлась бы с
+     * этой при первом изменении правила скрытия. */
+    return visible_tool_names(all, [this](const std::string& key) {
+        return rules_.denies_all(key);
+    });
 }
 
 void PermissionEngine::load_user_rules(const std::string& json_text) {

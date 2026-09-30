@@ -762,7 +762,13 @@ const char* kKnownKeys[] = {"read", "write", "bash", "git", "wp-cli", "db",
                             "systemd", "cron", "ssh",
                             /* И4.6: план задачи. Правил не требует — он не
                              * касается ни файлов, ни сети, и `* -> allow`
-                             * покрывает его по умолчанию. */ "todo"};
+                             * покрывает его по умолчанию. */
+                            "todo",
+                            /* И8.7: делегирование задачи субагенту. Свой
+                             * ключ, а не `bash`: «всегда разрешить
+                             * делегирование» и «всегда разрешить запуск
+                             * команд» — разные решения пользователя. */
+                            "task"};
 
 } // anonymous namespace
 
@@ -779,7 +785,7 @@ TEST(every_tool_has_permission_key) {
         real.push_back(d);
     }
     defs = real;
-    ASSERT_EQ(defs.size(), (size_t)54);
+    ASSERT_EQ(defs.size(), (size_t)55);
     for (const auto& d : defs) {
         if (d.permission_key.empty()) {
             std::cerr << "  инструмент " << d.name << " без ключа разрешения"

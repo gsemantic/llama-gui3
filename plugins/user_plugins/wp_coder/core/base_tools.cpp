@@ -12,6 +12,7 @@
 #include "text_edit.h"
 #include "file_lock.h"
 #include "json_utils.h"
+#include "subagent.h"
 
 #include <fstream>
 #include <sstream>
@@ -1559,6 +1560,16 @@ void register_base_tools() {
         };
         reg.register_def(std::move(def));
     }
+
+    /* И8.7 `task`: делегирование задачи субагенту. Объявлен здесь, а не
+     * в своём вызове регистрации, потому что он часть базового набора —
+     * так его увидят и плагин, и любой тест, зовущий register_base_tools
+     * (в том числе проверки агентов, которым RAG не нужен). Сам
+     * инструмент живёт в core/subagent.{h,cpp}: рядом с ним — его путь
+     * в область выполнения и вложенный ход, и держать объявление в
+     * файле на 1600 строк значило бы прятать решение о том, кто
+     * выполняет ход, в списке инструментов. */
+    register_task_tool();
 }
 
 void register_rag_tools() {

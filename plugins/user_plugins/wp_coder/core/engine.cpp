@@ -265,9 +265,46 @@ std::string Engine::wait_response(int timeout_ms) {
  * Сборка системного промпта
  * ====================================================================== */
 
+ScopedAgentScope::ScopedAgentScope(Engine& engine, RunScope next)
+    : engine_(engine) {
+    {
+        std::lock_guard<std::mutex> lk(engine_.state().mtx);
+        previous_ = engine_.state().scope;
+        engine_.state().scope = std::move(next);
+    }
+    /* Кэш сбрасывается ЗДЕСЬ, а не в compose: собранный промпт уже
+     * виден в нём, и пока область меняется, кэш принадлежит прежнему
+     * агенту. */
+    engine_.invalidate_prompt_cache();
+}
+
+ScopedAgentScope::~ScopedAgentScope() {
+    {
+        std::lock_guard<std::mutex> lk(engine_.state().mtx);
+        engine_.state().scope = std::move(previous_);
+    }
+    engine_.invalidate_prompt_cache();
+}
+
+RunScope Engine::scope_snapshot() const {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    return state_.scope;
+}
+
 std::string Engine::build_system_prompt() const {
     if (!state_.prompt_dirty && !state_.cached_system_prompt.empty())
         return state_.cached_system_prompt;
+
+    /* И8.7: кто выполняет ход. Читается ОДИН раз и до всех блоков, у
+     * которых своё представление о наборе инструментов и плане, иначе
+     * половина промпта собралась бы по правилам сессии, а половина — по
+     * правилам агента. */
+    std::shared_ptr<agent::Info> info;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        info = state_.scope.info;
+    }
+    const agent::Info* agent_rules = info.get();
 
     /* project_dir — ПЕРВЫМ, чтобы модель точно увидела корень проекта.
      * Даже при длинном кастомном промпте эта информация не потеряется. */
@@ -284,6 +321,17 @@ std::string Engine::build_system_prompt() const {
     sys += state_.agent_system_prompt.empty()
         ? std::string(kBaseSystemPrompt)
         : state_.agent_system_prompt;
+
+    /* И8.7: промпт агента — ДОПОЛНЕНИЕ к базовому, а не замена. Базовый
+     * объясняет протокол вызовов инструментов, агентский — роль и
+     * требования к результату (у субагента они свои: вернётся только
+     * текст). Место — сразу за базовым, до промпта модуля и каталога
+     * инструментов: иначе роль оказалась бы между описанием проекта и
+     * протоколом, и модель читала бы её как часть каталога. */
+    if (agent_rules && !agent_rules->prompt().empty()) {
+        sys += "\n\n";
+        sys += agent_rules->prompt();
+    }
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -312,10 +360,20 @@ std::string Engine::build_system_prompt() const {
      * схему, поэтому дрейф документации невозможен по построению.
      *
      * И2.8: запрещённые правилами разрешений в каталог не попадают —
-     * модель не тратит шаг на вызов, который всё равно отклонят. */
+     * модель не тратит шаг на вызов, который всё равно отклонят.
+     * И8.7: для субагента правила — его СОБСТВЕННЫЕ (agent::Info уже
+     * сложил поверх них правила сессии), и фильтр тот же, что у
+     * сессии, — одна функция на оба ответа (visible_tool_names). */
     {
         std::vector<ToolDef> all = ToolsRegistry::instance().defs();
-        std::vector<std::string> visible = permissions_.visible_tools(all);
+        std::vector<std::string> visible;
+        if (agent_rules) {
+            visible = visible_tool_names(all, [agent_rules](const std::string& key) {
+                return agent_rules->denies_whole_key(key);
+            });
+        } else {
+            visible = permissions_.visible_tools(all);
+        }
         std::string cat =
             ToolsRegistry::instance().build_tool_catalogue(visible);
         if (!cat.empty()) {
@@ -328,8 +386,14 @@ std::string Engine::build_system_prompt() const {
      *
      * В истории он жил бы до конца сессии и костенел: агент, дойдя до
      * пункта 4, продолжал бы сверяться с планом из пункта 1. В промпте он
-     * один и всегда свежий, а кэш инвалидируется при каждом todowrite. */
-    {
+     * один и всегда свежий, а кэш инвалидируется при каждом todowrite.
+     *
+     * И8.7: агенту, у которого план закрыт целиком (wp_explore —
+     * `todo: * → запретить`, 8.6), блок НЕ показывается. В нём прямо
+     * сказано «держи план в актуальном состоянии», а инструмента для
+     * этого у агента нет: модель тратила бы шаг на вызов, который
+     * отклонят. Тот же вопрос о запрете целиком, что и у каталога. */
+    if (!agent_rules || !agent_rules->denies_whole_key("todo")) {
         std::string plan;
         {
             std::lock_guard<std::mutex> lk(state_.mtx);

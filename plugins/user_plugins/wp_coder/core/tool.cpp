@@ -456,6 +456,18 @@ std::string permission_key_of(const ToolDef& def) {
     return def.permission_key.empty() ? def.name : def.permission_key;
 }
 
+std::vector<std::string> visible_tool_names(
+        const std::vector<ToolDef>& all,
+        const std::function<bool(const std::string&)>& denied_whole_key) {
+    std::vector<std::string> out;
+    out.reserve(all.size());
+    for (const ToolDef& def : all) {
+        if (denied_whole_key(permission_key_of(def))) continue;
+        out.push_back(def.name);
+    }
+    return out;
+}
+
 std::string canonical_permission_key(const std::string& name, bool* known) {
     if (known) *known = false;
     if (name.empty()) return name;

@@ -157,4 +157,34 @@ private:
     AgentEventCallback push_event_;
 };
 
+/* --- Вложенный ход субагента (И8.7, порт tool/task.ts) ---
+ *
+ * Отдельная функция, а не AgentLoop с флагом: контракты разные.
+ * Родитель работает с СЕССИЕЙ (state_.session, Planner, сжатие,
+ * ожидание разрешения, состояние движка), субагент — со своей
+ * короткой историей, которая никуда не сохраняется. Общая механика
+ * (fetch, fold, ToolRunner::run, cap_result, sync_tool_parts,
+ * учёт токенов) — та же; своя политика и своё условие завершения.
+ * Обоснование целиком — в комментарии у реализации.
+ *
+ * Кто выполняет ход — НЕ аргумент: область (RunScope) уже подменена
+ * вызывающим (ScopedAgentScope), и enforcement спрашивает именно её.
+ * Иначе «кто я» поехало бы вторым путём и разошлось бы с тем, что
+ * видит ToolRunner.
+ *
+ * Прерывание: между шагами. Каскад отмены родителя → cancel(child) с
+ * живым запросом — И8.12; здесь готовится только точка, где он будет
+ * подключён (между шагами, а не внутри). */
+struct SubagentResult {
+    bool ok = false;
+    std::string text;    /* итог субагента — во что обернётся task */
+    std::string error;   /* причина; ok == false */
+    int steps = 0;       /* сколько шагов реально сделано */
+};
+
+SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
+                                 AgentEventCallback push_event,
+                                 const std::string& sys_prompt,
+                                 const std::string& prompt, int max_steps);
+
 } // namespace coder
