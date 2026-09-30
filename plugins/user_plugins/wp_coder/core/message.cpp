@@ -313,6 +313,31 @@ std::string Message::text() const {
     return out;
 }
 
+std::string Message::task_answer() const {
+    /* 1. Текст хода: он и есть ответ, всё остальное — запасной путь. */
+    const std::string own = text();
+    if (!own.empty()) return own;
+
+    /* 2 и 3. Последняя ЗАКРЫТАЯ tool-часть: ошибка важнее вывода.
+     * Порядок частей не перебирается «до последней ошибки» — берётся
+     * именно последний вызов хода, потому что он и есть его итог, а
+     * ошибка трёхшаговой давности описывала бы уже не то, чем закончился
+     * ход. */
+    const MessagePart* last_tool = nullptr;
+    for (const MessagePart& p : parts) {
+        if (p.kind() != PartKind::Tool) continue;
+        if (p.state() == ToolState::Pending || p.state() == ToolState::Running) {
+            continue;
+        }
+        last_tool = &p;
+    }
+    if (last_tool == nullptr) return std::string();
+    if (last_tool->state() == ToolState::Error && !last_tool->error().empty()) {
+        return last_tool->error();
+    }
+    return last_tool->output().output;
+}
+
 std::string Message::to_model_string() const {
     const std::vector<ModelMessage> msgs = to_model_messages({*this});
     std::string out;

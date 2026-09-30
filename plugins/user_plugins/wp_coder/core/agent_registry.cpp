@@ -798,6 +798,16 @@ void register_builtin_agents(AgentRegistry& reg) {
         AgentMode mode;
         const char* prompt;
         std::vector<PermissionEntry> permission;
+        /* Права В РОЛИ СУБАГЕНТА (И8.10). Не в `permission` намеренно:
+         * правила агента идут после правил сессии, и встроенное
+         * разрешение там отменяло бы запрет ПОЛЬЗОВАТЕЛЯ в его диалоге.
+         *
+         * Дано одно — чтение. Чтение и есть делегирование («посмотри и
+         * скажи»), а запись и запуск команд человек подтверждает: ответ
+         * «всегда» доходит до правил субагента (И8.7), то есть одного
+         * нажатия хватает, и платить за тихую правку файлов без вопроса
+         * не приходится. Расширить до `write`/`bash` — одна строка здесь. */
+        std::vector<PermissionEntry> subagent_permission;
     };
     /* «Нет дельты» у встроенного агента — это ПУСТОЙ список правил, а
      * не правило «* → спросить». Правило приходит после базовых (см.
@@ -808,14 +818,16 @@ void register_builtin_agents(AgentRegistry& reg) {
     const std::vector<Builtin> builtins = {
         {"wp_build", "Исполнитель: доводит задачу до рабочего кода и проверяет "
                      "результат. Агент по умолчанию.",
-         AgentMode::All, kAgentBuildPrompt, {}},
+         AgentMode::All, kAgentBuildPrompt, {},
+         {{"read", "*", PermissionAction::Allow}}},
         {"wp_plan", "Планировщик: изучает проект и составляет план правок. "
                     "Файлы не меняет — инструментов правки у него нет.",
          AgentMode::All, kAgentPlanPrompt,
          {{"write", "*", PermissionAction::Deny}}},
         {"wp_general", "Субагент для отдельной задачи: выполняет переданное и "
                        "возвращает итог текстом.",
-         AgentMode::Subagent, kAgentGeneralPrompt, {}},
+         AgentMode::Subagent, kAgentGeneralPrompt, {},
+         {{"read", "*", PermissionAction::Allow}}},
         /* wp_explore (И8.6): «* → запретить», затем явный разрешённый
          * список. Именно в таком порядке: правило по ключу приходит
          * ПОСЛЕ catch-all, поэтому «прочитать» и не может быть, и не
@@ -844,6 +856,7 @@ void register_builtin_agents(AgentRegistry& reg) {
         def.mode = b.mode;
         def.prompt = b.prompt;
         def.permission = b.permission;
+        def.subagent_permission = b.subagent_permission;
         def.source_path = "встроенный";
         /* Отказ встроенного агента — это дефект сборки плагина, а не
          * ошибка пользователя: молча пропустить его значило бы узнать
@@ -854,6 +867,23 @@ void register_builtin_agents(AgentRegistry& reg) {
                       << " не зарегистрирован: " << why << std::endl;
         }
     }
+}
+
+Ruleset subagent_base_rules(const Ruleset& session_rules) {
+    /* Порядок исходных правил СОХРАНЯЕТСЯ: он и есть семантика набора
+     * (last-match-wins), и перестановка «запреты после разрешений»
+     * изменила бы решения. */
+    Ruleset out;
+    for (const Rule& r : session_rules.rules()) {
+        const bool deny = r.action == PermissionAction::Deny;
+        /* external_directory — про ГДЕ, а не про ЧТО, и наследуется
+         * целиком: иначе доверенный каталог (данные плагина, /tmp) снова
+         * стал бы вопросом пользователю при каждом субагенте. */
+        const bool place = r.permission == "external_directory" ||
+                           (r.permission == "*" && deny);
+        if (deny || place) out.add(r);
+    }
+    return out;
 }
 
 Ruleset normalized_agent_rules(const AgentDef& def,
@@ -894,6 +924,38 @@ Ruleset normalized_agent_rules(const AgentDef& def,
     return rules;
 }
 
+Ruleset normalized_entry_rules(const std::vector<PermissionEntry>& entries,
+                              const std::string& origin,
+                              const std::string& agent_name,
+                              std::vector<AgentLoadDiag>* diags) {
+    /* ТОТ ЖЕ разбор, что у `permission` (8.3): ключ приводится к
+     * каноническому, неизвестный остаётся ключом с замечанием. Отдельная
+     * копия этих двух строк была бы вторым местом одного правила и
+     * разошлась бы при первой правке канонизации. */
+    Ruleset rules;
+    for (const PermissionEntry& e : entries) {
+        bool known = false;
+        const std::string key = canonical_permission_key(e.key, &known);
+        if (diags) {
+            AgentLoadDiag d;
+            d.path = agent_name;
+            if (!known) {
+                d.message = origin + ": «" + e.key +
+                            "» — неизвестный инструмент или ключ разрешения; "
+                            "правило сохранено и сработает, если инструмент "
+                            "появится";
+            } else if (key != e.key) {
+                d.message = origin + ": «" + e.key + "» приведён к ключу «" +
+                            key + "»";
+            }
+            if (!d.message.empty()) diags->push_back(d);
+        }
+        if (e.pattern.empty()) continue;
+        rules.add(key, e.pattern, e.action);
+    }
+    return rules;
+}
+
 /* ======================================================================
  * И8.4: рантайм-структура агента
  * ====================================================================== */
@@ -902,11 +964,21 @@ namespace agent {
 
 std::shared_ptr<Info> Info::from_def(const AgentDef& def, const Ruleset& base,
                                      std::vector<AgentLoadDiag>* diags) {
-    return std::shared_ptr<Info>(new Info(def, base, diags));
+    return std::shared_ptr<Info>(new Info(def, base, diags, Role::Primary));
+}
+
+std::shared_ptr<Info> Info::for_subagent(const AgentDef& def,
+                                        const Ruleset& session_rules,
+                                        std::vector<AgentLoadDiag>* diags) {
+    /* База — ПРАВИЛА СЕССИИ, а не уже суженные: сужение живёт в
+     * конструкторе (Role::Subagent), иначе вызывающий решал бы за
+     * владельца правил, что именно наследуется. */
+    return std::shared_ptr<Info>(new Info(def, session_rules, diags,
+                                          Role::Subagent));
 }
 
 Info::Info(const AgentDef& def, const Ruleset& base,
-           std::vector<AgentLoadDiag>* diags) {
+           std::vector<AgentLoadDiag>* diags, Role role) {
     name_ = def.name;
     description_ = def.description;
     prompt_ = def.prompt;
@@ -937,11 +1009,47 @@ Info::Info(const AgentDef& def, const Ruleset& base,
         }
     }
 
-    /* Порядок правил решает всё: база первой, правила агента вторыми. */
-    rules_ = base;
+    /* Порядок правил решает всё: база первой, правила агента вторыми, и
+     * авто-запреты субагента — последними (8.10).
+     *
+     * Сужение базы делается ЗДЕСЬ, а не в вызывающем, потому что вызывающий
+     * (инструмент `task`) передаёт ПРАВИЛА СЕССИИ, а решать, что из них
+     * наследуется, должен владелец правил агента: тот же довод, что и для
+     * Ruleset::evaluate_matched в 8.4. */
+    rules_ = (role == Role::Subagent) ? subagent_base_rules(base) : base;
     const Ruleset own = normalized_agent_rules(def, diags);
     for (const Rule& r : own.rules()) rules_.add(r);
 
+    if (role == Role::Subagent) {
+        /* Права в роли субагента (встроенные агенты, И8.10) — после
+         * `permission`, чтобы агент мог сузить ими общий набор. */
+        const Ruleset sub = normalized_entry_rules(
+            def.subagent_permission, "subagent_permission",
+            def.source_path.empty() ? def.name : def.source_path, diags);
+        for (const Rule& r : sub.rules()) rules_.add(r);
+
+        /* Авто-запреты. Ключ, о котором агент сказал САМ, не трогается:
+         * проверка по `mentions_key`, а не по «есть ли правило с таким
+         * действием», потому что «сказал» = «описал ключ явно», а
+         * catch-all «*» — не описание этого ключа.
+         *
+         * Комментарий в правиле виден пользователю в дампе правил: иначе
+         * запрет, которого не было в описании агента, выглядел бы как
+         * ошибка плагина. */
+        const char* keys[] = {kSubagentNoDelegateKey, kSubagentNoPlanKey};
+        for (const char* key : keys) {
+            if (rules_.mentions_key(key)) continue;
+            Rule deny;
+            deny.permission = key;
+            deny.pattern = "*";
+            deny.action = PermissionAction::Deny;
+            deny.comment = std::string("субагент по умолчанию не может ") +
+                           (std::string(key) == kSubagentNoDelegateKey
+                                ? "делегировать дальше"
+                                : "вести план сессии");
+            rules_.add(deny);
+        }
+    }
 }
 
 PermissionAction Info::evaluate(const std::string& key,

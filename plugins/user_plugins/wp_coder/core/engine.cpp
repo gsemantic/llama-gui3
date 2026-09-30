@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iterator>
 #include <filesystem>
+#include <limits>
 
 namespace coder {
 
@@ -110,10 +111,16 @@ void Engine::submit(const std::string& prompt) {
 }
 
 void Engine::request_abort() {
-    /* Снаружи лока — см. комментарий в stop(). Именно этот вызов
-     * вытаскивает worker из ожидания разрешения: иначе «стоп» работал
-     * бы не на том шаге, где агент висит на вопросе пользователю. */
-    permissions_.cancel_all();
+    /* ПОРЯДОК ЗДЕСЬ — ЧАСТЬ КАСКАДА, а не оформление (И8.12).
+     *
+     * Сначала флаг и токен, ПОТОМ освобождение вопросов. Обратный порядок
+     * был гонкой, и нашлась она проверкой: освобождённый вопрос отдавал
+     * воркеру «пользователь не разрешил», воркер проверял флаг — а он ещё
+     * не был выставлен, — и агент продолжал работу после «стоп».
+     *
+     * Снаружи лока `cancel_all()` — см. комментарий в stop(): PermissionEngine
+     * держит свой mtx_ и не берёт state_.mtx, а наоборот брать нельзя
+     * (правило 2). */
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.abort_requested.store(true);
@@ -125,6 +132,10 @@ void Engine::request_abort() {
          * поток разбудится и AgentLoop/cleanup сам переведёт в Aborted. */
         state_.permission_cv.notify_all();
     }
+    /* Именно этот вызов вытаскивает worker из ожидания разрешения: иначе
+     * «стоп» работал бы не на том шаге, где агент висит на вопросе
+     * пользователю. */
+    permissions_.cancel_all();
 }
 
 void Engine::clear_session() {
@@ -176,21 +187,17 @@ void Engine::save_session() {
     if (dir.empty()) return;
 
     std::vector<Message> snap;
-    std::string session_id;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         snap = state_.session;
-        session_id = state_.session_id;
     }
     if (snap.empty()) return;
 
-    /* Идентификатор сессии выдаётся при первой записи и дальше тот же:
-     * новый id означал бы новый файл, то есть потерю resume. */
-    if (session_id.empty()) {
-        session_id = ids().next_session();
-        std::lock_guard<std::mutex> lk(state_.mtx);
-        state_.session_id = session_id;
-    }
+    /* Идентификатор сессии выдаётся при первом обращении и дальше тот же:
+     * новый id означал бы новый файл, то есть потерю resume. Место, где
+     * он выдаётся, — ensure_session_id (И8.9), потому что идентификатор
+     * нужен и дочерним сессиям субагентов, а не только записи файла. */
+    const std::string session_id = ensure_session_id();
 
     /* И5.7: моста больше нет. Сессия ИСТОРИЯ структуры, и в файл уходит
      * та же структура — с теми же идентификаторами, частями, parent_id и
@@ -208,6 +215,12 @@ void Engine::save_session() {
         std::cerr << "[wp_coder] session: не удалось сохранить сессию: "
                   << error << std::endl;
     }
+}
+
+std::string Engine::ensure_session_id() {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    if (state_.session_id.empty()) state_.session_id = ids().next_session();
+    return state_.session_id;
 }
 
 void Engine::load_session() {
@@ -621,6 +634,32 @@ void Engine::load_settings() {
         std::string t = setting_get(cb_, "wp_coder.max_steps", "12");
         try { steps = std::stoi(t); } catch (...) {}
         state_.max_steps = steps > 0 ? steps : 12;
+    }
+    /* И8.8: предел вложенности субагентов. Рядом с max_steps, потому что
+     * это тоже предел хода, а не отдельная подсистема.
+     *
+     * Мусор и отрицательные значения → дефолт, и это НЕ «предела нет»:
+     * настройку, которую не удалось разобрать, прочитать как «вкладывайся
+     * сколько хочешь» — значит вернуть ровно то, ради чего предел есть
+     * (И8.7, отклонение №78). Обратное тоже верно: 0 — не мусор, а
+     * запрет делегирования вообще, и подменять его единицей значило бы
+     * сделать «субагентов нет» неотличимым от опечатки.
+     *
+     * Разбор строгий, как в agent_registry (И8.2): std::stoll берёт
+     * ПРЕФИКС, и из «2abc» вышел бы 2 — то есть опечатка стала бы
+     * настройкой. Число вне int — тоже не настройка. */
+    {
+        const std::string t = setting_get(cb_, "wp_coder.subagent_depth", "");
+        int depth = limits::kSubagentDepthLimit;
+        try {
+            size_t used = 0;
+            const long long v = std::stoll(t, &used);
+            if (used == t.size() && v >= 0 &&
+                v <= static_cast<long long>(std::numeric_limits<int>::max())) {
+                depth = static_cast<int>(v);
+            }
+        } catch (...) {}
+        state_.subagent_depth = depth;
     }
     {
         int budget = 60000;

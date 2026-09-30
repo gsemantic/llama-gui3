@@ -796,3 +796,93 @@ TEST(turn_verdict_sees_an_open_tool_part_even_with_a_final_finish) {
      * частей, а проверка не падает на пустой. */
     ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::Completed);
 }
+
+/* ======================================================================
+ * И8.11: извлечение результата задачи из хода
+ *
+ * Проверяется на Message, потому что это чистая функция ответа хода, а
+ * инструмент `task` зовёт её (subagent → run_subagent_turn). Четыре
+ * случая — четыре разных ответа, и каждый из них в рантайме выглядел бы
+ * одинаково, если бы порядок был не тот.
+ * ====================================================================== */
+
+TEST(a_turn_text_is_the_answer_even_when_a_tool_failed_beside_it) {
+    Message turn;
+    turn.role = kRoleAssistant;
+    turn.parts.push_back(MessagePart::text("Прочитал, но вывода нет."));
+
+    /* Случай, ради которого порядок «текст, потом остальное» выбран: у хода
+     * есть И текст, И упавший вызов. Отдать ошибку вызова — значит
+     * выбросить объяснение, которое субагент уже составил. */
+    ToolOutput out;
+    out.output = "вывод";
+    turn.parts.push_back(MessagePart::tool("call_0", "read_file").set_error(
+        "[запрещено] инструмент запрещён правилом"));
+    turn.parts.push_back(MessagePart::tool("call_1", "bash").set_result(out));
+
+    ASSERT_EQ(turn.task_answer(), std::string("Прочитал, но вывода нет."));
+}
+
+TEST(a_turn_without_text_falls_back_to_the_error_of_its_last_call) {
+    Message turn;
+    turn.role = kRoleAssistant;
+    ToolOutput out;
+    out.output = "вывод";
+    /* Хелпер, который отработал, и потом хелпер, который нет: итог хода —
+     * ПОСЛЕДНИЙ вызов, и его ошибка полезнее вывода предыдущего. */
+    turn.parts.push_back(MessagePart::tool("call_0", "bash").set_result(out));
+    turn.parts.push_back(MessagePart::tool("call_1", "grep_search").set_error(
+        "[ошибка] файла нет"));
+
+    ASSERT_EQ(turn.task_answer(), std::string("[ошибка] файла нет"));
+}
+
+TEST(a_turn_without_text_falls_back_to_the_output_of_its_last_call) {
+    Message turn;
+    turn.role = kRoleAssistant;
+    ToolOutput out;
+    out.output = "структура проекта";
+    turn.parts.push_back(MessagePart::tool("call_0", "list").set_result(out));
+
+    ASSERT_EQ(turn.task_answer(), std::string("структура проекта"));
+}
+
+TEST(a_turn_with_nothing_to_answer_answers_nothing) {
+    /* Не «текст по умолчанию» и не вывод ПЕРВОГО вызова: пустой ответ
+     * обязан остаться пустым, иначе вызывающий получит то, чего
+     * субагент не говорил. */
+    Message turn;
+    turn.role = kRoleAssistant;
+    turn.parts.push_back(MessagePart::reasoning("размышление без ответа"));
+    ASSERT_EQ(turn.task_answer(), std::string());
+
+    /* Незакрытый вызов — не ответ: ход не закончен, и его вывода ещё
+     * нет. */
+    Message running;
+    running.role = kRoleAssistant;
+    running.parts.push_back(
+        MessagePart::tool("call_0", "bash").set_running());
+    ASSERT_EQ(running.task_answer(), std::string());
+
+    /* И незакрытый вызов НЕ ОТМЕНЯЕТ то, что уже есть: у хода, который
+     * оборвался на втором вызове, ответом остаётся вывод первого.
+     * Проверка отдельная от предыдущей, потому что по построению они
+     * различаются только ей: у вызова в состоянии «работает» вывода нет
+     * вовсе (И7.9), так что «взять его» молча даёт пустоту — и без этой
+     * строки порядок выбора между вызовами не был бы виден. */
+    Message interrupted;
+    interrupted.role = kRoleAssistant;
+    ToolOutput out;
+    out.output = "промежуточный";
+    interrupted.parts.push_back(
+        MessagePart::tool("call_0", "bash").set_result(out));
+    interrupted.parts.push_back(
+        MessagePart::tool("call_1", "bash").set_running());
+    ASSERT_EQ(interrupted.task_answer(), std::string("промежуточный"));
+    /* Порядок дел: пустой результат открытого вызова — тоже пустой. */
+    ToolOutput none;
+    Message pending;
+    pending.role = kRoleAssistant;
+    pending.parts.push_back(MessagePart::tool("call_1", "bash").set_result(none));
+    ASSERT_EQ(pending.task_answer(), std::string());
+}

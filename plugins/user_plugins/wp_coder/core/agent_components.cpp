@@ -56,9 +56,27 @@ std::string PermissionGate::check(const std::string& abs_path) {
      * (data_dir, /tmp, навыки): без этого агент спрашивал бы
      * разрешение на каждый заход в /tmp, и вопрос стал бы помехой.
      * Порядок именно такой — список пользователя проверяется первым и
-     * работает даже с пустым набором правил. */
+     * работает даже с пустым набором правил.
+     *
+     * И8.10: решение принимают ПРАВИЛА ТЕКУЩЕГО АГЕНТА, а не сессии.
+     * Иначе наследование `external_directory` было бы мёртвым: ребёнок
+     * получил бы правила в свой набор, а спрашивал бы всё равно сессия —
+     * и запрет САМОГО агента («мне нельзя ходить в /etc») не действовал
+     * бы. Правила сессии — случай «агента нет» (ход родителя).
+     *
+     * Указатель копируется под локом движка, а решение принимается ВНЕ
+     * него: `Info::evaluate` берёт свой мьютекс, а брать два мьютекса в
+     * разном порядке в одном месте — это ровно тот дедлок, ради которого
+     * написан порядок блокировок в SESSION_START. */
+    std::shared_ptr<agent::Info> agent_rules;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        agent_rules = state_.scope.info;
+    }
     const PermissionAction action =
-        engine().permissions().evaluate("external_directory", abs_path);
+        agent_rules ? agent_rules->evaluate("external_directory", abs_path)
+                    : engine().permissions().evaluate("external_directory",
+                                                       abs_path);
     if (action == PermissionAction::Deny) {
         return "[запрещено] Доступ к пути вне проекта запрещён правилом: "
                + abs_path
@@ -1013,7 +1031,8 @@ bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
 SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
                                  AgentEventCallback push_event,
                                  const std::string& sys_prompt,
-                                 const std::string& prompt, int max_steps) {
+                                 const std::string& prompt, int max_steps,
+                                 std::vector<Message> seed) {
     SubagentResult result;
     /* Ноль шагов сюда не доходит, и предохранителя на него нет: лимит
      * сессии задаёт load_settings и он не ниже единицы
@@ -1023,15 +1042,21 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
 
     /* История ребёнка — ЛОКАЛЬНАЯ. Родительский state_.session не
      * читается и не пишется: ход субагента не часть диалога (его
-     * результатом станет одна строка в вызове `task` — 8.11). */
-    std::vector<Message> history;
+     * результатом станет одна строка в вызове `task` — 8.11). Всё, что
+     * о ней узнаёт вызывающий, — в result.history (И8.9): дочерняя
+     * сессия пишется из этого поля, и второй путь к истории ребёнка
+     * означал бы, что сохраняется не та. */
+    std::vector<Message> history = std::move(seed);
     history.push_back(Message::user(prompt));
+    /* Корень — ПЕРВОЕ сообщение истории, а не только что добавленное:
+     * при продолжении (И8.9) это корень исходной задачи, иначе в одном
+     * файле сессии оказались бы два разговора. */
     const std::string root_id = history.front().id;
 
     for (int step = 0; step < max_steps; ++step) {
         if (state.abort_requested.load()) {
             result.error = "[прервано пользователем] субагент остановлен";
-            return result;
+            break;
         }
         ++result.steps;
 
@@ -1044,6 +1069,17 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
          * Finish, что и у родителя (И7.2). */
         record_turn_usage(state, response.usage());
 
+        /* И8.12: отмена, случившаяся ВО ВРЕМЯ запроса, — это отмена, а не
+         * сбой провайдера. Проверка стоит ДО разбора ответа, потому что
+         * после отмены провайдер почти всегда вернёт ошибку, и модель (и
+         * человек в ленте событий) прочитали бы «провайдер не ответил» там,
+         * где человек нажал «стоп». Тот же флаг, что и между шагами, и
+         * ждать его не надо: ожидание блокирующего вызова отменяемо и у
+         * ребёнка, и у родителя (предикат один — state_.abort_requested). */
+        if (state.abort_requested.load()) {
+            result.error = "[прервано пользователем] субагент остановлен";
+            break;
+        }
         if (!ok || response.empty()) {
             /* Два разных отказа и два разных текста: «провайдер не
              * ответил» (ok == false) и «ответил пустым» (ok == true, но
@@ -1054,7 +1090,7 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
                 (!ok ? (response.error().empty() ? "провайдер не ответил"
                                                 : response.error())
                      : std::string("провайдер ответил пустым ответом"));
-            return result;
+            break;
         }
 
         Message turn = turn_to_message(response, root_id);
@@ -1114,7 +1150,7 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
 
         if (aborted) {
             result.error = "[прервано пользователем] субагент остановлен";
-            return result;
+            break;
         }
 
         /* Провайдер закончил не затем, чтобы звать инструменты, и всё
@@ -1129,15 +1165,26 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
          * же, а не в ToolRunner. */
         if (response.finish_reason() != "tool-calls" && !turn.has_open_tool_part()) {
             result.ok = true;
-            result.text = response.text();
-            return result;
+            /* И8.11: результат достаётся из ХОДА (Message::task_answer), а
+             * не из ответа провайдера. Ответ — это то, что прислал
+             * провайдер, а ход — то, что осталось после выполнения
+             * вызовов; на финальном шаге, где модель только позвала
+             * хелпер, это разные вещи, и «пусто у провайдера» не значит
+             * «нечего сказать». */
+            result.text = turn.task_answer();
+            break;
         }
     }
-
-    result.error = "[ошибка] субагент " + state.scope.agent +
-                   " не закончил задачу за " + std::to_string(max_steps) +
-                   " шагов и не дал итога. Попроси его о конкретном "
-                   "результате или сделай работу сам.";
+    if (!result.ok && result.error.empty()) {
+        result.error =
+            "[ошибка] субагент " + state.scope.agent +
+            " не закончил задачу за " + std::to_string(max_steps) +
+            " шагов и не дал итога. Попроси его о конкретном "
+            "результате или сделай работу сам.";
+    }
+    /* Единственный выход (И8.9): история ребёнка отдаётся ЛЮБЫМ исходом,
+     * и обеспечено это здесь, а не в шести точках возврата. */
+    result.history = std::move(history);
     return result;
 }
 

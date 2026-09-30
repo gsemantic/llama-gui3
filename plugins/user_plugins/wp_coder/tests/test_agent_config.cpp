@@ -1324,3 +1324,172 @@ TEST(engine_load_settings_registers_builtin_agents) {
 
     fs::remove_all(tmp);
 }
+
+/* ======================================================================
+ * И8.10: наследование разрешений субагентом
+ *
+ * Здесь проверяется СБОРКА правил (Info::for_subagent), без инструмента и
+ * без модели: что именно переходит от сессии к ребёнку. Поведение
+ * инструментов (вопросы, отказы, каталог) — в test_task_tool.cpp.
+ * ====================================================================== */
+
+namespace {
+
+/* Правила сессии, на которых сужение заметно: разрешение, запрет,
+ * «спросить» и разрешение по внешнему каталогу — по одному случаю на
+ * вид правила. */
+Ruleset session_rules_for_subagent() {
+    Ruleset rs;
+    rs.add("*", "*", PermissionAction::Allow);      /* «пользователь разрешил всё» */
+    rs.add("write", "*", PermissionAction::Deny);   /* запрет должен перейти */
+    rs.add("bash", "*", PermissionAction::Allow);   /* разрешение — НЕ должно */
+    rs.add("external_directory", "*", PermissionAction::Ask);
+    /* «каталог/*», а не «каталог»: match() сравнивает шаблон, и без
+     * звёздочки правило покрывало бы ровно сам каталог — доверенный
+     * каталог с файлами внутри остался бы «спросить». Так и делает
+     * PermissionEngine для доверенных каталогов (И2.4). */
+    rs.add("external_directory", "/srv/odnoz/*", PermissionAction::Allow);
+    return rs;
+}
+
+AgentDef agent_without_rules(const std::string& name) {
+    AgentDef def;
+    def.name = name;
+    def.description = "Агент без своих правил";
+    def.mode = AgentMode::Subagent;
+    def.prompt = "Работаю.";
+    return def;
+}
+
+const char* action_name(PermissionAction a) {
+    return permission_action_name(a);
+}
+
+} // namespace
+
+TEST(a_subagent_inherits_denies_and_nothing_else_from_the_session) {
+    register_base_tools();
+    const Ruleset session = session_rules_for_subagent();
+    const auto child = agent::Info::for_subagent(agent_without_rules("t"),
+                                                 session);
+    ASSERT_TRUE(child != nullptr);
+
+    /* Запрет сессии наследуется: ребёнок не должен уметь то, что запрещено
+     * его вызывающему. */
+    ASSERT_EQ(std::string(action_name(child->evaluate("write", "*"))),
+              std::string("запретить"));
+    /* external_directory наследуется ЦЕЛИКОМ, включая разрешения: «куда
+     * можно ходить» — не то же, что «что можно делать», и доверенный
+     * каталог не должен снова становиться вопросом у каждого ребёнка. */
+    ASSERT_EQ(std::string(action_name(
+                  child->evaluate("external_directory", "/srv/odnoz/файл"))),
+              std::string("разрешить"));
+    ASSERT_EQ(std::string(action_name(
+                  child->evaluate("external_directory", "/где-то-ещё"))),
+              std::string("спросить"));
+
+    /* А разрешения НЕ наследуются — ни «всё подряд», ни точечное.
+     * Проверяется на обоих видах, потому что упрощение «запрет = правило с
+     * Deny» оставило бы точечное «bash: * → разрешить» наследуемым, и весь
+     * смысл сужения пропал бы на пользователях, разрешивших себе команды. */
+    ASSERT_EQ(std::string(action_name(child->evaluate("bash", "*"))),
+              std::string("спросить"));
+    ASSERT_EQ(std::string(action_name(child->evaluate("read", "любой.txt"))),
+              std::string("спросить"));
+}
+
+TEST(a_subagent_cannot_delegate_or_own_the_session_plan_unless_it_says_so) {
+    register_base_tools();
+    const Ruleset session = session_rules_for_subagent();
+
+    /* Авто-запреты (порт agent/subagent-permissions.ts). Делегировать
+     * дальше и вести план СЕССИИ ребёнок не может: план — это то, что
+     * человек видит и в чём участвует, а вложенные вызовы ограничены
+     * лимитом глубины (И8.8) и стоят денег. */
+    const auto plain = agent::Info::for_subagent(agent_without_rules("t"),
+                                                 session);
+    ASSERT_EQ(std::string(action_name(plain->evaluate("task", "*"))),
+              std::string("запретить"));
+    ASSERT_EQ(std::string(action_name(plain->evaluate("todo", "*"))),
+              std::string("запретить"));
+    /* Запрет целиком — инструмент уходит из каталога модели, а не просто
+     * отвечает отказом (И2.8): модель не должна тратить шаг на заведомо
+     * отклонённый вызов. */
+    ASSERT_TRUE(plain->denies_whole_key("task"));
+    ASSERT_TRUE(plain->denies_whole_key("todo"));
+
+    /* Сказал — разрешено. Проверка на ОБОИХ ключах: правило про одно из
+     * них не должно молча закрывать второе. */
+    AgentDef opt_in = agent_without_rules("opt_in");
+    PermissionEntry task;
+    task.key = "task";
+    task.action = PermissionAction::Allow;
+    opt_in.permission.push_back(task);
+    PermissionEntry todo;
+    todo.key = "todo";
+    todo.action = PermissionAction::Allow;
+    opt_in.permission.push_back(todo);
+    const auto allowed = agent::Info::for_subagent(opt_in, session);
+    ASSERT_EQ(std::string(action_name(allowed->evaluate("task", "*"))),
+              std::string("разрешить"));
+    ASSERT_EQ(std::string(action_name(allowed->evaluate("todo", "*"))),
+              std::string("разрешить"));
+    ASSERT_FALSE(allowed->denies_whole_key("task"));
+
+    /* Своё «спросить» тоже уважается: авто-запрет не навязывается поверх
+     * сказанного агентом, иначе агент не мог бы задать вопрос вместо
+     * запрета. */
+    AgentDef asking = agent_without_rules("asking");
+    PermissionEntry task_ask;
+    task_ask.key = "task";
+    task_ask.action = PermissionAction::Ask;
+    asking.permission.push_back(task_ask);
+    const auto asked = agent::Info::for_subagent(asking, session);
+    ASSERT_EQ(std::string(action_name(asked->evaluate("task", "*"))),
+              std::string("спросить"));
+}
+
+TEST(a_subagent_does_not_inherit_the_base_rules_of_a_primary_agent) {
+    register_base_tools();
+    /* Сужение относится к ДЕЛЕГИРОВАНИЮ. Основной агент (тот же агент,
+     * вызванный не через `task`) живёт по правилам сессии, иначе
+     * «выбрал агента и работаю» и «делегировал» отличались бы правами
+     * одного и того же объявленного агента — а это разные вещи для
+     * человека, который их выбирает. */
+    const Ruleset session = session_rules_for_subagent();
+    const auto as_primary = agent::Info::from_def(agent_without_rules("t"),
+                                                  session);
+    ASSERT_EQ(std::string(action_name(as_primary->evaluate("bash", "*"))),
+              std::string("разрешить"));
+    ASSERT_EQ(std::string(action_name(as_primary->evaluate("task", "*"))),
+              std::string("разрешить"));
+    ASSERT_FALSE(as_primary->denies_whole_key("todo"));
+}
+
+TEST(builtin_subagent_rights_do_not_override_the_users_own_decisions) {
+    register_base_tools();
+    AgentRegistry registry;
+    register_builtin_agents(registry);
+    const auto def = registry.find("wp_general");
+    ASSERT_TRUE(def != nullptr);
+
+    /* Сессия, где человек запретил себе писать. */
+    Ruleset session;
+    session.add("*", "*", PermissionAction::Allow);
+    session.add("write", "*", PermissionAction::Deny);
+
+    /* Как основной агент встроенный НЕ трогает решение пользователя:
+     * его права субагента живут в отдельном поле, иначе правило,
+     * написанное не пользователем, отменяло бы его запрет. */
+    const auto as_primary = agent::Info::from_def(*def, session);
+    ASSERT_EQ(std::string(action_name(as_primary->evaluate("write", "*"))),
+              std::string("запретить"));
+
+    /* Как субагент — читает без вопроса (это и есть делегирование), а
+     * писать спрашивает: запись подтверждает человек. */
+    const auto as_subagent = agent::Info::for_subagent(*def, session);
+    ASSERT_EQ(std::string(action_name(as_subagent->evaluate("read", "*"))),
+              std::string("разрешить"));
+    ASSERT_EQ(std::string(action_name(as_subagent->evaluate("write", "*"))),
+              std::string("запретить"));
+}

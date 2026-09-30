@@ -24,6 +24,12 @@
  * Проверки на текст ищут ОБЪЯВЛЕННЫЕ места (обязательные поля схемы,
  * конкретные ключи в сообщении об отказе), а не вхождения подстрок:
  * иначе проверка приняла бы сообщение, в котором назван не тот агент.
+ *
+ * Диагностика режет текст через text::utf8_prefix, а НЕ substr: текст
+ * кириллический, substr режет по БАЙТАМ и в stderr попадает обрывок
+ * UTF-8-символа. Это не косметика — прогон мутаций читает stderr как
+ * текст и на таком обрывке падал с UnicodeDecodeError, то есть прогон
+ * выглядел сломанным из-за диагностики (правило 13, кириллица).
  */
 
 #include "test_framework.h"
@@ -33,8 +39,10 @@
 #include "../core/agent_registry.h"
 #include "../core/base_tools.h"
 #include "../core/engine.h"
+#include "../core/json_utils.h"   /* text::utf8_prefix — см. правило 13 */
 #include "../core/limits.h"
 #include "../core/prompts.h"
+#include "../core/session_store.h"
 #include "../core/tool.h"
 #include "../core/tools_registry.h"
 
@@ -45,6 +53,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -80,11 +89,34 @@ struct FakeHost {
     bool fail = false;
     std::string error = "сеть недоступна";
     long long prompt_tokens = 100;
+    /* И8.12: ждать отмены вместо ответа. Имитирует ЖИВОЙ запрос: без
+     * этого «отмена родителя гасит ребёнка» нельзя проверить, потому что
+     * мгновенный ответ нечего отменять — и проверка прошла бы при любом
+     * коде. Предикат один с настоящим (state_.abort_requested), как в
+     * plugin_main.cpp. */
+    bool wait_for_abort = false;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> saw_abort{false};
 
     bool chat(const std::string& sys, const std::vector<ModelMessage>& msgs,
               LlmReply& out) {
         sys_prompts.push_back(sys);
         requests.push_back(msgs);
+        if (wait_for_abort) {
+            entered.store(true);
+            for (int i = 0; i < 2000; ++i) {
+                if (engine_state().abort_requested.load()) {
+                    saw_abort.store(true);
+                    /* Так отвечает блокирующий вызов хоста при отмене
+                     * ожидания (И6.6): провайдер не виноват. */
+                    out.error = "Прервано пользователем";
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            out.error = "хост без ответа";
+            return false;
+        }
         if (fail) {
             out.error = error;
             return false;
@@ -162,6 +194,93 @@ std::string task_args(const std::string& description,
            prompt + "\", \"subagent_type\": \"" + subagent_type + "\"";
 }
 
+/* Предел вложенности, каким его видит инструмент `task` (И8.8). */
+int depth_limit() {
+    std::lock_guard<std::mutex> lk(engine_state().mtx);
+    return engine_state().subagent_depth;
+}
+
+/* Очередь ответов имитатора — сброс между случаями одного теста. Без него
+ * счётчик запросов и накопленные транскрипты прошлого случая сделали бы
+ * числа следующего чужими, и проверка прошла бы сама по себе. */
+void reset_host(FakeHost& host, std::vector<std::string> replies) {
+    host.replies = replies;
+    host.next = 0;
+    host.sys_prompts.clear();
+    host.requests.clear();
+}
+
+/* Агент, который САМ разрешил делегирование (И8.10).
+ *
+ * С 8.10 субагент по умолчанию не может звать `task` — авто-запрет в
+ * Info::for_subagent. Проверки лимита глубины поэтому обязаны работать на
+ * агенте с явным `task: allow`: иначе они проверяли бы авто-запрет, а
+ * лимит глубины не проверялся бы вовсе — то есть его можно было бы
+ * сломать, и ничего бы не заметил (то же, что с проверкой «его зовут»). */
+bool add_delegator() {
+    AgentDef def;
+    def.name = "wp_delegator";
+    def.description = "Субагент, которому разрешено делегировать";
+    def.mode = AgentMode::Subagent;
+    def.prompt = "Субагент с правом делегировать.";
+    PermissionEntry read;
+    read.key = "read";
+    read.action = PermissionAction::Allow;
+    def.permission.push_back(read);
+    PermissionEntry task;
+    task.key = "task";
+    task.action = PermissionAction::Allow;
+    def.permission.push_back(task);
+    std::string err;
+    if (!AgentRegistry::instance().add(def, &err)) {
+        std::cerr << "  агент wp_delegator не зарегистрирован: " << err
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+/* Агент, которому разрешены команды: нужен там, где проверяется отмена
+ * ВНУТРИ инструмента. На агенте без правил `bash` сначала спросил бы
+ * разрешения, и команда не была бы запущена вовсе — то есть проверялось бы
+ * не то. */
+bool add_command_agent() {
+    AgentDef def;
+    def.name = "wp_commander";
+    def.description = "Субагент, которому разрешены команды";
+    def.mode = AgentMode::Subagent;
+    def.prompt = "Запускаю команды.";
+    PermissionEntry bash;
+    bash.key = "bash";
+    bash.action = PermissionAction::Allow;
+    def.permission.push_back(bash);
+    std::string err;
+    if (!AgentRegistry::instance().add(def, &err)) {
+        std::cerr << "  агент wp_commander не зарегистрирован: " << err
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+/* Агент без единого правила: всё, что не запрещено и не разрешено его
+ * собственными правилами, у него спрашивается (И8.10 — субагент не
+ * наследует разрешения сессии). */
+bool add_bare_agent(const std::string& name, const std::string& prompt) {
+    AgentDef def;
+    def.name = name;
+    def.description = "Агент без правил";
+    def.mode = AgentMode::Subagent;
+    def.prompt = prompt;
+    std::string err;
+    if (!AgentRegistry::instance().add(def, &err)) {
+        std::cerr << "  агент " << name << " не зарегистрирован: " << err
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
 /* Окружение одного теста. Восстанавливает ВСЁ, что меняет вложенный
  * ход: область, промпт, историю, режим, проект, лимиты, разрешения и
  * реестр агентов (правило 5 SESSION_START). */
@@ -169,6 +288,11 @@ struct TaskFixture {
     FakeHost host;
     PermissionGuard permissions;
     fs::path project;
+    /* Настройки плагина для этого теста (И8.8). Не пустая карта, а
+     * отвечающий хост: значения читает Engine::load_settings, то есть
+     * проверка идёт по НАСТОЯЩЕМУ чтению настройки, а не по подставленному
+     * в поле число. */
+    std::map<std::string, std::string> settings;
 
     TaskFixture() : permissions() {
         register_tools();
@@ -181,12 +305,28 @@ struct TaskFixture {
         std::error_code ec;
         fs::remove_all(project, ec);
         engine_state().session.clear();
+        /* Предел вложенности (И8.8) и идентификатор сессии (И8.9) — тоже
+         * состояние синглтона, и настройка одного теста не должна пережить
+         * его: идентификатор, выданный дочерней сессией, иначе сделал бы
+         * чужую задачу «своей» для следующего теста, а это ровно тот
+         * отказ, который проверяет 8.9. В prepare() они НЕ сбрасываются:
+         * prepare() идёт ПОСЛЕ init(), который прочитал настройки, и
+         * сброс стёр бы ровно то, что проверяется. */
+        {
+            std::lock_guard<std::mutex> lk(engine_state().mtx);
+            engine_state().subagent_depth = limits::kSubagentDepthLimit;
+            engine_state().session_id.clear();
+            /* Прерванный тестом токен не переживает тест: следующий увидел
+             * бы «отменено» и не смог бы ничего запустить. */
+            engine_state().turn_abort.reset();
+        }
         reset_registry();
     }
 
     HostCallbacks callbacks() {
         HostCallbacks cb;
         FakeHost* h = &host;
+        TaskFixture* self = this;
         cb.llm_chat = [h](const std::string& sys,
                           const std::vector<ModelMessage>& msgs,
                           LlmReply& out) {
@@ -195,8 +335,9 @@ struct TaskFixture {
         cb.llm_is_connected = []() { return true; };
         cb.path_data_dir = [this] { return project.string(); };
         cb.settings_set = [](const std::string&, const std::string&) {};
-        cb.settings_get = [](const std::string&, const std::string& d) {
-            return d;
+        cb.settings_get = [self](const std::string& key, const std::string& d) {
+            auto it = self->settings.find(key);
+            return it != self->settings.end() ? it->second : d;
         };
         cb.chat_event = [](const std::string&) {};
         return cb;
@@ -222,6 +363,13 @@ struct TaskFixture {
         engine_state().model_limits = compaction::ModelLimits();
         engine_state().compaction_config = compaction::CompactionConfig();
         engine_state().abort_requested.store(false);
+        /* Свой токен отмены на каждый тест — ровно как это делает submit
+         * (И6.7). Без него у инструментов не было бы ЧЕГО отменять
+         * (`ctx.abort()` вернул бы nullptr), и проверка «отмена убивает
+         * команду ребёнка» тихо проверяла бы разрешение, а не токен:
+         * `bash` спросил бы, вопрос отпустила бы отмена — и команда не
+         * была бы запущена вовсе. */
+        engine_state().turn_abort = std::make_shared<AbortToken>();
         engine_state().shutting_down = false;
         engine_state().state = AgentState::Executing;
         engine_state().steps = 0;
@@ -343,7 +491,7 @@ TEST(task_runs_the_named_subagent_and_its_text_reaches_the_parent) {
     ASSERT_EQ(fx.host.calls(), (size_t)4);
     if (fx.host.calls() != 4) {
         for (size_t i = 0; i < fx.host.calls(); ++i) {
-            std::cerr << "  запрос " << i << ": " << fx.host.transcript(i).substr(0, 200)
+            std::cerr << "  запрос " << i << ": " << text::utf8_prefix(fx.host.transcript(i), 200)
                       << std::endl;
         }
     }
@@ -437,7 +585,7 @@ TEST(subagent_sees_only_the_tools_its_own_rules_allow) {
     ASSERT_TRUE(out.output.find("session_store.cpp") != std::string::npos);
     if (fx.host.calls() != 1) {
         for (size_t i = 0; i < fx.host.calls(); ++i) {
-            std::cerr << "  запрос " << i << ": " << fx.host.transcript(i).substr(0, 200)
+            std::cerr << "  запрос " << i << ": " << text::utf8_prefix(fx.host.transcript(i), 200)
                       << std::endl;
         }
     }
@@ -566,7 +714,10 @@ TEST(task_refuses_agents_that_cannot_be_called_as_subagents) {
 }
 
 /* ======================================================================
- * 5. Поля, работа которых ещё не написана
+ * 5. Поле, работа которого ещё не написана
+ *
+ * И8.9 из этого списка убрал `task_id`: он работает, и проверки на его
+ * отказы — в разделе 12. Оставлен `background` (работа — И8.14).
  * ====================================================================== */
 
 TEST(task_refuses_arguments_it_cannot_honour_yet) {
@@ -577,33 +728,23 @@ TEST(task_refuses_arguments_it_cannot_honour_yet) {
     reset_registry();
 
     /* Объявленный в схеме параметр, который не делает ничего, — хуже
-     * отсутствующего: модель считает, что продолжение задачи состоялось,
-     * и ждёт результата. Отказ обязан называть поле. */
-    struct Case {
-        const char* field;
-        const char* extra;
-        const char* value;
-    };
-    const Case cases[] = {
-        {"task_id", ",\n \"task_id\": \"abc-123\"", "task_id"},
-        {"background", ",\n \"background\": true", "background"},
-    };
-    for (const Case& c : cases) {
+     * отсутствующего: модель считает, что задача ушла в фон, и ждёт
+     * уведомления, которого не будет. Отказ обязан называть поле. */
+    const char* cases[] = {"background"};
+    for (const char* field : cases) {
         json::JsonValue call = json::JsonValue::object();
         call.set("description", "Проверка поля");
         call.set("prompt", "Ничего не делать.");
         call.set("subagent_type", "wp_general");
-        if (std::string(c.field) == "task_id") call.set("task_id", "abc-123");
-        else call.set("background", true);
+        call.set(field, true);
         const ToolOutput out = ToolsRegistry::instance().run_output("task", call);
-        if (out.output.find(c.value) == std::string::npos) {
-            std::cerr << "  отказ по полю " << c.field << " не называет его: "
+        if (out.output.find(field) == std::string::npos) {
+            std::cerr << "  отказ по полю " << field << " не называет его: "
                       << out.output << std::endl;
         }
-        ASSERT_TRUE(out.output.find(c.value) != std::string::npos);
+        ASSERT_TRUE(out.output.find(field) != std::string::npos);
         ASSERT_TRUE(out.output.find("[ошибка] task") != std::string::npos);
         ASSERT_TRUE(out.output.find("не поддерживается") != std::string::npos);
-        (void)c.extra;
     }
 
     /* Пустые обязательные поля: схема проверяет НАЛИЧИЕ, а модель
@@ -636,19 +777,24 @@ TEST(a_subagent_cannot_open_a_subagent_of_its_own) {
     TaskFixture fx;
     /* Ход субагента: он зовёт `task` ещё раз. Второй уровень обязан быть
      * отказан ДО запроса к модели — иначе `task` внутри `task` стал бы
-     * рекурсивным генератором запросов. */
-    fx.host.replies = {
-        call_block("task", task_args("Вложенная", "Ещё глубже.", "wp_general")),
-        "Вложенный субагент не понадобился: я сделал это сам." };
+     * рекурсивным генератором запросов.
+     *
+     * Агент — делегирующий (И8.10): по умолчанию субагент не может звать
+     * `task` вовсе, и тогда до лимита глубины дело не доходит, то есть
+     * проверка глубины проверяла бы авто-запрет, а не предел. */
+    reset_host(fx.host, {
+        call_block("task", task_args("Вложенная", "Ещё глубже.", "wp_delegator")),
+        "Вложенный субагент не понадобился: я сделал это сам." });
     HostCallbacks cb = fx.callbacks();
     engine().init(cb);
     fx.prepare();
     reset_registry();
+    ASSERT_TRUE(add_delegator());
 
     json::JsonValue call = json::JsonValue::object();
     call.set("description", "Внешняя задача");
     call.set("prompt", "Сделай что-то.");
-    call.set("subagent_type", "wp_general");
+    call.set("subagent_type", "wp_delegator");
     const ToolOutput out = ToolsRegistry::instance().run_output("task", call);
 
     /* Два запроса: ход субагента и его следующий ход после отказа. Третьего
@@ -656,18 +802,21 @@ TEST(a_subagent_cannot_open_a_subagent_of_its_own) {
     ASSERT_EQ(fx.host.calls(), (size_t)2);
     if (fx.host.calls() != 2) {
         for (size_t i = 0; i < fx.host.calls(); ++i) {
-            std::cerr << "  запрос " << i << ": " << fx.host.transcript(i).substr(0, 200)
+            std::cerr << "  запрос " << i << ": " << text::utf8_prefix(fx.host.transcript(i), 200)
                       << std::endl;
         }
     }
     /* Отказ виден СУБАГЕНТУ — он читает его как результат своего вызова
-     * и потому не повторяет. */
-    const std::string expected =
-        std::string("Subagent depth limit reached (") +
-        std::to_string(limits::kSubagentDepthLimit) + ")";
+     * и потому не повторяет.
+     *
+     * Число в отказе — 1, а НЕ константа limits::kSubagentDepthLimit:
+     * настройки нет, и проверка обязана утверждать, что дефолт равен
+     * единице, а не «какому бы ни было дефолту». Сама константа
+     * закреплена в limits_file_is_single_source_of_truth. */
+    const std::string expected = "Subagent depth limit reached (1).";
     if (fx.host.transcript(1).find(expected) == std::string::npos) {
         std::cerr << "  субагент не увидел отказ по глубине: "
-                  << fx.host.transcript(1).substr(0, 300) << std::endl;
+                  << text::utf8_prefix(fx.host.transcript(1), 300) << std::endl;
     }
     ASSERT_TRUE(fx.host.transcript(1).find(expected) != std::string::npos);
     /* Итог задачи — ответ субагента, а не текст отказа. */
@@ -714,7 +863,7 @@ TEST(subagent_tool_calls_are_judged_by_the_subagent_rules) {
      * результате своего вызова. */
     const std::string seen = fx.host.transcript(1);
     if (seen.find("запрещён правилом") == std::string::npos) {
-        std::cerr << "  субагент не увидел запрет write: " << seen.substr(0, 300)
+        std::cerr << "  субагент не увидел запрет write: " << text::utf8_prefix(seen, 300)
                   << std::endl;
     }
     ASSERT_TRUE(seen.find("запрещён правилом") != std::string::npos);
@@ -739,6 +888,11 @@ TEST(an_always_answer_reaches_the_subagent_rules) {
     engine().init(cb);
     fx.prepare();
     reset_registry();
+    /* Агент БЕЗ правил (И8.10): субагент не наследует разрешения сессии,
+     * поэтому чтение у него спрашивается само по себе. На встроенном
+     * агенте с `read: allow` вопроса не было бы — и проверка доставки
+     * ответа «всегда» прошла бы вхолостую, ничего не дожидаясь. */
+    ASSERT_TRUE(add_bare_agent("wp_asker", "Субагент, у которого спрашивают."));
 
     /* Правила агента заморожены при его сборке (И8.4): они сложены из
      * правил СЕССИИ, какие были в тот момент. Ответ «всегда», который
@@ -784,7 +938,7 @@ TEST(an_always_answer_reaches_the_subagent_rules) {
     json::JsonValue call = json::JsonValue::object();
     call.set("description", "Две команды");
     call.set("prompt", "Запусти две команды.");
-    call.set("subagent_type", "wp_general");
+    call.set("subagent_type", "wp_asker");
     const ToolOutput out = ToolsRegistry::instance().run_output("task", call);
     joiner.join();
 
@@ -852,7 +1006,7 @@ TEST(subagent_does_not_disturb_the_parent_loop_detector) {
         std::cerr << "  в счётчике родителя " << parent_calls.size()
                   << " записей:" << std::endl;
         for (const std::string& s : parent_calls) {
-            std::cerr << "    " << s.substr(0, 60) << std::endl;
+            std::cerr << "    " << text::utf8_prefix(s, 60) << std::endl;
         }
     }
     ASSERT_EQ(parent_calls.size(), (size_t)1);
@@ -879,15 +1033,27 @@ TEST(subagent_provider_failure_looks_like_a_failure) {
     call.set("prompt", "Ничего не делать.");
     call.set("subagent_type", "wp_general");
 
+    /* И8.11: сбой приходит ТОЙ ЖЕ обёрткой, но с state="error".
+     * Признак «это не успех» больше не ищется по слову «ошибка» в тексте,
+     * а читается из атрибута: раньше проверка искала подстроку, и форма
+     * отказа могла бы съесть это слово незаметно для кода. */
+    const std::string error_state = "state=\"error\"";
+
     /* (1) Провайдер не ответил. */
     fx.host.fail = true;
     ToolOutput out = ToolsRegistry::instance().run_output("task", call);
-    if (out.output.find("[ошибка] task") == std::string::npos ||
+    if (out.output.find(error_state) == std::string::npos ||
         out.output.find("сеть недоступна") == std::string::npos) {
-        std::cerr << "  сбой провайдера не назван: " << out.output << std::endl;
+        std::cerr << "  сбой провайдера не назван: "
+                  << text::utf8_prefix(out.output, 200) << std::endl;
     }
-    ASSERT_TRUE(out.output.find("[ошибка] task") != std::string::npos);
+    ASSERT_TRUE(out.output.find(error_state) != std::string::npos);
     ASSERT_TRUE(out.output.find("сеть недоступна") != std::string::npos);
+    /* Идентификатор задачи в отказе тоже есть: задача была создана, и её
+     * можно продолжить (И8.9) — а тест без него проверял бы только
+     * «красный текст», и потеря task_id прошла бы молча. */
+    ASSERT_TRUE(out.output.find(out.metadata.get_string("session_id")) !=
+                std::string::npos);
 
     /* (2) Провайдер ответил ПУСТЫМ ответом: ok, ни текста, ни вызова.
      * Это другой отказ, и он обязан называться своим текстом: пустой
@@ -896,12 +1062,12 @@ TEST(subagent_provider_failure_looks_like_a_failure) {
     fx.host.fail = false;
     fx.host.replies = {""};
     out = ToolsRegistry::instance().run_output("task", call);
-    if (out.output.find("[ошибка] task") == std::string::npos ||
+    if (out.output.find(error_state) == std::string::npos ||
         out.output.find("пустым") == std::string::npos) {
-        std::cerr << "  пустой ответ пройден как успех: [" << out.output << "]"
-                  << std::endl;
+        std::cerr << "  пустой ответ пройден как успех: ["
+                  << text::utf8_prefix(out.output, 200) << "]" << std::endl;
     }
-    ASSERT_TRUE(out.output.find("[ошибка] task") != std::string::npos);
+    ASSERT_TRUE(out.output.find(error_state) != std::string::npos);
     ASSERT_TRUE(out.output.find("пустым") != std::string::npos);
 
     /* И область вернулась: неудавшийся субагент — не причина уйти
@@ -943,4 +1109,1103 @@ TEST(subagent_tokens_are_counted_in_the_session_metrics) {
      * ли окно (И7.2), и запрос субагента занимает то же место, что и
      * запрос родителя. */
     ASSERT_EQ(engine_state().measured_input_tokens, (long long)100);
+}
+
+/* ======================================================================
+ * 11. И8.8: предел вложенности настраивается
+ *
+ * Проверки идут по ТОМУ, ЧТО ВИДИТ МОДЕЛЬ, а не по полю состояния:
+ * настройка читается в Engine::load_settings, поэтому «значение
+ * прочиталось» доказывается отказом на третьем уровне и её отсутствием
+ * на втором, а не утверждением «state.subagent_depth == 2».
+ * ====================================================================== */
+
+/* Запуск одного вызова `task` с текущими настройками и ответами имитатора.
+ *
+ * Агент — делегирующий (add_delegator): с 8.10 субагент по умолчанию не
+ * может звать `task`, и проверки лимита глубины на агенте без такого
+ * права проверяли бы авто-запрет вместо предела. */
+ToolOutput run_task_call() {
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", "Задача родителя");
+    call.set("prompt", "Сделай что-то.");
+    call.set("subagent_type", "wp_delegator");
+    return ToolsRegistry::instance().run_output("task", call);
+}
+
+TEST(subagent_depth_setting_decides_how_deep_delegation_goes) {
+    TaskFixture fx;
+    fx.settings["wp_coder.subagent_depth"] = "2";
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    ASSERT_TRUE(add_delegator());
+    ASSERT_EQ(depth_limit(), 2);
+
+    /* Предел 2: субагент (глубина 1) вправе звать субагента (глубина 2).
+     * Очередь ответов общая для всех уровней, а ПЕРВЫЙ достаётся тому,
+     * кто спросил, — то есть ходу субагента (И8.7):
+     *   1 — ход субагента зовёт `task`;
+     *   2 — ход вложенного субагента (его ответ виден только через
+     *       транскрипт запроса 3, поэтому он назван так, как его должен
+     *       прочитать вызывающий);
+     *   3 — ход субагента после результата. */
+    reset_host(fx.host, {
+        call_block("task", task_args("Вложенная", "Ещё глубже.", "wp_delegator")),
+        "ВНУТРЕННИЙ_ОТВЕТ",
+        "Вложенный субагент сказал: ВНУТРЕННИЙ_ОТВЕТ"});
+
+    const ToolOutput out = run_task_call();
+
+    /* Три запроса: ход субагента, ход вложенного, финальный ход субагента.
+     * С дефолтом (1) их было бы два — отказ пришёл бы вместо вложенного
+     * хода. */
+    if (fx.host.calls() != 3) {
+        std::cerr << "  предел 2: запросов " << fx.host.calls()
+                  << " (ожидалось 3), ответы по порядку:"
+                  << std::endl;
+        for (size_t i = 0; i < fx.host.calls(); ++i) {
+            std::cerr << "    запрос " << i << ": "
+                      << text::utf8_prefix(fx.host.transcript(i), 160) << std::endl;
+        }
+    }
+    ASSERT_EQ(fx.host.calls(), (size_t)3);
+    /* Ответа вложенного субагента нет в ИТОГЕ (итог — это финал субагента),
+     * но он обязан быть в транскрипте его следующего запроса: иначе
+     * «три запроса» означали бы, что ребёнок отработал вхолостую. */
+    if (fx.host.transcript(2).find("ВНУТРЕННИЙ_ОТВЕТ") == std::string::npos) {
+        std::cerr << "  ответ вложенного не дошёл до модели субагента: "
+                  << text::utf8_prefix(fx.host.transcript(2), 300) << std::endl;
+    }
+    ASSERT_TRUE(fx.host.transcript(2).find("ВНУТРЕННИЙ_ОТВЕТ") !=
+                std::string::npos);
+    ASSERT_TRUE(out.output.find("ВНУТРЕННИЙ_ОТВЕТ") != std::string::npos);
+    /* Отказа по глубине не было вовсе — предел это допускает. */
+    for (size_t i = 0; i < fx.host.calls(); ++i) {
+        if (fx.host.transcript(i).find("depth limit") != std::string::npos ||
+            fx.host.sys(i).find("depth limit") != std::string::npos) {
+            std::cerr << "  при пределе 2 отказ по глубине в запросе " << i
+                      << std::endl;
+        }
+        ASSERT_TRUE(fx.host.transcript(i).find("depth limit") ==
+                    std::string::npos);
+        ASSERT_TRUE(fx.host.sys(i).find("depth limit") == std::string::npos);
+    }
+    /* Глубина верхнего вызова — 1, и это видно по метаданным: они
+     * достались бы читателю события, поэтому число там не выдумано. */
+    ASSERT_EQ(out.metadata.get_int("depth", 0), (long long)1);
+    /* Область после вложенных ходов вернулась в сессию — иначе следующий
+     * ход родителя пошёл бы с чужой глубиной. */
+    const RunScope after = engine().scope_snapshot();
+    ASSERT_EQ(after.depth, 0);
+    ASSERT_EQ(after.agent, std::string(""));
+}
+
+TEST(subagent_depth_refusal_names_the_configured_limit) {
+    TaskFixture fx;
+    fx.settings["wp_coder.subagent_depth"] = "2";
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    ASSERT_TRUE(add_delegator());
+    ASSERT_EQ(depth_limit(), 2);
+
+    /* Тот же предел 2, но глубина 3 запрещена. Очередь:
+     *   1 — субагент зовёт `task` (глубина 2, разрешено);
+     *   2 — вложенный субагент зовёт `task` (глубина 3, отказ);
+     *   3 — его следующий ход: здесь отказ ОБЯЗАН быть виден модели;
+     *   4 — финал субагента. */
+    reset_host(fx.host, {
+        call_block("task", task_args("Вложенная", "Ещё глубже.", "wp_delegator")),
+        call_block("task", task_args("Третья", "Совсем глубоко.", "wp_delegator")),
+        "Третий уровень не понадобился.",
+        "Вложенный субагент отработал."});
+
+    const ToolOutput out = run_task_call();
+
+    if (fx.host.calls() != 4) {
+        std::cerr << "  предел 2, попытка глубины 3: запросов "
+                  << fx.host.calls() << " (ожидалось 4)" << std::endl;
+    }
+    ASSERT_EQ(fx.host.calls(), (size_t)4);
+    /* Отказ виден модели вложенного субагента — по ТРАНСКРИПТУ его второго
+     * запроса, а не по счётчику: именно это чинит повторный вызов. */
+    const std::string seen = fx.host.transcript(2);
+    if (seen.find("Subagent depth limit reached (2).") == std::string::npos) {
+        std::cerr << "  отказ по глубине 3 не назван настроенным пределом (2): "
+                  << text::utf8_prefix(seen, 300) << std::endl;
+    }
+    ASSERT_TRUE(seen.find("Subagent depth limit reached (2).") !=
+                std::string::npos);
+    /* И НЕ назван дефолтом: константа в тексте отказа означала бы, что
+     * модель предлагает человеку поднять несуществующую настройку. */
+    ASSERT_TRUE(seen.find("depth limit reached (1)") == std::string::npos);
+    /* Название настройки — чтобы модель могла сказать человеку, что
+     * поднять, а не «не вышло». */
+    ASSERT_TRUE(seen.find("wp_coder.subagent_depth") != std::string::npos);
+    ASSERT_TRUE(out.output.find("Вложенный субагент отработал") !=
+                std::string::npos);
+}
+
+TEST(broken_subagent_depth_setting_keeps_the_default_limit) {
+    TaskFixture fx;
+
+    /* Дефолт ПОЛЯ — тоже число, и проверяется без движка: EngineState
+     * конструируется сам по себе, и дефолтом «0» сессия, которая ничего
+     * не настраивала, получила бы запрет делегирования (то есть
+     * настройка, которой нет, вела бы себя как выключенная). */
+    const EngineState fresh;
+    ASSERT_EQ(fresh.subagent_depth, limits::kSubagentDepthLimit);
+    ASSERT_TRUE(add_delegator());   /* run_task_call зовёт именно его */
+
+    /* Неразобранная настройка НЕ должна читаться как «предела нет»:
+     * это вернуло бы ровно то, ради чего предел написан (И8.7).
+     * Проверяется не «значение поля», а поведение: на втором уровне
+     * делегирование по-прежнему отказано с дефолтом 1.
+     *
+     * «3000000000» в списке — не опечатка в тесте: число помещается в
+     * long long и не помещается в int, то есть это единственный случай,
+     * где «разобралось» и « годится» — разные вещи. */
+    const char* broken[] = {"", "abc", "-3", "1.5", "2abc", "1 2", "0x2",
+                            "3000000000"};
+    for (const char* value : broken) {
+        fx.settings["wp_coder.subagent_depth"] = value;
+        HostCallbacks cb = fx.callbacks();
+        engine().init(cb);
+        fx.prepare();
+        reset_registry();
+        /* Реестр пересоздаётся в каждом случае, и делегирующий агент
+         * регистрируется после него же: зарегистрированный раньше агент
+         * исчез бы, и верхний вызов отказался бы «агент не найден» —
+         * то есть проверка прошла бы мимо своего предмета. */
+        ASSERT_TRUE(add_delegator());
+        if (depth_limit() != 1) {
+            std::cerr << "  настройка \"" << value << "\" дала предел "
+                      << depth_limit() << " вместо 1" << std::endl;
+        }
+        ASSERT_EQ(depth_limit(), 1);
+
+        reset_host(fx.host, {
+            call_block("task",
+                       task_args("Вложенная", "Ещё глубже.", "wp_general")),
+            "Сделал сам."});
+        const ToolOutput out = run_task_call();
+        if (fx.host.calls() != 2 ||
+            fx.host.transcript(1).find("Subagent depth limit reached (1).") ==
+                std::string::npos) {
+            std::cerr << "  настройка \"" << value
+                      << "»: запросов " << fx.host.calls()
+                      << ", отказ виден: "
+                      << (fx.host.calls() > 1 &&
+                          fx.host.transcript(1).find("depth limit") !=
+                              std::string::npos)
+                      << std::endl;
+        }
+        ASSERT_EQ(fx.host.calls(), (size_t)2);
+        ASSERT_TRUE(fx.host.transcript(1).find(
+                        "Subagent depth limit reached (1).") !=
+                    std::string::npos);
+        ASSERT_TRUE(out.output.find("Сделал сам") != std::string::npos);
+    }
+}
+
+TEST(subagent_depth_zero_forbids_delegation_entirely) {
+    TaskFixture fx;
+    fx.settings["wp_coder.subagent_depth"] = "0";
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    ASSERT_TRUE(add_delegator());
+    ASSERT_EQ(depth_limit(), 0);
+
+    /* Ноль — не мусор, а запрет делегирования вообще: подменить его
+     * дефолтом значило бы сделать «субагентов нет» неотличимым от
+     * опечатки. Отказ — до запроса к модели, как и любой отказ выбора
+     * агента (несуществующее имя тоже не оплачивается запросом). */
+    reset_host(fx.host, {"Сделал сам."});
+    const ToolOutput out = run_task_call();
+
+    if (fx.host.calls() != 0 ||
+        out.output.find("Subagent depth limit reached (0).") ==
+            std::string::npos) {
+        std::cerr << "  предел 0: запросов " << fx.host.calls()
+                  << ", ответ: " << text::utf8_prefix(out.output, 200) << std::endl;
+    }
+    ASSERT_EQ(fx.host.calls(), (size_t)0);
+    ASSERT_TRUE(out.output.find("Subagent depth limit reached (0).") !=
+                std::string::npos);
+}
+
+
+/* ======================================================================
+ * 12. И8.9: дочерняя сессия
+ *
+ * Проверяется не «файл записался», а три вещи, которые ломаются тихо:
+ *   - дочерняя сессия НЕ попадает в правило resume (иначе следующий
+ *     запуск открыл бы диалог субагента вместо диалога человека);
+ *   - при продолжении история ПРЕДЫДУЩЕГО хода видна модели в ТРАНСКРИПТЕ
+ *     её нового запроса (иначе `task_id` работал бы, ничего не добавляя);
+ *   - `task_id` извне не превращается в путь к файлу: идентификатор
+ *     приходит от модели.
+ * ====================================================================== */
+
+/* Файлы задач субагента, лежащие на диске. */
+std::vector<std::string> child_session_files(const fs::path& project) {
+    std::vector<std::string> out;
+    const fs::path dir = project / "wp_coder" / "sessions" / "sub";
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return out;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file()) continue;
+        out.push_back(e.path().string());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/* Прочитать файл сессии. Пустая строка — прочитать не удалось. */
+SessionFile read_session_file(const std::string& path, std::string* error) {
+    SessionFile out;
+    std::vector<std::string> warnings;
+    SessionArchive::load(path, out, error, &warnings);
+    return out;
+}
+
+/* Вызов `task`: имя агента задаётся явно.
+ *
+ * Имя параметром, а не «всегда wp_general»: половина проверок И8.10 —
+ * про то, что агент БЕЗ своих правил и агент С ЗАПРЕТОМ ведут себя иначе,
+ * и вызов с зашитым именем проверял бы встроенного агента вместо
+ * нужного — и проходил бы. */
+ToolOutput run_task_agent(const std::string& agent,
+                          const std::string& description,
+                          const std::string& prompt,
+                          const std::string& task_id = "") {
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", description);
+    call.set("prompt", prompt);
+    call.set("subagent_type", agent);
+    if (!task_id.empty()) call.set("task_id", task_id);
+    return ToolsRegistry::instance().run_output("task", call);
+}
+
+/* Вызов `task` с необязательным task_id (встроенный субагент). */
+ToolOutput run_task_with_id(const std::string& description,
+                            const std::string& prompt,
+                            const std::string& task_id) {
+    return run_task_agent("wp_general", description, prompt, task_id);
+}
+
+TEST(a_subagent_task_is_saved_as_a_child_session_of_this_dialog) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    /* Идентификатор родителя выдаётся доходом сессии; он же — parent_id
+     * дочерней. */
+    const std::string parent_id = engine().ensure_session_id();
+
+    reset_host(fx.host, {"Субагент закончил: всё разобрано."});
+    const ToolOutput out = run_task_with_id("Обзор проекта",
+                                            "Посмотри проект и скажи главное.",
+                                            "");
+
+    const std::string session_id = out.metadata.get_string("session_id");
+    ASSERT_FALSE(session_id.empty());
+    ASSERT_TRUE(SessionArchive::is_session_id(session_id));
+    ASSERT_TRUE(out.metadata.get_bool("session_saved", false));
+    /* Файл лежит ТАМ, где resume его не видит: иначе следующий запуск
+     * открыл бы диалог субагента (И8.9, current_file нерекурсивен). */
+    const std::vector<std::string> files = child_session_files(fx.project);
+    if (files.size() != 1) {
+        std::cerr << "  файлов задач субагента: " << files.size() << std::endl;
+    }
+    ASSERT_EQ(files.size(), (size_t)1);
+
+    std::string error;
+    const SessionFile child = read_session_file(files[0], &error);
+    if (!error.empty()) std::cerr << "  файл задачи: " << error << std::endl;
+    ASSERT_TRUE(error.empty());
+    ASSERT_EQ(child.session_id, session_id);
+    ASSERT_EQ(child.parent_id, parent_id);
+    /* Название — по плану: описание и агент в скобках. */
+    ASSERT_EQ(child.title, std::string("Обзор проекта (@wp_general subagent)"));
+    /* История ребёнка — его собственная: задание и ответ, без реплик
+     * родителя. Первое сообщение — задание субагента. */
+    ASSERT_EQ(child.messages.size(), (size_t)2);
+    if (!child.messages.empty()) {
+        ASSERT_TRUE(child.messages.front().text().find(
+                        "Посмотри проект") != std::string::npos);
+    }
+    /* Корень цепочки один: оба хода висят на первом сообщении, иначе в
+     * файле был бы «разговор, у которого нет начала». */
+    if (child.messages.size() == 2) {
+        ASSERT_EQ(child.messages[1].parent_id, child.messages[0].id);
+    }
+
+    /* Правило resume не выбрало задачу субагента. Пишем сессию
+     * пользователя и сравниваем: без этого сравнения проверка была бы
+     * верна и при «resume открывает ребёнка», пока файла родителя нет. */
+    engine().save_session();
+    const std::string current = SessionArchive::current_file(fx.project.string());
+    if (current.find("/sub/") != std::string::npos) {
+        std::cerr << "  resume выбрал задачу субагента: " << current
+                  << std::endl;
+    }
+    ASSERT_TRUE(current.find("/sub/") == std::string::npos);
+    ASSERT_FALSE(current.empty());
+}
+
+TEST(task_id_resumes_the_child_session_instead_of_starting_a_new_one) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    reset_host(fx.host, {"Первый ответ: найдено три места."});
+    const ToolOutput first =
+        run_task_with_id("Обзор проекта", "Найди, где читается конфиг.", "");
+    const std::string session_id = first.metadata.get_string("session_id");
+    ASSERT_FALSE(session_id.empty());
+
+    /* Продолжение: тот же идентификатор, новое задание. Ответ первого
+     * хода обязан быть В ТРАНСКРИПТЕ нового запроса — это и есть
+     * продолжение; проверка «файл перезаписан» доказала бы только, что
+     * файл существует. */
+    reset_host(fx.host, {"Второй ответ: вот точные места."});
+    const ToolOutput second =
+        run_task_with_id("Уточнение", "Теперь покажи вызовы.", session_id);
+
+    ASSERT_EQ(second.metadata.get_string("session_id"), session_id);
+    ASSERT_TRUE(second.metadata.get_bool("session_saved", false));
+    const std::string seen = fx.host.transcript(0);
+    if (seen.find("Первый ответ") == std::string::npos) {
+        std::cerr << "  субагент не увидел прошлый ход при продолжении: "
+                  << text::utf8_prefix(seen, 300) << std::endl;
+    }
+    ASSERT_TRUE(seen.find("Первый ответ") != std::string::npos);
+    ASSERT_TRUE(seen.find("Найди, где читается конфиг") != std::string::npos);
+    ASSERT_TRUE(second.output.find("вот точные места") != std::string::npos);
+
+    /* Одна задача, один файл: продолжение не завело второго ребёнка. */
+    const std::vector<std::string> files = child_session_files(fx.project);
+    if (files.size() != 1) {
+        std::cerr << "  после продолжения файлов задач: " << files.size()
+                  << std::endl;
+    }
+    ASSERT_EQ(files.size(), (size_t)1);
+    /* В файле оба хода и оба задания, а название осталось прежним:
+     * описание продолжения — подпись этого вызова, а не имя задачи. */
+    std::string error;
+    const SessionFile child = read_session_file(files[0], &error);
+    ASSERT_TRUE(error.empty());
+    ASSERT_EQ(child.title, std::string("Обзор проекта (@wp_general subagent)"));
+    ASSERT_EQ(child.messages.size(), (size_t)4);
+    bool has_old = false;
+    bool has_new = false;
+    for (const Message& m : child.messages) {
+        if (m.text().find("Найди, где читается") != std::string::npos) has_old = true;
+        if (m.text().find("Теперь покажи вызовы") != std::string::npos) has_new = true;
+    }
+    ASSERT_TRUE(has_old);
+    ASSERT_TRUE(has_new);
+    /* Корень цепочки прежний: продолжение не начинало новый разговор. */
+    ASSERT_EQ(child.messages[1].parent_id, child.messages[0].id);
+    ASSERT_EQ(child.messages[3].parent_id, child.messages[0].id);
+}
+
+TEST(task_id_from_another_dialog_or_a_foreign_string_is_refused) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    const std::string parent_id = engine().ensure_session_id();
+
+    /* Сессия пользователя: её идентификатор — не задача субагента. */
+    engine().save_session();
+
+    /* Задача ЧУЖОГО диалога: кладём файл руками, с другим родителем. */
+    SessionFile alien;
+    alien.session_id = "ses_000000007777";
+    alien.parent_id = "ses_000000099999";
+    alien.title = "Чужая задача";
+    alien.messages.push_back(Message::user("секретный разговор"));
+    std::string error;
+    const std::string alien_path =
+        SessionArchive::subagent_file_path(fx.project.string(), alien.session_id);
+    ASSERT_TRUE(SessionArchive::save(alien_path, alien, &error));
+
+    /* ПОДДЕЛКА ВНЕ КАТАЛОГА СЕССИЙ.
+     *
+     * Путь к файлу склеивается из `task_id`, поэтому без проверки
+     * «идентификатор ли это» строка `../../подделка` уводит поиск из
+     * `sessions/sub/` в `wp_coder/`. Подделка кладётся ТАМ и делается
+     * такой, чтобы её приняли: `parent_id` — текущий диалог, разбор
+     * проходит. Тогда код без проверки не просто «не заметит» отказа, а
+     * ПРОЧИТАЕТ файл и подставит его содержимое в контекст субагента —
+     * то есть модель получит то, чего никто не собирался ей показывать.
+     * Проверка на отказ сама по себе этого не ловила: «не найдена» и
+     * «это не идентификатор» — оба отказа, и проверка принимала первый
+     * (её нашёл прогон мутаций). */
+    {
+        std::error_code ec;
+        fs::create_directories(fx.project / "wp_coder", ec);
+        std::ofstream decoy(fx.project / "wp_coder" / "подделка.json");
+        decoy << "{\n"
+              << "  \"version\": 1,\n"
+              << "  \"session\": \"ses_000000000001\",\n"
+              << "  \"parent_id\": \"" << parent_id << "\",\n"
+              << "  \"title\": \"Подделка\",\n"
+              << "  \"messages\": [{\"id\": \"msg_000000000001\","
+              << " \"role\": \"user\","
+              << " \"parts\": [{\"kind\": \"text\","
+              << " \"text\": \"СЕКРЕТ_ИЗ_ЧУЖОГО_ФАЙЛА\"}]}]\n"
+              << "}\n";
+        decoy.close();
+        ASSERT_TRUE(fs::exists(fx.project / "wp_coder" / "подделка.json"));
+    }
+
+    struct Case {
+        const char* id;
+        const char* why;
+        /* Что обязан сказать отказ. Для не-идентификатора это важно
+         * отдельно: отказ «не найдена» означал бы, что до диска дошли,
+         * то есть проверки формата не было. */
+        const char* must_say;
+    };
+    const Case cases[] = {
+        {"abc-123", "не идентификатор", "не идентификатор"},
+        {"../../подделка", "не идентификатор: путь", "не идентификатор"},
+        {"ses_000000007777", "чужой диалог", "другому диалогу"},
+        {parent_id.c_str(), "не задача субагента", "не найдена"},
+        {"ses_000000008888", "не найдена", "не найдена"},
+    };
+    for (const Case& c : cases) {
+        reset_host(fx.host, {"Не понадобится."});
+        const ToolOutput out =
+            run_task_with_id("Продолжение", "Продолжи.", c.id);
+        if (out.output.find("[ошибка] task") == std::string::npos ||
+            out.output.find(c.must_say) == std::string::npos) {
+            std::cerr << "  task_id «" << c.id << "» (" << c.why
+                      << ") — отказ не тот: "
+                      << text::utf8_prefix(out.output, 200) << std::endl;
+        }
+        ASSERT_TRUE(out.output.find("[ошибка] task") != std::string::npos);
+        ASSERT_TRUE(out.output.find(c.must_say) != std::string::npos);
+        /* Отказ ДО запроса к модели: продолжения, которого не будет, не
+         * должно стоить денег, и чужой файл не должен попасть в контекст
+         * субагента. */
+        ASSERT_EQ(fx.host.calls(), (size_t)0);
+        for (size_t i = 0; i < fx.host.requests.size(); ++i) {
+            if (fx.host.transcript(i).find("СЕКРЕТ_ИЗ_ЧУЖОГО_ФАЙЛА") !=
+                std::string::npos) {
+                std::cerr << "  содержимое чужого файла дошло до модели"
+                          << std::endl;
+            }
+        }
+        /* И никакой новой задачи: отказ не должен создавать сессию. */
+        ASSERT_EQ(child_session_files(fx.project).size(), (size_t)1);
+    }
+
+    /* Ни один отказ не тронул файл чужой задачи. */
+    std::string alien_error;
+    const SessionFile still_alien =
+        read_session_file(alien_path, &alien_error);
+    ASSERT_TRUE(alien_error.empty());
+    ASSERT_EQ(still_alien.title, std::string("Чужая задача"));
+    ASSERT_EQ(still_alien.messages.size(), (size_t)1);
+}
+
+TEST(resumed_task_ids_do_not_clash_with_the_ids_already_in_the_file) {
+    /* Файл задачи мог быть записан ПРОШЛЫМ запуском плагина: его
+     * идентификаторы тогда были крупнее, чем нынешний счётчик процесса.
+     * SessionArchive::load поднимает счётчик по прочитанному — иначе
+     * первый же новый ход получил бы номер, который в истории уже занят,
+     * и два сообщения слиплись бы в одно молча (И5.6). */
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    SessionFile seeded;
+    seeded.session_id = "ses_000000090000";
+    seeded.parent_id = engine().ensure_session_id();
+    seeded.title = "Задача из прошлого запуска";
+    Message first = Message::user("старый ход");
+    first.id = "msg_000000090001";
+    Message answer = Message::assistant(first.id);
+    answer.id = "msg_000000090002";
+    answer.parts.push_back(MessagePart::text("старый ответ"));
+    seeded.messages.push_back(first);
+    seeded.messages.push_back(answer);
+    std::string error;
+    ASSERT_TRUE(SessionArchive::save(
+        SessionArchive::subagent_file_path(fx.project.string(),
+                                           seeded.session_id),
+        seeded, &error));
+
+    reset_host(fx.host, {"Продолжение после перезапуска."});
+    const ToolOutput out =
+        run_task_with_id("Продолжение", "Ещё немного.", seeded.session_id);
+    ASSERT_TRUE(out.output.find("[ошибка] task") == std::string::npos);
+    ASSERT_TRUE(out.output.find("Продолжение после перезапуска") !=
+                std::string::npos);
+
+    /* Ни одно новое сообщение не получило номер из старой истории. */
+    std::string load_error;
+    const SessionFile child = read_session_file(
+        SessionArchive::subagent_file_path(fx.project.string(),
+                                           seeded.session_id),
+        &load_error);
+    ASSERT_TRUE(load_error.empty());
+    ASSERT_EQ(child.messages.size(), (size_t)4);
+    for (size_t i = 2; i < child.messages.size(); ++i) {
+        if (id_number(child.messages[i].id) <= 90002) {
+            std::cerr << "  новое сообщение получило занятый номер: "
+                      << child.messages[i].id << std::endl;
+        }
+        ASSERT_TRUE(id_number(child.messages[i].id) > 90002);
+    }
+}
+
+/* ======================================================================
+ * 13. И8.10: наследование разрешений — на живом движке
+ *
+ * Проверки 12-го раздела живут в test_agent_config.cpp и смотрят на
+ * СБОРКУ правил. Здесь — то, что важнее: куда доходит отказ и что видит
+ * модель. Три утверждения, и каждое было бы «вроде obvious»:
+ *   - разрешение сессии ребёнку НЕ достаётся, и ребёнок об этом
+ *     спрашивает пользователя сам (а не молча делает по会话-разрешению);
+ *   - запрет сессии доходит, и инструмент у ребёнка ещё и скрыт из
+ *     каталога;
+ *   - про `external_directory` решают правила РЕБЁНКА: иначе наследование
+ *     было бы мёртвым, а запрет агента не действовал бы.
+ * ====================================================================== */
+
+/* Агент без своих правил: всё, что не запрещено сессией, спрашивается. */
+bool add_probe_agent() {
+    return add_bare_agent("wp_probe", "Агент без правил, всё спрашивает.");
+}
+
+TEST(a_subagent_does_not_inherit_allows_and_asks_the_user_instead) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    ASSERT_TRUE(add_probe_agent());
+
+    /* Сессия разрешает ВСЁ (approve_all_permissions) и вдобавок запрещает
+     * запись — запрет перейти должен, разрешение — нет. */
+    engine().permissions().add_rule(
+        Rule{"write", "*", PermissionAction::Deny, "тест: запись запрещена"});
+
+    {
+        std::ofstream f(fx.project / "odin.txt");
+        f << "содержимое\n";
+    }
+    /* Ребёнок читает (спрашивает) и пишет (отказ по правилу). */
+    reset_host(fx.host, {
+        call_block("read_file", ",\n \"path\": \"odin.txt\""),
+        call_block("write_file", ",\n \"path\": \"zapis.txt\","
+                                "\n \"content\": \"привет\""),
+        "Прочитал, записать не смог."});
+
+    /* Пользователь отвечает «всегда» на вопросы ребёнка. */
+    std::atomic<int> asked{0};
+    std::vector<std::thread> threads;
+    threads.emplace_back([&] {
+        for (int i = 0; i < 300; ++i) {
+            const std::vector<PermissionRequest> p =
+                engine().permissions().pending();
+            if (!p.empty() &&
+                engine().permissions().reply(p.front().id,
+                                             PermissionReply::Always)) {
+                ++asked;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+    Joiner joiner(threads);
+
+    const ToolOutput out = run_task_agent("wp_probe", "Чтение и запись",
+                                         "Прочитай и запиши.");
+    joiner.join();
+
+    /* Вопрос был: разрешение сессии ребёнку не досталось. Без этого
+     * утверждения тест прошёл бы и при наследовании — и проверил бы
+     * тогда не то. */
+    if (asked.load() != 1) {
+        std::cerr << "  вопросов ребёнка: " << asked.load()
+                  << " (ожидался один: разрешение сессии не наследуется)"
+                  << std::endl;
+    }
+    ASSERT_EQ(asked.load(), 1);
+    /* Чтение состоялось: ответ «всегда» дошёл до правил ребёнка (И8.7). */
+    ASSERT_TRUE(fx.host.transcript(2).find("содержимое") != std::string::npos);
+    /* Запись запрещена правилом, которое ребёнок УНАСЛЕДОВАЛ, и файла нет. */
+    const std::string seen = fx.host.transcript(2);
+    if (seen.find("запрещён правилом") == std::string::npos) {
+        std::cerr << "  ребёнок не увидел запрет на запись: "
+                  << text::utf8_prefix(seen, 300) << std::endl;
+    }
+    ASSERT_TRUE(seen.find("запрещён правилом") != std::string::npos);
+    ASSERT_FALSE(fs::exists(fx.project / "zapis.txt"));
+    ASSERT_TRUE(out.output.find("записать не смог") != std::string::npos);
+
+    /* Запрет виден РАНЬШЕ отказа: инструмент убран из каталога ребёнка
+     * (denies_whole_key), то есть модель о нём даже не знает. У сессии он
+     * тоже скрыт — запрет-то сессионный, и проверять тут нечего: разницу
+     * «своё правило агента против унаследованного» показывает
+     * the_child_rules_decide_about_paths_outside_the_project. */
+    ASSERT_FALSE(catalogue_mentions(fx.host.sys(0), "write_file"));
+}
+
+TEST(a_subagent_cannot_delegate_or_rewrite_the_session_plan_by_default) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    reset_host(fx.host, {
+        call_block("task", task_args("Вложенная", "Ещё глубже.", "wp_general")),
+        call_block("todowrite", ",\n \"todos\": [{\"id\": 1,"
+                                "\n \"content\": \"мой план\","
+                                "\n \"status\": \"pending\","
+                                "\n \"priority\": \"high\"}]"),
+        "Ни делегировать, ни план вести не смог."});
+    const ToolOutput out = run_task_with_id("Попытка", "Попробуй.", "");
+    ASSERT_TRUE(out.output.find("[ошибка] task") == std::string::npos);
+
+    /* Оба отказа — ПО ПРАВИЛУ, а не лимитом глубины: субагент не умеет
+     * делегировать по умолчанию (И8.10), и лимит глубины тут ни при чём
+     * (его проверяет агент с правом `task`, см. раздел 6). */
+    const std::string seen = fx.host.transcript(2);
+    if (seen.find("Инструмент task запрещён правилом") == std::string::npos ||
+        seen.find("todowrite запрещён правилом") == std::string::npos) {
+        std::cerr << "  отказы по правилу не видны ребёнку: "
+                  << text::utf8_prefix(seen, 400) << std::endl;
+    }
+    ASSERT_TRUE(seen.find("Инструмент task запрещён правилом") !=
+                std::string::npos);
+    ASSERT_TRUE(seen.find("todowrite запрещён правилом") != std::string::npos);
+    ASSERT_TRUE(seen.find("depth limit") == std::string::npos);
+    /* Три запроса: два отказа пришли без обращения к модели, а третий
+     * ход — это реакция ребёнка на них. */
+    ASSERT_EQ(fx.host.calls(), (size_t)3);
+
+    /* План СЕССИИ не тронут: план — то, что человек видит и в чём
+     * участвует, и переписанный ребёнком план выглядел бы как решение
+     * пользователя. */
+    std::lock_guard<std::mutex> lk(engine_state().mtx);
+    ASSERT_TRUE(engine_state().todos.empty());
+}
+
+TEST(the_child_rules_decide_about_paths_outside_the_project) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    /* Сессия разрешает всё, включая выход за пределы проекта. */
+    engine().permissions().add_rule(
+        Rule{"external_directory", "*", PermissionAction::Allow,
+             "тест: сессия пускает куда угодно"});
+
+    /* Агент, которому выход запрещён: его правило идёт после
+     * унаследованного, то есть перекрывает его. */
+    AgentDef caged;
+    caged.name = "wp_caged";
+    caged.description = "За пределы проекта не ходит";
+    caged.mode = AgentMode::Subagent;
+    caged.prompt = "Работаю внутри проекта.";
+    /* Читать ему разрешено, иначе проверка остановилась бы на вопросе о
+     * самом чтении и до гейта не дошла: гейт (external_directory) —
+     * вот что здесь проверяется. */
+    PermissionEntry read;
+    read.key = "read";
+    read.action = PermissionAction::Allow;
+    caged.permission.push_back(read);
+    PermissionEntry no_outside;
+    no_outside.key = "external_directory";
+    no_outside.action = PermissionAction::Deny;
+    caged.permission.push_back(no_outside);
+    std::string err;
+    ASSERT_TRUE(AgentRegistry::instance().add(caged, &err));
+
+    /* Файл ВНЕ проекта, в доверенном каталоге /tmp. */
+    const fs::path outside = fs::path("/tmp") /
+                             ("wp_coder_outside_" + std::to_string(::getpid()) +
+                              ".txt");
+    {
+        std::ofstream f(outside);
+        f << "снаружи\n";
+    }
+
+    reset_host(fx.host, {
+        call_block("read_file", ",\n \"path\": \"" + outside.string() + "\""),
+        "За пределы проекта не хожу."});
+    const ToolOutput out = run_task_agent("wp_caged", "Выход наружу",
+                                         "Прочитай файл снаружи.");
+    const std::string seen = fx.host.transcript(1);
+    if (seen.find("запрещён правилом") == std::string::npos) {
+        std::cerr << "  ребёнок прошёл за пределы проекта: "
+                  << text::utf8_prefix(seen, 300) << std::endl;
+    }
+    ASSERT_TRUE(seen.find("запрещён правилом") != std::string::npos);
+    /* Отказ гейта, а не вопрос без ответа: «спросить и не дождаться» и
+     * «запрещено правилом» выглядели бы для модели одинаково. */
+    ASSERT_TRUE(seen.find("Пользователь не разрешил") == std::string::npos);
+    ASSERT_TRUE(out.output.find("не хожу") != std::string::npos);
+
+    /* Сессия при этом может: запрет ребёнка не стал запретом диалога.
+     * Без этой половины проверка прошла бы и при сужении правил СЕССИИ,
+     * то есть проверяла бы не то место. */
+    json::JsonValue parent_call = json::JsonValue::object();
+    parent_call.set("path", outside.string());
+    const ToolOutput parent_out =
+        ToolsRegistry::instance().run_output("read_file", parent_call);
+    if (parent_out.output.find("снаружи") == std::string::npos) {
+        std::cerr << "  сессия не прочитала файл снаружи: "
+                  << text::utf8_prefix(parent_out.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(parent_out.output.find("снаружи") != std::string::npos);
+
+    std::error_code ec;
+    fs::remove(outside, ec);
+}
+
+/* ======================================================================
+ * 14. И8.11: результат в обёртке — и идентификатор в ней же
+ *
+ * Проверка двойная по одной причине: обёртка без идентификатора была бы
+ * красивой формой, а идентификатор без обёртки — вещью, о которой
+ * модель не знает. Смысл 8.11 в том, что одно доезжает в другом.
+ * ====================================================================== */
+
+TEST(the_task_result_carries_the_task_id_the_model_can_continue_by) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    reset_host(fx.host, {"Итог: нашёл три места."});
+    const ToolOutput out = run_task_agent("wp_general", "Обзор",
+                                         "Посмотри и скажи.");
+
+    const std::string session_id = out.metadata.get_string("session_id");
+    ASSERT_FALSE(session_id.empty());
+    /* Обёртка порта: идентификатор, состояние, тело результата. Именно
+     * ИДЕНТИФИКАТОР, а не описание задачи — по нему модель продолжит. */
+    const std::string opening = "<task id=\"" + session_id +
+                                "\" state=\"completed\">";
+    if (out.output.find(opening) == std::string::npos) {
+        std::cerr << "  обёртка не названа верно: "
+                  << text::utf8_prefix(out.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(out.output.find(opening) != std::string::npos);
+    ASSERT_TRUE(out.output.find("<task_result>") != std::string::npos);
+    ASSERT_TRUE(out.output.find("Итог: нашёл три места.") !=
+                std::string::npos);
+    ASSERT_TRUE(out.output.find("</task_result>") != std::string::npos);
+    ASSERT_TRUE(out.output.back() == '>');
+
+    /* Формат ОБЪЯВЛЕН в системном промпте (общее правило D2): строка
+     * формата, о которой модель не знает, ею и не пользуется. */
+    ASSERT_TRUE(engine().build_system_prompt().find("<task_result>") !=
+                std::string::npos);
+    ASSERT_TRUE(engine().build_system_prompt().find("task_id") !=
+                std::string::npos);
+
+    /* И это не бумажный идентификатор: продолжение с ним работает. */
+    reset_host(fx.host, {"Продолжил: вот точные места."});
+    const ToolOutput second = run_task_agent("wp_general", "Уточнение",
+                                             "Теперь покажи вызовы.",
+                                             session_id);
+    ASSERT_EQ(second.metadata.get_string("session_id"), session_id);
+    ASSERT_TRUE(second.output.find("Продолжил") != std::string::npos);
+    /* Прерванная линия, которой не было в 8.9: отказ по лимиту приходит
+     * обёрткой и называет настроенный предел. */
+    reset_host(fx.host, {"Ещё."});
+    const ToolOutput third = run_task_agent("wp_general", "Ещё раз",
+                                            "И ещё немного.", session_id);
+    ASSERT_TRUE(third.output.find("<task id=\"" + session_id) !=
+                std::string::npos);
+}
+
+TEST(a_failed_task_answers_with_the_same_wrapper_and_says_why) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    /* Провайдер молчит: ход не состоялся. */
+    fx.host.fail = true;
+    const ToolOutput out = run_task_agent("wp_general", "Провайдер",
+                                         "Ничего не делать.");
+    const std::string session_id = out.metadata.get_string("session_id");
+
+    const std::string opening = "<task id=\"" + session_id +
+                                "\" state=\"error\">";
+    if (out.output.find(opening) == std::string::npos) {
+        std::cerr << "  отказ без обёртки или с чужим состоянием: "
+                  << text::utf8_prefix(out.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(out.output.find(opening) != std::string::npos);
+    ASSERT_TRUE(out.output.find("state=\"completed\"") == std::string::npos);
+    /* Причина внутри, а не вместо: вызывающий должен знать и что делать
+     * дальше, и что именно сломалось. */
+    ASSERT_TRUE(out.output.find("сеть недоступна") != std::string::npos);
+    ASSERT_TRUE(out.output.find("не выполнил задачу") != std::string::npos);
+
+    /* ОТКАЗЫ до хода обёрткой НЕ идут: задачи не было. Иначе появление
+     * идентификатора в отказе читалось бы как «работа началась». Проверяются
+     * ДВА отказа и не один: отказ по имени агента и отказ по полю — они
+     * пишутся разными строками, и проверка одного из них ничего не сказала
+     * бы о втором. */
+    /* Сколько задач было до отказов: их создавать нельзя. Первая часть
+     * проверки задачу создала, поэтому сравниваем снимок, а не ноль. */
+    const size_t tasks_before = child_session_files(fx.project).size();
+
+    json::JsonValue bad = json::JsonValue::object();
+    bad.set("description", "Несуществующий");
+    bad.set("prompt", "Ничего.");
+    bad.set("subagent_type", "wp_нет_такого");
+    const ToolOutput refused = ToolsRegistry::instance().run_output("task", bad);
+    ASSERT_TRUE(refused.output.find("<task ") == std::string::npos);
+    ASSERT_TRUE(refused.output.find("[ошибка] task") != std::string::npos);
+
+    json::JsonValue bg = json::JsonValue::object();
+    bg.set("description", "В фон");
+    bg.set("prompt", "Ничего.");
+    bg.set("subagent_type", "wp_general");
+    bg.set("background", true);
+    const ToolOutput no_bg = ToolsRegistry::instance().run_output("task", bg);
+    ASSERT_TRUE(no_bg.output.find("background") != std::string::npos);
+    if (no_bg.output.find("<task ") != std::string::npos) {
+        std::cerr << "  отказ по полю обёрнут задачей: "
+                  << text::utf8_prefix(no_bg.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(no_bg.output.find("<task ") == std::string::npos);
+    /* И задачи не создано: отказ до хода не оставляет файла. */
+    ASSERT_EQ(child_session_files(fx.project).size(), tasks_before);
+}
+
+
+/* ======================================================================
+ * 15. И8.12: каскад отмены
+ *
+ * Отмена родителя должна гасить ребёнка В ЖИВОМ запросе, а не между его
+ * шагами: иначе «стоп» ждёт, пока провайдер договорит, а это ровно тот
+ * случай, ради которого в И6.6 переписали блокирующий вызов. Проверка
+ * идёт на живой запрос (имитатор ждёт отмены), потому что на мгновенном
+ * ответе «отмена ничего не ждёт» прошла бы при любом коде.
+ * ====================================================================== */
+
+/* Отменить родителя, как только ребёнок ушёл в запрос. */
+void abort_when_the_subagent_is_in_flight(FakeHost& host) {
+    std::thread aborter([&host] {
+        for (int i = 0; i < 400 && !host.entered.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        engine().request_abort();
+    });
+    aborter.detach();
+}
+
+TEST(aborting_the_parent_stops_the_subagent_in_its_live_request) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    fx.host.wait_for_abort = true;
+    /* Поток отмены: без него проверка ждала бы истёкшего ожидания хоста и
+     * прошла бы с «провайдер не ответил» при работающем коде. */
+    abort_when_the_subagent_is_in_flight(fx.host);
+
+    const ToolOutput out = run_task_agent("wp_general", "Долгая задача",
+                                         "Смотри проект.");
+    /* Живой запрос ребёнка прервался по флагу отмены — тот же предикат,
+     * что у родителя. */
+    if (!fx.host.saw_abort.load()) {
+        std::cerr << "  ожидание запроса ребёнка не прервалось: "
+                  << text::utf8_prefix(out.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(fx.host.saw_abort.load());
+
+    /* Отмена названа ОТМЕНОЙ, а не сбоем провайдера: человек нажал «стоп»,
+     * и в ленте событий и в ответе модели должно быть написано то же самое.
+     * Раньше здесь был текст «провайдер не ответил» — он и появлялся бы. */
+    if (out.output.find("[прервано пользователем]") == std::string::npos) {
+        std::cerr << "  отмена не названа отменой: "
+                  << text::utf8_prefix(out.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(out.output.find("[прервано пользователем]") !=
+                std::string::npos);
+    ASSERT_TRUE(out.output.find("state=\"error\"") != std::string::npos);
+    ASSERT_TRUE(out.output.find("Провайдер не ответил") == std::string::npos);
+    /* Следующего шага ребёнка не было: один запрос, один отказ. */
+    ASSERT_EQ(fx.host.calls(), (size_t)1);
+
+    /* Превосходная задача не потеряна: сессия ребёнка записана даже при
+     * отмене (И8.9), и её можно продолжить. */
+    const std::vector<std::string> files = child_session_files(fx.project);
+    ASSERT_EQ(files.size(), (size_t)1);
+    std::string error;
+    const SessionFile child = read_session_file(files[0], &error);
+    ASSERT_TRUE(error.empty());
+    ASSERT_FALSE(child.session_id.empty());
+}
+
+TEST(aborting_the_parent_releases_the_subagent_waiting_for_permission) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    /* Ребёнок без правил спрашивает разрешение на чтение — и ждёт. */
+    ASSERT_TRUE(add_bare_agent("wp_asker", "Субагент, у которого спрашивают."));
+    {
+        std::ofstream f(fx.project / "odin.txt");
+        f << "содержимое\n";
+    }
+    reset_host(fx.host, {
+        call_block("read_file", ",\n \"path\": \"odin.txt\""),
+        "Файл прочитан."});
+
+    /* Отмена приходит, пока ребёнок висит на вопросе пользователю: без
+     * неё «стоп» не вытащил бы ребёнка из ожидания, и родитель продолжил бы
+     * работу вместо того, чтобы остановиться. */
+    std::atomic<bool> saw_question{false};
+    /* Отсчёт от появления вопроса: до него ждать нечего, и «долго» значило
+     * бы только то, что вопрос долго не появлялся. */
+    std::atomic<long long> asked_at_ms{0};
+    std::vector<std::thread> threads;
+    threads.emplace_back([&] {
+        for (int i = 0; i < 400; ++i) {
+            if (!engine().permissions().pending().empty()) {
+                saw_question.store(true);
+                asked_at_ms.store(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now()
+                            .time_since_epoch()).count());
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        engine().request_abort();
+    });
+    Joiner joiner(threads);
+
+    const ToolOutput out = run_task_agent("wp_asker", "Вопрос",
+                                         "Прочитай файл.");
+    joiner.join();
+
+    ASSERT_TRUE(out.output.find("[прервано пользователем]") !=
+                std::string::npos);
+    ASSERT_TRUE(out.output.find("state=\"error\"") != std::string::npos);
+    /* Вопрос ДЕЙСТВИТЕЛЬНО был: иначе проверка прошла бы потому, что читать
+     * разрешили без спроса, и каскад отмены в неё не попал бы вовсе. */
+    if (!saw_question.load()) {
+        std::cerr << "  вопроса о разрешении не было — отменять было нечего"
+                  << std::endl;
+    }
+    ASSERT_TRUE(saw_question.load());
+    /* Вопрос снят, а не висит: иначе UI остался бы с открытым вопросом
+     * после остановки. */
+    ASSERT_TRUE(engine().permissions().pending().empty());
+    /* И снят ОТМЕНОЙ, а не истечением ожидания: страховочный таймаут в
+     * тестах — 2 с, и если бы сработал он, «стоп» в приложении ждал бы
+     * столько же на каждом вопросе. Порог 1.5 с с запасом на медленную
+     * машину; при правильном коде освобождение мгновенное. */
+    const long long waited =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count() -
+        asked_at_ms.load();
+    if (waited > 1500) {
+        std::cerr << "  освобождение вопроса заняло " << waited
+                  << " мс — значит, сработал таймаут ожидания, а не отмена"
+                  << std::endl;
+    }
+    ASSERT_TRUE(waited < 1500);
+    /* И область вернулась: остановка ребёнка не должна оставить его промпт
+     * следующему ходу родителя. */
+    const RunScope after = engine().scope_snapshot();
+    ASSERT_EQ(after.agent, std::string(""));
+    ASSERT_TRUE(after.info == nullptr);
+}
+
+TEST(aborting_the_parent_kills_the_command_the_subagent_is_running) {
+    /* Самый глубокий случай каскада: отмена приходит, когда ребёнок внутри
+     * ИНСТРУМЕНТА. Здесь работает не флаг между шагами, а токен отмены
+     * хода (core/abort.h): `bash` убивает ГРУППУ процессов (И6.7), и без
+     * отмены токена «стоп» ждал бы конца команды — то есть до получаса
+     * `sleep 30`.
+     *
+     * Проверка идёт на времени намеренно: «ответ пришёл» и «ответ пришёл
+     * быстро» — разные вещи, и второе здесь и есть предмет. */
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    /* Параметр `cli`, а не `command`: у bash схема требует cli, и вызов с
+     * «command» отклонялся проверкой аргументов — команда не запускалась
+     * вовсе, а проверка проходила, ничего не делая. Нашлось это тем, что
+     * мутация «токен не прерывается» выжила. */
+    ASSERT_TRUE(add_command_agent());
+    /* Команда взята из allowlist политики (И3) и она ДЛИННАЯ: `sleep` в
+     * allowlist нет, и вызов отклонялся политикой мгновенно — команда не
+     * запускалась, а проверка проходила, ничего не делая. Нашлось это тем,
+     * что мутация «токен не прерывается» выжила. */
+    reset_host(fx.host, {
+        call_block("bash", ",\n \"cli\": \"ping -c 25 127.0.0.1\""),
+        "Команда не нужна."});
+
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    threads.emplace_back([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        engine().request_abort();
+    });
+    Joiner joiner(threads);
+    const ToolOutput out = run_task_agent("wp_commander", "Долгая команда",
+                                         "Запусти долгую команду.");
+    joiner.join();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+
+    if (out.output.find("[прервано пользователем]") == std::string::npos) {
+        std::cerr << "  отмена не остановила команду ребёнка ("
+                  << elapsed << " мс): "
+                  << text::utf8_prefix(out.output, 200) << std::endl;
+    }
+    ASSERT_TRUE(out.output.find("[прервано пользователем]") !=
+                std::string::npos);
+    /* Команда была убита, а не доработана: 30 с ожидания при сорока
+     * миллисекундах до отмены. Порог с запасом (5 с), чтобы прогон не
+     * «мигал» на загруженной машине. */
+    if (elapsed > 5000) {
+        std::cerr << "  команда ребёнка не убита: " << elapsed << " мс"
+                  << std::endl;
+    }
+    ASSERT_TRUE(elapsed < 5000);
+    /* Следующего шага не было: оборванный ход не продолжается. */
+    ASSERT_EQ(fx.host.calls(), (size_t)1);
+    /* И задача сохранена: прерванную работу можно продолжить (И8.9). */
+    ASSERT_EQ(child_session_files(fx.project).size(), (size_t)1);
 }

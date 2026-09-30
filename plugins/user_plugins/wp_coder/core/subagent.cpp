@@ -9,7 +9,9 @@
 #include "agent_components.h"
 #include "agent_registry.h"
 #include "engine.h"
+#include "id_prefix.h"
 #include "limits.h"
+#include "session_store.h"
 #include "tool.h"
 #include "tools_registry.h"
 
@@ -34,6 +36,26 @@ std::string refuse(const std::string& reason) {
 }
 
 std::string quoted(const std::string& s) { return "«" + s + "»"; }
+
+/* Обёртка результата задачи (И8.11, порт task.ts:69).
+ *
+ * Идентификатор задачи едет ВМЕСТЕ с результатом, и это ровно то, чего
+ * не хватало механизму продолжения (И8.9): без него модель не знала, что
+ * задачу можно продолжить, потому что узнать идентификатор было негде.
+ * Формат назван в kBaseSystemPrompt — по общему правилу файла (D2):
+ * строка формата, о которой модель не знает, ею и не пользуется.
+ *
+ * `state` — «completed» или «error»: отдельный признак, а не слово в
+ * тексте, потому что по нему решает вызывающий, а читать текст он не
+ * обязан. ОТКАЗЫ (несуществующий агент, лимит глубины, негодный task_id)
+ * обёрткой НЕ идут: там не было задачи, а был отказ до неё, и обёртка
+ * с идентификатором выглядела бы как «задача выполнена». */
+std::string task_wrapper(const std::string& session_id, bool ok,
+                         const std::string& body) {
+    return "<task id=\"" + session_id + "\" state=\"" +
+           (ok ? "completed" : "error") + "\">\n<task_result>\n" + body +
+           "\n</task_result>\n</task>";
+}
 
 } // namespace
 
@@ -96,8 +118,10 @@ void register_task_tool() {
                     "видит разговора, поэтому всё нужное здесь");
     b.str("subagent_type", "имя субагента (как у субагента из списка "
                            "доступных)");
-    b.str("task_id", "НЕ ПОДДЕРЖИВАЕТСЯ (задача 8.9): продолжить ранее "
-                     "запущенную задачу нельзя, поле оставь пустым");
+    b.str("task_id", "идентификатор РАНЕЕ ЗАПУЩЕННОЙ задачи этого же "
+                     "субагента (вида ses_000000000123), чтобы продолжить "
+                     "её с того места, где она остановилась; поле пустое — "
+                     "это новая задача");
     b.boolean("background", "НЕ ПОДДЕРЖИВАЕТСЯ (задача 8.14): субагент "
                             "выполняется до конца, ответ придёт в этом же "
                             "вызове; поле оставь false");
@@ -136,18 +160,71 @@ void register_task_tool() {
             return out;
         }
 
-        /* --- 2. Поля, работа которых ещё не написана --- */
-        /* Объявлены в схеме (подпись порта), но не работают. Отказ здесь
-         * явный, потому что молчаливый игнор выглядел бы как успех: модель
-         * решила бы, что продолжила задачу, и ждала бы результата, которого
-         * не будет. */
-        if (!args.get_string("task_id").empty()) {
-            out.output = refuse(
-                "поле «task_id» не поддерживается: продолжить ранее"
-                " запущенную задачу пока нельзя. Поставь новую задачу без"
-                " task_id.");
-            return out;
+        /* --- 2. task_id: продолжение дочерней сессии (И8.9) ---
+         *
+         * Отказ 8.7 на это поле снят: продолжение написано. Проверка
+         * порядка не формальность — `task_id` приходит ОТ МОДЕЛИ, а из
+         * него склеивается путь к файлу, поэтому всё, что не является
+         * идентификатором сессии, отсекается ДО обращения к диску.
+         *
+         * Список задач субагента — это файлы в подкаталоге
+         * `sessions/sub` (kSubagentSessionDir). Отдельный каталог, а не
+         * фильтр по parent_id в общем: правило resume («самый свежий файл»)
+         * обходит каталог нерекурсивно, и файл ребёнка рядом с сессией
+         * человека стал бы «текущей сессией» — resume открыл бы диалог
+         * субагента вместо диалога пользователя. Поэтому проверка «это
+         * задача субагента» получилась бесплатно: идентификатор сессии
+         * человека в подкаталоге не лежит, и ответ — «не найдена». */
+        std::string task_id = args.get_string("task_id");
+        SessionFile resumed;
+        /* Идентификатор родителя — до проверки task_id: он нужен и для
+         * сверки «чья это задача», и для записи дочерней сессии, и
+         * выдаётся один раз (ensure_session_id, И8.9). */
+        const std::string parent_id = engine.ensure_session_id();
+        if (!task_id.empty()) {
+            if (!SessionArchive::is_session_id(task_id)) {
+                out.output = refuse(
+                    "поле «task_id» — не идентификатор задачи: ожидается"
+                    " ses_ и 12 цифр. Поставь новую задачу без task_id.");
+                return out;
+            }
+            const std::string dir = ctx.callbacks().path_data_dir
+                                        ? ctx.callbacks().path_data_dir()
+                                        : std::string();
+            std::string error;
+            const std::string path = SessionArchive::subagent_file_path(dir, task_id);
+            std::vector<std::string> warnings;
+            if (path.empty() ||
+                !SessionArchive::load(path, resumed, &error, &warnings)) {
+                out.output = refuse(
+                    "задача " + task_id + " не найдена: " +
+                    (error.empty() ? std::string("файла нет") : error) +
+                    ". Поставь новую задачу без task_id.");
+                return out;
+            }
+            for (const std::string& w : warnings) {
+                engine.push_event(AgentEvent::Status, "task/" + task_id + ": " + w);
+            }
+            /* Чужая задача — из другого диалога. Проверяется только когда
+             * у обоих есть идентификатор: у родителя он появляется при
+             * первом сохранении, и до него любой `task_id` выглядел бы
+             * «чужим». */
+            if (!resumed.parent_id.empty() && resumed.parent_id != parent_id) {
+                out.output = refuse(
+                    "задача " + task_id + " принадлежит другому диалогу"
+                    " (родитель " + resumed.parent_id + ", текущий " +
+                    parent_id + "). Продолжить её здесь нельзя: субагент"
+                    " получил бы чужую переписку. Поставь новую задачу без"
+                    " task_id.");
+                return out;
+            }
         }
+
+        /* --- 2a. Поле, работа которого ещё не написана --- */
+        /* Объявлено в схеме (подпись порта), но не работает. Отказ здесь
+         * явный, потому что молчаливый игнор выглядел бы как успех: модель
+         * решила бы, что задача ушла в фон, и ждала бы уведомления,
+         * которого не будет (работа — И8.14). */
         if (args.get_bool("background")) {
             out.output = refuse(
                 "поле «background» не поддерживается: субагент выполняется"
@@ -155,19 +232,36 @@ void register_task_tool() {
             return out;
         }
 
-        /* --- 3. Глубина вложенности (порог — 8.8) --- */
+        /* --- 3. Глубина вложенности (предел настраивается, И8.8) ---
+         *
+         * Глубина и предел читаются под ОДНИМ локом: решение «вложить ли
+         * ещё» не должно собираться из двух снимков. Предел — из
+         * настройки `wp_coder.subagent_depth` (EngineState, читается в
+         * load_settings), а не из константы: константа осталась
+         * дефолтом, и «два места, которые думают о пределе» здесь бы и
+         * разошлись. */
         int depth = 0;
+        int depth_limit = limits::kSubagentDepthLimit;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
             depth = state.scope.depth + 1;
+            depth_limit = state.subagent_depth;
         }
-        if (depth > limits::kSubagentDepthLimit) {
+        if (depth > depth_limit) {
+            /* Сообщение порта — «Subagent depth limit reached (N).» — и в
+             * N теперь эффективное значение, а не константа: модель, которая
+             * попросит человека поднять предел, должна увидеть, какой он
+             * сейчас. Название настройки в тексте нужно по той же
+             * причине, по которой отказ называет недоступных субагентов:
+             * отказ без подсказки стоит модели следующего шага на ту же
+             * ошибку. */
             out.output = refuse(
                 "Subagent depth limit reached (" +
-                std::to_string(limits::kSubagentDepthLimit) +
+                std::to_string(depth_limit) +
                 "). Глубже вкладывать субагентов нельзя: это кончилось бы"
-                " рекурсивными запросами к модели. Сделай работу сам или"
-                " вернись к вызывающему агенту.");
+                " рекурсивными запросами к модели. Предел — настройка"
+                " wp_coder.subagent_depth, и поднимает её пользователь."
+                " Сделай работу сам.");
             return out;
         }
 
@@ -205,11 +299,13 @@ void register_task_tool() {
 
         /* --- 5. Правила и область выполнения --- */
         std::vector<AgentLoadDiag> diags;
-        /* База — копия правил сессии под локом движка разрешений: Info
-         * живёт дольше вызова, а правила меняются из UI-потока. */
-        const std::shared_ptr<agent::Info> info =
-            agent::Info::from_def(*def, engine.permissions().rules_snapshot(),
-                                  &diags);
+        /* for_subagent, а не from_def (И8.10): ребёнок наследует от
+         * сессии только запреты и `external_directory`, а сверху получает
+         * свои правила и авто-запрет на `task`/`todo`. Снимок правил
+         * сессии берётся под локом движка разрешений: Info живёт дольше
+         * вызова, а правила меняются из UI-потока. */
+        const std::shared_ptr<agent::Info> info = agent::Info::for_subagent(
+            *def, engine.permissions().rules_snapshot(), &diags);
         for (const AgentLoadDiag& d : diags) {
             engine.push_event(AgentEvent::Status,
                               "task/" + name + ": " + d.message);
@@ -238,29 +334,91 @@ void register_task_tool() {
         ScopedAgentScope guard(engine, std::move(scope));
         const std::string sys = engine.build_system_prompt();
 
+        /* Идентификатор задачи и её название — ДО хода, а не после: ими
+         * подписывается событие «субагент запущен», и 8.11 повесит на
+         * тот же идентификатор обёртку результата. Выдавать его после
+         * означало бы, что в событии запуска его нет.
+         *
+         * Название при продолжении остаётся прежним: описание нового
+         * вызова — подпись конкретного продолжения, а не имя задачи, и
+         * переименование по нему сделало бы «продолжить задачу»
+         * неотличимым от «начать новую». */
+        const std::string session_id =
+            task_id.empty() ? ids().next_session() : task_id;
+        const std::string title =
+            (task_id.empty() || resumed.title.empty())
+                ? (description + " (@" + name + " subagent)")
+                : resumed.title;
+
         engine.push_event(AgentEvent::Status,
                           "task: субагент " + name + " — " + description);
 
         /* --- 6. Ход субагента --- */
+        /* Продолжение получает историю из дочерней сессии (И8.9): prompt
+         * становится следующей репликой того же разговора, а не началом
+         * нового. */
         const SubagentResult r = run_subagent_turn(
             state, ctx.callbacks(),
             [&engine](AgentEvent::Kind k, const std::string& text) {
                 engine.push_event(k, text);
             },
-            sys, prompt, max_steps);
+            sys, prompt, max_steps, resumed.messages);
 
         out.title = "task " + description + " (" + name + ")";
         out.metadata.set("agent", name);
         out.metadata.set("depth", static_cast<long long>(depth));
         out.metadata.set("steps", static_cast<long long>(r.steps));
         out.metadata.set("task", description);
+        out.metadata.set("session_id", session_id);
 
-        if (!r.ok) {
-            out.output = "[ошибка] task: субагент " + name + " не выполнил"
-                         " задачу.\n" + r.error;
-            return out;
+        /* --- 7. Дочерняя сессия (И8.9) ---
+         *
+         * Пишется ЛЮБЫМ исходом хода, включая отказ и прерывание:
+         * частично сделанная работа тоже стоит продолжения, а терять её
+         * молча значило бы, что `task_id` бесполезен ровно тогда, когда он
+         * нужен.
+         *
+         * Ошибка записи — не ошибка задачи: ход-то состоялся, поэтому в
+         * ответе модели она выглядела бы ошибкой работы. Пользователь
+         * узнаёт о ней из события, а продолжить задачу будет нечем. */
+        {
+            SessionFile child;
+            child.session_id = session_id;
+            child.parent_id = parent_id;
+            child.title = title;
+            child.messages = r.history;
+            const std::string dir = ctx.callbacks().path_data_dir
+                                        ? ctx.callbacks().path_data_dir()
+                                        : std::string();
+            const std::string path =
+                SessionArchive::subagent_file_path(dir, session_id);
+            std::string error;
+            if (path.empty() || !SessionArchive::save(path, child, &error)) {
+                out.metadata.set("session_saved", false);
+                engine.push_event(
+                    AgentEvent::Status,
+                    "task/" + name + ": не удалось сохранить задачу " +
+                        session_id + " — " +
+                        (error.empty() ? std::string("нет каталога данных")
+                                       : error));
+            } else {
+                out.metadata.set("session_saved", true);
+                engine.push_event(
+                    AgentEvent::Status,
+                    "task/" + name + ": задача " + session_id +
+                        (task_id.empty() ? " создана" : " продолжена"));
+            }
         }
-        out.output = r.text;
+
+        /* И8.11: результат — обёртка с идентификатором задачи, и она
+         * одинакова для успеха и отказа. Отдельным текстом «субагент не
+         * выполнил задачу» больше нет: состояние говорит признак, а
+         * внутри лежит сама причина, и модель читает одно место вместо
+         * двух. */
+        out.output = task_wrapper(session_id, r.ok,
+                                  r.ok ? r.text
+                                       : ("Субагент " + name +
+                                          " не выполнил задачу.\n" + r.error));
         return out;
     };
 

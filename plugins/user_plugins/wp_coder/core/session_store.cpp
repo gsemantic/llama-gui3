@@ -13,6 +13,14 @@ namespace fs = std::filesystem;
 namespace coder {
 namespace {
 
+/* Каталог файлов сессий — в одном месте: путь к файлу сессии человека, путь
+ * к файлу сессии субагента и правило resume («самый свежий файл») должны
+ * смотреть в один каталог, иначе «новый» каталог станет вторым местом
+ * одного факта. */
+std::string sessions_dir(const std::string& data_dir) {
+    return data_dir + "/wp_coder/sessions";
+}
+
 json::JsonValue output_to_json(const ToolOutput& out) {
     json::JsonValue v = json::JsonValue::object();
     v.set("title", out.title);
@@ -238,6 +246,12 @@ json::JsonValue SessionArchive::to_json(const SessionFile& session) {
         msgs.push_back(std::move(mv));
     }
     root.set("messages", std::move(msgs));
+    /* Дочерняя сессия (И8.9). Пишутся только когда заполнены: у сессии
+     * человека этих полей нет, и файл с двумя пустыми строками читался бы
+     * как «сессия без родителя, но с названием», то есть как ошибка
+     * формата. */
+    if (!session.parent_id.empty()) root.set("parent_id", session.parent_id);
+    if (!session.title.empty()) root.set("title", session.title);
     return root;
 }
 
@@ -266,6 +280,11 @@ bool SessionArchive::from_json(const json::JsonValue& value, SessionFile& out,
     out = SessionFile();
     out.version = kSessionFileVersion;
     out.session_id = value.get_string("session", "");
+    /* Отсутствие полей — не ошибка: это либо сессия человека (их у неё
+     * нет), либо файл, записанный до И8.9. И то и другое читается как
+     * «корень». */
+    out.parent_id = value.get_string("parent_id", "");
+    out.title = value.get_string("title", "");
     if (!value.has("messages")) {
         set_error(error, "в файле сессии нет списка сообщений");
         return false;
@@ -315,12 +334,30 @@ bool SessionArchive::from_json(const json::JsonValue& value, SessionFile& out,
 std::string SessionArchive::file_path(const std::string& data_dir,
                                     const std::string& session_id) {
     if (data_dir.empty() || session_id.empty()) return std::string();
-    return data_dir + "/wp_coder/sessions/" + session_id + ".json";
+    return sessions_dir(data_dir) + "/" + session_id + ".json";
+}
+
+std::string SessionArchive::subagent_file_path(const std::string& data_dir,
+                                           const std::string& session_id) {
+    if (data_dir.empty() || session_id.empty()) return std::string();
+    return sessions_dir(data_dir) + "/" + kSubagentSessionDir + "/" +
+           session_id + ".json";
+}
+
+bool SessionArchive::is_session_id(const std::string& id) {
+    /* Префикс и длина — id_has_prefix; цифры — id_number (он возвращает 0
+     * и для не-идентификатора, и для нуля, а у настоящего идентификатора
+     * номер не нулевой: 000000000000 не выдаёт ни одна последовательность,
+     * начинающая с 1). */
+    return id_has_prefix(id, kSessionPrefix) && id_number(id) != 0;
 }
 
 std::string SessionArchive::current_file(const std::string& data_dir) {
     if (data_dir.empty()) return std::string();
-    const fs::path dir = fs::path(data_dir) / "wp_coder" / "sessions";
+    /* Обход НЕРЕКУРСИВНЫЙ, и это теперь часть контракта: файлы сессий
+     * субагентов лежат в подкаталоге (И8.9) и в «текущую» сессию
+     * попасть не должны. */
+    const fs::path dir = sessions_dir(data_dir);
     std::error_code ec;
     if (!fs::is_directory(dir, ec)) return std::string();
 

@@ -535,4 +535,10 @@ TEST(limits_file_is_single_source_of_truth) {
      * число из порта (COMPACTION_BUFFER), и его правка означает
      * отклонение от него, а не «подстройку под нагрузку». */
     ASSERT_EQ((int)limits::kCompactionBuffer, 20000);
+    /* И8.8: константа стала ДЕФОЛТОМ настройки `wp_coder.subagent_depth`
+     * (её читает Engine::load_settings), то есть числом, которое
+     * получают все, кто настройку не трогал. Поэтому оно и закреплено
+     * здесь: смена дефолта меняет поведение у всех, и делать это надо
+     * вместе с записью в плане, а не молча. */
+    ASSERT_EQ((int)limits::kSubagentDepthLimit, 1);
 }

@@ -170,6 +170,19 @@ struct AgentDef {
     std::map<std::string, bool> tools;
     /* `permission:` — в порядке объявления (см. PermissionEntry). */
     std::vector<PermissionEntry> permission;
+    /* Права В РОЛИ СУБАГЕНТА (И8.10). Заполняют только встроенные агенты
+     * (register_builtin_agents); у агентов из файлов поле пусто, и их
+     * правами управляет `permission`.
+     *
+     * Отдельное поле, а не ещё одна строка в `permission`, по причине,
+     * которую видно только в 8.10: субагент наследует от сессии ТОЛЬКО
+     * запреты, поэтому встроенному агенту, который должен что-то делать
+     * без вопроса, это «что-то» надо разрешить именно здесь. В общем
+     * `permission` такое правило перекрыло бы решение ПОЛЬЗОВАТЕЛЯ в
+     * сессии (правила агента идут после базовых, И8.4) — то есть
+     * встроенный агент, написанный не пользователем, отменял бы его
+     * запрет. Права субагента не должны этого уметь. */
+    std::vector<PermissionEntry> subagent_permission;
     /* Ключи, которых нет в известном наборе, — плюс содержимое группы
      * `options:` (разворачивается в имена БЕЗ префикса: карта
      * `options: {retries: "2"}` даёт опцию `retries`, а не
@@ -292,6 +305,34 @@ std::vector<AgentLoadDiag> load_agents_from_directory(
  *
  * diags необязателен: нормализация ничего не разрушает, и замечания
  * нужны только там, где результат показывают человеку. */
+/* База правил РЕБЁНКА (И8.10): из правил сессии наследуются только
+ * запреты и ключ `external_directory`.
+ *
+ * external_directory наследуется целиком — вместе с разрешениями на
+ * доверенные каталоги, — и это не уступка: «куда можно ходить» не то же
+ * самое, что «что можно делать», а спрашивать пользователя у каждого
+ * субагента про /tmp значило бы превратить доверенный каталог в помеху.
+ * Права на действия не наследуются: см. Info::for_subagent. */
+Ruleset subagent_base_rules(const Ruleset& session_rules);
+
+/* Ключи, которые субагент по умолчанию НЕ может (И8.10, порт
+ * agent/subagent-permissions.ts): делегировать дальше и вести план
+ * СЕССИИ. Оба закрываются только явным правилом агента.
+ *
+ * Имена, а не строки в коде: enforcement спрашивает по ключу, и
+ * `todowrite` — это инструмент, а `todo` — ключ его группы. */
+inline constexpr const char* kSubagentNoDelegateKey = "task";
+inline constexpr const char* kSubagentNoPlanKey = "todo";
+
+/* Правила из готового списка PermissionEntry — тем же разбором, что и
+ * `permission` (ключ приводится к каноническому, неизвестный остаётся
+ * ключом с замечанием). Нужно для прав в роли субагента (И8.10), и это
+ * отдельная функция, а не второй разбор того же. */
+Ruleset normalized_entry_rules(const std::vector<PermissionEntry>& entries,
+                              const std::string& origin,
+                              const std::string& agent_name,
+                              std::vector<AgentLoadDiag>* diags);
+
 Ruleset normalized_agent_rules(const AgentDef& def,
                                std::vector<AgentLoadDiag>* diags = nullptr);
 
@@ -347,6 +388,27 @@ public:
     static std::shared_ptr<Info> from_def(const AgentDef& def, const Ruleset& base,
                                           std::vector<AgentLoadDiag>* diags = nullptr);
 
+    /* Сборка рантайма СУБАГЕНТА (И8.10). Отличие от from_def не в
+     * оформлении, а в трёх правилах, и каждое стоит своего места:
+     *   1. база — из правил сессии наследуются ТОЛЬКО запреты и ключ
+     *      `external_directory` (subagent_base_rules). Разрешения и
+     *      «спросить» не наследуются: решение пользователя «всегда
+     *      разрешить» относится к ЕГО диалогу, и тихая передача его
+     *      агенту означала бы, что делегирование обходит права, о которых
+     *      человек знает;
+     *   2. поверх базы — права агента (`permission`) и права в роли
+     *      субагента (`subagent_permission`, встроенные агенты);
+     *   3. авто-запрет на `task` и `todo` там, где агент не сказал о них
+     *      ничего (порядок правил решает: запрет идёт последним и
+     *      перекрывает).
+     *
+     * Вызывающий — инструмент `task` (subagent.cpp). Основной агент
+     * собирается по-прежнему через from_def: сужение относится к
+     * делегированию, а не к агенту вообще. */
+    static std::shared_ptr<Info> for_subagent(
+        const AgentDef& def, const Ruleset& session_rules,
+        std::vector<AgentLoadDiag>* diags = nullptr);
+
     const std::string& name() const { return name_; }
     const std::string& description() const { return description_; }
     AgentMode mode() const { return mode_; }
@@ -383,8 +445,14 @@ private:
     /* Сборка живёт в конструкторе, а не в отдельной функции-фабрике:
      * класс с мьютексом нельзя ни скопировать, ни переместить, и
      * `make_shared` в private-конструктор тоже не пускает. */
+    /* Роль определяет СБОРКУ правил (8.4 против 8.10), поэтому она
+     * аргументом конструктора, а не флагом внутри from_def: одна
+     * функция с булевым параметром «субагент ли» рано или поздно была бы
+     * вызвана с флагом наоборот, и разница стала бы невидимой. */
+    enum class Role { Primary, Subagent };
+
     Info(const AgentDef& def, const Ruleset& base,
-         std::vector<AgentLoadDiag>* diags);
+         std::vector<AgentLoadDiag>* diags, Role role);
 
     std::string name_;
     std::string description_;
