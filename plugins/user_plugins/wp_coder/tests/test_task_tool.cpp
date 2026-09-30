@@ -2209,3 +2209,201 @@ TEST(aborting_the_parent_kills_the_command_the_subagent_is_running) {
     /* И задача сохранена: прерванную работу можно продолжить (И8.9). */
     ASSERT_EQ(child_session_files(fx.project).size(), (size_t)1);
 }
+
+/* ======================================================================
+ * 16. И8.13: описание `task` собирается под вызывающего
+ *
+ * Список субагентов попадает в КАЖДЫЙ запрос, поэтому проверяется не
+ * функция сборки, а то, что реально уехало в модель: блок описания в
+ * системном промпте. Отдельно — что список отфильтрован по правилам
+ * ВЫЗЫВАЮЩЕГО, а не по наличию агента: «агент есть» и «его можно
+ * позвать» — разные вещи.
+ * ====================================================================== */
+
+/* Список субагентов в тексте описания (между заголовком и концом). */
+std::string subagent_list_from(const std::string& prompt) {
+    const std::string head = "Доступные субагенты:\n";
+    const size_t at = prompt.find(head);
+    if (at == std::string::npos) return std::string();
+    const size_t from = at + head.size();
+    /* Конец списка — первая строка параметров описания («description — …»)
+     * либо конец текста: список идёт до конца описания инструмента. */
+    const size_t tail = prompt.find("\n    description", from);
+    return prompt.substr(from, tail == std::string::npos
+                                   ? std::string::npos
+                                   : tail - from);
+}
+
+TEST(the_task_description_lists_the_available_subagents) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    const std::string prompt = engine().build_system_prompt();
+    if (!catalogue_mentions(prompt, "task")) {
+        std::cerr << "  в каталоге модели нет task: "
+                  << text::utf8_prefix(prompt, 300) << std::endl;
+    }
+    ASSERT_TRUE(catalogue_mentions(prompt, "task"));
+
+    /* Заголовок списка — в промпте, а извлекается уже сам список. */
+    ASSERT_TRUE(prompt.find("Доступные субагенты") != std::string::npos);
+    const std::string list = subagent_list_from(prompt);
+    if (list.empty()) {
+        std::cerr << "  список субагентов пуст: "
+                  << text::utf8_prefix(prompt.substr(prompt.find("\n- task")),
+                                       300)
+                  << std::endl;
+    }
+    ASSERT_FALSE(list.empty());
+    /* Имя плюс ЕГО ОПИСАНИЕ: модели нужно знать, чем этот агент
+     * занимается, а «wp_explore» само по себе не говорит ничего. */
+    ASSERT_TRUE(list.find("wp_general") != std::string::npos);
+    ASSERT_TRUE(list.find("wp_explore") != std::string::npos);
+    ASSERT_TRUE(list.find("Субагент-поиск") != std::string::npos);
+    /* Список строкой на агента, а не одной простынёй: иначе не видно,
+     * где кончилось одно описание и началось другое. */
+    ASSERT_TRUE(list.find("\n- ") != std::string::npos);
+}
+
+TEST(a_subagent_the_caller_may_not_use_is_hidden_from_the_description) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    /* Человек запретил делегировать к одному агенту. */
+    engine().permissions().add_rule(
+        Rule{"task", "wp_explore", PermissionAction::Deny,
+             "тест: к wp_explore не звать"});
+
+    const std::string list = subagent_list_from(engine().build_system_prompt());
+    if (list.find("wp_explore") != std::string::npos) {
+        std::cerr << "  запрещённый субагент в списке: "
+                  << text::utf8_prefix(list, 300) << std::endl;
+    }
+    ASSERT_TRUE(list.find("wp_explore") == std::string::npos);
+    /* Остальные на месте: запрет одного не должен был вычеркнуть всех. */
+    ASSERT_TRUE(list.find("wp_general") != std::string::npos);
+
+    /* И до места, где зовут, доведено: вызов запрещённого агента отказ,
+     * а не «агент не найден» — запрет по имени виден по ключу `task`. */
+    reset_host(fx.host, {"Не понадобится."});
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", "Обзор");
+    call.set("prompt", "Посмотри.");
+    call.set("subagent_type", "wp_explore");
+    /* Через ToolRunner, а не напрямую: enforcement по ключу `task` живёт
+     * там, и прямой вызов реестра его не проходит — то есть проверил бы
+     * не отказ, а обработчик инструмента. */
+    ToolRunner runner(engine_state(), cb,
+                      [](AgentEvent::Kind, const std::string&) {});
+    const ToolOutcome outcome = runner.run("task", call);
+    if (!outcome.ok &&
+        outcome.error.find("запрещён правилом") == std::string::npos) {
+        std::cerr << "  запрет по имени дал не тот отказ: "
+                  << text::utf8_prefix(outcome.error, 200) << std::endl;
+    }
+    ASSERT_FALSE(outcome.ok);
+    ASSERT_TRUE(outcome.error.find("запрещён правилом") != std::string::npos);
+    /* Отказ называет ИМЯ агента, а не только ключ: иначе модель не поняла
+     * бы, что именно нельзя, и позвала бы другого. */
+    ASSERT_TRUE(outcome.error.find("wp_explore") != std::string::npos);
+    ASSERT_EQ(fx.host.calls(), (size_t)0);
+}
+
+TEST(the_list_belongs_to_the_calling_agent_and_not_to_the_session) {
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    /* Ребёнок, которому делегирование разрешено, но не к агенту
+     * wp_explore. Сессия при этом ничего не запрещала: если бы список
+     * брался у сессии, wp_explore остался бы в списке — и модель
+     * потратила бы шаг на заведомо отклонённый вызов. */
+    AgentDef picky;
+    picky.name = "wp_picky";
+    picky.description = "Делегирует не всему подряд";
+    picky.mode = AgentMode::Subagent;
+    picky.prompt = "Делегирую.";
+    PermissionEntry task;
+    task.key = "task";
+    task.action = PermissionAction::Allow;
+    picky.permission.push_back(task);
+    PermissionEntry no_explore;
+    no_explore.key = "task";
+    no_explore.pattern = "wp_explore";
+    no_explore.action = PermissionAction::Deny;
+    picky.permission.push_back(no_explore);
+    std::string err;
+    ASSERT_TRUE(AgentRegistry::instance().add(picky, &err));
+
+    reset_host(fx.host, {"Готово."});
+    run_task_agent("wp_picky", "Проверка списка", "Ничего не делать.");
+
+    const std::string child_prompt = fx.host.sys(0);
+    const std::string child_list = subagent_list_from(child_prompt);
+    if (child_list.find("wp_explore") != std::string::npos ||
+        child_list.find("wp_general") == std::string::npos) {
+        std::cerr << "  список у ребёнка не его: "
+                  << text::utf8_prefix(child_list, 300) << std::endl;
+    }
+    ASSERT_TRUE(child_list.find("wp_explore") == std::string::npos);
+    ASSERT_TRUE(child_list.find("wp_general") != std::string::npos);
+    /* А у сессии wp_explore по-прежнему доступен — правила разные. */
+    ASSERT_TRUE(subagent_list_from(engine().build_system_prompt())
+                    .find("wp_explore") != std::string::npos);
+
+    /* И обратная сторона И2.8: агенту, которому делегировать запрещено
+     * целиком, инструмент `task` не показывается вовсе — вместе со
+     * списком. Иначе модель читала бы «доступные субагенты» под
+     * инструментом, которого нельзя вызвать. */
+    reset_host(fx.host, {"Готово."});
+    run_task_agent("wp_general", "Проверка скрытия", "Ничего не делать.");
+    ASSERT_FALSE(catalogue_mentions(fx.host.sys(0), "task"));
+    ASSERT_TRUE(fx.host.sys(0).find("Доступные субаг��нты") ==
+                std::string::npos);
+}
+
+TEST(an_empty_subagent_list_says_so_and_does_not_look_like_the_whole_list) {
+    /* Список пуст, а инструмент виден: запреты заданы ПО ИМЕНАМ, поэтому
+     * правила «всё под ключом» нет и инструмент не скрыт (И2.8). Молчащий
+     * пустой список выглядел бы как «субагенты не загрузились» — и модель
+     * либо выбрала бы имя наугад, либо решила, что делегирование сломано.
+     * Сказать «доступных нет» можно только здесь: при нормальной
+     * конфигурации список не пуст. */
+    TaskFixture fx;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    for (const std::string& n : AgentRegistry::instance().subagent_names()) {
+        engine().permissions().add_rule(
+            Rule{"task", n, PermissionAction::Deny, "тест: никого не звать"});
+    }
+    ASSERT_FALSE(AgentRegistry::instance().subagent_names().empty());
+
+    const std::string prompt = engine().build_system_prompt();
+    /* Инструмент на месте — запреты по именам, а не catch-all. */
+    ASSERT_TRUE(catalogue_mentions(prompt, "task"));
+    const std::string list = subagent_list_from(prompt);
+    if (list.find("нет") == std::string::npos) {
+        std::cerr << "  пустой список не назван: ["
+                  << text::utf8_prefix(list, 200) << "]" << std::endl;
+    }
+    ASSERT_TRUE(list.find("нет") != std::string::npos);
+    /* И ни одного имени в списке: иначе «нет» и имя рядом читались бы как
+     * «доступен вот этот». */
+    for (const std::string& n : AgentRegistry::instance().subagent_names()) {
+        if (list.find(n) != std::string::npos) {
+            std::cerr << "  в «пустом» списке есть " << n << std::endl;
+        }
+        ASSERT_TRUE(list.find(n) == std::string::npos);
+    }
+}

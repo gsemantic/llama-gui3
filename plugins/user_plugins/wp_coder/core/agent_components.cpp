@@ -253,9 +253,18 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
     };
     const PermissionAction perm_action = evaluate(perm_key, perm_pattern);
     if (perm_action == PermissionAction::Deny) {
+        /* И8.13: при не-«звёздочном» паттерне назван и ЗНАЧЕНИЕ, иначе
+         * отказ по «task: wp_explore → запретить» выглядел бы как «делегировать
+         * нельзя» — и модель позвала бы другого агента, не понимая, что
+         * запрещён именно этот. Для остальных инструментов это тоже полезно:
+         * отказ по write/read называет путь. */
+        const std::string what =
+            perm_pattern == "*" ? std::string()
+                                : (" (значение " + perm_pattern + ")");
         std::string denial =
             "[запрещено] Инструмент " + tool_name + " запрещён правилом"
-            " разрешений (ключ «" + perm_key + "»). Не ищи обход: другой"
+            " разрешений (ключ «" + perm_key + "»" + what +
+            "). Не ищи обход: другой"
             " инструмент с тем же эффектом тоже запрещён."
             "\nНЕ ПОВТОРЯЙ вызов. Скажи пользователю, что действие"
             " запрещено настройкой.";

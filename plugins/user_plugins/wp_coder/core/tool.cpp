@@ -514,9 +514,15 @@ std::string permission_pattern(const ToolDef& def, const json::JsonValue& args) 
      * могут быть оба (скажем, скачать файл по URL в путь), и вопрос
      * должен звучать про то, что инструмент меняет, а не откуда он
      * это взял. */
+    /* И8.13: `subagent_type` — тоже значение, о котором идёт решение.
+     * Без него паттерн у `task` всегда был «*», и правило вида
+     * «task: wp_explore → запретить» не могло существовать: правило
+     * «всем подряд» не отличает «не звать вовсе» от «не звать
+     * конкретного», а модель в списке субагентов видела бы ровно того,
+     * кого звать запрещено. */
     static const char* kPatternArgs[] = {
         "path", "file", "filePath", "command", "cmd", "cli",
-        "url", "host", "query", "name", "branch", "site"
+        "url", "host", "query", "name", "branch", "site", "subagent_type"
     };
     if (!args.is_object()) return "*";
     for (const char* key : kPatternArgs) {

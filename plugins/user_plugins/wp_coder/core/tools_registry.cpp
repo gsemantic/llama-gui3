@@ -227,7 +227,11 @@ std::string ToolsRegistry::describe_tool(const std::string& tool_name) const {
     const ToolDef* def = find(tool_name);
     if (!def) return "";
     std::string s = "- " + def->name;
-    if (!def->description.empty()) s += " — " + def->description;
+    /* Динамическое описание ЗАМЕЩАЕТ статическое (И8.13): см. ToolDef. */
+    const std::string description = def->describe_dynamic
+                                        ? def->describe_dynamic()
+                                        : def->description;
+    if (!description.empty()) s += " — " + description;
     if (!def->parameters.is_object()) return s;
     const json::JsonValue& props = def->parameters.get("properties");
     if (!props.is_object()) return s;
