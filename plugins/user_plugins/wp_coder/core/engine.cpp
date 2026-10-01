@@ -5,6 +5,7 @@
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
+#include "subagent.h"
 #include "session_store.h"
 #include "file_lock.h"
 #include "limits.h"
@@ -52,11 +53,26 @@ void Engine::start() {
 }
 
 void Engine::stop() {
+    size_t dropped = 0;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.shutting_down = true;
+        /* И8.14: поставленные в фон задачи снимаются вместе с движком.
+         * Молча сбросить очередь нельзя: человек видел, что задачи
+         * запущены, и ждал их итогов, — а они исчезли бы без единого
+         * слова. Работы ещё не было (дочерняя сессия пишется в конце хода
+         * ребёнка), то есть терять нечего, и событие говорит именно это. */
+        dropped = state_.background_tasks.size();
+        state_.background_tasks.clear();
         state_.permission_cv.notify_all();
         state_.cv.notify_all();
+    }
+    if (dropped > 0) {
+        push_event(AgentEvent::Status,
+                   "Движок остановлен: снято фоновых задач — " +
+                       std::to_string(dropped) +
+                       ". Они ещё не начинали выполняться, работа по ним не"
+                       " потеряна.");
     }
     /* Вне лока: cancel_all() берёт свой mtx_, а брать его поверх
      * state_.mtx здесь нельзя — PermissionEngine ходит в state_.mtx
@@ -103,6 +119,12 @@ void Engine::submit(const std::string& prompt) {
          * нажатие «стоп» отменило бы следующую задачу, и отмену нельзя
          * было бы снять вообще. */
         state_.turn_abort = std::make_shared<AbortToken>();
+        /* И8.14: запрос человека обнуляет цепочку автоматических ходов по
+         * фоновым результатам. Ответ пользователя всегда разрешает
+         * продолжить, и без этого сброса модель, однажды поставившая фоновую
+         * задачу на каждом ходу, уже не смогла бы вернуться к обычной работе
+         * без вмешательства. */
+        state_.background_turns = 0;
         state_.inbox.push(prompt);
         state_.cv.notify_all();
         std::cerr << "[wp_coder] submit: inbox_size=" << state_.inbox.size()
@@ -988,7 +1010,51 @@ void Engine::worker_main() {
         std::cerr << "[wp_coder] worker: picked up task, len=" << task.size() << std::endl;
         run_task(task);
         std::cerr << "[wp_coder] worker: run_task done" << std::endl;
+        /* И8.14: ход закончился — выполняем то, что он поставил в фон, и
+         * доставляем результаты. Здесь, а не в потоке фоновой задачи:
+         * область выполнения одна на весь движок, и второй поток отдал бы
+         * родителю enforcement по правилам ребёнка (обоснование — в
+         * core/subagent.h). */
+        deliver_background_tasks();
     }
+}
+
+/* И8.14: разбор очереди фоновых задач и доставка результатов.
+ *
+ * Результат доставить — значит начать ход: родительский ход к этому
+ * моменту закончился, а результат лежит в сессии сообщением, которое
+ * без хода никто не прочитает. Такой ход стоит денег, и его никто не
+ * заказывал, поэтому цепочка ограничена (limits::kBackgroundTurnLimit), а
+ * сбрасывает её любой запрос человека (submit). */
+void Engine::deliver_background_tasks() {
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        if (state_.shutting_down) return;
+    }
+    /* Возвращает false, если задач не было или их остановил пользователь
+     * (см. run_background_tasks) — оба случая означают, что читать в
+     * ходе нечего. */
+    if (!run_background_tasks(*this)) return;
+
+    bool over_limit = false;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        over_limit = state_.background_turns >= limits::kBackgroundTurnLimit;
+        if (!over_limit) ++state_.background_turns;
+    }
+    if (over_limit) {
+        push_event(AgentEvent::Status,
+                   "Результаты фоновых задач в диалоге, но автоматический ход "
+                   "не начат: предел цепочки — " +
+                       std::to_string(limits::kBackgroundTurnLimit) +
+                       ". Скажите, что с ними делать.");
+        return;
+    }
+    /* Текст задачи — короткая подпись для события и last_agent_task: сами
+     * результаты лежат в сессии отдельным сообщением, и повторять их в
+     * подписи значило бы показать пользователю дважды. */
+    run_task("Фоновые задачи завершены — их результаты в диалоге. "
+             "Разберись с ними и продолжи задачу.");
 }
 
 void Engine::trim_history_if_needed() {

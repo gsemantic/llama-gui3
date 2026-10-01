@@ -57,7 +57,226 @@ std::string task_wrapper(const std::string& session_id, bool ok,
            "\n</task_result>\n</task>";
 }
 
+/* --- И8.14: фоновая задача ---
+ *
+ * Текст ПРИЁМА — ответ вызова `task` с background: true. Он обязан
+ * сказать три вещи, иначе модель сделает что-нибудь лишнее: что задача
+ * принята (а не потеряна), что итог придёт сам и отдельным сообщением, и
+ * что опрашивать прогресс нельзя. Третье — не пожелание, а устройство
+ * механизма: продолжение фоновой задачи до её конца отклоняется (см.
+ * is_queued_background), и без явного запрета модель тратила бы шаг на
+ * заведомо отклонённый вызов. */
+std::string background_accepted(const std::string& session_id,
+                                 const std::string& agent,
+                                 const std::string& description) {
+    return "Задача принята в фоне: " + session_id + " (" + agent + ", «" +
+           description + "»).\n"
+           "Она начнёт выполняться после того, как закончится текущий ход, и её "
+           "итог придёт ОТДЕЛЬНЫМ сообщением в этот же диалог — в том же виде, "
+           "что и итог обычного вызова task.\n"
+           "НЕ ОПРАШИВАЙ ПРОГРЕСС: пока итог не пришёл, не зови task с этим "
+           "task_id, не ставь такую же задачу в фон повторно и не жди её "
+           "результата в этом вызове — делай другую работу. Итог придёт сам.";
+}
+
+/* Текст ДОСТАВКИ — синтетическое сообщение, которым результаты ложатся в
+ * сессию (И8.14). Заголовок назван словами, а не оставлен пустым: пустое
+ * сообщение с обёртками читалось бы как обычная реплика пользователя, и
+ * модель не поняла бы, откуда оно взялось. */
+std::string background_results_header(size_t count) {
+    return "[фоновые задачи завершены] Выполнено задач: " +
+           std::to_string(count) +
+           ". Это итоги фоновых задач, поставленных тобой раньше: работа "
+           "сделана, её не нужно ждать и не нужно перезапускать. Разберись с "
+           "ними и продолжи задачу.\n";
+}
+
+/* Жива ли ещё фоновую задачу — по ОЧЕРЕДИ, а не по файлу.
+ *
+ * Дочерняя сессия пишется в конце хода ребёнка, то есть файла у
+ * поставленной задачи ещё нет, и проверка «файл есть» объявила бы такую
+ * задачу несуществующей: модель получила бы «задача не найдена» на
+ * заведомо существующей работе и решила бы, что постановка не сработала. */
+bool is_queued_background(const EngineState& state, const std::string& task_id) {
+    std::lock_guard<std::mutex> lk(state.mtx);
+    for (const SubagentJob& job : state.background_tasks) {
+        if (job.session_id == task_id) return true;
+    }
+    return false;
+}
+
 } // namespace
+
+/* Итог выполнения задачи ребёнком: его собственный результат и то, что
+ * знать вызывающему, — сошлась ли запись дочерней сессии. */
+struct ChildTurn {
+    SubagentResult result;
+    bool session_saved = false;
+};
+
+/* Один ход ребёнка — ОБЩИЙ для обычного вызова и для фоновой задачи
+ * (И8.14). Два места, выполняющие «сделай задачу ребёнком», разошлись бы
+ * первым же изменением: область, промпт, предел шагов, запись дочерней
+ * сессии и обёртка результата — здесь ровно по одному разу каждое.
+ *
+ * ScopedAgentScope живёт до конца функции, а не только на время сборки
+ * промпта: область обязана быть подменена на ВЕСЬ ход ребёнка, иначе
+ * enforcement его инструментов отвечал бы по правилам сессии, а сам ход
+ * шёл бы с чужим агентом. В деструкторе область возвращается и кэш
+ * промпта сбрасывается — даже при раннем выходе, потому что Engine и
+ * ToolsRegistry — синглтоны и оставшийся после ребёнка чужой промпт ушёл
+ * бы в СЛЕДУЮЩИЙ ход родителя.
+ *
+ * Дочерняя сессия пишется ЛЮБЫМ исходом хода, включая отказ и
+ * прерывание: частично сделанная работа тоже стоит продолжения, а терять
+ * её молча значило бы, что `task_id` бесполезен ровно тогда, когда он
+ * нужен.
+ *
+ * Ошибка записи — не ошибка задачи: ход-то состоялся, поэтому в ответе
+ * модели она выглядела бы ошибкой работы. Пользователь узнаёт о ней из
+ * события, а продолжить задачу будет нечем. */
+ChildTurn run_child_turn(Engine& engine, EngineState& state,
+                         const SubagentJob& job) {
+    ChildTurn out;
+
+    RunScope scope;
+    scope.agent = job.agent;
+    scope.info = job.info;
+    scope.depth = job.depth;
+    scope.loop_calls = std::make_shared<std::deque<std::string>>();
+    ScopedAgentScope guard(engine, std::move(scope));
+    const std::string sys = engine.build_system_prompt();
+
+    /* Продолжение получает историю из дочерней сессии (И8.9): prompt
+     * становится следующей репликой того же разговора, а не началом
+     * нового. */
+    out.result = run_subagent_turn(
+        state, engine.callbacks(),
+        [&engine](AgentEvent::Kind k, const std::string& text) {
+            engine.push_event(k, text);
+        },
+        sys, job.prompt, job.max_steps, job.seed);
+
+    SessionFile child;
+    child.session_id = job.session_id;
+    child.parent_id = job.parent_id;
+    child.title = job.title;
+    child.messages = out.result.history;
+    const std::string dir = engine.callbacks().path_data_dir
+                                ? engine.callbacks().path_data_dir()
+                                : std::string();
+    const std::string path =
+        SessionArchive::subagent_file_path(dir, job.session_id);
+    std::string error;
+    if (path.empty() || !SessionArchive::save(path, child, &error)) {
+        out.session_saved = false;
+        engine.push_event(
+            AgentEvent::Status,
+            "task/" + job.agent + ": не удалось сохранить задачу " +
+                job.session_id + " — " +
+                (error.empty() ? std::string("нет каталога данных")
+                               : error));
+    } else {
+        out.session_saved = true;
+        engine.push_event(AgentEvent::Status,
+                          "task/" + job.agent + ": задача " + job.session_id +
+                              (job.resumed ? " продолжена" : " создана"));
+    }
+    return out;
+}
+
+/* Текст ответа вызова по итогу хода ребёнка. Одинаков для обычного вызова
+ * и для фоновой задачи (И8.11): состояние говорит признак, а внутри лежит
+ * сама причина, и модель читает одно место вместо двух. */
+std::string child_answer(const std::string& agent, const std::string& session_id,
+                         const SubagentResult& r) {
+    return task_wrapper(session_id, r.ok,
+                        r.ok ? r.text
+                             : ("Субагент " + agent + " не выполнил задачу.\n" +
+                                r.error));
+}
+
+bool run_background_tasks(Engine& engine) {
+    EngineState& state = engine.state();
+
+    /* Очередь забирается целиком под локом и выполняется уже без него:
+     * запрос к модели идёт без лока движка (D1 — висящий GUI). */
+    std::vector<SubagentJob> jobs;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        while (!state.background_tasks.empty()) {
+            jobs.push_back(std::move(state.background_tasks.front()));
+            state.background_tasks.pop_front();
+        }
+    }
+    if (jobs.empty()) return false;
+
+    /* Пока идёт фоновая работа, движок не «готов»: ход родителя уже
+     * закончился, и «готово» при работающем субагене было бы враньём того
+     * же класса, что И6.8 (исход → состояние). Состояние ПРИХРАНЯЕТСЯ и
+     * возвращается на выходе: разбор очереди не ход (свой состояние
+     * выставит run_task, если он начнётся), а оставленное «исполняется»
+     * навсегда — враньё второго порядка, и на пределе цепочки, где хода не
+     * будет, оно осталось бы висеть до следующего запроса. */
+    AgentState prev_state = AgentState::Idle;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        prev_state = state.state;
+        state.state = AgentState::Executing;
+    }
+    engine.push_event(AgentEvent::Status,
+                      "Фоновых задач: " + std::to_string(jobs.size()) +
+                          " — выполняю между ходами.");
+
+    std::string results;
+    size_t done = 0;
+    for (const SubagentJob& job : jobs) {
+        /* «Стоп» между задачами: остальные не начинаются вовсе, а начатая
+         * останавливается сама (флаг проверяется в цикле ребёнка, И8.12). */
+        if (state.abort_requested.load()) break;
+        engine.push_event(AgentEvent::Status,
+                          "task (фон): субагент " + job.agent + " — " +
+                              job.description);
+        const ChildTurn t = run_child_turn(engine, state, job);
+        results += child_answer(job.agent, job.session_id, t.result);
+        results += "\n";
+        ++done;
+    }
+
+    /* Отмена — результаты в диалог НЕ кладутся: цикл на отмене чистит
+     * историю (см. AgentLoop::run), и доставка в пустую сессию воскресила
+     * бы диалог, от которого человек отказался. Работа при этом не
+     * потеряна: дочерние сессии записаны, и продолжить её можно по
+     * идентификатору — поэтому в событии он и называется.
+     *
+     * Названо и СКОЛЬКО успело выполниться: «остановлены» без счёта
+     * читалось бы как «ничего не началось» при обратном, и человек
+     * счёл бы работу потерянной впустую (или наоборот — ждал бы её). */
+    if (state.abort_requested.load()) {
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.state = AgentState::Aborted;
+        }
+        engine.push_event(
+            AgentEvent::Status,
+            "Фоновые задачи остановлены пользователем: выполнено " +
+                std::to_string(done) + " из " + std::to_string(jobs.size()) +
+                ". Их результаты в диалог НЕ доставлены — сделайте новый "
+                "запрос, и они попадут в контекст." +
+                (done > 0 ? " Выполненное сохранено, продолжить можно по "
+                            "ses_… из списка задач."
+                          : ""));
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.state = prev_state;
+        state.session.push_back(
+            Message::user(background_results_header(done) + results));
+    }
+    return true;
+}
 
 /* Описание субагента одной строкой: имя и его описание. Имя само по
  * себе модели ничего не говорит («wp_explore» — и что делать?), а
@@ -116,8 +335,12 @@ std::string task_description() {
         " видит, что запущено), prompt — полное задание для субагента,"
         " включая то, в каком виде вернуть ответ, subagent_type — имя"
         " агента из списка ниже. Уточнить задание у субагента нельзя:"
-        " он не разговаривает с пользователем, и переспросить он не сможет.\n"
-        "  Доступные субагенты:\n";
+        " он не разговаривает с пользователем, и переспросить он не сможет."
+        " background: true ставит задачу в ФОН: вызов вернётся сразу, работа"
+        " пойдёт после того, как закончится твой ход, а итог придёт отдельным"
+        " сообщением. Опрашивать прогресс нельзя и не нужно: повторный task с"
+        " тем же task_id будет отклонён, пока задача не закончилась."
+        "\n  Доступные субагенты:\n";
     const std::string list = subagent_catalogue_for_caller();
     /* Пустой список — не «доступны все», а «доступных нет»: иначе модель
      * выбрала бы имя наугад и потратила шаг на отказ. */
@@ -185,9 +408,12 @@ void register_task_tool() {
                      "субагента (вида ses_000000000123), чтобы продолжить "
                      "её с того места, где она остановилась; поле пустое — "
                      "это новая задача");
-    b.boolean("background", "НЕ ПОДДЕРЖИВАЕТСЯ (задача 8.14): субагент "
-                            "выполняется до конца, ответ придёт в этом же "
-                            "вызове; поле оставь false");
+    b.boolean("background", "поставить задачу в ФОН: вызов вернётся сразу, "
+                            "работа пойдёт после того, как закончится текущий "
+                            "ход, а итог придёт отдельным сообщением в диалог. "
+                            "Не опрашивай прогресс и не перезапускай такую же "
+                            "задачу; поле пустое — работа ждёт результата "
+                            "здесь же, в этом вызове");
     b.required("description").required("prompt").required("subagent_type");
     def.parameters = b.build();
 
@@ -251,6 +477,19 @@ void register_task_tool() {
                     " ses_ и 12 цифр. Поставь новую задачу без task_id.");
                 return out;
             }
+            /* И8.14: задача, которая ещё в очереди, — это ОПРОС, а не
+             * продолжение. Проверка идёт ДО чтения файла: дочерней сессии
+             * у поставленной задачи ещё нет, и проверка «файл есть»
+             * объявила бы живую работу несуществующей — модель получила бы
+             * «задача не найдена» и решила бы, что постановка не
+             * сработала. */
+            if (is_queued_background(state, task_id)) {
+                out.output = refuse(
+                    "задача " + task_id + " ещё выполняется в фоне. Опрашивать"
+                    " её нельзя: сделай другую работу, а её итог придёт"
+                    " отдельным сообщением.");
+                return out;
+            }
             const std::string dir = ctx.callbacks().path_data_dir
                                         ? ctx.callbacks().path_data_dir()
                                         : std::string();
@@ -283,17 +522,12 @@ void register_task_tool() {
             }
         }
 
-        /* --- 2a. Поле, работа которого ещё не написана --- */
-        /* Объявлено в схеме (подпись порта), но не работает. Отказ здесь
-         * явный, потому что молчаливый игнор выглядел бы как успех: модель
-         * решила бы, что задача ушла в фон, и ждала бы уведомления,
-         * которого не будет (работа — И8.14). */
-        if (args.get_bool("background")) {
-            out.output = refuse(
-                "поле «background» не поддерживается: субагент выполняется"
-                " до конца, и его итог придёт в этом же вызове.");
-            return out;
-        }
+        /* --- 2a. Фон (И8.14) --- */
+        /* Принимается, а не отклоняется: работа за полем написана. Само
+         * поле разбирается ниже, где уже собраны правила ребёнка и предел
+         * шагов, — постановка в фон это тот же вызов, только без хода
+         * сейчас. */
+        const bool background = args.get_bool("background");
 
         /* --- 3. Глубина вложенности (предел настраивается, И8.8) ---
          *
@@ -360,7 +594,7 @@ void register_task_tool() {
             return out;
         }
 
-        /* --- 5. Правила и область выполнения --- */
+        /* --- 5. Правила, предел шагов и ЗАДАНИЕ --- */
         std::vector<AgentLoadDiag> diags;
         /* for_subagent, а не from_def (И8.10): ребёнок наследует от
          * сессии только запреты и `external_directory`, а сверху получает
@@ -375,113 +609,83 @@ void register_task_tool() {
         }
 
         int max_steps = 0;
-        RunScope scope;
-        scope.agent = name;
-        scope.info = info;
-        scope.depth = depth;
-        scope.loop_calls = std::make_shared<std::deque<std::string>>();
         {
             std::lock_guard<std::mutex> lk(state.mtx);
             max_steps = state.max_steps;
         }
         if (info->steps() > 0) max_steps = info->steps();
 
-        /* ScopedAgentScope живёт до конца обработчика, а не только на
-         * время сборки промпта: область обязана быть подменена на ВЕСЬ
-         * ход субагента, иначе enforcement его инструментов отвечал бы по
-         * правилам сессии, а сам ход шёл бы с чужим агентом. В
-         * деструкторе область возвращается и кэш промпта сбрасывается —
-         * даже при раннем выходе, потому что Engine и ToolsRegistry —
-         * синглтоны и оставшийся после ребёнка чужой промпт ушёл бы в
-         * СЛЕДУЮЩИЙ ход родителя. */
-        ScopedAgentScope guard(engine, std::move(scope));
-        const std::string sys = engine.build_system_prompt();
-
-        /* Идентификатор задачи и её название — ДО хода, а не после: ими
-         * подписывается событие «субагент запущен», и 8.11 повесит на
-         * тот же идентификатор обёртку результата. Выдавать его после
-         * означало бы, что в событии запуска его нет.
+        /* Идентификатор задачи и её название — ДО работы, а не после: ими
+         * подписывается событие «субагент запущен» и обёртка результата
+         * (И8.11), а у фоновой задачи по нему же модель узнаёт, что
+         * поставлено, ещё до всякой работы. Выдавать его после означало бы,
+         * что в событии запуска его нет.
          *
          * Название при продолжении остаётся прежним: описание нового
          * вызова — подпись конкретного продолжения, а не имя задачи, и
          * переименование по нему сделало бы «продолжить задачу»
          * неотличимым от «начать новую». */
-        const std::string session_id =
-            task_id.empty() ? ids().next_session() : task_id;
-        const std::string title =
-            (task_id.empty() || resumed.title.empty())
-                ? (description + " (@" + name + " subagent)")
-                : resumed.title;
+        SubagentJob job;
+        job.agent = name;
+        job.description = description;
+        job.prompt = prompt;
+        job.session_id = task_id.empty() ? ids().next_session() : task_id;
+        job.title = (task_id.empty() || resumed.title.empty())
+                        ? (description + " (@" + name + " subagent)")
+                        : resumed.title;
+        job.parent_id = parent_id;
+        job.info = info;
+        job.depth = depth;
+        job.max_steps = max_steps;
+        job.seed = resumed.messages;
+        job.resumed = !task_id.empty();
+
+        /* --- 6. Фон или ход сейчас ---
+         *
+         * Оба пути собирают одно и то же задание (job) и уходят в общую
+         * run_child_turn; различаются они только тем, КОГДА она
+         * выполняется. Именно поэтому правила и глубина берутся здесь, до
+         * ветвления: у фоновой задачи они снимаются в момент постановки
+         * (см. SubagentJob), иначе к моменту выполнения область
+         * принадлежала бы сессии. */
+        if (background) {
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.background_tasks.push_back(job);
+            }
+            out.title = "task " + description + " (" + name + ", в фоне)";
+            out.metadata.set("agent", name);
+            out.metadata.set("depth", static_cast<long long>(depth));
+            out.metadata.set("task", description);
+            out.metadata.set("session_id", job.session_id);
+            out.metadata.set("background", true);
+            engine.push_event(AgentEvent::Status,
+                              "task: субагент " + name + " — " + description +
+                                  " поставлен в фон (" + job.session_id + ")");
+            out.output = background_accepted(job.session_id, name, description);
+            return out;
+        }
 
         engine.push_event(AgentEvent::Status,
                           "task: субагент " + name + " — " + description);
 
-        /* --- 6. Ход субагента --- */
-        /* Продолжение получает историю из дочерней сессии (И8.9): prompt
-         * становится следующей репликой того же разговора, а не началом
-         * нового. */
-        const SubagentResult r = run_subagent_turn(
-            state, ctx.callbacks(),
-            [&engine](AgentEvent::Kind k, const std::string& text) {
-                engine.push_event(k, text);
-            },
-            sys, prompt, max_steps, resumed.messages);
+        /* --- 7. Ход субагента --- */
+        const ChildTurn t = run_child_turn(engine, state, job);
 
         out.title = "task " + description + " (" + name + ")";
         out.metadata.set("agent", name);
         out.metadata.set("depth", static_cast<long long>(depth));
-        out.metadata.set("steps", static_cast<long long>(r.steps));
+        out.metadata.set("steps", static_cast<long long>(t.result.steps));
         out.metadata.set("task", description);
-        out.metadata.set("session_id", session_id);
-
-        /* --- 7. Дочерняя сессия (И8.9) ---
-         *
-         * Пишется ЛЮБЫМ исходом хода, включая отказ и прерывание:
-         * частично сделанная работа тоже стоит продолжения, а терять её
-         * молча значило бы, что `task_id` бесполезен ровно тогда, когда он
-         * нужен.
-         *
-         * Ошибка записи — не ошибка задачи: ход-то состоялся, поэтому в
-         * ответе модели она выглядела бы ошибкой работы. Пользователь
-         * узнаёт о ней из события, а продолжить задачу будет нечем. */
-        {
-            SessionFile child;
-            child.session_id = session_id;
-            child.parent_id = parent_id;
-            child.title = title;
-            child.messages = r.history;
-            const std::string dir = ctx.callbacks().path_data_dir
-                                        ? ctx.callbacks().path_data_dir()
-                                        : std::string();
-            const std::string path =
-                SessionArchive::subagent_file_path(dir, session_id);
-            std::string error;
-            if (path.empty() || !SessionArchive::save(path, child, &error)) {
-                out.metadata.set("session_saved", false);
-                engine.push_event(
-                    AgentEvent::Status,
-                    "task/" + name + ": не удалось сохранить задачу " +
-                        session_id + " — " +
-                        (error.empty() ? std::string("нет каталога данных")
-                                       : error));
-            } else {
-                out.metadata.set("session_saved", true);
-                engine.push_event(
-                    AgentEvent::Status,
-                    "task/" + name + ": задача " + session_id +
-                        (task_id.empty() ? " создана" : " продолжена"));
-            }
-        }
+        out.metadata.set("session_id", job.session_id);
+        out.metadata.set("session_saved", t.session_saved);
 
         /* И8.11: результат — обёртка с идентификатором задачи, и она
          * одинакова для успеха и отказа. Отдельным текстом «субагент не
          * выполнил задачу» больше нет: состояние говорит признак, а
          * внутри лежит сама причина, и модель читает одно место вместо
          * двух. */
-        out.output = task_wrapper(session_id, r.ok,
-                                  r.ok ? r.text
-                                       : ("Субагент " + name +
-                                          " не выполнил задачу.\n" + r.error));
+        out.output = child_answer(name, job.session_id, t.result);
         return out;
     };
 
