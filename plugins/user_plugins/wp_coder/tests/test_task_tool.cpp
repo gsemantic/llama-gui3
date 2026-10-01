@@ -39,12 +39,14 @@
 #include "../core/agent_registry.h"
 #include "../core/base_tools.h"
 #include "../core/engine.h"
+#include "../core/git_tools.h"
 #include "../core/json_utils.h"   /* text::utf8_prefix — см. правило 13 */
 #include "../core/limits.h"
 #include "../core/prompts.h"
 #include "../core/session_store.h"
 #include "../core/tool.h"
 #include "../core/tools_registry.h"
+#include "../modules/wordpress/wp_tools.h"
 
 #include <unistd.h>
 
@@ -72,6 +74,12 @@ void register_tools() {
     if (done) return;
     done = true;
     register_base_tools();
+    /* WP- и git-инструменты нужны проверкам И8.15 не «для полноты», а
+     * чтобы отрицание было содержательным: без них в каталоге нет ни
+     * deploy, ни wp_db, и проверка «у wp_theme нет deploy» прошла бы на
+     * отсутствии инструмента вообще — то есть проверяла бы пустоту. */
+    wp::register_wp_tools();
+    register_git_tools();
     test_support::approve_all_permissions();
 }
 
@@ -691,6 +699,183 @@ TEST(subagent_sees_only_the_tools_its_own_rules_allow) {
     ASSERT_EQ(std::string(permission_action_name(
                   engine().permissions().evaluate("write", "/srv/a"))),
               std::string("разрешить"));
+}
+
+/* Список субагентов в тексте описания — та же функция, что и в проверках
+ * ниже по файлу, объявлена здесь, потому что WP-проверки идут раньше её
+ * определения. */
+std::string subagent_list_from(const std::string& prompt);
+
+/* ======================================================================
+ * 4. WP-субагенты (И8.15): что реально уходит в модель
+ * ====================================================================== */
+
+/* Проверки ниже смотрят на СОБЫТИЕ ВЫЗОВА, а не на таблицу встроенных
+ * агентов: права WP-агента имеют смысл только там, где доходят до
+ * модели. Сверка «в таблице есть deny» проверяла бы наше же объявление,
+ * а не то, что модель получила: запрет, не дошедший до каталога, —
+ * это модель, которая тратит шаг на заведомо отклонённый вызов. */
+
+TEST(a_wp_theme_subagent_gets_its_prompt_and_its_tool_catalogue) {
+    TaskFixture fx;
+    /* Первый ответ имитатора достаётся СУБАГЕНТУ: вызов делает сам тест. */
+    fx.host.replies = {"Готово: правил style.css и functions.php."};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    const std::string parent_sys = engine().build_system_prompt();
+    /* Вызывающий должен знать, кого зовут: иначе WP-специалисты были бы
+     * зарегистрированы, но недостижимы — мёртвый код по дороге. */
+    const std::string list = subagent_list_from(parent_sys);
+    ASSERT_TRUE(list.find("wp_theme") != std::string::npos);
+    ASSERT_TRUE(list.find("Субагент по темам") != std::string::npos);
+
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", "Тема");
+    call.set("prompt", "Оформи тему.");
+    call.set("subagent_type", "wp_theme");
+    const ToolOutput out = ToolsRegistry::instance().run_output("task", call);
+    ASSERT_EQ(fx.host.calls(), (size_t)1);
+
+    /* ЧТО УШЛО В МОДЕЛЬ: системный промпт ребёнка собран по ЕГО правилам и
+     * несёт ЕГО промпт. Чужой промпт в нём означал бы, что агент получил
+     * инструкцию другой роли (все четыре — с разными границами). */
+    const std::string child_sys = fx.host.sys(0);
+    if (child_sys.find(kAgentWpThemePrompt) == std::string::npos) {
+        std::cerr << "  в промпте ребёнка нет wp_theme: "
+                  << text::utf8_prefix(child_sys, 400) << std::endl;
+    }
+    ASSERT_TRUE(child_sys.find(kAgentWpThemePrompt) != std::string::npos);
+    ASSERT_TRUE(child_sys.find(kAgentWpDeployPrompt) == std::string::npos);
+    ASSERT_TRUE(child_sys.find(kAgentWpHookPrompt) == std::string::npos);
+
+    /* Каталог по роли: автор пишет и проверяет синтаксис… */
+    ASSERT_TRUE(catalogue_mentions(child_sys, "write_file"));
+    ASSERT_TRUE(catalogue_mentions(child_sys, "apply_patch"));
+    ASSERT_TRUE(catalogue_mentions(child_sys, "php_lint"));
+    ASSERT_TRUE(catalogue_mentions(child_sys, "skill_detail"));
+    /* …но не выкладывает и не ходит в данные: это граница роли, и запрет
+     * целиком убирает инструмент из каталога (И2.8), а не прячет за
+     * отказом — иначе модель тратила бы шаг впустую. */
+    if (catalogue_mentions(child_sys, "deploy")) {
+        std::cerr << "  у wp_theme в каталоге deploy" << std::endl;
+    }
+    ASSERT_FALSE(catalogue_mentions(child_sys, "deploy"));
+    ASSERT_FALSE(catalogue_mentions(child_sys, "wp_db"));
+
+    /* У вызывающего ничего не отнято: сужение ребёнка не утекает в
+     * сессию (общий набор инструментов — синглтон процесса). */
+    ASSERT_TRUE(catalogue_mentions(parent_sys, "deploy"));
+    ASSERT_EQ(engine().build_system_prompt(), parent_sys);
+}
+
+TEST(the_wp_deploy_subagent_is_refused_the_tools_that_change_files) {
+    TaskFixture fx;
+    /* Два ответа, и оба достаются ребёнку: родитель в этом тесте не ходит
+     * вовсе. Первый — вызов запрещённого инструмента, второй — ответ после
+     * отказа. Третьего ответа нет намеренно: ребёнок завершает ход
+     * текстом без вызова, а лишняя запись в очереди была бы числом,
+     * которое никто не проверит. */
+    fx.host.replies = {
+        call_block("write_file",
+                   ", \"path\": \"/srv/site/wp-content/themes/t/style.css\","
+                   " \"content\": \"x\""),
+        "Понял, писать не буду: файлы не трогал."};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    /* Каталог родителя снимаем ДО вложенного хода — это эталон для
+     * сравнения «после». */
+    const std::string parent_sys = engine().build_system_prompt();
+
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", "Выкладка");
+    call.set("prompt", "Выложи.");
+    call.set("subagent_type", "wp_deploy");
+    const ToolOutput out = ToolsRegistry::instance().run_output("task", call);
+
+    const std::string child_sys = fx.host.sys(0);
+    ASSERT_TRUE(child_sys.find(kAgentWpDeployPrompt) != std::string::npos);
+    /* Выкладка не пишет код: write_file у неё нет НИ В КАТАЛОГЕ, ни в
+     * правах. Проверяется обеими сторонами, потому что это две разные
+     * вещи: правило без каталога — модель зря тратит шаг, каталог без
+     * правила — обход на уровне enforcement. */
+    ASSERT_FALSE(catalogue_mentions(child_sys, "write_file"));
+    ASSERT_FALSE(catalogue_mentions(child_sys, "apply_patch"));
+    ASSERT_FALSE(catalogue_mentions(child_sys, "edit_file"));
+    /* А то, ради чего он существует, — на месте. */
+    ASSERT_TRUE(catalogue_mentions(child_sys, "deploy"));
+    ASSERT_TRUE(catalogue_mentions(child_sys, "verify"));
+
+    /* ЧТО ПРИШЛО В ИНСТРУМЕНТ: ребёнку отказали по правилу, и отказ
+     * попал в ЕГО транскрипт — то есть до модели, а не в stderr. */
+    /* Отказ виден ребёнку ВО ВТОРОМ запросе: первый — это исходная
+     * задача, а вызов инструмента и его результат попадают в следующий.
+     * Индекс 0 здесь прошёл бы на «вызова не было». */
+    const std::string child_talk = fx.host.transcript(1);
+    const size_t last = child_talk.rfind("write_file");
+    if (last == std::string::npos) {
+        std::cerr << "  ребёнок не звал write_file: "
+                  << text::utf8_prefix(child_talk, 400) << std::endl;
+    } else {
+        const std::string tail = child_talk.substr(last);
+        if (tail.find("запрещён правилом") == std::string::npos) {
+            std::cerr << "  после write_file нет отказа: "
+                      << text::utf8_prefix(tail, 300) << std::endl;
+        }
+        ASSERT_TRUE(tail.find("запрещён правилом") != std::string::npos);
+    }
+    ASSERT_TRUE(last != std::string::npos);
+    /* Отказ ребёнка не превращается в отказ родителя: у вызывающего
+     * write_file на месте и после вложенного хода. */
+    ASSERT_TRUE(catalogue_mentions(parent_sys, "write_file"));
+    ASSERT_EQ(engine().build_system_prompt(), parent_sys);
+    /* Отказ НЕ убивает ход ребёнка: он увидел отказ, продолжил и вернул
+     * итог. Иначе проверка выше прошла бы и при падении инструмента —
+     * то есть проверяла бы не запрет, а аварийное завершение. */
+    if (out.output.find("файлы не трогал") == std::string::npos) {
+        std::cerr << "  ребёнок не вернулся после отказа: "
+                  << text::utf8_prefix(out.output, 300) << std::endl;
+    }
+    ASSERT_TRUE(out.output.find("файлы не трогал") != std::string::npos);
+}
+
+TEST(a_wp_subagent_cannot_undo_what_its_own_role_forbids) {
+    TaskFixture fx;
+    /* Ребёнок пробует то, чего у него в каталоге нет: wp_db. Отказ
+     * обязан дойти до модели, иначе сужение правил — декорация. */
+    fx.host.replies = {
+        call_block("wp_db", ", \"query\": \"SELECT 1\""),
+        "Понял, к базе не хожу.",
+        "Готово: тему поправил, базу не трогал."};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", "Правка темы");
+    call.set("prompt", "Поправь тему.");
+    call.set("subagent_type", "wp_hook");
+    ToolsRegistry::instance().run_output("task", call);
+
+    const std::string child_sys = fx.host.sys(0);
+    ASSERT_TRUE(child_sys.find(kAgentWpHookPrompt) != std::string::npos);
+    ASSERT_FALSE(catalogue_mentions(child_sys, "wp_db"));
+
+    const std::string child_talk = fx.host.transcript(1);
+    const size_t last = child_talk.rfind("wp_db");
+    ASSERT_TRUE(last != std::string::npos);
+    const std::string tail = child_talk.substr(last);
+    if (tail.find("запрещён правилом") == std::string::npos) {
+        std::cerr << "  после wp_db нет отказа: "
+                  << text::utf8_prefix(tail, 300) << std::endl;
+    }
+    ASSERT_TRUE(tail.find("запрещён правилом") != std::string::npos);
 }
 
 /* ======================================================================

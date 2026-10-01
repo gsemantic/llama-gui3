@@ -802,12 +802,42 @@ void register_builtin_agents(AgentRegistry& reg) {
          * правила агента идут после правил сессии, и встроенное
          * разрешение там отменяло бы запрет ПОЛЬЗОВАТЕЛЯ в его диалоге.
          *
-         * Дано одно — чтение. Чтение и есть делегирование («посмотри и
-         * скажи»), а запись и запуск команд человек подтверждает: ответ
-         * «всегда» доходит до правил субагента (И8.7), то есть одного
-         * нажатия хватает, и платить за тихую правку файлов без вопроса
-         * не приходится. Расширить до `write`/`bash` — одна строка здесь. */
+         * По умолчанию дано одно — чтение: чтение и есть делегирование
+         * («посмотри и скажи»), а запуск команд человек подтверждает,
+         * потому что ответ «всегда» доходит до правил субагента (И8.7) и
+         * одного нажатия достаточно.
+         *
+         * В 8.15 у трёх WP-агентов-авторов к нему добавлено `write`, и
+         * добавление безопасно ровно потому, что запреты сессии уходят в
+         * конец набора (subagent_inherited_denies): иначе встроенное
+         * разрешение отменило бы «я запретил себе писать». Права на
+         * необратимое (`bash`, `deploy`, `wp-cli`, `db`) не выдаёт ни один
+         * встроенный агент — и это проверяется, а не обещается. */
         std::vector<PermissionEntry> subagent_permission;
+    };
+    /* Общий запрет для трёх агентов-авторов (wp_theme, wp_plugin,
+     * wp_hook) — одна функция, а не три копии списка. Причина в том, что
+     * список не «для красоты»: он убирает инструмент из каталога модели
+     * (И2.8), и разъезжающиеся копии разъехались бы так, что у двух
+     * агентов из четырёх в каталоге остался бы wp_db без объяснения.
+     *
+     * Сужается до «сервера и данных», а не до «всего, что не файлы»:
+     * автор пишет файлы темы и плагина, и выкладывать их, ходить по ssh,
+     * трогать systemd и базу — не его роль. Ключи взяты из
+     * apply_agent_defaults (permission_engine.cpp), и новый ключ сюда
+     * попадёт только вместе с решением, что автору он не нужен. */
+    const auto wp_author_denylist = []() {
+        static const char* kDenied[] = {"db",       "deploy", "ssh",
+                                        "systemd", "docker", "cron"};
+        std::vector<PermissionEntry> out;
+        for (const char* key : kDenied) {
+            PermissionEntry e;
+            e.key = key;
+            e.pattern = "*";
+            e.action = PermissionAction::Deny;
+            out.push_back(e);
+        }
+        return out;
     };
     /* «Нет дельты» у встроенного агента — это ПУСТОЙ список правил, а
      * не правило «* → спросить». Правило приходит после базовых (см.
@@ -847,6 +877,48 @@ void register_builtin_agents(AgentRegistry& reg) {
          {{"*", "*", PermissionAction::Deny},
           {"read", "*", PermissionAction::Allow},
           {"bash", "*", PermissionAction::Allow}}},
+
+         /* WP-специалисты (И8.15). Четыре записи в общей таблице встроенных
+          * агентов, а не отдельный класс и не свой набор инструментов:
+          * у каждого WP-агента те же инструменты, что у любого другого
+          * (сервер знает только `write`, `bash`, `deploy`...), и отличаются
+          * они ПРОМПТОМ и сужением. Свой инструмент «wp_theme_scaffold»
+          * означал бы вторую реализацию записи файла и второе место, где
+          * живёт правило «можно писать» (Д2).
+         *
+         * Права в роли субагента: `read` — как у остальных (8.10), плюс
+         * `write` у трёх авторов. `write` — единственное расширение
+         * относительно 8.10, и оно возможно только потому, что запреты
+         * сессии теперь идут ПОСЛЕДНЕНИМИ (subagent_inherited_denies):
+         * иначе эта строка отменила бы запрет человека (см. отклонение). */
+        {"wp_theme", "Субагент по темам WordPress: пишет и правит файлы "
+                     "темы — шаблоны, style.css, functions.php.",
+         AgentMode::Subagent, kAgentWpThemePrompt,
+         wp_author_denylist(),
+         {{"read", "*", PermissionAction::Allow},
+          {"write", "*", PermissionAction::Allow}}},
+        {"wp_plugin", "Субагент по плагинам WordPress: каркас, хуки "
+                      "активации, настройки, админка.",
+         AgentMode::Subagent, kAgentWpPluginPrompt,
+         wp_author_denylist(),
+         {{"read", "*", PermissionAction::Allow},
+          {"write", "*", PermissionAction::Allow}}},
+        {"wp_hook", "Субагент по хукам WordPress: находит, где зарегистрирован "
+                    "add_action/add_filter/add_shortcode, и правит его.",
+         AgentMode::Subagent, kAgentWpHookPrompt,
+         wp_author_denylist(),
+         {{"read", "*", PermissionAction::Allow},
+          {"write", "*", PermissionAction::Allow}}},
+        /* wp_deploy — зеркало авторов: выкладка не пишет код, поэтому у
+         * него НЕТ права write, и инструмент write_file уходит из его
+         * каталога (И2.8). Права на деплой, bash и wp-cli НЕ выдаются:
+         * по 8.10 субагент не наследует разрешения сессии, значит всё
+         * необратимое у него спрашивается — а для выкладки это и нужно. */
+        {"wp_deploy", "Субагент по выкладке WordPress: проверяет готовность и "
+                      "отправляет сделанное, ничего не правя.",
+         AgentMode::Subagent, kAgentWpDeployPrompt,
+         {{"write", "*", PermissionAction::Deny}},
+         {{"read", "*", PermissionAction::Allow}}},
     };
 
     for (const Builtin& b : builtins) {
@@ -869,19 +941,39 @@ void register_builtin_agents(AgentRegistry& reg) {
     }
 }
 
-Ruleset subagent_base_rules(const Ruleset& session_rules) {
+Ruleset subagent_place_rules(const Ruleset& session_rules) {
     /* Порядок исходных правил СОХРАНЯЕТСЯ: он и есть семантика набора
-     * (last-match-wins), и перестановка «запреты после разрешений»
-     * изменила бы решения. */
+     * (last-match-wins), и перестановка правил изменила бы решения.
+     *
+     * ВАЖНО: запретов здесь нет, и это не упущение, а половина решения
+     * про порядок — см. subagent_inherited_denies. */
     Ruleset out;
     for (const Rule& r : session_rules.rules()) {
-        const bool deny = r.action == PermissionAction::Deny;
         /* external_directory — про ГДЕ, а не про ЧТО, и наследуется
          * целиком: иначе доверенный каталог (данные плагина, /tmp) снова
          * стал бы вопросом пользователю при каждом субагенте. */
-        const bool place = r.permission == "external_directory" ||
-                           (r.permission == "*" && deny);
-        if (deny || place) out.add(r);
+        if (r.permission == "external_directory") out.add(r);
+    }
+    return out;
+}
+
+Ruleset subagent_inherited_denies(const Ruleset& session_rules) {
+    /* Запреты сессии уходят в конец набора, а не в начало.
+     *
+     * Пока запрет был в базе, встроенный агент со своей строкой
+     * `subagent_permission: write → разрешить` (8.15, WP-агенты) её
+     * ПЕРЕКРЫВАЛ: правило агента шло позже, а побеждает последнее
+     * совпадение. То есть плагин молча отменил бы «я запретил себе
+     * писать» — ровно то, чего 8.10 добивался в обратную сторону, и
+     * ровно то, чего plugin не имеет права делать: решение человека
+     * отменяется правилом, которое человек не писал.
+     *
+     * Порядок исходных правил сохраняется, включая catch-all «* →
+     * запретить»: он остаётся запретом и в конце набора перекрывает
+     * вообще всё, что разрешил агент. */
+    Ruleset out;
+    for (const Rule& r : session_rules.rules()) {
+        if (r.action == PermissionAction::Deny) out.add(r);
     }
     return out;
 }
@@ -1009,14 +1101,14 @@ Info::Info(const AgentDef& def, const Ruleset& base,
         }
     }
 
-    /* Порядок правил решает всё: база первой, правила агента вторыми, и
-     * авто-запреты субагента — последними (8.10).
+    /* Порядок правил решает всё: правила агента, права в роли субагента и
+     * авто-запреты — и ПОСЛЕ НИХ запреты сессии (8.10, уточнение 8.15).
      *
      * Сужение базы делается ЗДЕСЬ, а не в вызывающем, потому что вызывающий
      * (инструмент `task`) передаёт ПРАВИЛА СЕССИИ, а решать, что из них
      * наследуется, должен владелец правил агента: тот же довод, что и для
      * Ruleset::evaluate_matched в 8.4. */
-    rules_ = (role == Role::Subagent) ? subagent_base_rules(base) : base;
+    rules_ = (role == Role::Subagent) ? subagent_place_rules(base) : base;
     const Ruleset own = normalized_agent_rules(def, diags);
     for (const Rule& r : own.rules()) rules_.add(r);
 
@@ -1049,6 +1141,14 @@ Info::Info(const AgentDef& def, const Ruleset& base,
                                 : "вести план сессии");
             rules_.add(deny);
         }
+
+        /* Запреты сессии — ПОСЛЕДНИМИ, и это единственное место в коде,
+         * где запрет пользователя важнее правила агента. Проверяется
+         * отдельно (builtin_subagent_rights_never_lift_a_sessions_deny):
+         * пока запрет шёл в базу, встроенный grant на `write` его
+         * перекрывал, и плагин отменял решение человека. */
+        const Ruleset denies = subagent_inherited_denies(base);
+        for (const Rule& r : denies.rules()) rules_.add(r);
     }
 }
 

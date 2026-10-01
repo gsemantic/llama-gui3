@@ -203,11 +203,22 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_compaction.cpp
         tests/test_agent_registry.cpp
         tests/test_agent_config.cpp
-        tests/test_task_tool.cpp
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp
         tests/test_wp_tools.cpp
+        # ПОРЯДОК ФАЙЛОВ ЗНАЧИТ, И ЭТО НЕ КОСМЕТИКА (И8.15).
+        # test_iteration_iv_invariants.cpp проверяет, что КАЖДЫЙ пишущий
+        # инструмент классифицирован, и проходит, только пока модульные
+        # инструменты ещё НЕ зарегистрированы: wp_create_site помечен
+        # TF_WRITES_FILES и в таблицу проверки не входит намеренно. Любой
+        # файл, регистрирующий wp/python/devops-инструменты, обязан стоять
+        # ПОСЛЕ него — иначе проверка падает.
+        # Следствие: test_task_tool.cpp перенесён ниже test_wp_tools.cpp,
+        # потому что его проверки И8.15 смотрят каталог субагента и должны
+        # видеть deploy/wp_db: без них «у wp_theme нет deploy» прошло бы на
+        # отсутствии инструмента вообще, то есть проверяло бы пустоту.
+        tests/test_task_tool.cpp
         tests/test_python_tools.cpp
         tests/test_devops_tools.cpp
         tests/test_manifest_consistency.cpp

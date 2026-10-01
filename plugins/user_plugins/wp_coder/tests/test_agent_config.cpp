@@ -20,6 +20,8 @@
 #include "../core/engine.h"
 #include "../core/tool.h"
 #include "../core/tools_registry.h"
+#include "../core/git_tools.h"
+#include "../modules/wordpress/wp_tools.h"
 
 #include <algorithm>
 #include <atomic>
@@ -95,6 +97,24 @@ void write_file(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
     f << body;
+}
+
+/* Порядок встроенных агентов — ЗАКРЫТЫЙ список нашего кода, и именно
+ * поэтому его можно сверять строкой. Но сверять его в трёх местах
+ * (две проверки порядка и подсчёт размера) нельзя: добавление агента
+ * обязано быть правкой ОДНОГО места, иначе через год кто-то добавит
+ * агента, поправит две строки и забудет про третью. */
+const char* kBuiltinOrder =
+    "wp_build,wp_plan,wp_general,wp_explore,wp_theme,wp_plugin,wp_hook,"
+    "wp_deploy";
+
+std::string joined_names(const AgentRegistry& reg) {
+    std::string out;
+    for (const auto& p : reg.all()) {
+        if (!out.empty()) out += ",";
+        out += p->name;
+    }
+    return out;
 }
 
 } // namespace
@@ -1019,15 +1039,11 @@ TEST(builtin_agents_are_registered_in_a_fixed_order) {
     /* Порядок задаётся таблицей и попадает в описание `task` (8.13),
      * то есть в каждый ход: он не должен зависеть от того, в каком
      * порядке отработал реестр. */
-    std::string order;
-    for (const auto& p : reg.all()) {
-        if (!order.empty()) order += ",";
-        order += p->name;
-    }
-    if (order != "wp_build,wp_plan,wp_general,wp_explore") {
+    const std::string order = joined_names(reg);
+    if (order != kBuiltinOrder) {
         std::cerr << "  порядок встроенных: " << order << std::endl;
     }
-    ASSERT_EQ(order, std::string("wp_build,wp_plan,wp_general,wp_explore"));
+    ASSERT_EQ(order, std::string(kBuiltinOrder));
 
     /* У каждого есть описание (иначе он попал бы в список пустой
      * строкой) и промпт (иначе модель не знала бы своей роли). */
@@ -1230,11 +1246,7 @@ TEST(builtin_agents_are_overridden_by_config_in_place) {
 
     AgentRegistry reg;
     register_builtin_agents(reg);
-    std::string order_before;
-    for (const auto& p : reg.all()) {
-        if (!order_before.empty()) order_before += ",";
-        order_before += p->name;
-    }
+    const std::string order_before = joined_names(reg);
 
     reg.load_directory(dir.string());
 
@@ -1244,13 +1256,14 @@ TEST(builtin_agents_are_overridden_by_config_in_place) {
     ASSERT_EQ(plan->prompt, std::string("Свой промпт."));
     /* Место не сдвинулось: порядок попадает в описание `task` в каждом
      * ходе, и перестановка из-за одного файла конфига его ломала бы. */
-    std::string order_after;
-    for (const auto& p : reg.all()) {
-        if (!order_after.empty()) order_after += ",";
-        order_after += p->name;
-    }
+    const std::string order_after = joined_names(reg);
     ASSERT_EQ(order_after, order_before);
-    ASSERT_EQ(reg.size(), (size_t)4);
+    /* Переопределение на месте не добавляет агента: ровно те же, что были.
+     * Размер сверяется через ЗАКРЫТЫЙ список (kBuiltinOrder), а не числом,
+     * вычисленным из той же строки: иначе проверка ничего не проверяла бы
+     * — любое число, равное самому себе, проходит. */
+    ASSERT_EQ(joined_names(reg), std::string(kBuiltinOrder));
+    ASSERT_EQ(reg.size(), (size_t)8);
 
     fs::remove_all(tmp);
 }
@@ -1305,15 +1318,11 @@ TEST(engine_load_settings_registers_builtin_agents) {
     const auto plan = AgentRegistry::instance().find("wp_plan");
     ASSERT_TRUE(plan != nullptr);
     ASSERT_EQ(plan->description, std::string("Мой планировщик"));
-    std::string order;
-    for (const auto& p : AgentRegistry::instance().all()) {
-        if (!order.empty()) order += ",";
-        order += p->name;
-    }
-    if (order != "wp_build,wp_plan,wp_general,wp_explore") {
+    const std::string order = joined_names(AgentRegistry::instance());
+    if (order != kBuiltinOrder) {
         std::cerr << "  порядок после загрузки конфига: " << order << std::endl;
     }
-    ASSERT_EQ(order, std::string("wp_build,wp_plan,wp_general,wp_explore"));
+    ASSERT_EQ(order, std::string(kBuiltinOrder));
 
     /* Восстановление: реестр — синглтон, и оставленные в нём агенты
      * видели бы следующие тесты. */
@@ -1492,4 +1501,175 @@ TEST(builtin_subagent_rights_do_not_override_the_users_own_decisions) {
               std::string("разрешить"));
     ASSERT_EQ(std::string(action_name(as_subagent->evaluate("write", "*"))),
               std::string("запретить"));
+}
+
+/* ======================================================================
+ * И8.15: WP-субагенты
+ * ====================================================================== */
+
+/* Четыре WP-специалиста — ЗАКРЫТЫЙ список нашего кода, и именно поэтому
+ * его можно сверять строкой. Но и здесь список живёт в одном месте: он
+ * выводится из kBuiltinOrder, а не написан ещё раз, иначе проверка
+ * прошла бы сама по себе. */
+std::vector<std::string> wp_agents_of(const AgentRegistry& reg) {
+    static const char* kNames[] = {"wp_theme", "wp_plugin", "wp_hook",
+                                   "wp_deploy"};
+    std::vector<std::string> out;
+    for (const char* n : kNames) {
+        const auto def = reg.find(n);
+        if (def != nullptr) out.push_back(def->name);
+    }
+    return out;
+}
+
+TEST(the_four_wp_agents_exist_as_subagents_and_are_not_announced_otherwise) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    const std::vector<std::string> want = {"wp_theme", "wp_plugin", "wp_hook",
+                                           "wp_deploy"};
+    /* Порядок сверяется ЧИСЛОМ найденных и СОСТАВОМ поимённо: вектор
+     * строк печатать в ASSERT_EQ нечем (у тест-фреймворка нет
+     * оператора << для vector), а «последовательно, по одному» —
+     * ровно то, что здесь и проверяется. */
+    const std::vector<std::string> got = wp_agents_of(reg);
+    if (got.size() != want.size()) {
+        std::cerr << "  WP-агентов в реестре " << got.size() << " из "
+                  << want.size() << "; порядок: " << joined_names(reg)
+                  << std::endl;
+    }
+    ASSERT_EQ(got.size(), want.size());
+    for (size_t i = 0; i < want.size(); ++i) {
+        if (got[i] != want[i]) {
+            std::cerr << "  WP-агент №" << (i + 1) << ": ждали " << want[i]
+                      << ", получили " << got[i] << std::endl;
+        }
+        ASSERT_EQ(got[i], want[i]);
+    }
+
+    /* Субагент, а не основной агент: объявление «тема» в списке выбора
+     * агента настроек обещало бы человеку переключиться на него, а
+     * выбранный агент работает по правилам СЕССИИ — то есть обещание
+     * было бы ложным (И8.10). */
+    for (const std::string& n : want) {
+        const auto def = reg.find(n);
+        ASSERT_TRUE(def->mode == AgentMode::Subagent);
+        const std::vector<std::string> prim = reg.primary_names();
+        ASSERT_TRUE(std::find(prim.begin(), prim.end(), n) == prim.end());
+        const std::vector<std::string> sub = reg.subagent_names();
+        ASSERT_TRUE(std::find(sub.begin(), sub.end(), n) != sub.end());
+    }
+
+    /* Трёх НЕ должно быть: wp_rag/wp_terminal/wp_file дублировали бы
+     * core (rag_index/rag_query, bash, read/write/glob) — это был бы
+     * второй инструмент рядом с существующим. Проверка на ОТСУТСТВИЕ
+     * нужна, потому что мёртвый код И0.6 как раз вернуть легче, чем
+     * заметить его отсутствие. */
+    for (const char* absent : {"wp_rag", "wp_terminal", "wp_file"}) {
+        if (reg.find(absent) != nullptr) {
+            std::cerr << "  появился дублирующий core агент " << absent
+                      << std::endl;
+        }
+        ASSERT_TRUE(reg.find(absent) == nullptr);
+    }
+}
+
+TEST(builtin_subagent_rights_never_lift_a_sessions_deny) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    /* Сессия, где человек запретил себе писать, — и проверить, что НИ
+     * ОДИН встроенный агент этого запрета не отменяет. Раньше проверка
+     * жила на одном wp_general, у которого grant был только на чтение, и
+     * на `write` не смотрела: то есть первая же строка `write → allow`
+     * в таблице (а она нужна WP-агентам-авторам) тихо отменила бы
+     * «я запретил себе писать» — плагин не вправе отменять решение
+     * человека правилом, которое человек не писал. */
+    Ruleset session;
+    session.add("*", "*", PermissionAction::Allow);
+    session.add("write", "*", PermissionAction::Deny);
+
+    for (const auto& def : reg.all()) {
+        const auto child = agent::Info::for_subagent(*def, session);
+        const PermissionAction got = child->evaluate("write", "*");
+        if (got != PermissionAction::Deny) {
+            std::cerr << "  " << def->name
+                      << " отменил запрет сессии на write: "
+                      << action_name(got) << std::endl;
+        }
+        ASSERT_TRUE(got == PermissionAction::Deny);
+    }
+
+    /* И наоборот: без запрета сессии авторский grant РАБОТАЕТ, иначе
+     * правка выше была бы достигнута запретом всего подряд, и WP-агенты
+     * стали бы бесполезны (то есть «починили» бы, сломав смысл).
+     *
+     * Разыменование `*reg.find(...)` идёт ПОСЛЕ проверки на nullptr: без
+     * неё тест на отсутствующем агенте падал бы Segmentation fault, а не
+     * строкой FAIL. Нашлось это прогоном мутаций (убрали wp_theme из
+     * таблицы — прогон вернул rc=139 вместо «поймана»), то есть ровно тем
+     * способом, которым такие проверки обычно и портятся: зелёные. */
+    Ruleset open;
+    open.add("*", "*", PermissionAction::Allow);
+    const auto theme_def = reg.find("wp_theme");
+    if (theme_def == nullptr) {
+        std::cerr << "  в реестре нет wp_theme" << std::endl;
+    }
+    ASSERT_TRUE(theme_def != nullptr);
+    const auto theme = agent::Info::for_subagent(*theme_def, open);
+    ASSERT_EQ(std::string(action_name(theme->evaluate("write", "*"))),
+              std::string("разрешить"));
+    const auto deploy_def = reg.find("wp_deploy");
+    if (deploy_def == nullptr) {
+        std::cerr << "  в реестре нет wp_deploy" << std::endl;
+    }
+    ASSERT_TRUE(deploy_def != nullptr);
+    const auto deployer = agent::Info::for_subagent(*deploy_def, open);
+    /* А выкладка не пишет код — даже когда сессия разрешает: это её
+     * граница, а не запрет человека. */
+    ASSERT_EQ(std::string(action_name(deployer->evaluate("write", "*"))),
+              std::string("запретить"));
+}
+
+TEST(no_wp_subagent_is_granted_a_destructive_key_silently) {
+    register_base_tools();
+    AgentRegistry reg;
+    register_builtin_agents(reg);
+
+    /* Ключи, которые по умолчанию СПРАШИВАЮТСЯ (apply_agent_defaults).
+     * Встроенный WP-агент не вправе превратить такой ключ в «делать
+     * молча»: делегирование само по себе не спрашивает человека, и
+     * молчаливый `deploy` в субагент означал бы выкладку без
+     * подтверждения, а тихий `wp-cli` — правку базы в обход вопроса.
+     *
+     * Проверяются ЧЕТЫРЕ агента из 8.15, а не все встроенные: у wp_explore
+     * есть осознанный grant на `bash` (И8.6, поиск по проекту), и
+     * требование «никто не тихо разрешает опасное» запрещало бы его
+     * задним числом. Список WP-агентов — тот же kBuiltinOrder-вывод, что и
+     * в проверке их состава. */
+    Engine eng;
+    HostCallbacks cb;
+    eng.init(cb);
+    const Ruleset defaults = eng.permissions().rules();
+    static const char* kMustAsk[] = {"bash",  "deploy",  "wp-cli", "db",
+                                     "ssh",   "systemd", "docker", "cron",
+                                     "git",   "rag",     "package"};
+    for (const std::string& name : wp_agents_of(reg)) {
+        const auto def = reg.find(name);
+        /* Имя пришло из состава того же реестра, но проверка на nullptr
+         * всё равно нужна: deref без неё даёт Segmentation fault вместо
+         * FAIL (см. комментарий выше). */
+        ASSERT_TRUE(def != nullptr);
+        const auto child = agent::Info::for_subagent(*def, defaults);
+        for (const char* key : kMustAsk) {
+            const PermissionAction got = child->evaluate(key, "*");
+            if (got == PermissionAction::Allow) {
+                std::cerr << "  " << name << " молча разрешает " << key
+                          << std::endl;
+            }
+            ASSERT_TRUE(got != PermissionAction::Allow);
+        }
+    }
 }
