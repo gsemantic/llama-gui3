@@ -812,8 +812,8 @@ TEST(the_wp_deploy_subagent_is_refused_the_tools_that_change_files) {
     ASSERT_TRUE(catalogue_mentions(child_sys, "verify"));
 
     /* ЧТО ПРИШЛО В ИНСТРУМЕНТ: ребёнку отказали по правилу, и отказ
-     * попал в ЕГО транскрипт — то есть до модели, а не в stderr. */
-    /* Отказ виден ребёнку ВО ВТОРОМ запросе: первый — это исходная
+     * попал в ЕГО транскрипт — то есть до модели, а не в stderr.
+     * Отказ виден ребёнку ВО ВТОРОМ запросе: первый — это исходная
      * задача, а вызов инструмента и его результат попадают в следующий.
      * Индекс 0 здесь прошёл бы на «вызова не было». */
     const std::string child_talk = fx.host.transcript(1);
@@ -876,6 +876,234 @@ TEST(a_wp_subagent_cannot_undo_what_its_own_role_forbids) {
                   << text::utf8_prefix(tail, 300) << std::endl;
     }
     ASSERT_TRUE(tail.find("запрещён правилом") != std::string::npos);
+}
+
+/* ======================================================================
+ * 5. Склейка: агент из ФАЙЛА (И8.16)
+ * ====================================================================== */
+
+/* Проверки этого раздела закрывают склейку, а не отдельные куски её.
+ * Каждое звено по отдельности проверено: разбор frontmatter — на текстах
+ * (test_agent_config), нормализация `tools`→`permission` — там же, сужение
+ * и enforcement — встроенными агентами выше. Не проверено одно: что
+ * агент, прочитанный из `.md`, доезжает до ВЛОЖЕННОГО ХОДА со своими
+ * правилами. Связка рвётся молча — реестр покажет правильные поля,
+ * а ребёнок получит чужие, и оба теста по отдельности останутся зелёными.
+ *
+ * Агент здесь грузится через `load_directory`, а не через `Engine::
+ * load_settings`: путь «настройка → каталог» уже проверен отдельно
+ * (engine_load_settings_loads_project_agents), а вот разбор файла и
+ * превращение его в правила хода — то, что проверяется здесь. */
+
+std::string write_agent_file(const fs::path& dir, const std::string& name,
+                             const std::string& body) {
+    fs::create_directories(dir);
+    const fs::path p = dir / name;
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f << body;
+    return p.string();
+}
+
+TEST(an_agent_read_from_a_file_brings_its_own_rules_into_the_child_turn) {
+    TaskFixture fx;
+    /* Файл ДО первого вызова: агент должен быть в реестре к моменту
+     * делегирования, иначе проверялось бы «агент не найден». */
+    write_agent_file(fx.project / ".wpcode" / "agent", "reviewer.md",
+                     "---\n"
+                     "description: Проверяющий чужие правки\n"
+                     "mode: subagent\n"
+                     "tools:\n"
+                     "  read_file: true\n"
+                     "  write_file: false\n"
+                     "permission:\n"
+                     "  read: allow\n"
+                     "---\n"
+                     "Ты проверяющий. Смотри и ничего не трогай.\n");
+
+    /* Ответов четыре, и порядок важен: первый — вызов `task` от
+     * РОДИТЕЛЯ (его ход ведёт AgentLoop, а не прямой вызов инструмента),
+     * дальше — два хода ребёнка, последний — завершение родителя.
+     * Прямой `run_output` здесь не годился: он не пишет вызов в историю
+     * родителя, и проверка «ответ дошёл до вызывающего» проверяла бы
+     * пустоту. */
+    fx.host.replies = {
+        call_block("task", task_args("Проверка", "Посмотри файл.", "reviewer")),
+        call_block("write_file",
+                   ", \"path\": \"/srv/site/правка\", \"content\": \"x\""),
+        "Понял, запись запрещена. Итог: файл читается, правок нет.",
+        "Проверку закончил: ребёнок ответил, записи не было."};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    /* Настоящий разбор frontmatter и настоящая сборка правил — тем же
+     * вызовом, что и у плагина при загрузке проекта. */
+    for (const AgentLoadDiag& d :
+         AgentRegistry::instance().load_directory(
+             (fx.project / ".wpcode" / "agent").string())) {
+        std::cerr << "  замечание к агенту: " << d.path << ": " << d.message
+                  << std::endl;
+    }
+
+    /* Вызывающий знает про агента из файла: без этого он был бы
+     * недостижим, то есть написанный агент остался бы мёртвым. */
+    const std::string list = subagent_list_from(engine().build_system_prompt());
+    if (list.find("reviewer") == std::string::npos) {
+        std::cerr << "  агента из файла нет в списке: "
+                  << text::utf8_prefix(list, 300) << std::endl;
+    }
+    ASSERT_TRUE(list.find("reviewer") != std::string::npos);
+    ASSERT_TRUE(list.find("Проверяющий чужие правки") != std::string::npos);
+
+    /* Родительский ход — настоящим циклом: именно он кладёт вызов
+     * `task` в историю и приносит результат обратно. */
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [](AgentEvent::Kind, const std::string&) {});
+    loop.run(engine().build_system_prompt(), response);
+
+    /* ЗВЕНО 1: тело файла стало промптом ребёнка. Тело, а не имя и не
+     * описание: системный промпт из имени дал бы агенту роль, которой
+     * нет, и модель смотрела бы в пустоту. */
+    const std::string child_sys = fx.host.sys(1);
+    if (child_sys.find("Ты проверяющий. Смотри и ничего не трогай.") ==
+        std::string::npos) {
+        std::cerr << "  в промпте ребёнка нет тела файла: "
+                  << text::utf8_prefix(child_sys, 400) << std::endl;
+    }
+    ASSERT_TRUE(child_sys.find("Ты проверяющий. Смотри и ничего не трогай.") !=
+                std::string::npos);
+    /* И это НЕ встроенный агент: чужой промпт означал бы, что файл
+     * прочитан, а применены правила соседа по таблице. */
+    ASSERT_TRUE(child_sys.find(kAgentWpThemePrompt) == std::string::npos);
+
+    /* ЗВЕНО 2: `tools` из файла превратились в правила и доехали до
+     * каталога. `read_file: true` и `write_file: false` — это ключи
+     * `read` и `write` (agent_rules_fold_edit_aliases_into_the_write_key),
+     * и проверяется результат, а не синтаксис frontmatter. */
+    ASSERT_TRUE(catalogue_mentions(child_sys, "read_file"));
+    if (catalogue_mentions(child_sys, "write_file")) {
+        std::cerr << "  у агента из файла в каталоге write_file" << std::endl;
+    }
+    ASSERT_FALSE(catalogue_mentions(child_sys, "write_file"));
+    ASSERT_FALSE(catalogue_mentions(child_sys, "apply_patch"));
+
+    /* ЗВЕНО 3: сужение дошло до enforcement, а не только до каталога:
+     * ребёнок позвал write_file и получил отказ в своей транскрипте.
+     * Индекс 2 — это ВТОРОЙ запрос ребёнка: индекс 0 занят ходом
+     * родителя, индекс 1 — исходной задачей ребёнка, а вызов и его отказ
+     * приходят в запросе, который уходит в модель ПОСЛЕ вызова. */
+    const std::string child_talk = fx.host.transcript(2);
+    const size_t last = child_talk.rfind("write_file");
+    if (last == std::string::npos) {
+        std::cerr << "  ребёнок не звал write_file: "
+                  << text::utf8_prefix(child_talk, 400) << std::endl;
+    }
+    ASSERT_TRUE(last != std::string::npos);
+    const std::string tail = child_talk.substr(last);
+    if (tail.find("запрещён правилом") == std::string::npos) {
+        std::cerr << "  после write_file нет отказа: "
+                  << text::utf8_prefix(tail, 300) << std::endl;
+    }
+    ASSERT_TRUE(tail.find("запрещён правилом") != std::string::npos);
+
+    /* ЗВЕНО 4: ответ ребёнка дошёл до вызывающего — извлечение результата
+     * на агенте из файла, а не только на встроенном. */
+    const std::vector<Message> h = fx.history();
+    const MessagePart* part = nullptr;
+    for (const Message& m : h) {
+        const MessagePart* p = tool_part(m, "task");
+        if (p != nullptr) part = p;
+    }
+    if (part == nullptr) {
+        std::cerr << "  в истории родителя нет вызова task; частей: "
+                  << h.size() << std::endl;
+    }
+    ASSERT_TRUE(part != nullptr);
+    ASSERT_EQ(part->state(), ToolState::Completed);
+    if (part->output().output.find("правок нет") == std::string::npos) {
+        std::cerr << "  итог ребёнка не в результате task: "
+                  << text::utf8_prefix(part->output().output, 300)
+                  << std::endl;
+    }
+    ASSERT_TRUE(part->output().output.find("правок нет") != std::string::npos);
+    /* Транскрипт ребёнка в результат не попал: вызывающий получает ответ,
+     * а не чужой диалог. */
+    ASSERT_TRUE(part->output().output.find("\"tool\"") == std::string::npos);
+}
+
+TEST(an_agent_from_a_file_needs_an_explicit_grant_to_delegate_further) {
+    TaskFixture fx;
+    write_agent_file(fx.project / ".wpcode" / "agent", "recruiter.md",
+                     "---\n"
+                     "description: Набирает исполнителей\n"
+                     "mode: subagent\n"
+                     "permission:\n"
+                     "  read: allow\n"
+                     "  task: allow\n"
+                     "---\n"
+                     "Ты набиратель. Делегируй и собирай итог.\n");
+    /* Глубина 2 — и это часть проверки, а не обвязка. По умолчанию
+     * `subagent_depth` = 1, то есть вложенный вызов запрещён ЛИМИТОМ, даже
+     * если файл разрешил его ключом `task: allow`. Первая версия этой
+     * проверки подняла только `task: allow` и упала: вложенный вызов был
+     * отклонён, результат пришёл пустым, а «ребёнок не добрался до
+     * вложенного вызова» выглядело как поломка склейки. Оказалось, что
+     * для делегирования нужны ДВА условия — ключ в файле и глубина, — и
+     * по отдельности ни одно из них не про то, что проверяет склейка.
+     * Настройка ставится ДО `engine().init`: её читает `load_settings`. */
+    fx.settings["wp_coder.subagent_depth"] = "2";
+    /* Ответы: первый — попытка делегировать, второй — ответ внутреннего
+     * агента, третий — итог набирателя. */
+    fx.host.replies = {
+        call_block("task", task_args("Задача", "Сделай.", "wp_general")),
+        "Сделано: исполнитель отработал.",
+        "Готово: итог собрал."};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    for (const AgentLoadDiag& d :
+         AgentRegistry::instance().load_directory(
+             (fx.project / ".wpcode" / "agent").string())) {
+        std::cerr << "  замечание к агенту: " << d.path << ": " << d.message
+                  << std::endl;
+    }
+
+    json::JsonValue call = json::JsonValue::object();
+    call.set("description", "Набор");
+    call.set("prompt", "Собери итог.");
+    call.set("subagent_type", "recruiter");
+    ToolsRegistry::instance().run_output("task", call);
+
+    /* Файл СКАЗАЛ `task: allow`, и ребёнок действительно смог делегировать:
+     * без этой строки автозапрет закрыл бы ему `task`, и проверка ниже
+     * прошла бы на отказе, объявив успехом то, чего не было. */
+    /* Транскрипт — ВТОРОЙ запрос набирателя: вложенный вызов и его
+     * результат приходят в нём. Первый запрос — исходная задача, и
+     * вложенного вызова в нём ещё нет. */
+    const std::string child_talk = fx.host.transcript(2);
+    if (child_talk.find("wp_general") == std::string::npos) {
+        std::cerr << "  ребёнок не добрался до вложенного вызова: "
+                  << text::utf8_prefix(child_talk, 300) << std::endl;
+    }
+    ASSERT_TRUE(child_talk.find("wp_general") != std::string::npos);
+    ASSERT_TRUE(child_talk.find("Сделано: исполнитель отработал.") !=
+                std::string::npos);
+    /* Вложенный агент — СВОЙ, а не тот, кто звал: его системный промпт
+     * несёт промпт wp_general и НЕ несёт тело файла набирателя. Это и
+     * есть проверка на утечку области: сужение применилось к тому, кого
+     * позвали изнутри, а не к вызывающему.
+     *
+     * Про `write_file` в его каталоге: он ТАМ ЕСТЬ, и это правильно.
+     * `wp_general` не запрещает запись, а просто не разрешает её молча —
+     * то есть action = «спросить», а «спросить» инструмент из каталога
+     * НЕ убирает (убирает запрет, И2.8). Первая версия проверки ждала
+     * отсутствия write_file и упала бы на верном поведении. */
+    const std::string inner_sys = fx.host.sys(1);
+    ASSERT_TRUE(inner_sys.find(kAgentGeneralPrompt) != std::string::npos);
+    ASSERT_TRUE(inner_sys.find("Ты набиратель. Делегируй и собирай итог.") ==
+                std::string::npos);
 }
 
 /* ======================================================================
