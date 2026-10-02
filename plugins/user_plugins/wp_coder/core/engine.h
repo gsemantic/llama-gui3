@@ -13,6 +13,7 @@
 #include "abort.h"
 #include "agent_registry.h"
 #include "compaction.h"
+#include "harness_profile.h"
 #include "instruction.h"
 #include "module_api.h"
 #include "tools_registry.h"
@@ -288,6 +289,25 @@ struct EngineState {
      * лениво — при первой сборке промпта, где уже известен корень
      * проекта. */
     std::string instructions_config;
+    /* И9.7: профиль harness. `wp_coder.profile` — имя (без .json),
+     * `wp_coder.profiles_dir` — каталог, а profiles_bundled_dir приходит
+     * из src/plugin_main.cpp тем же путём, что и каталог навыков
+     * (WP_CODER_SKILLS_DIR): ядро не знает, где себя лежит, и знать не
+     * должно (D-7).
+     *
+     * Загрузка ПРЯМАЯ и в load_settings, а не ленивая, как инструкции
+     * (И9.1): файл локальный, без сети, а профиль сужает права, и
+     * право, которое применяется на первом же ходе, должно быть
+     * применено ДО первого хода, а не одновременно с ним. */
+    std::string profile_name;
+    std::string profiles_dir;
+    std::string profiles_bundled_dir;
+    bool has_profile = false;
+    harness::Profile profile;
+    /* Почему профиль не применился (пусто — применился или не задан).
+     * Показывается в логе и в панели: молча неприменённый профиль
+     * выглядел бы как «настройка не работает». */
+    std::string profile_error;
     mutable std::string cached_system_prompt;  // кэш собранного промпта
     mutable bool prompt_dirty = true;          // флаг необходимости пересборки
 
@@ -308,6 +328,11 @@ struct EngineState {
      * При превышении агент прерывает ожидание и сообщает об ошибке,
      * не дожидаясь ответа провайдера (2.2). */
     int llm_timeout_ms = 120000;
+    /* И9.7: настройка таймаута СЫРОЙ строкой. Нужна, чтобы решить, чьё
+     * значение важнее — профиля или человека, — по самому факту, что
+     * человек что-то написал, а не по результату разбора: «0» и мусор
+     * тоже написанное, и подменять их значением профиля молча нельзя. */
+    std::string llm_timeout_setting;
 
     /* Настройки агента (5.3) — переопределяют дефолты из core/limits.h. */
     int max_steps = 12;            // лимит шагов ReAct на задачу (kMaxSteps)
@@ -687,6 +712,31 @@ public:
     /* Инвалидация кэша промпта (вызывать при изменении настроек). */
     void invalidate_prompt_cache() const { state_.prompt_dirty = true; }
 
+    /* --- Профиль harness (И9.7) --- */
+
+    /* Каталог с ПОСТАВЛЕННЫМИ профилями (profiles/wp_coder плагина).
+     * Ставится из src/plugin_main.cpp: путь к дереву плагина известен
+     * только там, и это ровно тот же приём, что с WP_CODER_SKILLS_DIR.
+     * Ядро получает готовую строку и ни о каком каталоге плагина не
+     * знает — иначе проверка «профиль не найден» зависела бы от того,
+     * откуда собраны тесты. */
+    void set_profiles_bundled_dir(std::string dir);
+
+    /* Профиль по имени ИМЕНИ АГЕНТА (`profile:` во frontmatter, И9.7).
+     *
+     * Отдельная функция, а не поле в AgentDef: правила агента собирает
+     * владелец правил (Info, И8.4), и он же должен получить готовый
+     * профиль — иначе решение «чем этот агент ограничен» принималось бы
+     * в инструменте `task` и в UI отдельно.
+     *
+     * nullptr — профиль не задан или не читается; это НЕ ошибка сама по
+     * себе, и why (необязательный) получает причину. */
+    std::shared_ptr<const harness::Profile> profile_for_agent(
+        const std::string& agent_profile_name, std::string* why = nullptr) const;
+
+    /* Профиль сессии: разобран или нет, и почему. Для панели и лога. */
+    bool session_profile(harness::Profile* out, std::string* error) const;
+
     /* Применение/отклонение предложенных правок. */
     void pending_apply(size_t idx);
     void pending_discard(size_t idx);
@@ -790,6 +840,18 @@ private:
 
     void run_task(std::string task);
     void worker_main();
+
+    /* И9.7: применить профиль harness к сессии — таймаут, команды,
+     * запреты ключей. Зовётся из load_settings ПОСЛЕ
+     * permissions_.load_user_rules: запреты профиля кладутся в конец
+     * набора и потому перекрывают правила пользователя (тот же порядок,
+     * что у запретов сессии в Info, И8.10).
+     *
+     * Отдельный метод, а не строки в load_settings: он обязан быть
+     * вызываемым ПОВТОРНО без перечитывания всех настроек, иначе
+     * проверка «профиль сменился — граница снята» требовала бы
+     * поддельной таблицы настроек. */
+    void apply_session_profile();
 
     /* Путь к файлу сохранённой сессии (resume, 5.2): <data_dir>/wp_coder/session.json. */
     std::string session_file_path() const;

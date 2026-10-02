@@ -37,6 +37,7 @@
  * спрашивает пользователя, а не молча делает.
  */
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,14 @@ public:
              PermissionAction action);
 
     void clear();
+    /* Убрать правила по признаку. Нужно там, где набор ПЕРЕСБИРАЕТСЯ
+     * на месте, а не добавляется: правила профиля harness (И9.7) кладутся
+     * в конец (побеждает последнее совпавшее), и без удаления старых
+     * повторная загрузка настроек копила бы копии, а смена профиля не
+     * смогла бы ОТПУСТИТЬ то, что сужал прежний.
+     *
+     * Порядок оставшихся сохраняется — он и есть семантика набора. */
+    size_t erase_matching(const std::function<bool(const Rule&)>& pred);
     bool empty() const;
     size_t size() const;
     const std::vector<Rule>& rules() const;

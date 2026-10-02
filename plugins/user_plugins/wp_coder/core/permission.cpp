@@ -80,6 +80,13 @@ void Ruleset::add(const std::string& permission, const std::string& pattern,
 
 void Ruleset::clear() { rules_.clear(); }
 
+size_t Ruleset::erase_matching(const std::function<bool(const Rule&)>& pred) {
+    const size_t before = rules_.size();
+    rules_.erase(std::remove_if(rules_.begin(), rules_.end(), pred),
+                 rules_.end());
+    return before - rules_.size();
+}
+
 bool Ruleset::empty() const { return rules_.empty(); }
 
 size_t Ruleset::size() const { return rules_.size(); }

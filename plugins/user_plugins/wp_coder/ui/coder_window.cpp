@@ -288,6 +288,23 @@ static void render_session() {
             st.total_completion_tokens, st.last_tokens_per_second,
             st.llm_total_time, st.steps);
         ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "%s", stats);
+        /* И9.7: активный профиль harness. Показывается, потому что профиль
+         * СУЖАЕТ права, и человек, не видя его имени, не может понять,
+         * почему агент вдруг не может записать файл. Плюс причина, если
+         * профиль назван, но не применился: молча неприменённый профиль
+         * выглядел бы как «настройка не работает». */
+        {
+            coder::harness::Profile p;
+            std::string perror_text;
+            const bool on = engine().session_profile(&p, &perror_text);
+            if (on) {
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.6f, 1.0f),
+                                   "Профиль: %s", p.name.c_str());
+            } else if (!perror_text.empty()) {
+                ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.4f, 1.0f),
+                                   "Профиль не применён: %s", perror_text.c_str());
+            }
+        }
         if (st.state != AgentState::Idle && ImGui::Button("Стоп", {-1, 0})) {
             engine().request_abort();
         }

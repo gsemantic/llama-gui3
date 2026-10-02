@@ -82,6 +82,7 @@
 #include <vector>
 
 #include "permission.h"
+#include "harness_profile.h"
 
 namespace coder {
 
@@ -158,6 +159,12 @@ struct AgentDef {
 
     std::string model;   /* пусто — модель сессии */
     std::string color;   /* для UI; на поведение не влияет */
+
+    /* И9.7: имя профиля harness (`profile:` во frontmatter). Пусто —
+     * профиля нет. Разбирается и проверяется владельцем правил (Info),
+     * а не здесь: агент_registry не знает, где лежат файлы профилей, и
+     * знать не должен — каталог приходит настройкой (И9.7). */
+    std::string profile;
 
     bool has_temperature = false;
     double temperature = 0.0;
@@ -392,9 +399,16 @@ public:
      * shared_ptr, а не значение: рантайм-агента читают и worker-поток
      * (решение по каждому вызову инструмента), и UI (панель правил), и
      * копия правил «всегда» между ними — расхождение, после которого
-     * агент ведёт себя не так, как показано пользователю. */
+     * агент ведёт себя не так, как показано пользователю.
+     *
+     * profile — профиль harness агента (`profile:`, И9.7). nullptr —
+     * профиля нет. Его запреты кладутся в БАЗУ, до правил агента: файл
+     * агента и профиль названы в одном frontmatter, и если бы запрет
+     * профиля лег после `permission`, то агент не смог бы объявить себя
+     * уже — то есть строка в том же файле была бы мёртвой. */
     static std::shared_ptr<Info> from_def(const AgentDef& def, const Ruleset& base,
-                                          std::vector<AgentLoadDiag>* diags = nullptr);
+                                          std::vector<AgentLoadDiag>* diags = nullptr,
+                                          const harness::Profile* profile = nullptr);
 
     /* Сборка рантайма СУБАГЕНТА (И8.10). Отличие от from_def не в
      * оформлении, а в трёх правилах, и каждое стоит своего места:
@@ -417,7 +431,8 @@ public:
      * делегированию, а не к агенту вообще. */
     static std::shared_ptr<Info> for_subagent(
         const AgentDef& def, const Ruleset& session_rules,
-        std::vector<AgentLoadDiag>* diags = nullptr);
+        std::vector<AgentLoadDiag>* diags = nullptr,
+        const harness::Profile* profile = nullptr);
 
     const std::string& name() const { return name_; }
     const std::string& description() const { return description_; }
@@ -462,7 +477,8 @@ private:
     enum class Role { Primary, Subagent };
 
     Info(const AgentDef& def, const Ruleset& base,
-         std::vector<AgentLoadDiag>* diags, Role role);
+         std::vector<AgentLoadDiag>* diags, Role role,
+         const harness::Profile* profile);
 
     std::string name_;
     std::string description_;

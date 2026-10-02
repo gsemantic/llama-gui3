@@ -2,6 +2,8 @@
 
 #include "agent_components.h"
 #include "agent_registry.h"
+#include "command_policy.h"
+#include "harness_profile.h"
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
@@ -853,10 +855,48 @@ void Engine::load_settings() {
     state_.active_module    = setting_get(cb_, "wp_coder.active_module", "");
     state_.continue_conversation = setting_get(cb_, "wp_coder.continue_conversation", "true") != "false";
     {
-        int timeout = 120000;
-        std::string t = setting_get(cb_, "wp_coder.llm_timeout_ms", "120000");
-        try { timeout = std::stoi(t); } catch (...) {}
+        /* Таймаут: сначала настройка, потом профиль (И9.7).
+         *
+         * Порядок — «явное важнее профиля», и он читается в одну строку:
+         * пустая настройка означает «человек не задавал», и тогда берётся
+         * профиль. Обратный порядок (профиль поверх настройки) сделал бы
+         * настройку бесполезной: человек написал бы 60000, а получил бы
+         * 300000 из debug_verbose и не понял бы почему.
+         *
+         * Мусор и НОЛЬ → дефолт 120000, и это ОТДЕЛЬНОЕ решение, а не
+         * побочный эффект: раньше неразбираемое значение давало 0, то
+         * есть deadline в прошлом и мгновенный таймаут (host_bridge/
+         * llm_blocking.cpp:93) — опечатка в настройке обрывала бы работу
+         * агента на первом же запросе. Значит читаемое «0» из профиля
+         * отвергается (см. parse_profile), а «0» в настройке приводится к
+         * дефолту: ноль таймаута не выражает намерения человека, его
+         * выражает опечатка.
+         *
+         * Читать профиль здесь нельзя: к этому месту ещё не прочитаны
+         * правила разрешений, а профиль кладёт запреты в них (см.
+         * apply_session_profile ниже). */
+        const std::string t = setting_get(cb_, "wp_coder.llm_timeout_ms", "");
+        state_.llm_timeout_setting = t;   // решает исход vs профиль, И9.7
+        int timeout = 0;
+        if (!t.empty()) {
+            try { timeout = std::stoi(t); } catch (...) {}
+        }
         state_.llm_timeout_ms = timeout;
+    }
+    /* И9.7: профиль harness. Каталог — настройка, а если она пуста, то
+     * поставленный каталог плагина (тот же приём, что у навыков). */
+    {
+        std::string dir = setting_get(cb_, "wp_coder.profiles_dir", "");
+        if (dir.empty()) dir = state_.profiles_bundled_dir;
+        state_.profiles_dir = dir;
+        /* Имя профиля — с приведением регистра, как имена агентов (И8.1):
+         * его пишет человек, и «Secure_Audit» в настройке означал бы
+         * «профиль не найден» при файле secure_audit.json. */
+        std::string name = setting_get(cb_, "wp_coder.profile", "");
+        for (char& c : name) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        state_.profile_name = name;
     }
     {
         int steps = 12;
@@ -990,6 +1030,10 @@ void Engine::load_settings() {
     permissions_.load_user_rules(
         setting_get(cb_, "wp_coder.permission_rules", ""));
 
+    /* И9.7: профиль harness. После правил пользователя — запреты профиля
+     * кладутся в конец набора. */
+    apply_session_profile();
+
     /* И3.6: доверенные сетевые хосты для curl/wget в bash.
      * Штатно доверен только localhost (задан в конструкторе политики),
      * сюда добавляются адреса сайта из настроек: их плагин и так
@@ -1002,6 +1046,155 @@ void Engine::load_settings() {
         if (!state_.wp_site_url.empty()) hosts.push_back(state_.wp_site_url);
         security::trust_command_hosts(hosts);
     }
+}
+
+/* И9.7: профиль harness → сессия. Разбор, таймаут, команды, запреты.
+ *
+ * Что делает и что НЕ делает — по одному правилу: поле применяется, если
+ * у плагина есть место, где его применение имеет смысл. Отсюда и список
+ * в core/harness_profile.h: temperature/max_tokens ждут И11.14 (D23),
+ * model/allowed_extensions/rag_enabled применять нечем.
+ *
+ * ПОЧЕМУ ЗДЕСЬ, А НЕ В ИНИЦИАЛИЗАТОРЕ ПРОФИЛЯ. Инициализация читала бы
+ * файл и молчала; здесь у профиля есть место для ПРИЧИНЫ (profile_error),
+ * а профиль, который не применился, обязан быть виден — иначе человек
+ * написал бы «secure_audit» и ходил бы с правами обычной сессии, ничего
+ * об этом не подозревая.
+ *
+ * ПОВТОРНЫЙ ВЫЗОВ ИДЕМПОТЕНТЕН. Именно поэтому у политики команд есть
+ * reset_allowed_binaries(), а запреты разрешений кладутся по сигнатуре
+ * (список ключей): load_settings зовётся на каждом init, и без сброса
+ * смена профиля оставила бы границу прежнего. */
+void Engine::apply_session_profile() {
+    std::string name;
+    std::string dir;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        name = state_.profile_name;
+        dir = state_.profiles_dir;
+    }
+
+    /* Даже без профиля границу команды надо вернуть к дефолту: иначе
+     * снятый профиль (или смена на другой) оставил бы прежнее сужение. */
+    command_policy().reset_allowed_binaries();
+
+    if (name.empty()) {
+        /* Прежние запреты профиля снимаются даже когда профиля больше
+         * нет: человек убрал настройку, и его «всегда» из ответа на
+         * вопрос не должен упираться в запрет, которого он уже отменил. */
+        permissions_.apply_profile_rules("", "", {});
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.has_profile = false;
+        state_.profile = harness::Profile();
+        state_.profile_error.clear();
+        /* Таймаут: настройки не было, профиля нет — дефолт плагина. */
+        if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
+        return;
+    }
+
+    harness::Profile profile;
+    std::string why;
+    if (!harness::load_profile(dir, name, &profile, &why)) {
+        /* Профиль не применился — значит, прежние его запреты тоже не
+         * должны остаться в силе: иначе сессия была бы ограничена
+         * настройкой, которой человек больше не задавал. */
+        permissions_.apply_profile_rules("", "", {});
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.has_profile = false;
+        state_.profile = harness::Profile();
+        state_.profile_error = why;
+        if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
+        std::cout << "[wp_coder] профиль harness: " << why << std::endl;
+        return;
+    }
+
+    /* Таймаут профиля — только если настройка не задана (см. load_settings):
+     * явная настройка человека важнее значения из файла. */
+    std::string cmd_why;
+    std::string keys_why;
+    const std::vector<std::string> denied = harness::denied_keys(
+        profile.tools_policy, ToolsRegistry::instance().defs(), &keys_why);
+    if (!keys_why.empty()) {
+        /* tools_policy пустой в файле — это не ошибка разбора: поле
+         * необязательное, и профиль без него просто ничего не сужает.
+         * Неизвестное значение parse_profile уже отверг. */
+        std::cout << "[wp_coder] профиль harness " << profile.name << ": "
+                  << keys_why << std::endl;
+    }
+    if (!harness::apply_allowed_commands(command_policy(),
+                                         profile.allowed_commands, &cmd_why)) {
+        std::cout << "[wp_coder] профиль harness " << profile.name
+                  << ": команды не применены — " << cmd_why << std::endl;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.has_profile = true;
+        state_.profile = profile;
+        state_.profile_error.clear();
+        /* Таймаут профиля — только если настройка не задана. Проверка идёт
+         * по СЫРОЙ строке настройки, а не по разобранному числу: «0» и мусор
+         * — это тоже «человек написал», и молча заменить их значением
+         * профиля значило бы стереть его опечатку вместо того, чтобы её
+         * показать. Мусор и ноль разбираются в дефолт в load_settings. */
+        if (profile.has_timeout_ms && state_.llm_timeout_setting.empty()) {
+            state_.llm_timeout_ms = profile.timeout_ms;
+        }
+        if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
+    }
+
+    /* Запреты — в конец набора правил, поэтому перекрывают правила
+     * пользователя (last match wins, core/permission.h). Человеку при этом
+     * остаётся последнее слово: его ответ «всегда» кладётся правилом
+     * ПОЗЖЕ (PermissionEngine::approve) и потому побеждает. Профиль —
+     * это поза по умолчанию, а не запрет на запрет.
+     *
+     * apply_profile_rules, а не add_rule в цикле: он ПЕРЕСБИРАЕТ свои
+     * правила вместо добавления, иначе повторный init копил бы копии, а
+     * смена профиля не отпустила бы то, что сужал прежний. */
+    permissions_.apply_profile_rules(profile.name, profile.tools_policy, denied);
+    if (!denied.empty()) {
+        std::cout << "[wp_coder] профиль harness " << profile.name
+                  << ": запрещено " << denied.size() << " ключей инструментов ("
+                  << profile.tools_policy << ")" << std::endl;
+    }
+    for (const std::string& k : profile.unknown_keys) {
+        std::cout << "[wp_coder] профиль harness " << profile.name
+                  << ": поле «" << k << "» плагину неизвестно" << std::endl;
+    }
+
+    /* Набор видимых инструментов мог измениться. */
+    invalidate_prompt_cache();
+}
+
+void Engine::set_profiles_bundled_dir(std::string dir) {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    state_.profiles_bundled_dir = std::move(dir);
+}
+
+std::shared_ptr<const harness::Profile> Engine::profile_for_agent(
+    const std::string& agent_profile_name, std::string* why) const {
+    if (why) why->clear();
+    if (agent_profile_name.empty()) return nullptr;
+    std::string dir;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        dir = state_.profiles_dir;
+    }
+    harness::Profile p;
+    std::string reason;
+    if (!harness::load_profile(dir, agent_profile_name, &p, &reason)) {
+        if (why) *why = reason;
+        return nullptr;
+    }
+    return std::make_shared<const harness::Profile>(std::move(p));
+}
+
+bool Engine::session_profile(harness::Profile* out, std::string* error) const {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    if (out) *out = state_.profile;
+    if (error) *error = state_.profile_error;
+    return state_.has_profile;
 }
 
 void Engine::save_settings() {

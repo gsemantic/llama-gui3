@@ -620,6 +620,11 @@ void CommandPolicy::deny_binary(const std::string& binary) {
     allowed_.erase(binary);
 }
 
+void CommandPolicy::reset_allowed_binaries() {
+    allowed_.clear();
+    for (const char* binary : kAllowedBinaries) allowed_.insert(binary);
+}
+
 void CommandPolicy::add_arg_rule(Rule r) {
     arg_rules_.push_back(std::move(r));
 }

@@ -373,6 +373,52 @@ std::vector<std::string> PermissionEngine::visible_tools(
     });
 }
 
+/* Маркер правил профиля в комментарии. Одна константа на запись и на
+ * опознание: сравнение и удаление старых правил не должны жить в другой
+ * строке, чем их написание, — иначе правка одного забыла другое. */
+const char* const kProfileRuleMarker = "профиль harness ";
+/* Префикс комментария, по которому опознаются правила профиля.
+ * Имени профиля в нём нет — см. комментарий у apply_profile_rules. */
+
+void PermissionEngine::apply_profile_rules(const std::string& profile,
+                                           const std::string& policy,
+                                           const std::vector<std::string>& denied_keys) {
+    std::function<void()> cb;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        /* Свои правила снимаются ПЕРЕД добавлением новых: load_settings
+         * зовётся на каждом init, и простое добавление копило бы копии
+         * (их видно в дампе правил), а смена профиля не смогла бы
+         * отпустить то, что сужал прежний. */
+        /* Маркер БЕЗ имени профиля: снимаются все правила профиля, каким
+         * бы профиль прежним ни был. Имя в маркер не входит намеренно —
+         * при вызове с пустым именем («профиля больше нет») маркер с
+         * именем не совпал бы ни с чем, и запреты остались бы навсегда.
+         * Активен профиль один, так что «снять все и положить новые» —
+         * ровно то, что нужно, и ничьи правила не затрагиваются. */
+        const std::string marker = kProfileRuleMarker;
+        rules_.erase_matching([&marker](const Rule& r) {
+            return r.comment.compare(0, marker.size(), marker) == 0;
+        });
+        /* Комментарий виден человеку в панели правил, поэтому он говорит
+         * ЧТО ограничено, а не только откуда: иначе строка «профиль
+         * harness secure_audit» читалась бы как ошибка плагина. */
+        const std::string why = marker + profile + ": " +
+                                (policy == "strict" ? "только чтение"
+                                                    : "только чтение и план");
+        for (const std::string& key : denied_keys) {
+            Rule r;
+            r.permission = key;
+            r.pattern = "*";
+            r.action = PermissionAction::Deny;
+            r.comment = why;
+            rules_.add(std::move(r));
+        }
+        cb = on_change_;
+    }
+    if (cb) cb();
+}
+
 void PermissionEngine::load_user_rules(const std::string& json_text) {
     /* Повторная загрузка того же текста ничего не делает: load_settings
      * зовётся на каждом init, а правила дописываются в конец, и без этой

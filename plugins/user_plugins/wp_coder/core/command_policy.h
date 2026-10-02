@@ -151,6 +151,16 @@ public:
      * потоком: единственное исключение — trust_host, см. ниже). */
     void allow_binary(const std::string& binary);
     void deny_binary(const std::string& binary);
+    /* Вернуть allowlist к значениям по умолчанию (И9.7).
+     *
+     * Сужение, сделанное профилем harness, обязано быть СНИМАЕМО: иначе
+     * смена профиля оставила бы границу прежнего, и `secure_audit`
+     * навсегда запрещал бы `git` после перехода на `accurate_cloud` —
+     * выглядело бы это как «профиль не работает», хотя работает не тот.
+     * Правило пользователя (arg_rules) не трогается: его снимает
+     * clear_arg_rules(), и смешивать две вещи в одной функции значило бы
+     * забыть про одну из них. */
+    void reset_allowed_binaries();
     const std::vector<Rule>& arg_rules() const { return arg_rules_; }
     void add_arg_rule(Rule r);
     void add_arg_rule(const std::string& permission, const std::string& pattern,

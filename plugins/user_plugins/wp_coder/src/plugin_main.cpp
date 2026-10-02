@@ -384,6 +384,15 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
     coder::SkillsManager::instance().load_from_directory(
         std::string(WP_CODER_SKILLS_DIR), "wordpress");
 
+    /* И9.7: каталог профилей harness, поставленных с плагином. Строка
+     * приходит из CMake (WP_CODER_PROFILES_DIR) — ровно тем же путём, что
+     * каталог навыков: путь к дереву плагина известен здесь и больше
+     * нигде, а ядро о своём расположении не знает (D-7). Порядок важен
+     * только в одном: пусть ДО Engine::init ниже, иначе первый
+     * load_settings прочитал бы пустой каталог, и профиль «не нашёлся
+     * бы» до первой перезагрузки настроек. */
+    coder::engine().set_profiles_bundled_dir(std::string(WP_CODER_PROFILES_DIR));
+
     /* Активируем навыки выбранного модуля.
      *
      * Раньше здесь стояла проверка «если active_module непустой». На

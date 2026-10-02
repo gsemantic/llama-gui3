@@ -196,6 +196,32 @@ std::string child_answer(const std::string& agent, const std::string& session_id
                                 r.error));
 }
 
+std::shared_ptr<agent::Info> build_child_info(
+    Engine& engine, const AgentDef& def,
+    std::vector<AgentLoadDiag>* diags) {
+    /* Профиль harness, названный в `profile:` (И9.7). Разбирает его
+     * движок: каталог профилей — его настройка, и агент о каталоге не
+     * знает. Пустое имя — не ошибка, а «профиля нет». */
+    std::shared_ptr<const harness::Profile> profile;
+    if (!def.profile.empty()) {
+        std::string why;
+        profile = engine.profile_for_agent(def.profile, &why);
+        if (!profile && !why.empty() && diags) {
+            AgentLoadDiag d;
+            d.path = def.source_path.empty() ? def.name : def.source_path;
+            d.message = "profile: " + why;
+            diags->push_back(d);
+        }
+    }
+    /* for_subagent, а не from_def (И8.10): ребёнок наследует от сессии
+     * только запреты и `external_directory`, а сверху получает свои правила
+     * и авто-запрет на `task`/`todo`. Снимок правил сессии берётся под
+     * локом движка разрешений: Info живёт дольше вызова, а правила
+     * меняются из UI-потока. */
+    return agent::Info::for_subagent(def, engine.permissions().rules_snapshot(),
+                                     diags, profile.get());
+}
+
 bool run_background_tasks(Engine& engine) {
     EngineState& state = engine.state();
 
@@ -596,13 +622,13 @@ void register_task_tool() {
 
         /* --- 5. Правила, предел шагов и ЗАДАНИЕ --- */
         std::vector<AgentLoadDiag> diags;
-        /* for_subagent, а не from_def (И8.10): ребёнок наследует от
-         * сессии только запреты и `external_directory`, а сверху получает
-         * свои правила и авто-запрет на `task`/`todo`. Снимок правил
-         * сессии берётся под локом движка разрешений: Info живёт дольше
-         * вызова, а правила меняются из UI-потока. */
-        const std::shared_ptr<agent::Info> info = agent::Info::for_subagent(
-            *def, engine.permissions().rules_snapshot(), &diags);
+        /* Правила ребёнка собирает build_child_info (И9.7): там решается,
+         * какой профиль harness достался агенту, и она же — единственное
+         * место, где этот шов виден проверке. Правила сессии снимаются под
+         * локом движка разрешений: Info живёт дольше вызова, а правила
+         * меняются из UI-потока. */
+        const std::shared_ptr<agent::Info> info =
+            build_child_info(engine, *def, &diags);
         for (const AgentLoadDiag& d : diags) {
             engine.push_event(AgentEvent::Status,
                               "task/" + name + ": " + d.message);

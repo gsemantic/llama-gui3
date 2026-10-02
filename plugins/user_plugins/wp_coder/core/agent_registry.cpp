@@ -470,7 +470,7 @@ std::string join_lines(const std::vector<std::string>& ls, size_t from) {
 bool is_known_key(const std::string& key) {
     static const char* kKnown[] = {
         "description", "mode", "model", "temperature", "top_p", "prompt",
-        "tools", "permission", "steps", "color", "hidden",
+        "tools", "permission", "steps", "color", "hidden", "profile",
     };
     for (const char* k : kKnown) {
         if (key == k) return true;
@@ -605,6 +605,26 @@ bool parse_agent_markdown(const std::string& text, const std::string& name,
     }
     if (const YamlNode* c = root.find("color")) {
         if (c->kind == YamlNode::Kind::Scalar) out->color = c->scalar;
+    }
+    /* И9.7: профиль harness для этого агента. Имя приводится к нижнему
+     * регистру здесь, а не при поиске файла: тогда и диагностика, и
+     * сообщение «профиль не найден» говорят одно и то же имя, каким оно
+     * написано у человека в настройках. */
+    if (const YamlNode* pr = root.find("profile")) {
+        if (pr->kind == YamlNode::Kind::Scalar) {
+            std::string name = pr->scalar;
+            for (char& c : name) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            std::string why;
+            if (!harness::valid_profile_name(name, &why)) {
+                note(why);
+            } else {
+                out->profile = name;
+            }
+        } else {
+            note("profile: ожидалось имя профиля");
+        }
     }
     if (const YamlNode* h = root.find("hidden")) {
         bool v = false;
@@ -1055,22 +1075,25 @@ Ruleset normalized_entry_rules(const std::vector<PermissionEntry>& entries,
 namespace agent {
 
 std::shared_ptr<Info> Info::from_def(const AgentDef& def, const Ruleset& base,
-                                     std::vector<AgentLoadDiag>* diags) {
-    return std::shared_ptr<Info>(new Info(def, base, diags, Role::Primary));
+                                     std::vector<AgentLoadDiag>* diags,
+                                     const harness::Profile* profile) {
+    return std::shared_ptr<Info>(new Info(def, base, diags, Role::Primary, profile));
 }
 
 std::shared_ptr<Info> Info::for_subagent(const AgentDef& def,
                                         const Ruleset& session_rules,
-                                        std::vector<AgentLoadDiag>* diags) {
+                                        std::vector<AgentLoadDiag>* diags,
+                                        const harness::Profile* profile) {
     /* База — ПРАВИЛА СЕССИИ, а не уже суженные: сужение живёт в
      * конструкторе (Role::Subagent), иначе вызывающий решал бы за
      * владельца правил, что именно наследуется. */
     return std::shared_ptr<Info>(new Info(def, session_rules, diags,
-                                          Role::Subagent));
+                                          Role::Subagent, profile));
 }
 
 Info::Info(const AgentDef& def, const Ruleset& base,
-           std::vector<AgentLoadDiag>* diags, Role role) {
+           std::vector<AgentLoadDiag>* diags, Role role,
+           const harness::Profile* profile) {
     name_ = def.name;
     description_ = def.description;
     prompt_ = def.prompt;
@@ -1109,6 +1132,31 @@ Info::Info(const AgentDef& def, const Ruleset& base,
      * наследуется, должен владелец правил агента: тот же довод, что и для
      * Ruleset::evaluate_matched в 8.4. */
     rules_ = (role == Role::Subagent) ? subagent_place_rules(base) : base;
+    /* И9.7: запреты профиля harness — в базу, ДО правил агента.
+     *
+     * Порядок здесь и есть смысл привязки: `profile:` и `permission:`
+     * написаны в одном файле, и запрет, легший после, сделал бы строку
+     * `permission` бессильной в этом же файле. Обратная сторона
+     * выбрана сознательно: субагент, получивший профиль от родителя,
+     * может сузить себя ещё и своими правилами, а расширить — нет.
+     *
+     * Для СУБАГЕНТА база — это subagent_place_rules (только
+     * external_directory), поэтому профиль ребёнка кладётся ровно так же
+     * после неё, и он не наследует запреты профиля СЕССИИ: их приносит
+     * последним subagent_inherited_denies, отдельно и по своим правилам. */
+    if (profile && !profile->tools_policy.empty()) {
+        std::string why;
+        const std::vector<std::string> denied = harness::denied_keys(
+            profile->tools_policy, ToolsRegistry::instance().defs(), &why);
+        for (const std::string& key : denied) {
+            Rule deny;
+            deny.permission = key;
+            deny.pattern = "*";
+            deny.action = PermissionAction::Deny;
+            deny.comment = "профиль harness " + profile->name;
+            rules_.add(deny);
+        }
+    }
     const Ruleset own = normalized_agent_rules(def, diags);
     for (const Rule& r : own.rules()) rules_.add(r);
 

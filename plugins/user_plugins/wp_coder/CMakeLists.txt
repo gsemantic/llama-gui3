@@ -45,6 +45,7 @@ set(CORE_SOURCES
     core/agent_registry.cpp
     core/subagent.cpp
     core/instruction.cpp
+    core/harness_profile.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -116,6 +117,10 @@ message(STATUS "wp_coder: version ${WP_CODER_VERSION} (plugin.json)")
 
 target_compile_definitions(wp_coder PRIVATE
     WP_CODER_SKILLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/skills"
+    # И9.7: каталог ПОСТАВЛЕННЫХ профилей harness. Тот же приём, что с
+    # навыками: дерево плагина знает только этот файл (src/), а ядро
+    # получает готовую строку и о своём расположении не знает.
+    WP_CODER_PROFILES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/profiles/wp_coder"
     WP_CODER_VERSION="${WP_CODER_VERSION}")
 
 target_link_libraries(wp_coder PRIVATE wp_coder_core)
@@ -223,6 +228,14 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_task_tool.cpp
         tests/test_python_tools.cpp
         tests/test_devops_tools.cpp
+        # И9.7: профили harness. После файлов, регистрирующих
+        # инструменты, — по двум причинам, и обе существенные.
+        # (1) Как и у соседей выше: test_iteration_iv_invariants.cpp
+        # проходит, только пока модульные инструменты не зарегистрированы.
+        # (2) СВОЯ: проверка запретов профиля сверяет ПОЛНОТУ по ключам
+        # живого реестра (новый ключ обязан быть либо разрешён, либо
+        # запрещён) — на неполном реестре она прошла бы на его неполноте.
+        tests/test_harness_profile.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp
@@ -236,7 +249,11 @@ if(WP_CODER_BUILD_TESTS)
     )
     target_link_libraries(wp_coder_tests PRIVATE wp_coder_core Threads::Threads)
     target_compile_definitions(wp_coder_tests PRIVATE
-        WP_CODER_VERSION="${WP_CODER_VERSION}")
+        WP_CODER_VERSION="${WP_CODER_VERSION}"
+        # И9.7: тот же путь, что у плагина. Проверка «поставленные профили
+        # читаются» обязана смотреть на НАСТОЯЩИЕ файлы, а на свою копию:
+        # копия прошла бы, пока файлы в дереве плагина сломаны.
+        WP_CODER_PROFILES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/profiles/wp_coder")
     # Модули линкуются с headless_browser (wp_tools.cpp использует render_dom).
     if(TARGET headless_browser)
         target_link_libraries(wp_coder_tests PRIVATE headless_browser)
