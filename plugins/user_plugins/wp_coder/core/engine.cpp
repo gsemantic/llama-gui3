@@ -14,6 +14,7 @@
 #include <sstream>
 #include <vector>
 #include <cstring>
+#include <ctime>
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -28,6 +29,72 @@ namespace coder {
 using limits::kSessionBudget;
 
 namespace fs = std::filesystem;
+
+/* И9.4: env-блок системного промпта (порт opencode session/system.ts:74).
+ *
+ * Модели полезно знать, где она работает: без этого объяснение «пути
+ * относительны» остаётся фразой, а с ним — фактом, который можно
+ * проверить. Собирается из того, что плагин действительно знает, и НЕ
+ * больше: поле, которого нет, было бы выдумкой.
+ *
+ * Чего здесь нет и почему:
+ *   - МОДЕЛЬ и PROVIDER. Через ABI хост не сообщает ни то, ни другое
+ *     (в LlamaHostApi нет ни одного запроса модели), а выдуманная настройка
+ *     wp_coder.model стала бы ВТОРЫМ источником истины: человек указал бы
+ *     там одно, хот с другим, и env-блок врал бы модели. Поля появятся
+ *     вместе с И9.7, который читает профиль harness.
+ *   - ЧАСОВОЙ ПОЯС: в хосте его взять неоткуда, а молча ставить системную
+ *     зону значило бы печатать время не там, где его читает человек.
+ *
+ * Дата НЕ инвалидирует кэш промпта: полночь посреди сессии не повод
+ * пересобирать промпт ради одной строки, а разница в один день для модели
+ * ничего не меняет. */
+static std::string build_env_block(const std::string& project_dir) {
+    std::string out = "\n\n## ОКРУЖЕНИЕ\n\n";
+    if (!project_dir.empty()) {
+        /* Working directory и Workspace root folder — одно и то же
+         * значение: отдельного «рабочего каталога» у плагина нет, его
+         * роль играет wp_coder.project_dir (он же корень worktree и он же
+         * cwd). Обе строки оставлены по плану (9.4), и их совпадение —
+         * признак того, что второго каталога не появилось. */
+        out += "Working directory: " + project_dir + "\n";
+        out += "Workspace root folder: " + project_dir + "\n";
+        /* .git — каталог у обычного клона и ФАЙЛ у worktree и submodule.
+         * Различать обязательно: проверка «каталог существует» сказала бы
+         * «нет» в worktree, а это самый вероятный случай у человека,
+         * который работает над фича-веткой. */
+        std::error_code ec;
+        const fs::path git = fs::path(project_dir) / ".git";
+        const bool is_repo = fs::exists(git, ec);
+        out += std::string("Is directory a git repo: ") +
+               (is_repo ? "да" : "нет") + "\n";
+    } else {
+        out += "Working directory: не задан (wp_coder.project_dir пуст)\n";
+        out += "Is directory a git repo: неизвестно\n";
+    }
+#if defined(__linux__)
+    out += "Platform: linux\n";
+#elif defined(__APPLE__)
+    out += "Platform: macos\n";
+#elif defined(_WIN32)
+    out += "Platform: windows\n";
+#else
+    out += "Platform: неизвестно\n";
+#endif
+    {
+        /* Дата — локальная, в формате ISO: модель не должна угадывать
+         * формат, а человек читает её в том же календаре, что и модель. */
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+        if (localtime_r(&now, &local) != nullptr) {
+            char buf[16];
+            if (std::strftime(buf, sizeof(buf), "%Y-%m-%d", &local) > 0) {
+                out += std::string("Date: ") + buf + "\n";
+            }
+        }
+    }
+    return out;
+}
 
 /*
  * Engine — глобальный singleton
@@ -326,7 +393,99 @@ RunScope Engine::scope_snapshot() const {
     return state_.scope;
 }
 
+void Engine::ensure_instructions() const {
+    /* Настройка берётся ИЗ СОСТОЯНИЯ, а не через cb_.settings_get здесь.
+     *
+     * Так требует сам файл: настройки читает Engine::load_settings
+     * (core/project.h, «Про настройки: ЗДЕСЬ их нет»), и ленивая загрузка
+     * не должна стать вторым местом, которое ходит к хосту. Практическое
+     * следствие оказалось важнее формального: settings_get — это колбэк,
+     * который хост ставит на время init, и тест, вызвавший init с локальной
+     * таблицей настроек, оставляет в синглтоне висящий на неё указатель.
+     * Пока единственным читателем был load_settings (то есть вызов шёл
+     * внутри init, пока таблица жива), это было незаметно; первый же
+     * вызов settings_get из сборки промпта — это уже произвольный момент
+     * времени, и проверка падала с Segmentation fault вместо строки FAIL. */
+    std::string project;
+    std::string config_text;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        if (state_.instructions_loaded) return;
+        project = state_.project_dir;
+        config_text = state_.instructions_config;
+    }
+
+    std::lock_guard<std::mutex> lk(instructions_mtx_);
+    /* Пока ждали лок, инструкции могли прочитать и перечитать
+     * (reload_instructions сбрасывает флаг) — тогда наш результат был бы
+     * устаревшим, и он молча заменил бы свежий. */
+    {
+        std::lock_guard<std::mutex> slk(state_.mtx);
+        if (state_.instructions_loaded) return;
+    }
+
+    std::vector<Instruction> loaded = instruction::load(project, config_text);
+
+    {
+        std::lock_guard<std::mutex> slk(state_.mtx);
+        state_.instructions = std::move(loaded);
+        state_.instructions_loaded = true;
+    }
+    /* Список изменился — кэш промпта, если он был, больше не верен.
+     * Флаг снимается здесь, а не в invalidate_prompt_cache(): этот зовётся
+     * на каждом todowrite и к загрузке инструкций отношения не имеет. */
+    invalidate_prompt_cache();
+}
+
+void Engine::reload_instructions() const {
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.instructions.clear();
+        state_.instructions_loaded = false;
+    }
+    invalidate_prompt_cache();
+}
+
+void Engine::attach_instructions(std::vector<Instruction> more) const {
+    if (more.empty()) return;
+    size_t added = 0;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        added = instruction::append_new(state_.instructions, std::move(more));
+    }
+    /* Ничего нового — кэш трогать незачем. Иначе сборка промпта на каждом
+     * чтении файла пересобирала бы промпт вхолостую. */
+    if (added == 0) return;
+    invalidate_prompt_cache();
+}
+
 std::string Engine::build_system_prompt() const {
+    /* И9.3: порядок блоков — ПОРЯДОК ПЛАНА (session/llm/request.ts:58),
+     * и он проверяется тестом, а не держится на память о том, в каком
+     * порядке вызваны += :
+     *
+     *   базовый промпт → env-блок → AGENTS.md → инструкции модулей →
+     *   каталог навыков → переопределение текущего запроса.
+     *
+     * Смысл порядка один: сначала ПРОТОКОЛ, потом СОДЕРЖИМОЕ, а самое
+     * специфичное — в конце, где оно перекрывает общее. Поэтому инструкции
+     * проекта идут после объяснения протокола (иначе «сначала осмотрись»
+     * читалось бы как часть правил репозитория), а режим запроса — в самом
+     * конце (он и есть переопределение).
+     *
+     * env-блока (И9.4) в этой сборке ещё нет: его содержимое — набор фактов
+     * о текущем окружении, а заводить пустой заголовок ради порядка значило
+     * бы добавить в промпт блок без содержимого.
+     *
+     * Два блока, которых в списке плана нет, стоят на своих местах и по
+     * названной причине: каталог инструментов — между модулем и навыками
+     * (он описывает ЧТО доступно, то есть мост между «как» и «о чём»), а
+     * план задачи — после каталога, рядом с состоянием сессии.
+     */
+    /* И9.1: до проверки кэша — источник инструкций может ещё не быть
+     * прочитан, и тогда промпт собрался бы без него и запомнился. */
+    ensure_instructions();
+
     if (!state_.prompt_dirty && !state_.cached_system_prompt.empty())
         return state_.cached_system_prompt;
 
@@ -342,7 +501,15 @@ std::string Engine::build_system_prompt() const {
     const agent::Info* agent_rules = info.get();
 
     /* project_dir — ПЕРВЫМ, чтобы модель точно увидела корень проекта.
-     * Даже при длинном кастомном промпте эта информация не потеряется. */
+     * Даже при длинном кастомном промпте эта информация не потеряется.
+     *
+     * И9.3: это ОСОЗНАННОЕ исключение из порядка плана, где корень проекта
+     * жил бы в env-блоке сразу за базовым промптом (И9.4). Причина названа
+     * в первой строке: назначение этого блока — выжить при длинном
+     * пользовательском промпте, а блок после базового при длинном
+     * пользовательском промпте окажется в самом конце. Дублировать его в
+     * env-блоке не будем: у И9.4 это задача, и там решается, что из
+     * «Workspace root folder» остаётся в плане, а что — уже сказано здесь. */
     std::string sys;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
@@ -366,6 +533,35 @@ std::string Engine::build_system_prompt() const {
     if (agent_rules && !agent_rules->prompt().empty()) {
         sys += "\n\n";
         sys += agent_rules->prompt();
+    }
+
+    /* И9.4: env-блок. Место — сразу за базовым промптом и ДО правил
+     * проекта: это факты о том, где агент работает, а правила проекта
+     * читаются в предположении, что факты уже известны. */
+    {
+        std::string root;
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            root = state_.project_dir;
+        }
+        sys += build_env_block(root);
+    }
+
+    /* И9.1: инструкции проекта и пользователя.
+     *
+     * Место — между промптом агента и инструкциями модуля, и это не
+     * вкусовое решение, а следствие порядка из плана (9.3): правила
+     * проекта идут после базового промпта, но ДО инструкций модуля,
+     * потому что модуль описывает работу с доменом, а проект — как
+     * именно её делать в этом репозитории.
+     *
+     * Один текст на все источники не годится: потерялось бы, какой файл
+     * что сказал, а при конфликте (проект против модуля) не нашлось бы,
+     * что важнее. Блоки собирает instruction::render — по одному на
+     * источник, с заголовком, названным в kBaseSystemPrompt. */
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        sys += instruction::render(state_.instructions);
     }
 
     {
@@ -643,6 +839,17 @@ void Engine::load_settings() {
     state_.deploy_remote_dir = setting_get(cb_, "wp_coder.deploy_remote_dir", "");
     state_.wp_local_url    = setting_get(cb_, "wp_coder.local_url", "");
     state_.agent_system_prompt = setting_get(cb_, "wp_coder.agent_system_prompt", "");
+    /* И9.1: список источников инструкций из настройки. Читается здесь,
+     * вместе со всеми остальными настройками, и по той же причине: это
+     * единственное место, где плагин ходит к хосту за настройками.
+     * Список разбирается при первой сборке промпта (ensure_instructions),
+     * потому что там известен корень проекта, а здесь — нет. */
+    state_.instructions_config = setting_get(cb_, "wp_coder.instructions", "");
+    /* Перечитывание настроек обязано сбрасывать и ПРОЧИТАННЫЕ инструкции:
+     * сменился корень проекта или список источников, а правила прежнего
+     * проекта остались бы в промпте. Само значение читается здесь, а
+     * разбирается при первой сборке промпта — там известен корень. */
+    reload_instructions();
     state_.active_module    = setting_get(cb_, "wp_coder.active_module", "");
     state_.continue_conversation = setting_get(cb_, "wp_coder.continue_conversation", "true") != "false";
     {

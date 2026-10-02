@@ -44,6 +44,7 @@ set(CORE_SOURCES
     core/compaction.cpp
     core/agent_registry.cpp
     core/subagent.cpp
+    core/instruction.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -203,6 +204,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_compaction.cpp
         tests/test_agent_registry.cpp
         tests/test_agent_config.cpp
+        tests/test_instruction.cpp
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp

@@ -79,6 +79,12 @@ static void apply_settings_from_buffers() {
         st.wp_local_url = s_local_url;
     }
     engine().invalidate_prompt_cache();
+    /* И9.1: корень проекта входит в состав инструкций (AGENTS.md /
+     * CLAUDE.md лежат именно там), поэтому смена корня обязана
+     * перечитать их. Отдельно от invalidate_prompt_cache(): тот зовётся
+     * ещё и на каждом todowrite, а перечитывать инструкции посреди хода
+     * нельзя — это сетевой запрос к URL из настройки. */
+    engine().reload_instructions();
     engine().save_settings();
 }
 

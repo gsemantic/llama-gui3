@@ -13,6 +13,7 @@
 #include "abort.h"
 #include "agent_registry.h"
 #include "compaction.h"
+#include "instruction.h"
 #include "module_api.h"
 #include "tools_registry.h"
 #include "skills_manager.h"
@@ -267,6 +268,26 @@ struct EngineState {
     /* LLM / промпт. */
     std::string agent_system_prompt;  // пользовательский (пустой = kBaseSystemPrompt)
     std::string active_module;        // имя активного модуля
+    /* И9.1: инструкции проекта и пользователя, готовые к вставке.
+     *
+     * Читаются ОДИН раз (см. Engine::ensure_instructions) и живут в
+     * состоянии, а не перечитываются на каждой сборке промпта: сборка
+     * идёт и на каждом todowrite, а источником может быть URL, и повторная
+     * загрузка означала бы сетевой запрос посреди хода.
+     *
+     * mutable — по той же причине, что у cached_system_prompt и
+     * prompt_dirty: сборка промпта константна (её зовёт и вложенный ход
+     * субагента через ссылку на движок), а наполнить состояние должен
+     * тот же вызов, который его читает. Приватность состояния важнее
+     * константности функции, иначе ленивая загрузка потребовала бы
+     * неконстантного пути вызова на каждом месте. */
+    mutable std::vector<Instruction> instructions;
+    mutable bool instructions_loaded = false;
+    /* И9.1: значение настройки `wp_coder.instructions` (JSON-массив
+     * строк), прочитанное в load_settings. Разбирается в список источников
+     * лениво — при первой сборке промпта, где уже известен корень
+     * проекта. */
+    std::string instructions_config;
     mutable std::string cached_system_prompt;  // кэш собранного промпта
     mutable bool prompt_dirty = true;          // флаг необходимости пересборки
 
@@ -618,6 +639,51 @@ public:
      * решает, кем быть (инструмент `task`, И8.7), и для проверок. */
     RunScope scope_snapshot() const;
 
+    /* И9.1: прочитать инструкции, если они ещё не прочитаны.
+     *
+     * Загрузка ЛЕНИВАЯ и происходит на worker-потоке, а не в
+     * load_settings: там она повесила бы UI на время сетевого запроса
+     * (ll_plugin_init зовёт Engine::init на хостовом потоке), а здесь
+     * ожидание приходится на начало хода, где оно и уместно.
+     *
+     * Повторно НЕ перечитывает: invalidate_prompt_cache() зовётся на
+     * каждом todowrite, и перечитывание означало бы сетевой запрос
+     * посреди хода. Перечитать явно можно только reload_instructions —
+     * при смене корня проекта.
+     *
+     * Свой мьютекс, а не state_.mtx: загрузка ходит по диску и в сеть,
+     * а state_.mtx общий с UI, и держать его на этом времени нельзя
+     * (тот же довод, что у compact_history_if_needed). Порядок
+     * блокировок — сначала этот, потом state_.mtx; обратного места в
+     * коде нет, и добавлять его нельзя. */
+    void ensure_instructions() const;
+
+    /* Сбросить прочитанные инструкции, чтобы следующая сборка промпта
+     * прочитала их заново. Зовётся из UI при смене корня проекта и из
+     * load_settings при перечитывании настроек. */
+    void reload_instructions() const;
+
+    /* И9.2: прикрепить инструкции, найденные рядом с прочитанным файлом.
+     *
+     * Список пополняется МЕЖДУ запросами к модели (инструмент `read`
+     * вызывается между ними), поэтому кэш промпта сбрасывается здесь: иначе
+     * правила каталога нашлись бы, но до модели не дошли бы — она увидела
+     * бы их только в следующем ходе, а если ход последний, то и вовсе
+     * никогда.
+     *
+     * Публичная — по той же причине, что deliver_background_tasks():
+     * проверка обязана доходить до места, где это происходит, а поднять
+     * worker-поток в тесте нельзя. */
+    void attach_instructions(std::vector<Instruction> more) const;
+
+    /* Список источников инструкций — для проверок и диагностики.
+     * Копией, а не ссылкой: ссылка пережила бы освобождение лока, под
+     * которым она взята, и читала бы список, который уже переписали. */
+    std::vector<Instruction> instructions_for_test() const {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        return state_.instructions;
+    }
+
     /* Инвалидация кэша промпта (вызывать при изменении настроек). */
     void invalidate_prompt_cache() const { state_.prompt_dirty = true; }
 
@@ -717,6 +783,10 @@ private:
     EngineState state_;
     HostCallbacks cb_;
     PermissionEngine permissions_;
+    /* И9.1: свой лок загрузки инструкций. Отдельный от state_.mtx
+     * (см. ensure_instructions) и по той же причине — загрузка не должна
+     * держать общий лок, пока ходит по диску и в сеть. */
+    mutable std::mutex instructions_mtx_;
 
     void run_task(std::string task);
     void worker_main();

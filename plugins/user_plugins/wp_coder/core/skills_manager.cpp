@@ -86,6 +86,43 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
         dirs_.push_back(dir);
     }
 
+    /* И9.5: что лежит в каталоге рядом с навыками, кроме самих навыков.
+     *
+     * Считается ОДИН раз на каталог, а не внутри цикла по файлам: это
+     * содержимое каталога, а не свойство каждого навыка, и перебор каталога
+     * на каждый файл означал бы, что число навыков умножает работу чтения
+     * без нужды. Чужие .md отброшены — они и есть другие навыки, и их
+     * повторение в «ресурсах» сбило бы модель с толку. */
+    std::vector<std::string> sibling_files;
+    {
+        /* Конец итератора берётся ОДИН раз, а не конструируется заново в
+         * условии цикла. Причина конкретная: конструктор directory_iterator
+         * в условии затирает error_code, которой же заканчивается обход, —
+         * и разыменование на выходе за последний элемент становится
+         * разыменованием итератора «конец», то есть падением. Наблюдалось
+         * как Segmentation fault в path::extension(). */
+        std::error_code sec;
+        fs::directory_iterator sit(dir, sec);
+        const fs::directory_iterator send;
+        if (!sec) {
+            for (; sit != send; sit.increment(sec)) {
+                if (sec) break;
+                /* Чужие .md — это ДРУГИЕ навыки, а не ресурсы: перечислить
+                 * их рядом с навыком значило бы сказать модели, что они
+                 * принадлежат ему. */
+                if (sit->path().extension() == ".md") continue;
+                std::error_code isec;
+                sibling_files.push_back(
+                    sit->path().filename().string() +
+                    (sit->is_directory(isec) ? "/" : ""));
+            }
+        }
+        /* Порядок каталога не задан, а навыки попадают в промпт: без
+         * сортировки один и тот же каталог давал бы разный текст от
+         * запуска к запуску, а кэш промпта этого не различает. */
+        std::sort(sibling_files.begin(), sibling_files.end());
+    }
+
     for (auto it = fs::directory_iterator(dir, ec);
          it != fs::directory_iterator(); it.increment(ec)) {
         if (ec) break;
@@ -144,6 +181,8 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
             }
         }
         sk.body = body.str();
+        /* И9.5: ресурсы каталога достаются навыку вместе с телом. */
+        sk.files = sibling_files;
 
         /* Имя из файла — основное. Заголовок в описании не дублируем: он
          * почти всегда совпадает с именем. */

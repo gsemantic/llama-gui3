@@ -8,6 +8,7 @@
 #include "limits.h"
 #include "file_utils.h"
 #include "glob.h"
+#include "instruction.h"
 #include "apply_patch.h"
 #include "text_edit.h"
 #include "file_lock.h"
@@ -301,7 +302,18 @@ std::string base_list_skills() {
     return s.str();
 }
 
-/* skill_detail: полный текст навыка по имени. */
+/* skill_detail: полный текст навыка по имени.
+ *
+ * И9.5: тело отдаётся в обёртке <skill_content name="…">, а рядом —
+ * <skill_files> с тем, что лежит в каталоге навыка. Обе метки названы в
+ * kBaseSystemPrompt: строка формата, о которой модель не знает, ею и не
+ * пользуется (общее правило файла, D2). До И9.5 здесь был голый
+ * заголовок «### НАВЫК: …» с телом, и модель не могла отличить текст
+ * навыка от текста инструмента.
+ *
+ * Пустой <skill_files> НЕ печатается: пустой раздел выглядит как
+ * «ресурсов нет, а список пуст», то есть как отсутствие ресурсов там, где
+ * проверка их просто не делала. */
 std::string base_skill_detail(const std::string& name) {
     if (name.empty()) return "[ошибка] укажи имя навыка (QUERY)";
     const Skill* sk = SkillsManager::instance().find(name);
@@ -313,40 +325,21 @@ std::string base_skill_detail(const std::string& name) {
             s << "  " << s2.name << " — " << s2.description << "\n";
         return s.str();
     }
-    if (sk->body.empty())
-        return "[" + sk->name + " — нет подробной инструкции]";
-    return "### НАВЫК: " + sk->name + "\n" + sk->body;
-}
-
-/* И4.7: инструкции проекта рядом с прочитанным файлом (задел для И9).
- *
- * Поднимаемся от каталога файла к корню проекта и собираем AGENTS.md /
- * CLAUDE.md, которые там лежат: они относятся к коду, который агент
- * сейчас читает, и И9 подключит их к промпту. Здесь — только факт
- * наличия, потому что подключение требует правок промпта (И9.2), а
- * молчаливый список в metadata без пользы был бы декорцией. */
-std::vector<std::string> nearby_instruction_files(const std::string& abs_file,
-                                                  const std::string& project) {
-    std::vector<std::string> out;
-    std::error_code ec;
-    fs::path dir = fs::path(abs_file).parent_path();
-    fs::path root = project.empty() ? dir : fs::path(project);
-    int hops = 0;
-    while (hops++ < 8) {
-        for (const char* name : {"AGENTS.md", "CLAUDE.md"}) {
-            const fs::path cand = dir / name;
-            if (fs::exists(cand, ec)) {
-                std::string rel = cand.lexically_relative(root).generic_string();
-                if (rel.empty() || rel == ".") rel = name;
-                out.push_back(rel);
-            }
-        }
-        if (dir == root || dir.empty()) break;
-        const fs::path up = dir.parent_path();
-        if (up == dir) break;
-        dir = up;
+    std::stringstream out;
+    out << "<skill_content name=\"" << sk->name << "\">\n";
+    if (sk->body.empty()) {
+        out << "[у навыка нет подробной инструкции — доступно только "
+               "описание из каталога]";
+    } else {
+        out << sk->body;
     }
-    return out;
+    if (!sk->files.empty()) {
+        out << "\n<skill_files>\n";
+        for (const auto& f : sk->files) out << "- " << f << "\n";
+        out << "</skill_files>";
+    }
+    out << "\n</skill_content>";
+    return out.str();
 }
 
 /* --- И4.6: план задачи (todowrite / toread) --- */
@@ -602,13 +595,23 @@ void register_base_tools() {
                     << (first_line + taken);
             }
 
-            /* И4.7 (задел для И9): инструкции рядом с файлом. Само
-             * подключение — И9, пока фиксируем факт наличия, чтобы агент
-             * знал, что правила проекта рядом есть. */
+            /* И9.2: инструкции рядом с прочитанным файлом. ОДИН обход
+             * на двоих: и список для metadata.loaded (И4.7), и прикрепление
+             * к промпту. Два обхода разошлись бы при первой же правке
+             * (например, если правило перестанет подниматься к корню), и
+             * модель получала бы в подписи один список, а в промпте другой.
+             *
+             * Прикрепление — отдельным шагом, а не частью чтения: правила
+             * должны попасть в СЛЕДУЮЩИЙ запрос к модели (промпт собирается
+             * там), и Engine::attach_instructions сбрасывает его кэш. */
+            std::vector<Instruction> nearby =
+                instruction::resolve(abs, ctx.project_dir());
+            engine().attach_instructions(nearby);
+
             json::JsonValue loaded = json::JsonValue::array();
-            for (const auto& p : nearby_instruction_files(abs, ctx.project_dir())) {
+            for (const Instruction& in : nearby) {
                 json::JsonValue e = json::JsonValue::object();
-                e.set("path", p);
+                e.set("path", in.label);
                 loaded.push_back(std::move(e));
             }
             if (loaded.size() > 0) {
@@ -1133,11 +1136,27 @@ void register_base_tools() {
     {
         ToolDef def;
         def.name = "skill_detail";
+        /* И9.6: двухуровневый каталог навыков. Подробный (имя + описание)
+         * живёт в системном промпте, а здесь — КРАТКИЙ, только имена: описание
+         * инструмента уходит в каждый запрос, и платить за пересказ всех
+         * навыков на каждом шаге незачем, когда модель всё равно читает
+         * подробный список выше. Заодно это единственное место, где имена
+         * навыков известны модели БЕЗ вызова инструмента: список в
+         * системном промпте меняется вместе с навыками, а описание
+         * инструмента пересобирается при каждом вызове build_tool_catalogue.
+         *
+         * Динамическое описание ЗАМЕЩАЕТ статическое (И8.13) — поэтому само
+         * «Полный текст навыка по имени» входит в dynamic, а не теряется. */
         def.description = "Полный текст навыка по имени";
+        def.describe_dynamic = []() {
+            return skill_detail_description(
+                SkillsManager::instance().all_skills());
+        };
         def.flags = TF_READ_ONLY;
         def.permission_key = "read";
         SchemaBuilder b;
-        b.str("query", "имя навыка из list_skills").required("query");
+        b.str("query", "имя навыка из списка в описании инструмента или из "
+                       "каталога навыков в системном промпте").required("query");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
             return out("навык", base_skill_detail(arg_str(a, "query")));
@@ -1624,6 +1643,30 @@ void register_rag_tools() {
         };
         reg.register_def(std::move(def));
     }
+}
+
+/* И9.6: описание инструмента skill_detail — краткий уровень каталога
+ * навыков.
+ *
+ * Живёт ВНЕ анонимного пространства файла, в отличие от соседних
+ * base_* помощников: объявлено в base_tools.h, потому что проверка обязана
+ * доставать и до пустой ветки. SkillsManager — синглтон, копящий навыки
+ * между проверками, и «навыков нет» в нём не наступает никогда, то есть
+ * проверка пустого каталога через него прошла бы по причине, обратной
+ * своей. В анонимном пространстве функция получила бы внутреннюю связность
+ * и объявление в заголовке стало бы вторым, невидимым для проверки. */
+std::string skill_detail_description(const std::vector<Skill>& skills) {
+    std::string out =
+        "Полный текст навыка по имени (QUERY). Доступные навыки: ";
+    if (skills.empty()) {
+        out += "пока пусто — вызови list_skills, чтобы проверить.";
+        return out;
+    }
+    for (size_t i = 0; i < skills.size(); ++i) {
+        if (i) out += ", ";
+        out += skills[i].name;
+    }
+    return out;
 }
 
 } // namespace coder
