@@ -46,6 +46,7 @@ set(CORE_SOURCES
     core/subagent.cpp
     core/instruction.cpp
     core/harness_profile.cpp
+    core/snapshot.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -236,6 +237,11 @@ if(WP_CODER_BUILD_TESTS)
         # живого реестра (новый ключ обязан быть либо разрешён, либо
         # запрещён) — на неполном реестре она прошла бы на его неполноте.
         tests/test_harness_profile.cpp
+        # И10.1: снимки рабочего каталога. Инструментов не регистрирует,
+        # поэтому может стоять где угодно до test_iteration_iv_invariants.cpp;
+        # стоит после файлов, зовущих цикл агента (test_agent_loop.cpp),
+        # потому что проверяет состояние движка — то, что цикл меняет.
+        tests/test_snapshot.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

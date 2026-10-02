@@ -8,6 +8,7 @@
 #include "limits.h"
 #include "json_utils.h"
 #include "llm_source.h"
+#include "snapshot.h"
 
 #include <sstream>
 #include <vector>
@@ -582,6 +583,48 @@ const char* kLastStepReminder =
 
 } // namespace
 
+/* И10.1: снимок рабочего каталога в начале шага.
+ *
+ * Порядок здесь не косметический, и оба пункта — про блокировки:
+ *
+ *   1. Каталог проекта и предыдущая причина неудачи читаются под
+ *      state.mtx и копируются — дальше лок не держится.
+ *   2. Сам снимок берётся БЕЗ лока: внутри работает git (до
+ *      limits::kSnapshotTimeoutSec) или копируется каталог, а UI ждёт
+ *      тот же мьютекс. Лок на этом месте означал бы висящий GUI.
+ *   3. Результат кладётся под локом — короткая запись. */
+snapshot::Snapshot take_step_snapshot(EngineState& state,
+                                      HostCallbacks& cb,
+                                      AgentEventCallback push_event) {
+    std::string project_dir;
+    std::string prev_reason;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        project_dir = state.project_dir;
+        prev_reason = state.last_snapshot.reason;
+    }
+
+    const std::string data_dir = cb.path_data_dir ? cb.path_data_dir() : "";
+    const snapshot::Snapshot snap =
+        snapshot::take(project_dir, snapshot::store_dir(data_dir));
+
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.last_snapshot = snap;
+        if (snap.ok()) ++state.snapshots_taken;
+    }
+
+    /* Пустой каталог проекта — не отказ снимка, а отсутствие проекта:
+     * об этом панель говорит отдельно, и второе сообщение на каждом
+     * шаге было бы только шумом. */
+    if (!snap.ok() && !project_dir.empty() && snap.reason != prev_reason &&
+        push_event) {
+        push_event(AgentEvent::Status,
+                   "Снимок рабочего каталога не снят: " + snap.reason);
+    }
+    return snap;
+}
+
 bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
     int stuck_counter = 0;  // последовательных коротких ответов
@@ -598,6 +641,14 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             }
             return true;
         }
+
+        /* И10.1: снимок рабочего каталога в начале шага. Раньше
+         * откатывать правки агента было нечем: undo_edit держит ОДИН слот
+         * .orig на файл, и вторая правка того же файла затирала первую.
+         * Снимок снимается ДО запроса к модели — то есть до того, как
+         * агент узнает, что ему делать, и состояние на снимке принадлежит
+         * началу шага, а не его результату. */
+        take_step_snapshot(state_, cb_, this->push_event_);
 
         /* И5.9: у цикла есть ПРЕДУПРЕЖДЕНИЕ о последнем шаге, а не только
          * жёсткий конец. max_steps остаётся предохранителем (о нём ниже), но
@@ -1068,6 +1119,14 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
             break;
         }
         ++result.steps;
+
+        /* И10.1: тот же снимок в начале шага, что и в основном цикле, и
+         * той же функцией. Отдельная точка обязательна: ход субагента
+         * ходит по СВОЕМУ циклу (функция, а не AgentLoop), и без этой
+         * строки субагент, а значит и автор WP-правок (8.15), оставлял
+         * бы файлы без снимка — то есть «откат работает» было бы верно
+         * только для агента сессии. */
+        take_step_snapshot(state, cb, push_event);
 
         std::vector<LlmEvent> events;
         const bool ok = llm_source::fetch(

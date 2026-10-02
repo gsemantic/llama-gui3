@@ -195,5 +195,14 @@ inline constexpr unsigned kInstructionFetchTimeoutSec = 5;
  * ограничение ещё не мешает. */
 inline constexpr int kInstructionWalkHops = 8;
 
+/* И10.1: снимок состояния рабочего каталога.
+ *
+ * Время на одну команду git. Снимок снимается на каждом шаге цикла, то
+ * есть внутри хода агента, и ждать дольше бессмысленно: состояние,
+ * ради которого снимок берётся, к моменту ответа уже не то. Таймаут не
+ * «снимка не будет» — он означает ровно то же, что таймаут у команды у
+ * человека: имя причины попадёт в reason, и откат об этом скажет. */
+inline constexpr unsigned kSnapshotTimeoutSec = 30;
+
 } // namespace limits
 } // namespace coder

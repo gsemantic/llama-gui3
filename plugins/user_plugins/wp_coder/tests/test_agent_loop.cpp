@@ -25,6 +25,7 @@
 #include "test_support.h"
 #include "../core/agent_components.h"
 #include "../core/base_tools.h"
+#include "../core/snapshot.h"
 #include "../core/git_tools.h"
 #include "../core/tools_registry.h"
 #include "../core/permission_engine.h"
@@ -224,6 +225,11 @@ struct LoopFixture {
         engine_state().shutting_down = false;
         engine_state().state = AgentState::Executing;
         engine_state().steps = 0;
+        /* И10.1: счётчик снимков — тоже состояние синглона. Без сброса
+         * проверка «цикл снимает снимок на каждом шаге» считала бы чужие
+         * шаги и прошла бы на цикле, который не снимает ничего. */
+        engine_state().last_snapshot = snapshot::Snapshot();
+        engine_state().snapshots_taken = 0;
     }
 
     /* Прогон цикла. Возвращается признак «задача завершена» из самого
@@ -865,4 +871,81 @@ TEST(loop_leaves_the_measurement_empty_when_the_host_sends_no_usage) {
                                   engine_state().session);
     ASSERT_FALSE(used.measured());
     ASSERT_TRUE(used.tokens > 0);
+}
+
+/* ======================================================================
+ * И10.1: снимок рабочего каталога на каждом шаге
+ * ====================================================================== */
+
+TEST(the_loop_snapshots_the_workspace_on_every_step) {
+    /* Точка подключения, а не функция снимка: снимок можно снять где
+     * угодно и получить зелёный набор проверок снимка, ни разу не
+     * показав, что цикл его берёт. Проверяется ровно это — по одному
+     * снимку на шаг, а не «хоть какой-то». */
+    LoopFixture fx;
+    fx.host.replies = {call_block("list_skills", ""),
+                       call_block("list_skills", ""),
+                       long_answer("Навыки: wp, python, devops.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    ASSERT_TRUE(engine_state().steps >= 2);
+    ASSERT_EQ(engine_state().snapshots_taken, engine_state().steps);
+    /* Снимок обязан быть настоящим, а не пустой структурой: иначе
+     * счётчик рос бы, а откатываться было бы нечем. */
+    ASSERT_TRUE(engine_state().last_snapshot.ok());
+    ASSERT_TRUE(engine_state().last_snapshot.hash.size() > 0);
+}
+
+TEST(the_step_snapshot_does_not_contain_what_the_agent_wrote) {
+    /* Момент снимка — начало шага, а не его результат. Проверяется
+     * содержимым копии: если бы снимок брался ПОСЛЕ вызова инструмента,
+     * откат вернул бы к состоянию, которое агент уже сделал, то есть
+     * ничего бы не откатывал — и откат выглядел бы рабочим.
+     */
+    LoopFixture fx;
+    fx.host.replies = {call_block("write_file",
+                                  ",\n \"path\": \"новый-файл.md\""
+                                  ",\n \"content\": \"привет\""),
+                       long_answer("Файл записан.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    /* Снимок первого шага снимается ДО запроса к модели, поэтому он
+     * виден на первом же запросе — а к этому моменту write_file ещё не
+     * отработал. Проверка содержимого — уже после прогона: каталог
+     * снимка с этого момента не меняется, и «в нём нет файла» означает
+     * «файл появился после снимка», а не «снимок снят позже». */
+    snapshot::Snapshot first_step;
+    int calls = 0;
+    fx.host.on_chat = [&] {
+        ++calls;
+        if (calls == 1) {
+            std::lock_guard<std::mutex> lk(engine_state().mtx);
+            first_step = engine_state().last_snapshot;
+        }
+    };
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    ASSERT_TRUE(fs::exists(fx.project / "новый-файл.md"));
+    ASSERT_TRUE(first_step.ok());
+    ASSERT_TRUE(first_step.kind == snapshot::Kind::DirCopy);
+    ASSERT_FALSE(fs::exists(fs::path(first_step.dir) / "новый-файл.md"));
+    /* Снимок второго шага снят уже после записи — значит состояние
+     * движка по снимкам идёт, а не повторяет первый. */
+    ASSERT_TRUE(engine_state().last_snapshot.ok());
+    ASSERT_TRUE(engine_state().last_snapshot.hash != first_step.hash);
+    ASSERT_TRUE(
+        fs::exists(fs::path(engine_state().last_snapshot.dir) / "новый-файл.md"));
 }
