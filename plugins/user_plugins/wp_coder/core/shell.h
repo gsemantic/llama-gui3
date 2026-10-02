@@ -31,6 +31,26 @@
 namespace coder {
 namespace shell {
 
+/* Прочитать вывод команды целиком.
+ *
+ * И10.2: fread + append, а НЕ fgets + `out += buf`. `out += buf` считает
+ * длину строкой, то есть обрывает вывод на первом NUL: для текста это
+ * незаметно, а для разделителя NUL (`git diff --name-only -z`) команда
+ * возвращала ПЕРВЫЙ путь и молча теряла остальные — список изменённых
+ * файлов выходил неполным, и откат 10.3 вернул бы не всё. Тихая потеря
+ * данных в общей обёртке того же класса, что сбой одной проверки:
+ * заметить её можно было только по симптому.
+ *
+ * Одна функция на обе обёртки (run_capture и run_capture_status): копия
+ * чтения рядом с копией комментария разъехалась бы при первой же правке
+ * одной из них, и поломка вернулась бы в одной обёртке, заметив только
+ * ту, чью забыли починить. */
+inline void slurp(FILE* f, std::string& out) {
+    char buf[4096];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+}
+
 /* И3.6: политика команд на входе shell.
  *
  * Это единственная точка, где команда, СОБРАННАЯ плагином из аргументов
@@ -62,9 +82,8 @@ inline std::string run_capture(const std::string& cmd, unsigned timeout_sec = 60
     }
     FILE* f = popen(full.c_str(), "r");
     if (!f) return "[ошибка] не удалось запустить: " + cmd;
-    char buf[4096];
     std::string out;
-    while (fgets(buf, sizeof(buf), f)) out += buf;
+    slurp(f, out);
     pclose(f);
     return out;
 }
@@ -91,8 +110,7 @@ inline bool run_capture_status(const std::string& cmd, std::string& out,
         exit_code = -1;
         return false;
     }
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), f)) out += buf;
+    slurp(f, out);
     exit_code = pclose(f);
     return exit_code == 0;
 }

@@ -396,17 +396,30 @@ TEST(a_step_snapshot_lands_in_the_engine_state) {
     HostCallbacks cb;
     cb.path_data_dir = [&sb] { return sb.store(); };
 
-    const Snapshot s = take_step_snapshot(state, cb, nullptr);
-    if (!s.ok())    ASSERT_TRUE(s.ok());
+    /* Первый шаг: в состоянии до вызова снимка не было, и это видно
+     * именно в возврате — читать состояние ПОСЛЕ вызова уже поздно,
+     * там лежит новый снимок (подробно — в agent_components.h). */
+    const StepSnapshot first = take_step_snapshot(state, cb, nullptr);
+    ASSERT_TRUE(first.after.ok());
+    ASSERT_FALSE(first.before.ok());
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         ASSERT_TRUE(state.last_snapshot.ok());
-        ASSERT_EQ(state.last_snapshot.hash, s.hash);
+        ASSERT_EQ(state.last_snapshot.hash, first.after.hash);
         ASSERT_EQ(state.snapshots_taken, 1);
     }
-    /* Второй шаг — вторая запись: счётчик обязан расти, иначе «снимки
-     * берутся» останется утверждением без доказательства. */
-    take_step_snapshot(state, cb, nullptr);
+    /* Второй шаг: `before` обязан быть ПЕРВЫМ снимком, а не вторым —
+     * иначе сравнивать было бы нечего. Первая версия подключения
+     * читала состояние после вызова, получала «до и после совпали» и
+     * объявляла, что агент ничего не менял; поймала эта проверка. */
+    /* Между шагами файл меняется — иначе два чистых дерева совпали бы
+     * и равенство хешей ничего бы не доказывало. */
+    write_file(fs::path(sb.project()) / "a.txt", "two\n");
+    const StepSnapshot second = take_step_snapshot(state, cb, nullptr);
+    ASSERT_TRUE(second.before.ok());
+    ASSERT_EQ(second.before.hash, first.after.hash);
+    ASSERT_TRUE(second.after.ok());
+    ASSERT_TRUE(second.before.hash != second.after.hash);
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         ASSERT_EQ(state.snapshots_taken, 2);
@@ -494,4 +507,241 @@ TEST(the_subagent_turn_snapshots_the_workspace_too) {
     std::lock_guard<std::mutex> lk(state.mtx);
     state.project_dir.clear();
     state.last_snapshot = Snapshot();
+}
+
+/* ======================================================================
+ * И10.2: что изменилось между двумя снимками
+ * ====================================================================== */
+
+TEST(diff_dirs_sees_a_changed_an_added_and_a_removed_file) {
+    /* Каталоги сравниваются побайтно, и все три исхода различимы: без
+     * «удалённого» список выглядел бы полным, а откат (10.3) вернул бы
+     * файл, которого человек удалил сам. */
+    SandBox sb("diffdirs");
+    const fs::path before = fs::path(sb.root) / "before";
+    const fs::path after = fs::path(sb.root) / "after";
+    std::error_code ec;
+    fs::create_directories(before / "вложенный", ec);
+    fs::create_directories(after / "вложенный", ec);
+    write_file(before / "a.txt", "one\n");
+    write_file(before / "b.txt", "уходит\n");
+    write_file(before / "вложенный" / "c.txt", "глубоко\n");
+    write_file(after / "a.txt", "two\n");                       /* изменён */
+    write_file(after / "вложенный" / "c.txt", "глубоко\n");     /* не тронут */
+    write_file(after / "d.txt", "новый\n");                     /* добавлен */
+
+    const std::vector<std::string> files =
+        diff_dirs(before.string(), after.string());
+    ASSERT_EQ(files.size(), (size_t)3);
+    ASSERT_EQ(files[0], std::string("a.txt"));
+    ASSERT_EQ(files[1], std::string("b.txt"));
+    ASSERT_EQ(files[2], std::string("d.txt"));
+    /* Порядок задан, а не «как обошёл каталог»: список попадает в файл
+     * сессии, и та же работа обязана выглядеть одинаково. */
+    ASSERT_TRUE(files[0] < files[1] && files[1] < files[2]);
+}
+
+TEST(diff_dirs_ignores_a_symlink_and_a_missing_directory) {
+    SandBox sb("diffsymlink");
+    const fs::path before = fs::path(sb.root) / "before";
+    const fs::path after = fs::path(sb.root) / "after";
+    std::error_code ec;
+    fs::create_directories(before, ec);
+    fs::create_directories(after, ec);
+    write_file(after / "a.txt", "one\n");
+    fs::create_directory_symlink(after, after / "назад");
+
+    /* Ссылка на каталог не разворачивается в обход: `назад` ведёт в
+     * сам after, и обход ушёл бы в бесконечность. */
+    const std::vector<std::string> files =
+        diff_dirs(before.string(), after.string());
+    ASSERT_EQ(files.size(), (size_t)1);
+    ASSERT_EQ(files[0], std::string("a.txt"));
+
+    /* Ссылка на ФАЙЛ — отдельный случай, и он ловится отдельно: по
+     * ссылке статус файла такой же, как у цели, то есть без явной
+     * проверки она считалась бы обычным файлом и её содержимое молча
+     * сравнивалось бы вместо содержимого цели. Своя пара каталогов:
+     * в первой a.txt отсутствует, и он попал бы в список, замазав
+     * различие между «новый файл» и «новый симлинк». */
+    const fs::path b2 = fs::path(sb.root) / "before2";
+    const fs::path a2 = fs::path(sb.root) / "after2";
+    fs::create_directories(b2, ec);
+    fs::create_directories(a2, ec);
+    write_file(b2 / "цель.txt", "другое\n");
+    write_file(a2 / "цель.txt", "данные\n");
+    fs::create_symlink(a2 / "цель.txt", a2 / "ссылка.txt");
+
+    const std::vector<std::string> with_link = diff_dirs(b2.string(), a2.string());
+    ASSERT_EQ(with_link.size(), (size_t)1);
+    ASSERT_EQ(with_link[0], std::string("цель.txt"));
+    /* Несуществующий каталог — пустой список, а не исключение: вызывающий
+     * сам различает «нечего сравнивать» по ok. */
+    ASSERT_EQ(diff_dirs(sb.root.string() + "/нет-такого",
+                        after.string()).size(), (size_t)0);
+}
+
+TEST(changed_files_of_two_git_snapshots_lists_what_the_agent_touched) {
+    SandBox sb("gitdiff");
+    init_repo(sb.project());
+    write_file(fs::path(sb.project()) / "a.txt", "one\n");
+    write_file(fs::path(sb.project()) / "уходит.txt", "было\n");
+    /* Имя с не-ASCII — не украшение: без `-z` git печатает его
+     * восьмеричными побегами в кавычках, и в файл сессии ушёл бы не
+     * путь, а его текстовое представление. Имя обязано быть
+     * ОТСЛЕЖИВАЕМЫМ: неотслеживаемые файлы не видны ни снимку, ни
+     * diff, и это ограничение наследуется (см. шапку snapshot.h). */
+    write_file(fs::path(sb.project()) / "правка-ü.txt", "прежде\n");
+    raw_git(sb.project(), "add -A");
+    raw_git(sb.project(), "commit -q -m base");
+
+    const Snapshot before = take(sb.project(), sb.store());
+    ASSERT_TRUE(before.ok());
+
+    write_file(fs::path(sb.project()) / "a.txt", "two\n");
+    write_file(fs::path(sb.project()) / "правка-ü.txt", "стало\n");
+    fs::remove(fs::path(sb.project()) / "уходит.txt");
+    write_file(fs::path(sb.project()) / "новый.txt", "неотслеживаемый\n");
+
+    const Snapshot after = take(sb.project(), sb.store());
+    const FileChanges ch = changed_files(before, after);
+    ASSERT_TRUE(ch.ok);
+    ASSERT_EQ(ch.files.size(), (size_t)3);
+    ASSERT_EQ(ch.files[0], std::string("a.txt"));
+    ASSERT_EQ(ch.files[1], std::string("правка-ü.txt"));
+    ASSERT_EQ(ch.files[2], std::string("уходит.txt"));
+    for (const std::string& f : ch.files) {
+        /* Побегов быть не должно: путь приходит сырым. */
+        ASSERT_TRUE(f.find('\\') == std::string::npos);
+    }
+}
+
+TEST(an_unchanged_project_gives_an_empty_list_and_a_failed_snapshot_says_why) {
+    /* «Ничего не изменилось» и «сравнивать нечем» — разные факты, и
+     * одним пустым списком их не различить: часть «ход ничего не
+     * менял» и часть «сравнение не состоялось» выглядели бы одинаково,
+     * а 10.3 откатывал бы по несуществующему списку. */
+    SandBox sb("unchanged");
+    init_repo_with_file(sb.project(), "a.txt", "one\n");
+    const Snapshot s1 = take(sb.project(), sb.store());
+    const Snapshot s2 = take(sb.project(), sb.store());
+
+    const FileChanges same = changed_files(s1, s2);
+    ASSERT_TRUE(same.ok);
+    ASSERT_EQ(same.files.size(), (size_t)0);
+
+    Snapshot broken;
+    broken.reason = "каталог проекта не найден";
+    const FileChanges against_broken = changed_files(s1, broken);
+    ASSERT_FALSE(against_broken.ok);
+    ASSERT_TRUE(against_broken.reason.find("не найден") != std::string::npos);
+
+    /* Снимки разных видов сравнивать нельзя: у дерева и у копии каталога
+     * разные единицы (путь от корня против пути от проекта). */
+    Snapshot copy = s1;
+    copy.kind = Kind::DirCopy;
+    const FileChanges mixed = changed_files(s1, copy);
+    ASSERT_FALSE(mixed.ok);
+    ASSERT_TRUE(mixed.reason.find("разных видов") != std::string::npos);
+}
+
+TEST(attach_patch_part_lands_in_the_turn_that_made_the_changes) {
+    /* Часть кладётся в ПОСЛЕДНЕЕ сообщение ассистента: изменения
+     * принадлежат тому ходу, чьи инструменты их сделали. Приписанная к
+     * чужой реплике, она означала бы «это изменилось, пока я говорил». */
+    std::vector<Message> history;
+    history.push_back(Message::user("сделай"));
+    Message first = Message::assistant("первый ход");
+    first.parts.push_back(MessagePart::text("работаю"));
+    history.push_back(first);
+    history.push_back(Message::user("уточнение"));
+    Message second = Message::assistant("второй ход");
+    history.push_back(second);
+
+    FileChanges ch;
+    ch.ok = true;
+    ch.files = {"a.php", "b.php"};
+    Snapshot before;
+    before.kind = Kind::GitTree;
+    before.hash = "abc123";
+
+    Message* target = attach_patch_part(history, before, ch);
+    ASSERT_TRUE(target != nullptr);
+    ASSERT_EQ(target->id, second.id);
+    /* Часть легла в СООБЩЕНИЕ ВЕКТОРА, а не в локальную копию: второй
+     * экземпляр `second` остался бы без части, и проверка на нём ничего
+     * бы не говорила о коде. */
+    Message* stored = find_message(history, second.id);
+    ASSERT_TRUE(stored != nullptr);
+    ASSERT_EQ(stored->parts.size(), (size_t)1);
+    ASSERT_TRUE(stored->parts[0].is(PartKind::Patch));
+    /* Хеш — тот, С КОГО считали: вернуться надо к состоянию ДО
+     * изменений этого хода, а не к тому, что получилось. */
+    ASSERT_EQ(stored->parts[0].snapshot_hash(), std::string("abc123"));
+    ASSERT_EQ(stored->parts[0].files().size(), (size_t)2);
+    ASSERT_EQ(stored->parts[0].files().at(0).as_string(), std::string("a.php"));
+
+    /* Пустой список — это «ход ничего не менял», и такую правку хранить
+     * незачем: часть без содержимого только размножала бы записи
+     * сессии. Несравнимые снимки — другой повод, и тоже без части. */
+    FileChanges empty;
+    empty.ok = true;
+    FileChanges failed;
+    failed.reason = "сравнивать нечего";
+    ASSERT_TRUE(attach_patch_part(history, before, empty) == nullptr);
+    ASSERT_TRUE(attach_patch_part(history, before, failed) == nullptr);
+    ASSERT_EQ(find_message(history, second.id)->parts.size(), (size_t)1);
+
+    /* Ассистентских сообщений нет — класть некуда, и это не ошибка:
+     * первый шаг цикла сравнивает снимки, когда история ещё пуста. */
+    std::vector<Message> fresh;
+    fresh.push_back(Message::user("сделай"));
+    ASSERT_TRUE(attach_patch_part(fresh, before, ch) == nullptr);
+}
+
+TEST(a_nul_separated_command_output_survives_the_shell_wrapper) {
+    /* Обёртка shell читала вывод команды как строку (`out += buf`) и
+     * обрывала его на первом NUL. Для текста это незаметно, а
+     * `git diff --name-only -z` отдаёт первым путём весь ответ и молча
+     * теряет остальные: список изменившихся файлов выходил неполным,
+     * и откат 10.3 вернул бы не всё. Проверяется не git и не снимки, а
+     * обёртка — иначе поломка ждала бы своего симптома. */
+    std::string out;
+    int code = -1;
+    const bool ok =
+        shell::run_capture_status("printf 'a\\0b\\0c\\0'", out, code, 5);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(out, std::string("a\0b\0c\0", 6));
+}
+
+TEST(changed_files_names_paths_from_the_project_and_not_from_the_repository) {
+    /* Проект плагина — возможно ПОДКАТАЛОГ репозитория (монорепозиторий,
+     * а каталог данных рядом с ним). git печатает пути от корня
+     * репозитория, и путь «wp-content/deep/z.php» из корня для агента
+     * не значил бы ничего: он оперирует путями от project_dir. Без
+     * --relative проверка этого не увидела бы — на проекте, который сам
+     * является корнем репозитория, обе формы совпадают. */
+    SandBox sb("relative");
+    const fs::path repo = fs::path(sb.root) / "repo";
+    const fs::path app = repo / "wp-content";
+    std::error_code ec;
+    fs::create_directories(app / "deep", ec);
+    write_file(repo / "снаружи.txt", "не наш\\n");
+    write_file(app / "deep" / "z.php", "<?php\\n");
+    init_repo(repo.string());
+    raw_git(repo.string(), "add -A");
+    raw_git(repo.string(), "commit -q -m base");
+
+    const Snapshot before = take(app.string(), sb.store());
+    ASSERT_TRUE(before.kind == Kind::GitTree);
+    write_file(app / "deep" / "z.php", "<?php // правка\\n");
+
+    const Snapshot after = take(app.string(), sb.store());
+    const FileChanges ch = changed_files(before, after);
+    ASSERT_TRUE(ch.ok);
+    ASSERT_EQ(ch.files.size(), (size_t)1);
+    ASSERT_EQ(ch.files[0], std::string("deep/z.php"));
+    /* Чужой файл вне проекта в список не попадает: он не часть работы
+     * агента, и 10.3 не должен трогать то, что лежит рядом. */
+    ASSERT_TRUE(ch.files[0].find("снаружи") == std::string::npos);
 }

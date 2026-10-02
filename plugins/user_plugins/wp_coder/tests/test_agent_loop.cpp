@@ -260,6 +260,14 @@ std::string call_block(const char* tool, const char* json_args) {
            json_args + "}\n```";
 }
 
+/* Часть-список изменений хода (И10.2). */
+const MessagePart* patch_part(const Message& m) {
+    for (const MessagePart& p : m.parts) {
+        if (p.is(PartKind::Patch)) return &p;
+    }
+    return nullptr;
+}
+
 /* Первая часть-инструмент хода. */
 const MessagePart* first_tool_part(const Message& m) {
     for (const MessagePart& p : m.parts) {
@@ -948,4 +956,61 @@ TEST(the_step_snapshot_does_not_contain_what_the_agent_wrote) {
     ASSERT_TRUE(engine_state().last_snapshot.hash != first_step.hash);
     ASSERT_TRUE(
         fs::exists(fs::path(engine_state().last_snapshot.dir) / "новый-файл.md"));
+}
+
+TEST(the_turn_records_the_files_it_changed) {
+    /* Склейка И10.1 и И10.2: список изменившихся файлов доезжает до
+     * сообщения ТОГО хода, который их изменил, и с хешем состояния ДО
+     * его работы. Ни одна из двух функций по отдельности этого не
+     * проверяет — первая только снимает, вторая только кладёт. */
+    LoopFixture fx;
+    fx.host.replies = {call_block("write_file",
+                                  ",\n \"path\": \"новый-файл.md\""
+                                  ",\n \"content\": \"привет\""),
+                       long_answer("Файл записан.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    /* Снимок первого шага — состояние ДО того, как агент что-либо
+     * сделал; именно он обязан оказаться в хеше части. */
+    snapshot::Snapshot first_step;
+    int calls = 0;
+    fx.host.on_chat = [&] {
+        ++calls;
+        if (calls == 1) {
+            std::lock_guard<std::mutex> lk(engine_state().mtx);
+            first_step = engine_state().last_snapshot;
+        }
+    };
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    fx.run(loop, response);
+
+    ASSERT_TRUE(fs::exists(fx.project / "новый-файл.md"));
+    ASSERT_TRUE(first_step.ok());
+
+    const std::vector<Message> h = fx.history();
+    ASSERT_EQ(h.size(), (size_t)3);
+    /* Часть изменения — в ПЕРВОМ ассистентском ходе (тот, что звал
+     * write_file), а не в последнем: список принадлежит тому ходу,
+     * чьи инструменты эти файлы и создали. */
+    const MessagePart* pp = patch_part(h[1]);
+    if (pp == nullptr) {
+        std::cerr << "  в ходе, создавшем файл, нет части patch" << std::endl;
+    }
+    ASSERT_TRUE(pp != nullptr);
+    ASSERT_EQ(pp->snapshot_hash(), first_step.hash);
+    ASSERT_EQ(pp->files().size(), (size_t)1);
+    ASSERT_EQ(pp->files().at(0).as_string(), std::string("новый-файл.md"));
+    /* Последний ход ничего не менял — части в нём быть не должно, иначе
+     * список приписывался бы ходу, который к файлам не причастен. */
+    ASSERT_TRUE(patch_part(h[2]) == nullptr);
+    /* И модель этого списка не видит: он не в её транскрипте (служебный
+     * вид, см. core/message.h). Проверяется по собранному транскрипту,
+     * а не по флажку: «не должно попасть» и «не попало» — разные вещи. */
+    const std::string talk = fx.host.transcript(1);
+    ASSERT_TRUE(talk.find("новый-файл.md") != std::string::npos);
 }

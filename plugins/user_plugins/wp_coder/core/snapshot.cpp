@@ -19,10 +19,14 @@
 #include "core/limits.h"
 #include "core/shell.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <set>
 #include <system_error>
 
 namespace coder {
@@ -213,6 +217,55 @@ Snapshot fail(std::string reason) {
     return s;
 }
 
+/* Равны ли два файла побайтно. Размер сравнивается первым: на каталоге
+ * проекта это отсекает почти всё, не читая содержимое. */
+bool same_content(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    const auto sa = fs::file_size(a, ec);
+    if (ec) return false;
+    const auto sb = fs::file_size(b, ec);
+    if (ec) return false;
+    if (sa != sb) return false;
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
+    if (!fa || !fb) return false;
+    char ba[65536];
+    char bb[65536];
+    for (;;) {
+        fa.read(ba, sizeof(ba));
+        fb.read(bb, sizeof(bb));
+        const std::streamsize na = fa.gcount();
+        const std::streamsize nb = fb.gcount();
+        if (na != nb) return false;
+        if (na <= 0) return true;
+        if (std::memcmp(ba, bb, static_cast<size_t>(na)) != 0) return false;
+    }
+}
+
+/* Обычные файлы каталога относительно корня. Симлинки пропускаются по
+ * той же причине, что и при копировании. Каталог копий исключать не
+ * нужно: сравниваются две КОПИИ, и каждая из них уже сделана без него
+ * (take() исключает), то есть лишние каталоги не возникли бы. */
+void list_files(const fs::path& root, std::set<std::string>& out) {
+    std::error_code ec;
+    fs::recursive_directory_iterator it(
+        root, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return;
+    const fs::recursive_directory_iterator end;
+    for (; it != end; it.increment(ec)) {
+        if (ec) return;
+        const fs::directory_entry entry = *it;
+        if (entry.is_symlink()) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (!entry.is_regular_file()) continue;
+        const std::string rel = entry.path().lexically_relative(root).string();
+        if (rel.empty()) continue;
+        out.insert(rel);
+    }
+}
+
 } // namespace
 
 const char* Snapshot::kind_name() const {
@@ -247,6 +300,7 @@ Snapshot take(const std::string& project_dir, const std::string& store) {
     if (is_git_repo(project_dir)) {
         Snapshot s;
         s.kind = Kind::GitTree;
+        s.project_dir = project_dir;
 
         bool ok = false;
         const std::string stash_out =
@@ -291,6 +345,7 @@ Snapshot take(const std::string& project_dir, const std::string& store) {
     }
     Snapshot s;
     s.kind = Kind::DirCopy;
+    s.project_dir = project_dir;
     s.hash = make_copy_id();
     s.dir = store + "/" + s.hash;
     /* Путь каталога копий относительно проекта, если он внутри него.
@@ -303,6 +358,104 @@ Snapshot take(const std::string& project_dir, const std::string& store) {
         return fail("копия каталога не удалась: " + err);
     }
     return s;
+}
+
+std::vector<std::string> diff_dirs(const std::string& before,
+                                   const std::string& after) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!fs::is_directory(before, ec) || !fs::is_directory(after, ec)) {
+        return out;
+    }
+    std::set<std::string> in_before;
+    std::set<std::string> in_after;
+    list_files(fs::path(before), in_before);
+    list_files(fs::path(after), in_after);
+    /* Два обхода, и порядок результата задан множествами: порядок
+     * обхода каталога не определён, а список файлов попадает в файл
+     * сессии и в UI — неопределённый порядок означал бы две сессии с
+     * разным текстом на одном и том же шаге. */
+    for (const std::string& rel : in_after) {
+        const bool known = in_before.count(rel) != 0;
+        if (!known ||
+            !same_content(fs::path(before) / rel, fs::path(after) / rel)) {
+            out.push_back(rel);
+        }
+    }
+    for (const std::string& rel : in_before) {
+        if (in_after.count(rel) == 0) out.push_back(rel);
+    }
+    /* Общая сортировка: два обхода дали бы «сначала из after, потом
+     * удалённые», то есть два разных порядка в зависимости от того,
+     * что оказалось удалением. Список попадает в файл сессии и в UI, и
+     * один и тот же шаг обязан выглядеть одинаково при любом исходе.
+     * Порядок — побайтовый, как у git: два пути должны читаться
+     * одинаково, какой бы путь их ни назвал. */
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/* Вывод git с -z разделён NUL, а не переводом строки: без -z git печатает
+ * имя с пробелом или не-ASCII в кавычках с восьмеричными побегами
+ * ("\320\270\320\274..."), и в файл сессии ушёл бы не путь, а его
+ * текстовое представление. Проверено на живом git 2.39. */
+static std::vector<std::string> split_nul(const std::string& s) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t z = s.find('\0', pos);
+        if (z == std::string::npos) {
+            out.push_back(s.substr(pos));
+            break;
+        }
+        if (z > pos) out.push_back(s.substr(pos, z - pos));
+        pos = z + 1;
+    }
+    return out;
+}
+
+FileChanges changed_files(const Snapshot& before, const Snapshot& after) {
+    FileChanges ch;
+    if (!before.ok() || !after.ok()) {
+        ch.reason = "сравнивать нечего: один из снимков не состоялся (" +
+                    std::string(before.ok() ? after.reason : before.reason) + ")";
+        return ch;
+    }
+    if (before.kind != after.kind) {
+        ch.reason = std::string("снимки разных видов: ") + before.kind_name() +
+                    " и " + after.kind_name();
+        return ch;
+    }
+    if (before.kind == Kind::GitTree) {
+        if (before.hash == after.hash) {
+            ch.ok = true;
+            return ch;
+        }
+        /* Сравниваются два ДЕРЕВА, а не дерево и рабочий каталог: между
+         * двумя командами git состояние могло уехать, и тогда ответ был
+         * бы верен только для момента, который никто не запоминал.
+         *
+         * --relative обязателен: git печатает пути от КОРНЯ репозитория,
+         * а проект плагина — возможно подкаталог, и путь «wp-content/…»
+         * из корня монорепозитория для агента не значил бы ничего. */
+        std::string out;
+        int code = 0;
+        const std::string cmd =
+            "git -C " + shell::shell_quote(before.project_dir) +
+            " diff --name-only --relative -z " + shell::shell_quote(before.hash) +
+            " " + shell::shell_quote(after.hash);
+        shell::run_capture_status(cmd, out, code, limits::kSnapshotTimeoutSec);
+        if (code != 0) {
+            ch.reason = "git не сравнил снимки: " + first_line(out);
+            return ch;
+        }
+        ch.files = split_nul(out);
+        ch.ok = true;
+        return ch;
+    }
+    ch.files = diff_dirs(before.dir, after.dir);
+    ch.ok = true;
+    return ch;
 }
 
 } // namespace snapshot

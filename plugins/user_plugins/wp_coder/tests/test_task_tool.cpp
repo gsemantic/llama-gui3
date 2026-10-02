@@ -3531,3 +3531,90 @@ TEST(stopping_the_engine_says_how_many_background_tasks_it_dropped) {
      * тест не смог бы ни запустить ход, ни разобрать очередь. */
     fx.prepare();
 }
+
+/* ======================================================================
+ * И10.2: список изменений субагента
+ * ====================================================================== */
+
+TEST(the_child_turn_records_the_files_it_changed) {
+    /* У ребёнка СВОЙ цикл (run_subagent_turn), и без своей точки
+     * подключения список изменений получал бы только агент сессии:
+     * автор WP-правок (8.15) работает именно ребёнком, то есть на
+     * вопрос «что он поменял» ответа не было бы. Проверяется не функция
+     * сравнения (она общая с родительским циклом и покрыта там), а
+     * доезд до ДОЧЕРНЕЙ СЕССИИ — то есть результат, ради которого файл
+     * вообще пишется. */
+    TaskFixture fx;
+    write_agent_file(fx.project / ".wpcode" / "agent", "author.md",
+                     "---\n"
+                     "description: Автор правки\n"
+                     "mode: subagent\n"
+                     "tools:\n"
+                     "  write_file: true\n"
+                     "permission:\n"
+                     "  write: allow\n"
+                     "  read: allow\n"
+                     "---\n"
+                     "Ты автор. Создай файл.\n");
+
+    /* Порядок ответов: ход родителя (вызов task), два хода ребёнка
+     * (запись и итог) и завершение родителя. */
+    fx.host.replies = {
+        call_block("task", task_args("Правка", "Создай файл.", "author")),
+        call_block("write_file",
+                   ", \"path\": \"правка-1.php\", \"content\": \"<?php\""),
+        long_answer("Файл создан: правка-1.php."),
+        long_answer("Ребёнок создал файл, принято.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    reset_registry();
+    for (const AgentLoadDiag& d :
+         AgentRegistry::instance().load_directory(
+             (fx.project / ".wpcode" / "agent").string())) {
+        (void)d;
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [](AgentEvent::Kind, const std::string&) {});
+    loop.run(engine().build_system_prompt(), response);
+
+    ASSERT_TRUE(fs::exists(fx.project / "правка-1.php"));
+
+    /* Имя дочерней сессии выдаётся в момент запуска, поэтому файл
+     * ищется в каталоге, а не по вычисленному имени: иначе проверка
+     * знала бы то, чего код не гарантирует. */
+    const fs::path sub_dir = fx.project / "wp_coder" / "sessions" / "sub";
+    std::vector<fs::path> found;
+    std::error_code ec;
+    for (const fs::directory_entry& e : fs::directory_iterator(sub_dir, ec)) {
+        if (e.path().extension() == ".json") found.push_back(e.path());
+    }
+    ASSERT_EQ(found.size(), (size_t)1);
+
+    SessionFile child;
+    std::string error;
+    if (!SessionArchive::load(found[0].string(), child, &error)) {
+        std::cerr << "  дочерняя сессия не прочиталась: " << error << std::endl;
+    }
+    ASSERT_TRUE(SessionArchive::load(found[0].string(), child, &error));
+
+    bool listed = false;
+    for (const Message& m : child.messages) {
+        for (const MessagePart& p : m.parts) {
+            if (!p.is(PartKind::Patch)) continue;
+            if (p.snapshot_hash().empty()) {
+                std::cerr << "  в части patch нет хеша снимка" << std::endl;
+            }
+            for (size_t i = 0; i < p.files().size(); ++i) {
+                if (p.files().at(i).as_string() == "правка-1.php") listed = true;
+            }
+        }
+    }
+    if (!listed) {
+        std::cerr << "  в дочерней сессии нет списка файлов с правкой-1.php"
+                  << std::endl;
+    }
+    ASSERT_TRUE(listed);
+}

@@ -593,36 +593,58 @@ const char* kLastStepReminder =
  *      limits::kSnapshotTimeoutSec) или копируется каталог, а UI ждёт
  *      тот же мьютекс. Лок на этом месте означал бы висящий GUI.
  *   3. Результат кладётся под локом — короткая запись. */
-snapshot::Snapshot take_step_snapshot(EngineState& state,
-                                      HostCallbacks& cb,
-                                      AgentEventCallback push_event) {
+StepSnapshot take_step_snapshot(EngineState& state, HostCallbacks& cb,
+                                AgentEventCallback push_event) {
+    StepSnapshot out;
     std::string project_dir;
-    std::string prev_reason;
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         project_dir = state.project_dir;
-        prev_reason = state.last_snapshot.reason;
+        out.before = state.last_snapshot;
     }
 
     const std::string data_dir = cb.path_data_dir ? cb.path_data_dir() : "";
-    const snapshot::Snapshot snap =
+    out.after =
         snapshot::take(project_dir, snapshot::store_dir(data_dir));
 
     {
         std::lock_guard<std::mutex> lk(state.mtx);
-        state.last_snapshot = snap;
-        if (snap.ok()) ++state.snapshots_taken;
+        state.last_snapshot = out.after;
+        if (out.after.ok()) ++state.snapshots_taken;
     }
 
     /* Пустой каталог проекта — не отказ снимка, а отсутствие проекта:
      * об этом панель говорит отдельно, и второе сообщение на каждом
      * шаге было бы только шумом. */
-    if (!snap.ok() && !project_dir.empty() && snap.reason != prev_reason &&
-        push_event) {
+    if (!out.after.ok() && !project_dir.empty() &&
+        out.after.reason != out.before.reason && push_event) {
         push_event(AgentEvent::Status,
-                   "Снимок рабочего каталога не снят: " + snap.reason);
+                   "Снимок рабочего каталога не снят: " + out.after.reason);
     }
-    return snap;
+    return out;
+}
+
+Message* attach_patch_part(std::vector<Message>& history,
+                           const snapshot::Snapshot& before,
+                           const snapshot::FileChanges& changes) {
+    if (!changes.ok || changes.files.empty()) return nullptr;
+    /* Последнее сообщение ассистента, а не последнее сообщение вообще:
+     * список изменений принадлежит тому ходу, чьи инструменты их
+     * сделали, и приписанный к чужой реплике он означал бы «это
+     * изменилось, пока я говорил». */
+    Message* target = nullptr;
+    for (Message& m : history) {
+        if (m.is_assistant()) target = &m;
+    }
+    if (!target) return nullptr;
+    json::JsonValue files = json::JsonValue::array();
+    for (const std::string& f : changes.files) {
+        files.push_back(json::JsonValue(f));
+    }
+    /* Хеш — тот, С КОГОГО считали, а не тот, который получился: вернуться
+     * надо к состоянию до изменений этого хода. */
+    target->parts.push_back(MessagePart::patch(before.hash, std::move(files)));
+    return target;
 }
 
 bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
@@ -648,7 +670,23 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * Снимок снимается ДО запроса к модели — то есть до того, как
          * агент узнает, что ему делать, и состояние на снимке принадлежит
          * началу шага, а не его результату. */
-        take_step_snapshot(state_, cb_, this->push_event_);
+        const StepSnapshot shots =
+            take_step_snapshot(state_, cb_, this->push_event_);
+        /* И10.2: что изменилось между снимком ПРЕДЫДУЩЕГО шага и этим —
+         * это и есть работа предыдущего хода, и список кладётся в его
+         * сообщение.
+         *
+         * Лок берётся только на запись части и НИКОГДА на время
+         * сравнения: changed_files зовёт git (до kSnapshotTimeoutSec), а
+         * UI ждёт тот же мьютекс. Это ровно то, чего нельзя делать в
+         * take_step_snapshot, и оба места стоят рядом специально —
+         * чтобы правка одного не превратила другое в висящий UI. */
+        const snapshot::FileChanges changes =
+            snapshot::changed_files(shots.before, shots.after);
+        if (changes.ok) {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            attach_patch_part(state_.session, shots.before, changes);
+        }
 
         /* И5.9: у цикла есть ПРЕДУПРЕЖДЕНИЕ о последнем шаге, а не только
          * жёсткий конец. max_steps остаётся предохранителем (о нём ниже), но
@@ -1126,7 +1164,12 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
          * строки субагент, а значит и автор WP-правок (8.15), оставлял
          * бы файлы без снимка — то есть «откат работает» было бы верно
          * только для агента сессии. */
-        take_step_snapshot(state, cb, push_event);
+        const StepSnapshot shots = take_step_snapshot(state, cb, push_event);
+        /* И10.2: список изменений — в сообщение ребёнка. Лока здесь нет
+         * и быть не может: история субагента локальна (core/subagent.h),
+         * а снимки только что записал тот же поток. */
+        attach_patch_part(history, shots.before,
+                          snapshot::changed_files(shots.before, shots.after));
 
         std::vector<LlmEvent> events;
         const bool ok = llm_source::fetch(
