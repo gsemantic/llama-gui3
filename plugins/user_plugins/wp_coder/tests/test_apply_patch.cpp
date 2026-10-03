@@ -356,8 +356,12 @@ TEST(apply_patch_writes_files_on_disk) {
     ASSERT_TRUE(r.find("[патч не разобран]") == std::string::npos);
     ASSERT_EQ(read_file(t / "sub" / "b.txt"), std::string("создан\n"));
     ASSERT_EQ(read_file(t / "a.txt"), std::string("one\nTWO\n"));
-    /* Правка оставила .orig — этим пользуется undo_edit. */
-    ASSERT_TRUE(fs::exists(t / "a.txt.orig"));
+    /* И10.3: правка НЕ оставляет .orig — резервные копии убраны вместе с
+     * `undo_edit`. Проверка на отсутствие, а не на присутствие: мусор в
+     * проекте появлялся на КАЖДОЙ записи (write_file, search_replace,
+     * edit_file, apply_patch), и проверка «.orig есть» была бы ровно
+     * тем, что закрепила бы его навсегда. */
+    ASSERT_FALSE(fs::exists(t / "a.txt.orig"));
     ASSERT_TRUE(r.find("создано 1") != std::string::npos);
     ASSERT_TRUE(r.find("изменено 1") != std::string::npos);
     fs::remove_all(t);

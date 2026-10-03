@@ -683,11 +683,16 @@ TEST(agent_rules_fold_edit_aliases_into_the_write_key) {
     for (const ToolDef& d : defs) {
         if (rules.denies_all(permission_key_of(d))) ++hidden;
     }
-    if (hidden < 5) {
+    if (hidden != 4) {
         std::cerr << "  правилом «edit: false» скрыто инструментов: " << hidden
                   << std::endl;
     }
-    ASSERT_TRUE(hidden >= 5);
+    /* Ровно четыре: write_file, search_replace, edit_file, apply_patch.
+     * Число, а не «≥»: `undo_edit` ушёл вместе с `.orig` (И10.3), а
+     * `revert` живёт на своём ключе `revert` — и молчаливый переезд
+     * `revert` в ключ `write` прошёл бы здесь, оставив «всегда разрешить
+     * откат» означать «всегда разрешить запись». */
+    ASSERT_EQ(hidden, (size_t)4);
 }
 
 TEST(agent_rules_keep_declaration_order_and_patterns) {
@@ -1107,7 +1112,10 @@ TEST(builtin_plan_agent_cannot_write) {
     for (const ToolDef& d : ToolsRegistry::instance().defs()) {
         if (permission_key_of(d) == "write") ++hidden;
     }
-    ASSERT_TRUE(hidden >= 5);
+    /* Ровно четыре, и это устойчивое число: все инструменты ключа `write`
+     * живут в core/base_tools.cpp, то есть регистрируются одинаково при
+     * любом порядке файлов тестов. */
+    ASSERT_EQ(hidden, (size_t)4);
 
     /* Остальное агент планирования НЕ сужает: он читает проект и ищет. */
     ASSERT_EQ(std::string(permission_action_name(plan->evaluate("read", "/srv/a.php"))),
@@ -1208,12 +1216,24 @@ TEST(builtin_explore_agent_is_deny_all_with_a_read_only_list) {
     ASSERT_TRUE(foreign.empty());
     if (read_tools < 5) std::cerr << "  читающих инструментов: " << read_tools << std::endl;
     if (bash_tools < 1) std::cerr << "  инструментов bash: " << bash_tools << std::endl;
-    if (hidden_write < 5) std::cerr << "  скрыто пишущих: " << hidden_write << std::endl;
+    if (hidden_write != 4) std::cerr << "  скрыто пишущих: " << hidden_write << std::endl;
     ASSERT_TRUE(read_tools >= 5);
     ASSERT_TRUE(bash_tools >= 1);
-    /* Все пять пишущих инструментов скрыты: агент-поиск не должен ни
-     * видеть их, ни получать отказ на каждом шаге. */
-    ASSERT_EQ(hidden_write, (size_t)5);
+    /* Все четыре инструмента ключа `write` скрыты: агент-поиск не должен
+     * ни видеть их, ни получать отказ на каждом шаге. Их было пять, пока
+     * жил `undo_edit`; `revert` на своём ключе (И10.3) и в эту группу не
+     * входит — а вот ДОЛЖЕН быть скрыт, и это проверяет отдельная
+     * проверка ниже. */
+    ASSERT_EQ(hidden_write, (size_t)4);
+
+    /* `revert` (И10.3) перезаписывает проект целиком, поэтому у
+     * агента-поиска его быть не должно ВООБЩЕ. Явная проверка, а не
+     * через список `foreign`: там он просто оказался бы в незнакомом
+     * ключе, и запрет «случайно заметного» инструмента выглядел бы так
+     * же, как запрет по недосмотру. */
+    const ToolDef* rev = ToolsRegistry::instance().find("revert");
+    ASSERT_TRUE(rev != nullptr);
+    ASSERT_TRUE(explore->denies_whole_key(permission_key_of(*rev)));
 
     /* Промпт требует назвать тщательность: без этого субагент отвечает
      * поверхностно, а вызывающий принимает это за полный обзор. */

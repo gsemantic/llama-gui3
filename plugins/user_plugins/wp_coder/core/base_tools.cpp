@@ -13,6 +13,7 @@
 #include "text_edit.h"
 #include "file_lock.h"
 #include "json_utils.h"
+#include "snapshot.h"
 #include "subagent.h"
 
 #include <fstream>
@@ -116,14 +117,6 @@ std::string first_external_path(const std::string& cmd) {
         return tok;
     }
     return "";
-}
-
-/* Резервная копия файла (.orig) перед правкой — для undo_edit (3.5).
- * Хранится только последний backup на файл (перезаписывается). */
-void backup_file(const std::string& abs) {
-    if (!fs::exists(abs)) return;
-    std::error_code ec;
-    fs::copy_file(abs, abs + ".orig", fs::copy_options::overwrite_existing, ec);
 }
 
 /* И4.5: вернуть содержимое в формате существующего файла.
@@ -464,6 +457,33 @@ ToolOutput out(std::string title, std::string text) {
     return o;
 }
 
+/* Список путей в ответ инструмента. Показывается начало, а не всё, и
+ * число остальных названо: список без хвоста молчал бы, что вернулось
+ * двадцать файлов, а вернулось семьдесят. Потолок — тот же, что у
+ * сообщения об откате: список читают глазами, и он не должен съедать
+ * контекст запроса. */
+std::string file_list_lines(const std::vector<std::string>& files,
+                            size_t max_lines = 40) {
+    std::string text;
+    const size_t shown = std::min(max_lines, files.size());
+    for (size_t i = 0; i < shown; ++i) text += "  " + files[i] + "\n";
+    if (files.size() > shown) {
+        text += "  …и ещё " + std::to_string(files.size() - shown) + "\n";
+    }
+    return text;
+}
+
+/* Обрезка по краям пробелов и переводов строк: модель присылает хеш с
+ * переводом каретки нередко, и такой хеш не совпал бы ни с одним
+ * снимком — отказ был бы враньём («нет такого снимка» вместо «лишний
+ * перевод строки»). */
+std::string trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
 } // anonymous namespace
 
 void register_base_tools() {
@@ -672,7 +692,6 @@ void register_base_tools() {
                 return out("[запрещено] запись запрещена в: " + abs);
             std::string perm = guard_permission(ctx, abs);
             if (!perm.empty()) return out(std::move(perm));
-            backup_file(abs);  // для undo_edit (3.5)
             /* И4.5: формат существующего файла сохраняется. Перезапись
              * CRLF-файла через LF молча ломает .gitattributes и
              * .bat/.sh, а BOM ждут Windows-редакторы и часть CI. */
@@ -1067,7 +1086,6 @@ void register_base_tools() {
                         ++proposed;
                         report << "  предложено изменить " << f.path << "\n";
                     } else {
-                        backup_file(abs);
                         std::ofstream fo(abs, std::ios::binary | std::ios::trunc);
                         if (!fo) return refuse("не удалось записать: " + abs);
                         fo << result;
@@ -1215,7 +1233,6 @@ void register_base_tools() {
             std::string perm = guard_permission(ctx, abs);
             if (!perm.empty()) return out(std::move(perm));
 
-            backup_file(abs);  // для undo_edit (3.5)
             std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
             if (!fout) return out("[ошибка] не удалось записать: " + abs);
             fout << result;
@@ -1533,7 +1550,6 @@ void register_base_tools() {
 
             std::string perm = guard_permission(ctx, abs);
             if (!perm.empty()) return out(std::move(perm));
-            backup_file(abs);  // для undo_edit (3.5)
             std::ofstream fout(abs, std::ios::binary | std::ios::trunc);
             if (!fout) return out("[ошибка] не удалось записать: " + abs);
             fout << new_content;
@@ -1544,38 +1560,98 @@ void register_base_tools() {
         reg.register_def(std::move(def));
     }
 
-    /* 3.5 undo_edit: отмена последней правки из .orig-backup. */
+    /* И10.3 `revert`: возврат проекта к состоянию снимка. Заменяет
+     * `undo_edit` (3.5), у которого был ОДИН слот .orig на файл: вторая
+     * правка того же файла затирала первую, а откат знал только про
+     * последнее состояние одного файла. Снимок называет состояние всего
+     * каталога, и к нему можно вернуться целиком (границы отката — в
+     * шапке core/snapshot.h).
+     *
+     * Ключ разрешения — свой, а не `write`: откат перезаписывает проект
+     * целиком, и «всегда разрешить» на его вопросе не должен молча
+     * разрешать обычную запись файлов (и наоборот). Свой ключ виден
+     * человеку в правилах и закрывает инструмент в профиле strict, где
+     * остаётся только чтение, — обе проверки тотальны и упали бы сами.
+     *
+     * TF_DESTRUCTIVE — по существу, а не по привычке: содержимое файлов,
+     * которое человек правил руками или уже закоммитил, откат затирает, и
+     * вернуть его можно только новым откатом вперёд (10.4). Поэтому в
+     * режиме плана инструмент запрещён (propose_write тут не годится:
+     * предложить сотню файлов — не предложение), а в research не
+     * проходит и подавно. Вопрос пользователя задаёт ToolRunner::run,
+     * Enforcement-единственная-точка (правило 7). */
     {
         ToolDef def;
-        def.name = "undo_edit";
-        def.description = "Отмена последней правки файла (из резервной копии .orig)";
-        def.flags = TF_WRITES_FILES;
-        def.permission_key = "write";
+        def.name = "revert";
+        def.description =
+            "Вернуть файлы проекта к состоянию снимка. hash — tree-hash "
+            "снимка (проект под git) или идентификатор копии каталога; он "
+            "назван в истории сессии, в блоке «изменённые файлы», и "
+            "пользователь может назвать его тебе. "
+            "Пустой hash — снимок начала текущего шага, то есть состояние "
+            "до правок этого хода. Файлы, которых в снимке нет (созданные "
+            "после него), НЕ удаляются: git не берёт неотслеживаемые "
+            "файлы в снимок, поэтому откат их не трогает.";
+        def.flags = TF_WRITES_FILES | TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "revert";
         SchemaBuilder b;
-        b.str("path", "путь к файлу").required("path");
+        b.str("hash",
+              "tree-hash или идентификатор копии снимка; пусто — снимок "
+              "начала текущего шага");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
-            const std::string rel = arg_str(a, "path");
-            std::string abs = project_resolve(rel);
-            file_lock::Guard file_guard(abs);
-            std::string bak = abs + ".orig";
-            if (!fs::exists(bak)) return out("[ошибка] нет backup (.orig) для " + abs);
-            /* Откат — это тоже запись, поэтому в режиме плана он
-             * предлагается, а не выполняется. */
-            std::error_code ec;
-            std::ifstream restore(bak, std::ios::binary);
-            if (!restore) return out("[ошибка] не удалось прочитать backup: " + bak);
-            std::string restored((std::istreambuf_iterator<char>(restore)),
-                                 std::istreambuf_iterator<char>());
-            restore.close();
-            if (ctx.propose_write(rel, restored)) {
-                return out("предложено откат " + rel, "[предложено] откат " + abs);
+            const std::string hash = arg_str(a, "hash");
+            const std::string project_dir = ctx.project_dir();
+            const HostCallbacks& cbs = ctx.callbacks();
+            const std::string data_dir =
+                cbs.path_data_dir ? cbs.path_data_dir() : "";
+            /* Снимок начала шага читается под локом и копируется: держать
+             * лок на откате нельзя (git и копирование файлов — внутри,
+             * а UI ждёт тот же мьютекс, это висящий GUI из D1). */
+            snapshot::Snapshot last;
+            {
+                std::lock_guard<std::mutex> lk(ctx.state().mtx);
+                last = ctx.state().last_snapshot;
             }
-            std::string perm = guard_permission(ctx, abs);
-            if (!perm.empty()) return out(std::move(perm));
-            fs::copy_file(bak, abs, fs::copy_options::overwrite_existing, ec);
-            if (ec) return out("[ошибка] восстановление не удалось: " + ec.message());
-            return out("откат " + rel, "[undo_edit] восстановлен файл: " + abs);
+            const snapshot::RestoreResult r = snapshot::restore(
+                hash, last, project_dir, snapshot::store_dir(data_dir));
+            const std::string shown = trim(hash).empty()
+                                          ? (last.ok() ? last.hash : std::string())
+                                          : trim(hash);
+            if (!r.ok) {
+                return out("откат не состоялся",
+                           "[revert] откат не состоялся: " + r.reason);
+            }
+            if (r.restored.empty() && r.leftover.empty()) {
+                return out("откат нечего делать",
+                           "[revert] проект уже совпадает со снимком"
+                           + (shown.empty() ? std::string()
+                                            : (" " + shown)) +
+                           " (" + r.source + "): различающихся файлов нет");
+            }
+            std::string text = "[revert] состояние снимка" +
+                               (shown.empty() ? std::string() : (" " + shown)) +
+                               " (" + r.source + ") возвращено файлов: " +
+                               std::to_string(r.restored.size()) + ".";
+            /* Список ограничен, а не «сколько влезет»: откат на большом
+             * проекте вернёт сотни файлов, и весь список в RESULT съел бы
+             * контекст (предел общего усечения — 2000 строк, но список
+             * изменений читают глазами, а не читают целиком). */
+            text += file_list_lines(r.restored);
+            if (!r.leftover.empty()) {
+                /* Механизм НЕ угадывается: для копии каталога это отказ
+                 * записи (нет прав на файл), для git-пути такого быть не
+                 * должно — и выдуманная причина в ответе была бы
+                 * враньём, которое модель перескажет человеку. */
+                text += "Не удалось вернуть (" +
+                        std::to_string(r.leftover.size()) +
+                        "): после отката эти файлы всё ещё отличаются от "
+                        "снимка.\n" + file_list_lines(r.leftover);
+            }
+            text +=
+                "Файлы, которых нет в снимке, не удалены: снимок не видит "
+                "неотслеживаемые файлы, и откат их не трогает.";
+            return out("откат к снимку", std::move(text));
         };
         reg.register_def(std::move(def));
     }

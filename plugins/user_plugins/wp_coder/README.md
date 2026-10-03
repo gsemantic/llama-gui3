@@ -47,7 +47,7 @@ wp_coder/
 
 | Модуль | Инструменты | Навыки (inline) |
 |--------|-------------|-----------------|
-| **core** (базовые) | `read_file`, `write_file`, `search_replace`, `edit_file`, `undo_edit`, `grep_search`, `glob`, `repo_map`, `list`, `web_fetch`, `bash`, `apply_patch`, `todowrite`, `todoread`, `list_skills`, `skill_detail`, `rag_index`, `rag_query` | — |
+| **core** (базовые) | `read_file`, `write_file`, `search_replace`, `edit_file`, `revert`, `grep_search`, `glob`, `repo_map`, `list`, `web_fetch`, `bash`, `apply_patch`, `todowrite`, `todoread`, `list_skills`, `skill_detail`, `rag_index`, `rag_query` | — |
 | **core** (git) | `git_status`, `git_diff`, `git_log`, `git_add`, `git_branch`, `git_checkout`, `git_commit` | — |
 | **WordPress** | `wp_cli`, `wp_db`, `wp_media`, `wp_option`, `wp_rest`, `wp_create_site`, `wp_check_deps`, `deploy`, `verify`, `php_lint`, `headless_render`, `validate` | `wp_theme`, `wp_hook`, `wp_database`, `wp_media`, `wp_plugin_boilerplate`, `wp_git` |
 | **Python** | `python_run`, `pip_install`, `django_manage`, `pytest_run`, `venv_create`, `python_lint` | `python_django`, `python_flask`, `python_fastapi`, `python_project` |

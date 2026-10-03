@@ -182,9 +182,11 @@ TEST(every_write_tool_is_classified_by_the_format_test) {
                                      "apply_patch"};
     /* Пишущие, но не проверяемые таблицей, с причиной. */
     static const char* kExempt[] = {
-        /* Восстанавливает байты резервной копии как есть: менять формат
-         * здесь нельзя, это отмена правки, а не правка. */
-        "undo_edit",
+        /* И10.3 `revert`: возвращает БАЙТЫ снимка как есть, потому что
+         * откат — это не правка. Проверять тут нечего: сравнивать не с
+         * чем, эталонного состояния у проверки нет, а нашёлся бы ровно
+         * тот дефект (BOM/CRLF), против которого откат и работает. */
+        "revert",
         /* Пишет не в проект, а во внешний индекс RAG (через хост). */
         "rag_index"};
 
@@ -252,7 +254,12 @@ TEST(expected_tool_set_is_registered_and_documented) {
     const std::string cat = ToolsRegistry::instance().build_tool_catalogue();
     for (const char* name : {"read_file", "write_file", "search_replace",
                              "apply_patch", "glob", "list", "grep_search",
-                             "bash", "todowrite", "todoread"}) {
+                             "bash", "todowrite", "todoread",
+                             /* И10.3: откат по снимку. В списке ожидаемого
+                              * набора, а не «есть в реестре»: инструмент,
+                              * которого модель не видит в каталоге, не
+                              * отличается от отсутствующего. */
+                             "revert"}) {
         if (!ToolsRegistry::instance().has(name)) {
             std::cerr << "  нет инструмента " << name << std::endl;
             ASSERT_TRUE(false);

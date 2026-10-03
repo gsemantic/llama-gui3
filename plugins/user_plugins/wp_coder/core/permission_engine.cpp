@@ -135,6 +135,12 @@ void PermissionEngine::apply_agent_defaults(
     rs.add("cron", "*", PermissionAction::Ask);
     rs.add("package", "*", PermissionAction::Ask);
     rs.add("rag", "*", PermissionAction::Ask);
+    /* Откат к снимку (И10.3): спрашивается всегда, потому что перезаписывает
+     * файлы проекта теми байтами, которые были до правок агента, — а это
+     * задевает и то, что человек правил руками. Отдельный ключ, а не
+     * `write`: «всегда разрешить откат» не должно молча разрешать обычную
+     * запись файлов, и наоборот (тот же довод, что у `task`). */
+    rs.add("revert", "*", PermissionAction::Ask);
     /* pytest гоняет код проекта — то есть исполняет произвольный код
      * из дерева, которое агент только что правил. */
     rs.add("test", "*", PermissionAction::Ask);

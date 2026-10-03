@@ -28,6 +28,13 @@
 
 using namespace coder;
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <unistd.h>
+
+namespace fs = std::filesystem;
+
 namespace {
 
 /* Полный набор из 50 инструментов: базовые, git и три модуля.
@@ -204,7 +211,7 @@ TEST(research_mode_blocks_every_writing_tool) {
     /* Регресссия D3: research был только текстом в промпте. Теперь ни
      * один инструмент, меняющий состояние, не вызывается. */
     const char* forbidden[] = {
-        "write_file", "search_replace", "edit_file", "undo_edit",
+        "write_file", "search_replace", "edit_file", "revert",
         "rag_index", "bash", "git_commit", "git_add", "git_checkout",
     };
     for (const char* tool : forbidden) {
@@ -272,6 +279,11 @@ TEST(plan_mode_blocks_execution_and_destructive_tools) {
     const char* forbidden[] = {
         "bash", "git_commit", "deploy", "cron_add", "systemd_restart",
         "docker_run", "wp_create_site", "pip_install",
+        /* И10.3: откат к снимку перезаписывает файлы проекта, поэтому в
+         * режиме плана он запрещён, а не предложен. «Предложить сотню
+         * файлов» — не предложение, и ToolContext::propose_write здесь
+         * неприменим. */
+        "revert",
     };
     for (const char* tool : forbidden) {
         const ToolDef* def = ToolsRegistry::instance().find(tool);
@@ -289,8 +301,12 @@ TEST(plan_mode_blocks_execution_and_destructive_tools) {
  * этот тест. */
 TEST(plan_mode_allows_only_known_proposers_to_write) {
     register_all_tools();
+    /* `revert` в списке нет и быть не должен: он помечен TF_DESTRUCTIVE,
+     * то есть в режиме плана запрещён политикой режима, и проверка выше
+     * (`plan_mode_blocks_execution_and_destructive_tools`) требует отказа
+     * от него, а не предложения. */
     const char* proposers[] = {"write_file", "search_replace", "edit_file",
-                             "undo_edit", "apply_patch"};
+                             "apply_patch"};
     for (const auto& def : ToolsRegistry::instance().defs()) {
         if (!tf_has(def.flags, TF_WRITES_FILES)) continue;
         if ((def.flags & kPlanForbidden) != 0u) continue;   /* и так заблокирован */
@@ -312,7 +328,7 @@ TEST(plan_mode_still_proposes_file_writes) {
      * пользователь подтверждает в UI. Это поведение раньше было
      * продублировано в четырёх инструментах, теперь живёт в
      * ToolContext::propose_write. */
-    const char* writers[] = {"write_file", "search_replace", "edit_file", "undo_edit"};
+    const char* writers[] = {"write_file", "search_replace", "edit_file"};
     for (const char* tool : writers) {
         const ToolDef* def = ToolsRegistry::instance().find(tool);
         if (!def) throw std::runtime_error(std::string("нет инструмента: ") + tool);
@@ -422,4 +438,51 @@ TEST(tool_runner_refuses_tool_in_research_mode) {
     /* И история не тронута: её ведёт цикл, у которого есть сообщение и
      * вызов, а не ToolRunner. */
     ASSERT_TRUE(st.session.empty());
+}
+
+/* И10.3: отказ по режиму приходит от ENFORCEMENT, а обработчик не
+ * трогает ни одного файла.
+ *
+ * Через ToolRunner, а не через ToolsRegistry::run_output: прямой вызов
+ * реестра enforcement не проходит и проверил бы обработчик, а не отказ
+ * (журнал И8.13, п. 3). Содержимое файла проверяется на диске, потому
+ * что «отказ» и «отказ, который всё-таки записал» — разные дефекты, и
+ * текст ошибки у них одинаковый. */
+TEST(plan_mode_refuses_revert_before_it_touches_a_file) {
+    register_all_tools();
+    ModeGuard mode(0, true);
+    auto& st = engine_state();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_plan_revert_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    {
+        std::ofstream f(t / "a.txt");
+        f << "не тронуто";
+    }
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        st.project_dir = t.string();
+        st.recent_calls.clear();
+    }
+    ToolRunner runner(st, Engine::instance().callbacks(),
+                      [&](AgentEvent::Kind, const std::string&) {});
+    json::JsonValue args = json::JsonValue::object();
+    /* Хеш заведомо никому не принадлежит: если бы отказ пришёл из
+     * обработчика, текст был бы про снимок, а Enforcement говорит про
+     * режим. Разница видна. */
+    args.set("hash", std::string(40, 'a'));
+    const ToolOutcome outcome = runner.run("revert", args);
+    ASSERT_FALSE(outcome.ok);
+    ASSERT_TRUE(outcome.error.find("сначала план") != std::string::npos);
+    std::ifstream f(t / "a.txt");
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    ASSERT_EQ(content, std::string("не тронуто"));
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        st.project_dir.clear();
+    }
 }

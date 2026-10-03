@@ -1,8 +1,9 @@
 /*
- * snapshot.cpp — снимок состояния рабочего каталога (И10.1).
+ * snapshot.cpp — снимок состояния рабочего каталога (И10.1) и возврат к
+ * нему (И10.3).
  *
  * Обоснование выбора команд и границы честности — в шапке snapshot.h;
- * здесь только код. Два места, где легко ошибиться, и оба закрыты
+ * здесь только код. Три места, где легко ошибиться, и все три закрыты
  * комментарием при коде:
  *
  *   - `git stash create` при чистом дереве отдаёт ПУСТОЙ вывод, а при
@@ -12,6 +13,13 @@
  *   - `git stash create` не берёт неотслеживаемые файлы (см. шапку), и
  *     `git write-tree` молча отдаёт индекс, то есть тоже не видит новых
  *     файлов. Это свойство git; обманывать его нечем.
+ *   - `git restore --worktree` НЕ трогает индекс и НЕ удаляет файлы,
+ *     которых нет в источнике (проверено на живом git 2.39: untracked,
+ *     staged-added и созданный после снимка файл после отката остались на
+ *     месте; staged — остался staged). Это ровно то поведение, которое
+ *     нужно откату, — но именно поэтому список «что вернулось» нельзя
+ *     доверять git: он молчит, а вернуться может не всё (каталог без
+ *     прав на запись обрывает команду целиком).
  */
 
 #include "core/snapshot.h"
@@ -31,6 +39,12 @@
 
 namespace coder {
 namespace snapshot {
+
+/* Определение константы из шапки — здесь, а не в анонимном пространстве:
+ * внутри анонимного пространства имя оказывается двусмысленным (оно видно
+ * и как `snapshot::kOwnerSuffix`, и как безымянное), и файл перестаёт
+ * собираться. */
+const char* const kOwnerSuffix = ".owner";
 
 namespace fs = std::filesystem;
 
@@ -81,6 +95,28 @@ static bool is_hex_hash(const std::string& s) {
         const bool digit = (c >= '0' && c <= '9');
         const bool lower = (c >= 'a' && c <= 'f');
         if (!digit && !lower) return false;
+    }
+    return true;
+}
+
+/* Идентификатор копии — ровно то, что печатает make_copy_id. Форма
+ * проверяется перед тем, как из неё собирается путь: хеш приходит от
+ * модели, а «snap-../../..» в пути — это чтение и запись мимо каталога
+ * копий. Обратная проверка (будущий формат) здесь не нужна: неизвестное
+ * имя отвергается, а не угадывается. */
+static bool is_copy_id(const std::string& s) {
+    static const char* kPrefix = "snap-";
+    const size_t prefix_len = std::strlen(kPrefix);
+    if (s.size() <= prefix_len + 3) return false;
+    if (s.compare(0, prefix_len, kPrefix) != 0) return false;
+    size_t i = prefix_len;
+    const size_t dash = s.find('-', i);
+    if (dash == std::string::npos || dash == i) return false;
+    for (size_t k = i; k < dash; ++k) {
+        if (s[k] < '0' || s[k] > '9') return false;
+    }
+    for (size_t k = dash + 1; k < s.size(); ++k) {
+        if (s[k] < '0' || s[k] > '9') return false;
     }
     return true;
 }
@@ -357,6 +393,29 @@ Snapshot take(const std::string& project_dir, const std::string& store) {
     if (!copy_tree(fs::path(project_dir), fs::path(s.dir), skip_rel, err)) {
         return fail("копия каталога не удалась: " + err);
     }
+    /* И10.3: отметка, чьим проектом снята копия. Пишется ПОСЛЕ копии и
+     * перед возвратом: копия без отметки вернулась бы, но откат по ней
+     * был бы невозможен (restore отвергает её с названной причиной), то
+     * есть это был бы снимок, который только кажется откатываемым.
+     *
+     * Если отметку записать не удалось, копия сносится: оставить её значит
+     * оставить в каталоге копий мусор, который ничем не читается. */
+    const std::string owner = s.dir + kOwnerSuffix;
+    {
+        std::ofstream f(owner, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            fs::remove_all(fs::path(s.dir), ec);
+            return fail("копия каталога непригодна: не записать отметку "
+                        + owner);
+        }
+        f << project_dir << "\n";
+        if (!f.good()) {
+            fs::remove_all(fs::path(s.dir), ec);
+            fs::remove(owner, ec);
+            return fail("копия каталога непригодна: отметка записана не "
+                        "вся: " + owner);
+        }
+    }
     return s;
 }
 
@@ -456,6 +515,239 @@ FileChanges changed_files(const Snapshot& before, const Snapshot& after) {
     ch.files = diff_dirs(before.dir, after.dir);
     ch.ok = true;
     return ch;
+}
+
+/* ======================================================================
+ * И10.3: возврат к состоянию снимка
+ * ====================================================================== */
+
+namespace {
+
+/* Файлы проекта, отличающиеся от дерева снимка (git-путь).
+ *
+ * --relative обязателен по той же причине, что в changed_files: путь от
+ * корня репозитория агенту ничего не значит, а проект — возможно
+ * подкаталог. Пустой список при нулевом коде — «совпадает», и это не
+ * ошибка. */
+bool diff_from_tree(const std::string& dir, const std::string& tree,
+                    std::vector<std::string>& out, std::string& err) {
+    std::string text;
+    int code = 0;
+    const std::string cmd =
+        "git -C " + shell::shell_quote(dir) +
+        " diff --name-only --relative -z " + shell::shell_quote(tree);
+    shell::run_capture_status(cmd, text, code, limits::kSnapshotTimeoutSec);
+    if (code != 0) {
+        err = first_line(text);
+        return false;
+    }
+    out = split_nul(text);
+    return true;
+}
+
+/* Откат по дереву git.
+ *
+ * Pathspec — точка: без неё git вернул бы весь репозиторий, а проект
+ * плагина может быть подкаталком чужого монорепозитория (проверено на
+ * живом git 2.39: `git -C <sub> restore -- .` вернул только файлы под
+ * sub, а лежащий рядом файл в корне репозитория не тронул). Точка
+ * разрешается относительно каталога, который задаёт -C, — то есть
+ * относительно проекта, а не относительно рабочего каталога хоста.
+ *
+ * --worktree без --staged: индекс неприкосновенен. Снимок — это рабочее
+ * дерево, и его возврат не должен переписывать то, что человек staged
+ * (проверено на живом git 2.39: `git diff --cached` до и после отката
+ * совпал).
+ *
+ * Файловых семафоров здесь НЕТ, и это не недосмотр, а разобранная
+ * невозможность. `file_lock::Guard` берёт одну из 64 нерекурсивных полос
+ * по хешу пути, поэтому N Guard'ов на N путях — это дедлок на первой же
+ * паре путей, попавших в одну полосу (на 60 файлах это не «возможно», а
+ * фактически всегда: рождений по полосам 64 хватает с большим запасом).
+ * Обойти это нечем: полосы не видны снаружи, а брать полосу на весь каталог
+ * значило бы защитить от записи в каталог, тогда как пишущие инструменты
+ * берут полосу по ФАЙЛУ, — то есть такая блокировка ничего бы не
+ * исключала, а выглядела бы защищённой.
+ *
+ * Гонки с другим писателем при этом нет: второй писатель из UI —
+ * `Engine::pending_apply`, а он берёт содержимое из `state.pending`,
+ * которое наполняет только `ToolContext::propose_write`, а тот вне режима
+ * плана возвращается сразу. Откат в режиме плана запрещён (TF_DESTRUCTIVE),
+ * поэтому «человек жмёт «применить» в тот же момент» недостижимо. */
+RestoreResult restore_git(const std::string& tree,
+                          const std::string& project_dir) {
+    RestoreResult r;
+    r.source = "git";
+    std::vector<std::string> before;
+    std::string err;
+    if (!diff_from_tree(project_dir, tree, before, err)) {
+        r.reason = "git не сравнил проект со снимком: " + err;
+        return r;
+    }
+    if (before.empty()) {
+        r.ok = true;
+        return r;
+    }
+
+    std::string text;
+    int code = 0;
+    const std::string cmd =
+        "git -C " + shell::shell_quote(project_dir) +
+        " restore --source=" + shell::shell_quote(tree) + " --worktree -- .";
+    shell::run_capture_status(cmd, text, code, limits::kSnapshotTimeoutSec);
+    if (code != 0) {
+        r.reason = "git не вернул состояние снимка: " + first_line(text);
+        return r;
+    }
+
+    /* Проверка ПОСЛЕ, а не по списку «до»: git молчит об успехе, и файл
+     * мог остаться отличным (например, его нельзя записать). Считать
+     * успехом сам факт команды значило бы сообщить модели «проект приведён
+     * к снимку» там, где он не приведён. */
+    std::vector<std::string> after;
+    if (!diff_from_tree(project_dir, tree, after, err)) {
+        r.reason = "git вернул состояние, но проверить его не удалось: " + err;
+        return r;
+    }
+    const std::set<std::string> still_different(after.begin(), after.end());
+    for (const std::string& rel : before) {
+        if (still_different.count(rel) == 0) r.restored.push_back(rel);
+    }
+    r.leftover = after;
+    r.ok = true;
+    return r;
+}
+
+/* Откат по копии каталога (проект не под git).
+ *
+ * Отметка проекта сверяется ДО любой записи: каталог копий общий для всех
+ * проектов плагина, и копия чужого проекта, возвращённая в текущий,
+ * залила бы его файлами того — молча и целиком (правило 3 в шапке).
+ *
+ * Отсутствующие в копии файлы НЕ удаляются (правило 1 в шапке): копия
+ * снята целиком, и «нет в копии» означает лишь «нечего верчать», а не
+ * «удалить». */
+RestoreResult restore_copy(const std::string& copy_id,
+                            const std::string& project_dir,
+                            const std::string& store) {
+    RestoreResult r;
+    r.source = "копия каталога";
+    if (store.empty()) {
+        r.reason = "не задан каталог данных плагина: копии снимков "
+                   "недоступны, откатить копию нечем";
+        return r;
+    }
+    std::error_code ec;
+    const std::string dir = store + "/" + copy_id;
+    if (!fs::is_directory(dir, ec)) {
+        r.reason = "снимка нет: копия " + copy_id + " не найдена (" + dir + ")";
+        return r;
+    }
+
+    const std::string owner_path = dir + kOwnerSuffix;
+    std::string owner;
+    {
+        std::ifstream f(owner_path, std::ios::binary);
+        if (f) {
+            owner = std::string((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+        }
+    }
+    owner = trim(owner);
+    if (owner.empty()) {
+        r.reason = "копия снимка без отметки проекта (" + owner_path +
+                   "): откат по ней невозможен";
+        return r;
+    }
+    if (owner != project_dir) {
+        r.reason = "снимок снят с другого проекта (" + owner +
+                   "), а откат запрошен для " + project_dir;
+        return r;
+    }
+
+    std::set<std::string> in_copy;
+    list_files(fs::path(dir), in_copy);
+
+    std::vector<std::string> pending;
+    for (const std::string& rel : in_copy) {
+        const fs::path from = fs::path(dir) / rel;
+        const fs::path to = fs::path(project_dir) / rel;
+        std::error_code exists_ec;
+        if (fs::exists(to, exists_ec) && same_content(from, to)) continue;
+        pending.push_back(rel);
+    }
+    if (pending.empty()) {
+        r.ok = true;
+        return r;
+    }
+
+    std::vector<std::string> failed;
+    for (const std::string& rel : pending) {
+        const fs::path from = fs::path(dir) / rel;
+        const fs::path to = fs::path(project_dir) / rel;
+        std::error_code copy_ec;
+        fs::create_directories(to.parent_path(), copy_ec);
+        if (!copy_ec) {
+            fs::copy_file(from, to, fs::copy_options::overwrite_existing,
+                          copy_ec);
+        }
+        /* Копия побайтная (правило 9 шапки snapshot.cpp): BOM и CRLF
+         * переживают её без участия text_edit, и трогать их нечем. */
+        if (copy_ec || !same_content(from, to)) failed.push_back(rel);
+    }
+    for (const std::string& rel : pending) {
+        if (std::find(failed.begin(), failed.end(), rel) == failed.end()) {
+            r.restored.push_back(rel);
+        }
+    }
+    r.leftover = failed;
+    r.ok = true;
+    return r;
+}
+
+} // namespace
+
+RestoreResult restore(const std::string& hash, const Snapshot& last,
+                      const std::string& project_dir, const std::string& store) {
+    RestoreResult r;
+    if (project_dir.empty()) {
+        r.reason = "не задан каталог проекта: откатывать нечего";
+        return r;
+    }
+    std::error_code ec;
+    if (!fs::is_directory(project_dir, ec)) {
+        r.reason = "каталог проекта не найден: " + project_dir;
+        return r;
+    }
+
+    /* Вид снимка — по форме хеша (см. шапку). Форма проверяется ДО
+     * подстановки в команду и ДО сборки пути: хеш приходит от модели, а
+     * «идентификатор копии» превращается в путь. */
+    const std::string h = trim(hash);
+    if (h.empty()) {
+        if (!last.ok()) {
+            r.reason = "снимка начала шага нет: " +
+                       (last.reason.empty() ? std::string("снимок не снят")
+                                            : last.reason) +
+                       ". Укажи hash явно.";
+            return r;
+        }
+        if (last.kind == Kind::GitTree) return restore_git(last.hash, project_dir);
+        return restore_copy(last.hash, project_dir, store);
+    }
+    if (is_hex_hash(h)) {
+        if (!is_git_repo(project_dir)) {
+            r.reason = "hash похож на tree-hash git, а каталог " + project_dir +
+                       " не под git: восстановить нечего";
+            return r;
+        }
+        return restore_git(h, project_dir);
+    }
+    if (is_copy_id(h)) return restore_copy(h, project_dir, store);
+
+    r.reason = "hash не похож ни на tree-hash git, ни на идентификатор "
+               "копии каталога: " + h;
+    return r;
 }
 
 } // namespace snapshot

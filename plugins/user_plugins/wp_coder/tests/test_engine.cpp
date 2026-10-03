@@ -1157,7 +1157,13 @@ TEST(edit_file_out_of_range_rejected) {
     fs::remove_all(tmp);
 }
 
-TEST(undo_edit_restores_backup) {
+/* И10.3: `undo_edit` и его .orig-проверка убраны — откатом занимается
+ * инструмент `revert` (core/snapshot.h), и write_file больше не оставляет
+ * резервных копий. На их месте здесь проверяется, что мусора НЕ
+ * появляется: прежняя проверка «.orig есть» была бы на новом коде
+ * неправильной, а «.orig нет» ловит возврат backup_file, если его
+ * кто-то вернёт ради «отката одного файла». */
+TEST(write_file_leaves_no_backup_copies_behind) {
     fs::path tmp = make_tmp_project();
     {
         std::ofstream f(tmp / "u.txt");
@@ -1165,24 +1171,15 @@ TEST(undo_edit_restores_backup) {
     }
     init_tools_for_phase3(tmp);
 
-    /* write_file создаёт .orig-backup (3.5). */
     ToolArgs w;
     w.path = "u.txt";
     w.content = "new-content";
     std::string wr = ToolsRegistry::instance().run("write_file", w);
     ASSERT_TRUE(wr.find("[записано]") != std::string::npos);
-    ASSERT_TRUE(fs::exists(tmp / "u.txt.orig"));
-
-    /* undo_edit восстанавливает старую версию. */
-    ToolArgs u;
-    u.path = "u.txt";
-    std::string ur = ToolsRegistry::instance().run("undo_edit", u);
-    ASSERT_TRUE(ur.find("[undo_edit]") != std::string::npos);
-
-    std::ifstream fin(tmp / "u.txt");
-    std::string content((std::istreambuf_iterator<char>(fin)),
-                        std::istreambuf_iterator<char>());
-    ASSERT_EQ(content, std::string("old-content"));
+    if (fs::exists(tmp / "u.txt.orig")) {
+        std::cerr << "  write_file снова оставил .orig" << std::endl;
+    }
+    ASSERT_FALSE(fs::exists(tmp / "u.txt.orig"));
     fs::remove_all(tmp);
 }
 

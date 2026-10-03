@@ -17,6 +17,7 @@
  */
 
 #include "../core/agent_components.h"
+#include "../core/base_tools.h"
 #include "../core/shell.h"
 #include "../core/snapshot.h"
 
@@ -24,6 +25,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -744,4 +746,535 @@ TEST(changed_files_names_paths_from_the_project_and_not_from_the_repository) {
     /* Чужой файл вне проекта в список не попадает: он не часть работы
      * агента, и 10.3 не должен трогать то, что лежит рядом. */
     ASSERT_TRUE(ch.files[0].find("снаружи") == std::string::npos);
+}
+
+/* ======================================================================
+ * И10.3: возврат к состоянию снимка
+ *
+ * Порядок — по цене решения. Первые проверки: ЧТО вернулось и ЧТО
+ * осталось нетронутым. Обе ловятся только на живом git и на живой
+ * файловой системе, и обе смотрели бы вхолостую на заглушке: откат,
+ * который «восстановил» бы всё, и откат, который снёс бы лишнее, —
+ * это два разных дефекта, и виден только второй.
+ *
+ * Чего здесь нет и почему: содержимое файла, которое вернулось, должно
+ * быть БАЙТ В БАЙТ состоянию снимка — но сравнивать его с тем, что мы
+ * сами же и положили в снимок, значило бы проверять код кодом. Эталон
+ * берётся из git (`git cat-file` по дереву) и с диска.
+ * ====================================================================== */
+
+namespace {
+
+bool contains(const std::vector<std::string>& v, const std::string& s) {
+    return std::find(v.begin(), v.end(), s) != v.end();
+}
+
+/* «Снимка нет» — ровно то, чем помечено состояние движка до первого
+ * шага цикла. Отдельная функция, а не Snapshot{} в вызовах: пустой
+ * снимок в тесте отката — это недосмотр, и без имени он выглядит как
+ * ещё один аргумент. */
+Snapshot no_snapshot() { return Snapshot(); }
+
+} // namespace
+
+TEST(revert_returns_the_project_to_the_state_of_the_snapshot) {
+    SandBox sb("revert_git");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    write_file(fs::path(repo) / "b.txt", "b-original\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+    /* b.txt в первый коммит не вошёл: снимок берётся через stash, и файл
+     * из индекса в дерево снимка не попадает. */
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m second");
+
+    const Snapshot snap = take(repo, sb.store());
+    ASSERT_TRUE(snap.kind == Kind::GitTree);
+    ASSERT_EQ(blob_in_tree(repo, snap.hash, "a.txt"), std::string("one\n"));
+
+    /* Агент после снимка: изменил файл, удалил другой, создал новый. */
+    write_file(fs::path(repo) / "a.txt", "two\n");
+    raw_git(repo, "add a.txt");
+    /* И правка поверх staged: индекс и рабочее дерево теперь разные, и
+     * откат обязан вернуть рабочее дерево, не переписав индекс. */
+    write_file(fs::path(repo) / "a.txt", "три\n");
+    fs::remove(fs::path(repo) / "b.txt");
+    write_file(fs::path(repo) / "new.txt", "создано агентом\n");
+
+    /* Индекс неприкосновенен: человек подготовил a.txt к коммиту. */
+    const std::string index_before = raw_git(repo, "diff --cached --name-only");
+    ASSERT_TRUE(index_before.find("a.txt") != std::string::npos);
+
+    const RestoreResult r = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.source, std::string("git"));
+    /* Содержимое — байт в байт состоянию снимка, а эталон взят из git. */
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"),
+              blob_in_tree(repo, snap.hash, "a.txt"));
+    /* Удалённый файл ВОЗВРАЩАЕТСЯ: он есть в снимке, и «восстановить
+     * состояние» без этого означало бы «вернуть половину». */
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "b.txt"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("b-original\n"));
+    /* Файла, которого в снимке нет, откат НЕ удаляет: снимок не берёт
+     * неотслеживаемые файлы, поэтому он его и не видел — «удалить всё,
+     * чего в дереве нет» снесло бы и то, что снимок никогда не видел
+     * (шапка core/snapshot.h, ограничение 1). */
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "new.txt"));
+    ASSERT_EQ(read_text(fs::path(repo) / "new.txt"),
+              std::string("создано агентом\n"));
+
+    /* Список вернувшихся назван файлами, а не числом: по нему видно,
+     * ЧТО именно восстановлено, и именно он потом попадёт в PatchPart
+     * следующего хода. */
+    ASSERT_EQ(r.restored.size(), (size_t)2);
+    ASSERT_TRUE(contains(r.restored, "a.txt"));
+    ASSERT_TRUE(contains(r.restored, "b.txt"));
+    ASSERT_TRUE(r.leftover.empty());
+
+    /* Индекс не переписан: снимок — это рабочее дерево, и его возврат
+     * не должен переписывать то, что человек подготовил к коммиту.
+     * Проверка содержательная: staged a.txt остался staged (пустой
+     * список означал бы, что индекс перезаписали). */
+    ASSERT_EQ(raw_git(repo, "diff --cached --name-only"), index_before);
+
+    /* Второй откат того же снимка — не ошибка и не «что-то вернулось»:
+     * состояние уже там. Иначе модель получила бы отказ там, где всё
+     * в порядке, и начала бы искать обход. */
+    const RestoreResult again = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_TRUE(again.ok);
+    ASSERT_TRUE(again.restored.empty());
+    ASSERT_TRUE(again.leftover.empty());
+}
+
+TEST(revert_does_not_reach_outside_the_project_directory) {
+    /* Проект плагина — возможно подкаталог репозитория (монорепозиторий,
+     * каталог данных рядом). Откат без pathspec вернул бы весь
+     * репозиторий, то есть тронул бы чужой файл, который агент не
+     * трогал и который не часть его работы. На проекте, который сам
+     * является корнем репозитория, отличить одно от другого нельзя —
+     * поэтому каталог данных проверки отдельный. */
+    SandBox sb("revert_sub");
+    const fs::path repo = fs::path(sb.root) / "repo";
+    const fs::path app = repo / "wp-content";
+    std::error_code ec;
+    fs::create_directories(app / "deep", ec);
+    write_file(repo / "снаружи.txt", "снаружи-исходное\n");
+    write_file(app / "deep" / "z.php", "<?php\n");
+    init_repo(repo.string());
+    raw_git(repo.string(), "add -A");
+    raw_git(repo.string(), "commit -q -m base");
+
+    const Snapshot snap = take(app.string(), sb.store());
+    ASSERT_TRUE(snap.kind == Kind::GitTree);
+
+    write_file(app / "deep" / "z.php", "<?php // правка\n");
+    write_file(repo / "снаружи.txt", "снаружи-ИЗМЕНЕНО\n");
+
+    const RestoreResult r = restore(snap.hash, snap, app.string(), sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(read_text(app / "deep" / "z.php"), std::string("<?php\n"));
+    /* Чужой файл остался как был — иначе откат писал бы мимо проекта. */
+    ASSERT_EQ(read_text(repo / "снаружи.txt"), std::string("снаружи-ИЗМЕНЕНО\n"));
+    ASSERT_EQ(r.restored.size(), (size_t)1);
+    ASSERT_EQ(r.restored.at(0), std::string("deep/z.php"));
+}
+
+TEST(revert_reports_what_it_could_not_return_instead_of_claiming_success) {
+    /* Каталог, в который нельзя записать: git вернёт не ноль, и откат
+     * обязан сказать об этом, а не отчитаться «2 файла вернулись».
+     * Проверка ловит ровно тот подмен, который выглядит как успех:
+     * список ДО отката, объявленный результатом. */
+    SandBox sb("revert_fail");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    fs::create_directories(fs::path(repo) / "sub");
+    write_file(fs::path(repo) / "sub" / "b.txt", "b\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m second");
+
+    const Snapshot snap = take(repo, sb.store());
+    ASSERT_TRUE(snap.kind == Kind::GitTree);
+    write_file(fs::path(repo) / "a.txt", "two\n");
+    fs::remove(fs::path(repo) / "sub" / "b.txt");
+
+    /* Права на каталог снимаем после снимка: без этого git создал бы
+     * файл (в каталоге写) и откат прошёл бы вхолостую. */
+    fs::permissions(fs::path(repo) / "sub", fs::perms::owner_read | fs::perms::owner_exec);
+    const RestoreResult r = restore(snap.hash, snap, repo, sb.store());
+    fs::permissions(fs::path(repo) / "sub",
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec);
+
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("git") != std::string::npos);
+    ASSERT_TRUE(r.restored.empty());
+    ASSERT_TRUE(r.leftover.empty());
+}
+
+TEST(a_mode_only_difference_is_returned_by_the_rollback_too) {
+    /* Права — тоже состояние, и откат возвращает их: проверено на живом
+     * git 2.39, что `git restore --worktree` после `chmod +x` снова
+     * делает файл неисполняемым, если в дереве бит не выставлен.
+     *
+     * Написать противоположное — «восстанавливается только содержимое» —
+     * было бы враньём в шапке core/snapshot.h, и враньё это осело бы там
+     * навсегда: проверить его можно было только на живом git, то есть не
+     * в общем обзоре, а именно здесь. Первая версия проверки утверждала
+     * ровно это и упала; вывод внесён в шапку и в журнал. */
+    SandBox sb("revert_mode");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+    const Snapshot snap = take(repo, sb.store());
+    ASSERT_TRUE(snap.kind == Kind::GitTree);
+
+    /* Права меняются, содержимое — нет. */
+    std::error_code ec;
+    fs::permissions(fs::path(repo) / "a.txt",
+                    fs::perms::owner_read | fs::perms::owner_write |
+                    fs::perms::owner_exec);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+
+    const RestoreResult r = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    /* Файл отличался от снимка (по правам) и после отката не отличается —
+     * то есть он вернулся, и попал в restored именно потому, что это
+     * ПРОВЕРЕНО сравнением после, а не объявлено списком «до». */
+    ASSERT_EQ(r.restored.size(), (size_t)1);
+    ASSERT_EQ(r.restored.at(0), std::string("a.txt"));
+    ASSERT_TRUE(r.leftover.empty());
+    ASSERT_TRUE((fs::status(fs::path(repo) / "a.txt").permissions() &
+                 fs::perms::owner_exec) == fs::perms::none);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    /* И сам снимок теперь совпадает с проектом: повторный откат не должен
+     * ни вернуть, ни пожаловаться. */
+    const RestoreResult again = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_TRUE(again.ok);
+    ASSERT_TRUE(again.restored.empty());
+    ASSERT_TRUE(again.leftover.empty());
+}
+
+TEST(revert_refuses_a_hash_it_cannot_use_and_says_which_kind_it_is) {
+    SandBox sb("revert_hash");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    /* Не строка и не путь: раньше такие значения уходили в команду как
+     * есть, и отказ выглядел бы как «снимок не найден», а причина была
+     * бы в другом. */
+    const RestoreResult junk =
+        restore("snap-../../etc", no_snapshot(), repo, sb.store());
+    ASSERT_FALSE(junk.ok);
+    ASSERT_TRUE(junk.reason.find("не похож") != std::string::npos);
+    /* Текст отказа назван целиком: модель должна понять, что прислала. */
+    ASSERT_TRUE(junk.reason.find("snap-../../etc") != std::string::npos);
+
+    /* Правильная форма, чужой объект: git не знает такого дерева, и
+     * отказ приходит с его текстом — молчаливого «ничего не вернулось»
+     * быть не должно. */
+    const std::string absent(40, 'a');
+    const RestoreResult missing = restore(absent, no_snapshot(), repo, sb.store());
+    ASSERT_FALSE(missing.ok);
+    ASSERT_TRUE(missing.reason.find("git не вернул") != std::string::npos ||
+                missing.reason.find("не сравнил") != std::string::npos);
+
+    /* Дерево git против проекта без git: развидеть нечего, и сказать
+     * об этом лучше, чем искать копию с таким именем. */
+    SandBox plain("revent_nogit");
+    write_file(fs::path(plain.project()) / "a.txt", "one\n");
+    const RestoreResult not_git = restore(absent, no_snapshot(),
+                                          plain.project(), plain.store());
+    ASSERT_FALSE(not_git.ok);
+    ASSERT_TRUE(not_git.reason.find("не под git") != std::string::npos);
+}
+
+TEST(revert_of_a_copy_snapshot_returns_a_project_without_git) {
+    /* Фолбэк «копия каталога» — не запасной путь, а единственный для
+     * проекта без git, то есть для самого частого случая у человека,
+     * который начал проект (журнал И10.1, п. 2б). Откат, работающий
+     * только под git, был бы откатом на половине пользователей. */
+    SandBox sb("revert_copy");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    /* Каталог создаётся явно: write_file этого файла не делает, и файл в
+     * несуществующем каталоге молча не записался бы — снимок вышел бы
+     * без него, а проверка «вернули удалённый файл» падала бы не по
+     * существу. */
+    std::error_code mk;
+    fs::create_directories(fs::path(repo) / "sub", mk);
+    write_file(fs::path(repo) / "sub" / "b.txt", "b\n");
+    ASSERT_FALSE(is_git_repo(repo));
+
+    const Snapshot snap = take(repo, sb.store());
+    ASSERT_TRUE(snap.kind == Kind::DirCopy);
+    ASSERT_TRUE(fs::is_directory(fs::path(snap.dir)));
+
+    write_file(fs::path(repo) / "a.txt", "two\n");
+    fs::remove(fs::path(repo) / "sub" / "b.txt");
+    write_file(fs::path(repo) / "new.txt", "новое\n");
+
+    const RestoreResult r = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.source, std::string("копия каталога"));
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "sub" / "b.txt"));
+    ASSERT_EQ(read_text(fs::path(repo) / "sub" / "b.txt"), std::string("b\n"));
+    /* Отсутствие файла в копии — «нечего возвращать», а не «удалить». */
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "new.txt"));
+    ASSERT_EQ(r.restored.size(), (size_t)2);
+    ASSERT_TRUE(contains(r.restored, "a.txt"));
+    ASSERT_TRUE(contains(r.restored, "sub/b.txt"));
+    ASSERT_TRUE(r.leftover.empty());
+
+    /* Повторный откат — тоже не ошибка: состояние уже там. */
+    const RestoreResult again = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_TRUE(again.ok);
+    ASSERT_TRUE(again.restored.empty());
+}
+
+TEST(revert_of_a_copy_says_which_files_it_could_not_return) {
+    /* Файл, в который нельзя записать. Проверка ловит подмен «список ДО
+     * отката назван результатом»: откат отчитался бы о вернутом файле,
+     * содержимое которого осталось прежним, и модель продолжила бы
+     * считать проект приведённым к снимку. */
+    SandBox sb("revert_copy_left");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    const Snapshot snap = take(repo, sb.store());
+    ASSERT_TRUE(snap.kind == Kind::DirCopy);
+    write_file(fs::path(repo) / "a.txt", "two\n");
+
+    fs::permissions(fs::path(repo) / "a.txt", fs::perms::owner_read);
+    const RestoreResult r = restore(snap.hash, snap, repo, sb.store());
+    fs::permissions(fs::path(repo) / "a.txt",
+                    fs::perms::owner_read | fs::perms::owner_write);
+
+    ASSERT_TRUE(r.ok);
+    ASSERT_TRUE(r.restored.empty());
+    ASSERT_EQ(r.leftover.size(), (size_t)1);
+    ASSERT_EQ(r.leftover.at(0), std::string("a.txt"));
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+}
+
+TEST(revert_refuses_a_copy_taken_from_another_project) {
+    /* Каталог копий общий для всех проектов плагина. Без сверки
+     * «чьим проектом снята копия» откат по чужому хешу залил бы текущий
+     * проект файлами того — молча и целиком, а имена у этих файлов
+     * совпадают, потому что проекты похожи (шапка core/snapshot.h,
+     * правило 3). */
+    SandBox a("revert_owner_a");
+    SandBox b("revert_owner_b");
+    write_file(fs::path(a.project()) / "config.php", "<?php // A\n");
+    write_file(fs::path(b.project()) / "config.php", "<?php // B\n");
+    write_file(fs::path(b.project()) / "b.txt", "b-only\n");
+
+    const Snapshot snap = take(a.project(), a.store());
+    ASSERT_TRUE(snap.kind == Kind::DirCopy);
+
+    const RestoreResult r = restore(snap.hash, snap, b.project(), a.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("другого проекта") != std::string::npos);
+    ASSERT_TRUE(r.reason.find(a.project()) != std::string::npos);
+    /* Отказ не тронул ни одного файла: проверка на содержимом, а не на
+     * тексте причины. */
+    ASSERT_EQ(read_text(fs::path(b.project()) / "config.php"),
+              std::string("<?php // B\n"));
+    ASSERT_EQ(read_text(fs::path(b.project()) / "b.txt"), std::string("b-only\n"));
+}
+
+TEST(a_copy_without_the_project_mark_cannot_be_restored) {
+    /* Отметку снимают с копии — и такой снимок выглядит рабочим: каталог
+     * на месте, файлы внутри есть. Откат обязан отказаться с названной
+     * причиной, а не восстановить по подозрению: неизвестно, чей это
+     * проект. */
+    SandBox sb("revert_nomark");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    const Snapshot snap = take(repo, sb.store());
+    ASSERT_TRUE(snap.kind == Kind::DirCopy);
+    std::error_code ec;
+    fs::remove(std::string(snap.dir) + kOwnerSuffix, ec);
+    ASSERT_TRUE(ec ? false : !fs::exists(std::string(snap.dir) + kOwnerSuffix));
+
+    write_file(fs::path(repo) / "a.txt", "two\n");
+    const RestoreResult r = restore(snap.hash, snap, repo, sb.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("без отметки проекта") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+}
+
+TEST(the_snapshot_of_the_current_step_is_used_when_the_hash_is_empty) {
+    /* Пустой hash — снимок начала текущего шага (тот, что лежит в
+     * состоянии движка). Так откатывает сам агент, посреди хода: хеш
+     * снимка видит пользователь, а модели он не достаётся, и отправлять
+     * служебную часть в транскрипт нельзя (отклонение 111).
+     *
+     * Проверка обязана звать restore() ИМЕННО с пустым hash: прежняя
+     * версия звала его с «пробелами вокруг хеша» (обрезка — другой
+     * случай), и проверка с именем «при пустом hash» не проверяла пустой
+     * hash. Поймала это мутация «пустой hash не берёт снимок начала
+     * шага»: поймала, но не та проверка, а соседняя. */
+    SandBox sb("revert_empty");
+    const std::string repo = sb.project();
+    write_file(fs::path(repo) / "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    const Snapshot last = take(repo, sb.store());
+    ASSERT_TRUE(last.kind == Kind::GitTree);
+    write_file(fs::path(repo) / "a.txt", "two\n");
+
+    const RestoreResult r = restore("", last, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.source, std::string("git"));
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_EQ(r.restored.size(), (size_t)1);
+    ASSERT_EQ(r.restored.at(0), std::string("a.txt"));
+
+    /* Хеш с пробелами и переводом строки — модель присылает так часто, и
+     * отказ «нет такого снимка» был бы враньём: снимок есть. */
+    write_file(fs::path(repo) / "a.txt", "три\n");
+    const RestoreResult padded = restore("  " + last.hash + "\n", last, repo,
+                                         sb.store());
+    ASSERT_TRUE(padded.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+
+    /* Снимка начала шага нет — отказ с названной причиной, а не пустой
+     * успех. Иначе модель решила бы, что откат состоялся. */
+    Snapshot broken;
+    broken.reason = "конфликт в индексе";
+    const RestoreResult none = restore("", broken, repo, sb.store());
+    ASSERT_FALSE(none.ok);
+    ASSERT_TRUE(none.reason.find("конфликт в индексе") != std::string::npos);
+    ASSERT_TRUE(none.reason.find("hash") != std::string::npos);
+}
+
+/* --- Инструмент `revert` (а не только функция) --- */
+
+namespace {
+
+/* Движок с проектом и каталогом данных фикстуры.
+ *
+ * Лямбда захватывает ФИКСТУРУ ПО ССЫЛКЕ и по причине из шапки SandBox:
+ * копия фикстуры удаляла бы каталог в конце полного выражения, то есть
+ * до первого же вызова инструмента. */
+struct ToolFixture {
+    SandBox sb;
+    HostCallbacks cb;
+
+    explicit ToolFixture(const char* what) : sb(what) {
+        cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&,
+                         LlmReply&) { return false; };
+        cb.llm_complete = [](const std::string&, const std::string&,
+                             std::string&) { return false; };
+        cb.llm_is_connected = []() { return false; };
+        cb.path_data_dir = [this] { return sb.store(); };
+        cb.chat_event = [](const std::string&) {};
+        Engine::instance().init(cb);
+        register_base_tools();
+        EngineState& state = engine_state();
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.project_dir = sb.project();
+            state.last_snapshot = Snapshot();
+            state.plan_mode = false;
+            state.mode = 0;
+        }
+    }
+    ~ToolFixture() {
+        EngineState& state = engine_state();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir.clear();
+        state.last_snapshot = Snapshot();
+    }
+    ToolFixture(const ToolFixture&) = delete;
+    ToolFixture& operator=(const ToolFixture&) = delete;
+
+    ToolOutput run(const std::string& hash) {
+        json::JsonValue a = json::JsonValue::object();
+        if (!hash.empty()) a.set("hash", json::JsonValue(hash));
+        return ToolsRegistry::instance().run_output("revert", a);
+    }
+    /* Снимок кладётся в состояние так же, как его кладёт цикл: откат без
+     * пустого hash берёт именно его. */
+    void publish(const Snapshot& s) {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().last_snapshot = s;
+    }
+};
+
+} // namespace
+
+TEST(the_revert_tool_rolls_the_project_back_to_the_snapshot_of_the_step) {
+    ToolFixture fx("revert_tool");
+    write_file(fs::path(fx.sb.project()) / "a.txt", "one\n");
+    init_repo_with_file(fx.sb.project(), "a.txt", "one\n");
+    const Snapshot snap = take(fx.sb.project(), fx.sb.store());
+    ASSERT_TRUE(snap.ok());
+    fx.publish(snap);
+
+    write_file(fs::path(fx.sb.project()) / "a.txt", "two\n");
+    const ToolOutput o = fx.run("");
+    ASSERT_TRUE(o.output.find("[revert]") != std::string::npos);
+    ASSERT_TRUE(o.output.find("возвращено") != std::string::npos);
+    ASSERT_TRUE(o.output.find("a.txt") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(fx.sb.project()) / "a.txt"),
+              std::string("one\n"));
+
+    /* Ответ обязан называть границу отката словами: модель, увидевшая
+     * «1 файл вернулся», считает проект приведённым к снимку, и файл,
+     * созданный ею после снимка, который откат НЕ удаляет, был бы для неё
+     * сюрпризом на следующем же шаге. */
+    ASSERT_TRUE(o.output.find("не удалены") != std::string::npos);
+
+    /* Повторный вызов: состояние уже там, и это сказано словами, а не
+     * отказом — иначе модель начала бы искать обход. */
+    const ToolOutput again = fx.run("");
+    ASSERT_TRUE(again.output.find("уже совпадает") != std::string::npos);
+}
+
+TEST(the_revert_tool_says_plainly_that_it_did_not_work) {
+    ToolFixture fx("revert_tool_fail");
+    write_file(fs::path(fx.sb.project()) / "a.txt", "one\n");
+    /* Снимка в состоянии нет: пустой hash нечего принимать за снимок. */
+    const ToolOutput none = fx.run("");
+    ASSERT_TRUE(none.output.find("откат не состоялся") != std::string::npos);
+    ASSERT_TRUE(none.output.find("снимка начала шага нет") != std::string::npos);
+
+    const ToolOutput junk = fx.run("что-то не то");
+    ASSERT_TRUE(junk.output.find("откат не состоялся") != std::string::npos);
+    ASSERT_TRUE(junk.output.find("не похож") != std::string::npos);
+}
+
+TEST(the_revert_tool_shows_a_long_list_of_returned_files) {
+    /* Список файлов длинный: показывается начало, а число остальных
+     * НАЗЫВАЕТСЯ. Молчаливый хвост выглядел бы как «вернулось 40», а
+     * вернулось 60 — и следующий шаг агента строился бы на неправде.
+     *
+     * Проверка заодно держит форму списка на файлах, которых больше, чем
+     * полос file_lock (64). Первая версия отката брала по file_lock::Guard
+     * на каждый изменённый файл, и на 60 путях две из них гарантированно
+     * попадают в одну полосу — то есть висят на нерекурсивном мьютексе.
+     * Этот тест поймал то самое (его и видели по сторожу, а не по
+     * падению), и по нему же видно, что deadlock-риск не вернулся. */
+    ToolFixture fx("revert_tool_long");
+    const std::string repo = fx.sb.project();
+    for (int i = 0; i < 60; ++i) {
+        write_file(fs::path(repo) / ("f" + std::to_string(i) + ".txt"), "one\n");
+    }
+    init_repo_with_file(repo, "f0.txt", "one\n");
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m all");
+    const Snapshot snap = take(repo, fx.sb.store());
+    ASSERT_TRUE(snap.ok());
+    for (int i = 0; i < 60; ++i) {
+        write_file(fs::path(repo) / ("f" + std::to_string(i) + ".txt"), "two\n");
+    }
+    fx.publish(snap);
+
+    const ToolOutput o = fx.run(snap.hash);
+    ASSERT_TRUE(o.output.find("возвращено файлов: 60") != std::string::npos);
+    ASSERT_TRUE(o.output.find("и ещё") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "f59.txt"), std::string("one\n"));
 }
