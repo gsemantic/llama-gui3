@@ -155,6 +155,15 @@ PermissionOutcome permission_outcome(EngineState& state, const std::string& path
 struct StepSnapshot {
     snapshot::Snapshot before;  /* что лежало в состоянии до вызова */
     snapshot::Snapshot after;   /* только что снятое */
+    /* Копии, которые снял этот вызов и которые больше не читает НИКТО:
+     * снимок, не ставший уровнем (шаг ничего не изменил). На проекте без
+     * git это полная копия каталога, и без уборки она осталась бы на
+     * диске до конца сессии, а удалять её должен вызывающий — потому что
+     * `after` ещё нужен ему для сравнения «до и после» (changed_files).
+     * Уборка внутри take_step_snapshot оказалась бы слишком ранней и
+     * сломала бы именно этот список: чтение удалённого каталога молча
+     * даёт «изменений нет». */
+    std::vector<snapshot::Snapshot> discard;
 };
 
 StepSnapshot take_step_snapshot(EngineState& state,

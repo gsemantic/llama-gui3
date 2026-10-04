@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -300,6 +301,46 @@ void list_files(const fs::path& root, std::set<std::string>& out) {
         if (rel.empty()) continue;
         out.insert(rel);
     }
+}
+
+/* Содержимое файла целиком. Отказ — пустая строка, и это различается
+ * с пустым файлом по вызывающему: пустой файл читается успешно и
+ * тоже даёт пустую строку, поэтому неудача видна по `ok`. */
+std::string read_bytes(const fs::path& path, bool& ok) {
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || ec) {
+        ok = false;
+        return "";
+    }
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        ok = false;
+        return "";
+    }
+    ok = true;
+    return std::string((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+}
+
+/* Отрезать от блока вывода git преамбулу (`diff --git`, `index`,
+ * `new file mode`, …) и оставить unified-тело с `--- `.
+ *
+ * Зачем: окно рисует строки патча, а преамбула — служебная часть git.
+ * Наш собственный генератор (core/diff.h) печатает ровно то же тело, и
+ * без этого шага один и тот же файл выглядел бы по-разному в зависимости
+ * от того, git-уровень это или копия каталога. */
+std::string strip_git_preamble(const std::string& block) {
+    const size_t start = block.find("--- ");
+    if (start == std::string::npos) return "";
+    std::string body = block.substr(start);
+    /* Завершающий перевод строки убирается: наш собственный генератор
+     * (core/diff.h) тоже его не оставляет, иначе окно показало бы пустую
+     * строку в конце патча ИМЕННО для git-уровней, а копий каталога — нет.
+     * Один и тот же файл обязан выглядеть одинаково в обоих случаях. */
+    while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
+        body.pop_back();
+    }
+    return body;
 }
 
 } // namespace
@@ -817,10 +858,367 @@ void discard_copies(const std::vector<Snapshot>& snapshots) {
     }
 }
 
-void UndoStack::push(const Snapshot& s) {
+/* --- И10.5: diff для показа в UI --- */
+
+size_t DiffReport::additions() const {
+    size_t n = 0;
+    for (const diff::FileDiff& f : files) n += f.additions;
+    return n;
+}
+
+size_t DiffReport::deletions() const {
+    size_t n = 0;
+    for (const diff::FileDiff& f : files) n += f.deletions;
+    return n;
+}
+
+namespace {
+
+/* Один файл по `git diff --numstat -z`: имя и СЧЁТЧИКИ строк.
+ *
+ * Имена берутся ОТСЮДА, а не из заголовков unified-патча, и это не
+ * выбор вкуса: у git есть два вида изменений, для которых строк
+ * `--- a/путь` / `+++ b/путь` НЕ ВООБЩЕ печатается — двоичный файл
+ * (`Binary files … differ`) и изменение только прав (`old mode`/
+ * `new mode`). В обоих случаях имя есть только в заголовке
+ * `diff --git a/X b/Y`, а он неоднозначен: имя с пробелом там
+ * неотделимо от следующего поля (живой git печатает
+ * `diff --git a/ascii space.txt b/ascii space.txt`).
+ *
+ * `--numstat -z` печатает `добавлено<TAB>удалено<TAB>путь` и НЕ
+ * цитирует путь (проверено на живом git 2.39), то есть имя приходит
+ * однозначным. У двоичного файла счётчики — `-\t-`, и это признак
+ * «строк нет», а не «нулевые строки». */
+struct NumstatEntry {
+    std::string file;
+    size_t additions = 0;
+    size_t deletions = 0;
+    bool binary = false;
+};
+
+std::vector<NumstatEntry> parse_numstat_z(const std::string& out) {
+    std::vector<NumstatEntry> entries;
+    size_t pos = 0;
+    while (pos < out.size()) {
+        size_t nul = out.find('\0', pos);
+        const std::string record =
+            nul == std::string::npos ? out.substr(pos) : out.substr(pos, nul - pos);
+        pos = nul == std::string::npos ? out.size() : nul + 1;
+        if (record.empty()) continue;
+        const size_t t1 = record.find('\t');
+        if (t1 == std::string::npos) continue;
+        const size_t t2 = record.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        NumstatEntry e;
+        e.file = record.substr(t2 + 1);
+        const std::string add = record.substr(0, t1);
+        const std::string del = record.substr(t1 + 1, t2 - t1 - 1);
+        if (add == "-" || del == "-") {
+            e.binary = true;
+        } else {
+            e.additions = static_cast<size_t>(std::strtoul(add.c_str(), nullptr, 10));
+            e.deletions = static_cast<size_t>(std::strtoul(del.c_str(), nullptr, 10));
+        }
+        if (!e.file.empty()) entries.push_back(e);
+    }
+    return entries;
+}
+
+/* Разбор unified-вывода и склейка его с numstat.
+ *
+ * Порядок блоков совпадает с порядком numstat (оба сортируются путём), и
+ * ЭТО ПРОВЕРЯЕТСЯ: у блока, у которого имя есть, сверяется, что оно
+ * совпало с ожидаемым из numstat. Расхождение — отказ с названной
+ * причиной, а не показ diff чужого файла: в блоке может быть файл с
+ * двоичным содержимым без единой строки, и ошибка в сортировке выдала
+ * бы его патч за патч соседа. */
+bool parse_git_diff(const std::string& out,
+                    const std::vector<NumstatEntry>& numstat,
+                    DiffReport& report);
+
+} // namespace
+
+bool diff_from_git_text(const std::string& numstat_z, const std::string& patch,
+                        DiffReport* out) {
+    DiffReport report;
+    const std::vector<NumstatEntry> numstat = parse_numstat_z(numstat_z);
+    if (!parse_git_diff(patch, numstat, report)) {
+        *out = report;
+        return false;
+    }
+    if (report.files.size() + report.omitted < numstat.size()) {
+        /* Файлов в numstat больше, чем блоков в выводе патча: обычно это
+         * изменение только прав (git печатает для него блок, но строк
+         * нет), и тогда отчёт неполон без предупреждения. */
+        report.truncated = true;
+        report.omitted += numstat.size() - (report.files.size() + report.omitted);
+    }
+    report.ok = true;
+    *out = report;
+    return true;
+}
+
+namespace {
+
+bool parse_git_diff(const std::string& out,
+                    const std::vector<NumstatEntry>& numstat,
+                    DiffReport& report) {
+    std::vector<std::string> lines;
+    size_t pos = 0;
+    while (pos < out.size()) {
+        const size_t nl = out.find('\n', pos);
+        if (nl == std::string::npos) {
+            lines.push_back(out.substr(pos));
+            break;
+        }
+        lines.push_back(out.substr(pos, nl - pos));
+        pos = nl + 1;
+    }
+
+    const char kBlockHead[] = "diff --git ";
+    const size_t kBlockHeadLen = sizeof(kBlockHead) - 1;
+    size_t i = 0;
+    size_t index = 0;
+    while (i < lines.size()) {
+        if (lines[i].compare(0, kBlockHeadLen, kBlockHead) != 0) { ++i; continue; }
+        size_t j = i + 1;
+        std::string block = lines[i] + "\n";
+        bool has_binary_line = false;
+        bool has_mode_only = false;
+        while (j < lines.size() &&
+               lines[j].compare(0, kBlockHeadLen, kBlockHead) != 0) {
+            if (lines[j].compare(0, 13, "Binary files ") == 0) has_binary_line = true;
+            /* Длина 9, а не 8: «old mode » — девять символов вместе с
+             * пробелом, и с восемью сравнение никогда не сходилось, то
+             * есть изменение прав проходило как файл без строк и без
+             * объяснения. Поймано проверкой на тексте вывода git. */
+            if (lines[j].compare(0, 9, "old mode ") == 0) has_mode_only = true;
+            block += lines[j] + "\n";
+            ++j;
+        }
+        i = j;
+
+        /* Имя из заголовков — там, где они есть. */
+        std::string minus_field, plus_field;
+        {
+            size_t p2 = 0;
+            bool in_hunk = false;
+            while (p2 < block.size()) {
+                const size_t nl = block.find('\n', p2);
+                const std::string line =
+                    nl == std::string::npos ? block.substr(p2)
+                                            : block.substr(p2, nl - p2);
+                if (!in_hunk) {
+                    if (line.compare(0, 4, "--- ") == 0) {
+                        minus_field = line.substr(4);
+                    } else if (line.compare(0, 4, "+++ ") == 0) {
+                        plus_field = line.substr(4);
+                    }
+                    if (line.compare(0, 3, "@@ ") == 0) in_hunk = true;
+                }
+                if (nl == std::string::npos) break;
+                p2 = nl + 1;
+            }
+        }
+        std::string name = diff::parse_git_header_name(minus_field);
+        if (name.empty()) name = diff::parse_git_header_name(plus_field);
+
+        if (index >= numstat.size()) {
+            report.ok = false;
+            report.reason =
+                "git напечатал больше блоков изменений, чем файлов в "
+                "numstat: показывать diff не того файла нельзя";
+            return false;
+        }
+        const NumstatEntry& e = numstat[index];
+        ++index;
+        if (!name.empty() && name != e.file) {
+            report.ok = false;
+            report.reason = "git напечатал блок для «" + name +
+                            "», а в numstat на этом месте «" + e.file +
+                            "»: показывать diff не того файла нельзя";
+            return false;
+        }
+
+        diff::FileDiff fd;
+        fd.file = e.file;
+        fd.binary = e.binary;
+        fd.additions = e.additions;
+        fd.deletions = e.deletions;
+        if (e.binary) {
+            fd.patch = "";
+            fd.note = "двоичный файл: показать нечем, строк нет";
+        } else if (has_mode_only && has_binary_line == false && e.additions == 0 &&
+                   e.deletions == 0) {
+            /* Права изменились, содержимое нет. Строк нет — и сказать
+             * «правок нет» было бы неправдой: изменение есть, просто
+             * не в строках. */
+            fd.patch = "";
+            fd.note = "изменились только права файла, строк нет";
+        } else {
+            fd.patch = strip_git_preamble(block);
+        }
+        if (report.files.size() < limits::kMaxDiffFiles) {
+            report.files.push_back(fd);
+        } else {
+            report.truncated = true;
+            ++report.omitted;
+        }
+    }
+    return true;
+}
+
+/* Копия каталога: файлы, которых нет с одной стороны или которые
+ * разошлись побайтно. Симлинки пропускаются — тем же правилом, что при
+ * копировании (diff_dirs). */
+void diff_copy_dirs(const Snapshot& before, const Snapshot& after,
+                    DiffReport& report) {
+    std::set<std::string> in_before, in_after;
+    list_files(fs::path(before.dir), in_before);
+    list_files(fs::path(after.dir), in_after);
+    std::set<std::string> all = in_before;
+    all.insert(in_after.begin(), in_after.end());
+    for (const std::string& rel : all) {
+        if (in_before.count(rel) && in_after.count(rel) &&
+            same_content(fs::path(before.dir) / rel, fs::path(after.dir) / rel)) {
+            continue;
+        }
+        if (report.files.size() >= limits::kMaxDiffFiles) {
+            report.truncated = true;
+            ++report.omitted;
+            continue;
+        }
+        bool ok_before = false, ok_after = false;
+        const std::string content_before =
+            read_bytes(fs::path(before.dir) / rel, ok_before);
+        const std::string content_after =
+            read_bytes(fs::path(after.dir) / rel, ok_after);
+        if (!ok_before || !ok_after) {
+            /* Файл не прочитался — показать его нечем, и молча пропустить
+             * значило бы «правок нет» при файле, который изменился. */
+            diff::FileDiff fd;
+            fd.file = rel;
+            fd.note = ok_before ? "файл после состояния не читается"
+                                : "файл до состояния не читается";
+            report.files.push_back(fd);
+            continue;
+        }
+        report.files.push_back(
+            diff::make_file_diff(rel, content_before, content_after));
+    }
+}
+
+} // namespace
+
+DiffReport diff_states(const Snapshot& before, const Snapshot& after,
+                       const std::string& store_dir) {
+    (void)store_dir;
+    DiffReport report;
+    report.from_hash = before.hash;
+    report.to_hash = after.hash;
+    if (!before.ok() || !after.ok()) {
+        report.reason = "сравнивать нечем: снимок не состоялся";
+        if (!before.ok()) report.reason += " (до: " + before.reason + ")";
+        if (!after.ok()) report.reason += " (после: " + after.reason + ")";
+        return report;
+    }
+    if (before.kind != after.kind) {
+        /* Снимки разных видов сравнить нечем: git-путь работает с двумя
+         * деревьями, копия — с двумя каталогами. Молча взять «что-то
+         * одно» значило бы показать diff не того. */
+        report.reason = std::string("снимки разных видов: до — ") +
+                        before.kind_name() + ", после — " + after.kind_name();
+        return report;
+    }
+
+    if (before.kind == Kind::GitTree) {
+        std::error_code ec;
+        if (!fs::is_directory(before.project_dir, ec)) {
+            report.reason = "каталог проекта не найден: " + before.project_dir;
+            return report;
+        }
+        const std::string range = shell::shell_quote(before.hash) + " " +
+                                  shell::shell_quote(after.hash);
+        /* Два вызова, и оба нужны. Первый даёт ИМЕНА и СЧЁТЧИКИ однозначно
+         * (numstat -z не цитирует путь), второй — тела патчей. Одним
+         * вызовом обойтись нельзя: у двоичного файла и у изменения только
+         * прав в unified-выводе нет ни `---`, ни `+++`, то есть имя там
+         * существует только в неоднозначном заголовке `diff --git`. */
+        bool stat_ok = false;
+        const std::string stat_out = git_cmd(
+            before.project_dir,
+            "diff --numstat -z --no-renames --relative " + range + " -- .",
+            stat_ok);
+        if (!stat_ok) {
+            report.reason = "git не отдал список изменённых файлов: " +
+                            first_line(stat_out);
+            return report;
+        }
+        bool cmd_ok = false;
+        const std::string out = git_cmd(
+            before.project_dir,
+            "diff --no-color --no-renames -U3 --relative " + range + " -- .",
+            cmd_ok);
+        if (!cmd_ok) {
+            report.reason = "git не отдал diff: " + first_line(out);
+            return report;
+        }
+        /* Разбор — в diff_from_git_text(), отдельной функцией: сверку
+         * вывода git с живым репозиторием нельзя заставить
+         * детерминированно (отклонение 110 — там же про parse_hash).
+         * Шов заполняет отчёт целиком, поэтому хеши, о которых знает
+         * только вызывающий, проставляются ПОСЛЕ — иначе отчёт потерял
+         * бы «из какого состояния в какое», а это ровно то, что человек
+         * читает в заголовке. */
+        if (!diff_from_git_text(stat_out, out, &report)) {
+            report.from_hash = before.hash;
+            report.to_hash = after.hash;
+            return report;
+        }
+        report.from_hash = before.hash;
+        report.to_hash = after.hash;
+    } else {
+        diff_copy_dirs(before, after, report);
+    }
+    report.ok = true;
+    return report;
+}
+
+DiffReport UndoStack::diff_step(size_t index, const std::string& project_dir,
+                                const std::string& store_dir) const {
+    DiffReport report;
+    if (levels_.empty()) {
+        report.reason = "ступеней нет: агент ещё не делал шагов";
+        return report;
+    }
+    if (index >= levels_.size()) {
+        report.reason = "уровня " + std::to_string(index) + " нет: стек содержит " +
+                        std::to_string(levels_.size());
+        return report;
+    }
+    const Snapshot& from = levels_[index];
+    if (index + 1 < levels_.size()) {
+        return diff_states(from, levels_[index + 1], store_dir);
+    }
+    /* Последний уровень: «куда» — это то, что на диске сейчас. Снимок
+     * берётся здесь, и на не-git-проекте это ПОЛНАЯ копия каталога —
+     * цена названа в шапке diff_step(), потому что её платит тот, кто
+     * спросил (окно), а не агент. */
+    const Snapshot here = take(project_dir, store_dir);
+    const DiffReport computed = diff_states(from, here, store_dir);
+    /* Снимок «куда» не принадлежит стеку и не переживает вызов, поэтому
+     * убирается ЗДЕСЬ: правило «копии удаляет вызывающий, потому что лок
+     * кончается» относится к копиям стека, а этот снимок снят и прочитан
+     * в одном вызове, вне лока. Оставить его было бы утечкой на каждом
+     * нажатии кнопки — то есть на каждом показе diff верхнего уровня. */
+    discard_copies(std::vector<Snapshot>{here});
+    return computed;
+}
+
+bool UndoStack::push(const Snapshot& s) {
     /* Снимок не состоялся — уровня нет. Причина остаётся в самом снимке:
      * терять её нельзя, отказ потом скажет именно ею. */
-    if (!s.ok()) return;
+    if (!s.ok()) return false;
 
     /* Смена проекта обнуляет стек. Сверка идёт по полю снимка, а не по
      * отдельному флагу «проект сменился»: проект задаётся настройкой и
@@ -845,9 +1243,10 @@ void UndoStack::push(const Snapshot& s) {
     }
     /* Тот же уровень дважды не заводим: шаг, ничего не изменивший, не
      * должен стоить нажатия «отменить». */
-    if (levels_.empty() || !same_state(s, levels_.back())) {
-        levels_.push_back(s);
+    if (!levels_.empty() && same_state(s, levels_.back())) {
+        return false;
     }
+    levels_.push_back(s);
     pos_ = levels_.size() - 1;
 
     /* Глубина ограничена: уровень на проекте без git — полная копия
@@ -867,6 +1266,7 @@ void UndoStack::push(const Snapshot& s) {
         levels_.erase(levels_.begin());
         --pos_;
     }
+    return true;
 }
 
 void UndoStack::clear() {

@@ -47,6 +47,7 @@ set(CORE_SOURCES
     core/instruction.cpp
     core/harness_profile.cpp
     core/snapshot.cpp
+    core/diff.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -242,6 +243,11 @@ if(WP_CODER_BUILD_TESTS)
         # стоит после файлов, зовущих цикл агента (test_agent_loop.cpp),
         # потому что проверяет состояние движка — то, что цикл меняет.
         tests/test_snapshot.cpp
+        # И10.5: diff для показа в UI. Инструментов не регистрирует и
+        # состояние движка не трогает, поэтому может стоять где угодно до
+        # test_iteration_iv_invariants.cpp; стоит после test_snapshot.cpp,
+        # потому что проверяет то, чем снимок кормит.
+        tests/test_diff.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

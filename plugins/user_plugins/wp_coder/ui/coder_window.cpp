@@ -5,11 +5,13 @@
 #include "../core/module_api.h"
 #include "../core/project.h"
 #include "../core/security.h"
+#include "../core/snapshot.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
 
 #include <cstring>
+#include <mutex>
 #include <algorithm>
 #include <sstream>
 
@@ -269,6 +271,115 @@ static void render_tools() {
 }
 
 /* --- Окно: Сессия (5.1) --- */
+/* И10.5: diff по уровням стека сессии.
+ *
+ * Задача 10.5 — «diff для каждого снапшота доступен UI», и здесь ровно
+ * «доступен»: список уровней, по кнопке — что изменит отмена этого
+ * уровня. Настоящий виджет с тематизацией строк, переключателем
+ * word-wrap и номерами строк — это И11.1/И11.2; здесь сознательно
+ * простой текст, иначе 10.5 и 11.1 были бы одной задачей, а И11.1
+ * потом нечего было бы делать.
+ *
+ * Два правила, которые видны в этой функции и обязаны быть названы:
+ *   - `state_.mtx` НЕ держится на время подсчёта: снимки читаются под
+ *     локом, а diff считает Engine::level_diff уже без него (правило 3
+ *     SESSION_START, тот же висящий UI, что закрыл D1);
+ *   - отчёт с `truncated` показывается как НЕПОЛНЫЙ, и пропущенные
+ *     файлы называются числом. Молчаливое усечение выглядело бы как
+ *     «изменилось вот столько», и человек нажал бы «отменить» не
+ *     зная, что вернётся. */
+static bool s_diff_loaded = false;
+static size_t s_diff_index = 0;
+static snapshot::DiffReport s_diff_report;
+
+static void render_snapshot_diff() {
+    size_t levels = 0;
+    size_t position = 0;
+    {
+        auto& st = engine_state();
+        std::lock_guard<std::mutex> lk(st.mtx);
+        levels = st.undo_stack.size();
+        position = st.undo_stack.position();
+    }
+    /* Позиция могла уехать (агент сделал шаг), и прежний отчёт тогда
+     * показывал бы чужой уровень. */
+    if (s_diff_loaded && s_diff_index < levels) {
+        s_diff_loaded = false;
+    }
+    if (levels == 0) {
+        s_diff_loaded = false;
+        return;
+    }
+
+    char title[96];
+    std::snprintf(title, sizeof(title), "Снапшоты: уровень %zu из %zu",
+                  position + 1, levels);
+    if (!ImGui::TreeNodeEx(title, ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    if (ImGui::Button("Что вернёт отмена текущего шага")) {
+        s_diff_index = position;
+        s_diff_report = engine().level_diff(position);
+        s_diff_loaded = true;
+    }
+    if (!s_diff_loaded) {
+        ImGui::TextDisabled("diff считается по кнопке: он читает диск, а окно"
+                            " не должно делать это на каждом кадре");
+        ImGui::TreePop();
+        return;
+    }
+    if (!s_diff_report.ok) {
+        ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.4f, 1.0f), "%s",
+                           s_diff_report.reason.c_str());
+        ImGui::TreePop();
+        return;
+    }
+    char head[160];
+    std::snprintf(head, sizeof(head), "Файлов: %zu, +%zu −%zu", s_diff_report.files.size(),
+                  s_diff_report.additions(), s_diff_report.deletions());
+    ImGui::Text("%s", head);
+    if (s_diff_report.truncated) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "Показаны не все файлы: ещё %zu (предел — показывать,"
+                           " сколько влезло)", s_diff_report.omitted);
+    }
+    for (const coder::diff::FileDiff& fd : s_diff_report.files) {
+        ImGui::PushID(fd.file.c_str());
+        char line[256];
+        std::snprintf(line, sizeof(line), "%s  +%zu −%zu", fd.file.c_str(),
+                      fd.additions, fd.deletions);
+        if (ImGui::TreeNodeEx(line, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!fd.note.empty()) {
+                ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s",
+                                   fd.note.c_str());
+            }
+            /* Патч печатается построчно: строки `+`/`-` в окне без
+             * подсветки читаются тем же глазом, что и текст, а
+             * раскраска строк — это И11.1. */
+            size_t pos = 0;
+            while (pos < fd.patch.size()) {
+                const size_t nl = fd.patch.find('\n', pos);
+                const std::string one = nl == std::string::npos
+                                            ? fd.patch.substr(pos)
+                                            : fd.patch.substr(pos, nl - pos);
+                if (!one.empty() && one[0] == '+') {
+                    ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s",
+                                       one.c_str());
+                } else if (!one.empty() && one[0] == '-') {
+                    ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "%s",
+                                       one.c_str());
+                } else {
+                    ImGui::TextUnformatted(one.c_str());
+                }
+                if (nl == std::string::npos) break;
+                pos = nl + 1;
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
+}
+
 static void render_session() {
     if (!g_api->window_is_visible(g_host, g_win_session)) return;
     ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
@@ -310,6 +421,8 @@ static void render_session() {
         }
         ImGui::Separator();
     }
+
+    render_snapshot_diff();
 
     /* Лента событий (последние 40). */
     ImGui::BeginChild("session_events", ImVec2(0, 0), ImGuiChildFlags_Borders);

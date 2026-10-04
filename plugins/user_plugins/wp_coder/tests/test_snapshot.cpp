@@ -341,6 +341,7 @@ TEST(a_project_without_git_is_copied_whole) {
 
 TEST(a_copy_does_not_contain_the_previous_copies) {
     /* Каталог копий внутри проекта — так устроена фикстура тестов
+     std::error_code ec;
      * цикла. Без исключения копия содержала бы предыдущие копии, и
      * каждая следующая была бы вдвое больше: на 12 шагах это
      * копия копии копии, а не откат. */
@@ -429,6 +430,11 @@ TEST(a_step_snapshot_lands_in_the_engine_state) {
      * там лежит новый снимок (подробно — в agent_components.h). */
     const StepSnapshot first = take_step_snapshot(state, cb, nullptr);
     ASSERT_TRUE(first.after.ok());
+    /* `discard` — контракт вызывающего (шапка StepSnapshot): снимок, не
+     * ставший уровнем, удаляется ПОСЛЕ того, как вызывающий прочитал его
+     * через changed_files. Проверка его не убирала, и копия оставалась
+     * лежать — то есть проверка сама была причиной утечки, которую искала. */
+    discard_copies(first.discard);
     ASSERT_FALSE(first.before.ok());
     {
         std::lock_guard<std::mutex> lk(state.mtx);
@@ -543,6 +549,7 @@ TEST(the_subagent_turn_snapshots_the_workspace_too) {
 
 TEST(diff_dirs_sees_a_changed_an_added_and_a_removed_file) {
     /* Каталоги сравниваются побайтно, и все три исхода различимы: без
+     std::error_code ec;
      * «удалённого» список выглядел бы полным, а откат (10.3) вернул бы
      * файл, которого человек удалил сам. */
     SandBox sb("diffdirs");
@@ -744,6 +751,7 @@ TEST(a_nul_separated_command_output_survives_the_shell_wrapper) {
 
 TEST(changed_files_names_paths_from_the_project_and_not_from_the_repository) {
     /* Проект плагина — возможно ПОДКАТАЛОГ репозитория (монорепозиторий,
+     std::error_code ec;
      * а каталог данных рядом с ним). git печатает пути от корня
      * репозитория, и путь «wp-content/deep/z.php» из корня для агента
      * не значил бы ничего: он оперирует путями от project_dir. Без
@@ -875,6 +883,7 @@ TEST(revert_returns_the_project_to_the_state_of_the_snapshot) {
 
 TEST(revert_does_not_reach_outside_the_project_directory) {
     /* Проект плагина — возможно подкаталог репозитория (монорепозиторий,
+     std::error_code ec;
      * каталог данных рядом). Откат без pathspec вернул бы весь
      * репозиторий, то есть тронул бы чужой файл, который агент не
      * трогал и который не часть его работы. На проекте, который сам
@@ -1112,6 +1121,7 @@ TEST(revert_refuses_a_copy_taken_from_another_project) {
 
 TEST(a_copy_without_the_project_mark_cannot_be_restored) {
     /* Отметку снимают с копии — и такой снимок выглядит рабочим: каталог
+     std::error_code ec;
      * на месте, файлы внутри есть. Откат обязан отказаться с названной
      * причиной, а не восстановить по подозрению: неизвестно, чей это
      * проект. */
@@ -1386,6 +1396,15 @@ size_t copy_dirs(const std::string& store) {
     return n;
 }
 
+/* Копии снимков, снятых ДВИЖКОМ (take_step_snapshot), лежат в
+ * store_dir(data_dir), то есть на уровень глубже, чем копии, снятые
+ * тестом напрямую через take(project, sb.store()). Считать каталоги в
+ * data_dir и принимать это за число копий — версия проверки, которая
+ * считает папку `wp_coder` и потому проходит при любом числе снимков. */
+size_t copy_dirs_in_store(const std::string& data_dir) {
+    return copy_dirs(store_dir(data_dir));
+}
+
 } // namespace
 
 TEST(undo_returns_one_step_back_and_redo_returns_it_forward) {
@@ -1581,6 +1600,7 @@ TEST(new_work_after_an_undo_kills_the_way_forward) {
 
 TEST(undo_returns_a_deleted_file_and_keeps_a_created_one) {
     /* Граница 1 шапки core/snapshot.h: отмена — не обращение функции.
+     std::error_code ec;
      * Удалённый файл вернётся, созданный — останется. Обе половины
      * проверяются здесь, потому что проверить одну и не заметить
      * вторую легко, а читателю ответа инструмента это стоило бы
@@ -1612,6 +1632,7 @@ TEST(undo_returns_a_deleted_file_and_keeps_a_created_one) {
 
 TEST(undo_refuses_a_level_it_cannot_restore_and_keeps_the_stack_usable) {
     /* Отказ не должен съедать стек: иначе одна неудачная отмена отняла
+     std::error_code ec;
      * бы и возможность вернуться вперёд. Проверяется на копии каталога,
      * потому что уровень git нельзя испортить руками — его объект живёт
      * в базе репозитория.
@@ -1673,6 +1694,7 @@ TEST(undo_refuses_a_level_it_cannot_restore_and_keeps_the_stack_usable) {
 
 TEST(the_stack_is_dropped_when_the_project_changes) {
     /* Уровни чужого проекта вернули бы сюда его файлы — молча и целиком,
+     std::error_code ec;
      * потому что у похожих проектов имена файлов совпадают (то же, чем
      * отличается приём отклонения 123). Сверка идёт по полю снимка,
      * потому что проект меняется прямой записью в состояние из UI и
@@ -2100,4 +2122,775 @@ TEST(a_refused_redo_leaves_no_copy_either) {
     /* Стек остался пригодным: отказ — не поломка, и вернуться назад
      * по-прежнему можно. */
     ASSERT_TRUE(stack.can_undo());
+}
+
+/* ======================================================================
+ * И10.5: diff для каждого снапшота доступен UI
+ *
+ * Проверяется ровно то, что обещает задача: по ИМЕНОВАННОМУ состоянию
+ * получается список файлов с патчами, и этот список — то же самое, что
+ * человек видит в `git diff`. Эталон git сверяется посимвольно, иначе
+ * «мы печатаем unified» было бы утверждением без проверки.
+ *
+ * Порядок — по цене решения. Первое: имена файлов и их счётчики, потому
+ * что ошибка здесь выглядит как рабочий откат («отмена вернула не то»).
+ * Второе: отказы, потому что «отчёт пуст» и «отчёт не удалось» — разные
+ * факты, и человек по первому решил бы, что правок не было.
+ * ====================================================================== */
+
+namespace {
+
+/* Тело unified-патка из вывода git: всё от `--- `, без преамбулы
+ * (`diff --git`, `index`) и без хвоста `@@ … @@ <function>`, который
+ * git дописывает по своей эвристике. Наш генератор печатает ровно это
+ * тело — иначе один и тот же файл выглядел бы по-разному в зависимости
+ * от того, git-уровень это или копия каталога. */
+std::string git_body(std::string out) {
+    const size_t start = out.find("--- ");
+    if (start == std::string::npos) return "";
+    out = out.substr(start);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    size_t pos = 0;
+    while ((pos = out.find("@@ -", pos)) != std::string::npos) {
+        const size_t close = out.find("@@", pos + 3);
+        if (close == std::string::npos) break;
+        const size_t line_end = out.find('\n', close);
+        const size_t tail_end = line_end == std::string::npos ? out.size() : line_end;
+        out.erase(close + 2, tail_end - (close + 2));
+        pos = close + 2;
+    }
+    return out;
+}
+
+/* Найти файл в отчёте. */
+const diff::FileDiff* find_file(const DiffReport& r, const std::string& name) {
+    for (const diff::FileDiff& f : r.files) {
+        if (f.file == name) return &f;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST(diff_states_names_every_changed_file_with_gits_own_patch) {
+    /* ГЛАВНОЕ ПРОВЕРЕНИЕ ЗАДАЧИ: список файлов и патчи совпадают с тем,
+     * что печатает git на тех же двух состояниях. Сверка посимвольная —
+     * иначе проверка ловила бы «мы что-то напечатали», а не «мы
+     * напечатали то же, что git». */
+    SandBox sb("diff_states");
+    const std::string repo = sb.project();
+    write_content(repo, "one.txt", "a\nb\nc\n");
+    write_content(repo, "two.txt", "x\ny\n");
+    init_repo_with_file(repo, "one.txt", "a\nb\nc\n");
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m base");
+
+    const Snapshot before = take(repo, sb.store());
+    ASSERT_TRUE(before.kind == Kind::GitTree);
+
+    write_content(repo, "one.txt", "a\nB\nc\nd\n");
+    write_content(repo, "two.txt", "x\n");
+    const Snapshot after = take(repo, sb.store());
+    ASSERT_TRUE(after.kind == Kind::GitTree);
+
+    const DiffReport r = diff_states(before, after, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.from_hash, before.hash);
+    ASSERT_EQ(r.to_hash, after.hash);
+    ASSERT_EQ(r.files.size(), (size_t)2);
+    ASSERT_FALSE(r.truncated);
+    ASSERT_EQ(r.omitted, (size_t)0);
+    /* Счётчики — по обоим файлам сразу: one.txt это +2/−1, two.txt это
+     * +0/−1, то есть +2 и −2. Ожидание «одно удаление» относилось к
+     * одному файлу и проверяло бы арифметику не того объекта. */
+    ASSERT_EQ(r.additions(), (size_t)2);
+    ASSERT_EQ(r.deletions(), (size_t)2);
+
+    const diff::FileDiff* one = find_file(r, "one.txt");
+    const diff::FileDiff* two = find_file(r, "two.txt");
+    ASSERT_TRUE(one != nullptr);
+    ASSERT_TRUE(two != nullptr);
+    if (!one || !two) return;
+    ASSERT_EQ(one->additions, (size_t)2);
+    ASSERT_EQ(one->deletions, (size_t)1);
+    ASSERT_EQ(two->additions, (size_t)0);
+    ASSERT_EQ(two->deletions, (size_t)1);
+    ASSERT_TRUE(one->patch.find("+B\n") != std::string::npos);
+    /* two.txt теряет ПОСЛЕДНЮЮ строку, поэтому `-y` — последняя строка
+     * патча и завершающего перевода у неё нет. Проверяется и сама
+     * форма: патч хранится без завершающего перевода — так его печатает
+     * наш генератор и так же приводится вывод git, иначе у git-уровней
+     * в окне была бы лишняя пустая строка, а у копий каталога нет. */
+    ASSERT_TRUE(two->patch.find("-y") != std::string::npos);
+    ASSERT_TRUE(!two->patch.empty());
+    ASSERT_TRUE(two->patch.back() != '\n');
+
+    /* Посимвольная сверка с живым git на тех же деревьях.
+     *
+     * Эталон берётся ОТДЕЛЬНО по одному пути: общий вывод git содержит
+     * блок на каждый файл, и сверка патча одного файла с ним целиком
+     * сравнивала бы разные вещи — первая версия проверки именно так и
+     * делала, и падала на чужом блоке. */
+    const std::string git_patch = git_body(raw_git(
+        repo, "diff --no-color --no-renames -U3 --relative " + before.hash + " " +
+                  after.hash + " -- one.txt"));
+    ASSERT_EQ(one->patch, git_patch);
+    ASSERT_TRUE(!git_patch.empty());
+}
+
+TEST(diff_states_reports_paths_relative_to_the_project_not_the_repo) {
+    /* Проект — ПОДКАРАЛОГ репозитория, и без `--relative` git печатал бы
+     std::error_code ec;
+     * пути от корня репозитория («wp/deep/f.txt» вместо «f.txt»). Человек
+     * увидел бы в окне файл, которого в его проекте нет, и diff перестал
+     * бы быть «про его проект». */
+    SandBox sb("diff_relative");
+    std::error_code ec;
+    fs::create_directories(fs::path(sb.root) / "outer", ec);
+    const std::string outer = (fs::path(sb.root) / "outer").string();
+    fs::create_directories(fs::path(outer) / "deep", ec);
+    init_repo(outer);
+    write_file(fs::path(outer) / "deep" / "f.txt", "a\nb\n");
+    raw_git(outer, "add -A");
+    raw_git(outer, "commit -q -m base");
+
+    const std::string project = (fs::path(outer) / "deep").string();
+    const Snapshot before = take(project, sb.store());
+    write_file(fs::path(project) / "f.txt", "a\nB\n");
+    const Snapshot after = take(project, sb.store());
+    const DiffReport r = diff_states(before, after, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)1);
+    ASSERT_EQ(r.files.at(0).file, std::string("f.txt"));
+}
+
+TEST(diff_states_names_an_added_and_a_deleted_file_on_the_git_path) {
+/* Добавленный и удалённый файл — это ДВА разных вида изменений, и
+     * для каждого git печатает свою пару заголовков (`--- /dev/null`
+     * либо `+++ /dev/null`). Если разбор берёт имя только из `---`,
+     * добавленный файл остался бы без имени, а удалённый — получил бы
+     * имя из `+++ /dev/null`, то есть «/dev/null» вместо своего. */
+    SandBox sb("diff_add_del");
+    std::error_code ec;
+    const std::string repo = sb.project();
+    write_content(repo, "stay.txt", "a\n");
+    write_content(repo, "gone.txt", "b\n");
+    init_repo_with_file(repo, "stay.txt", "a\n");
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m base");
+
+    const Snapshot before = take(repo, sb.store());
+    fs::remove(fs::path(repo) / "gone.txt", ec);
+    write_content(repo, "new.txt", "c\n");
+    /* `git add` здесь — обязательная часть сценария, а не украшение:
+     * неотслеживаемый файл не попадает в дерево снимка (отклонение 107),
+     * и первая версия проверки ждала его в отчёте, то есть требовала
+     * нарушить границу, о которой сама же и говорит. */
+    raw_git(repo, "add -A");
+    const Snapshot after = take(repo, sb.store());
+
+    const DiffReport r = diff_states(before, after, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)2);
+    const diff::FileDiff* added = find_file(r, "new.txt");
+    const diff::FileDiff* deleted = find_file(r, "gone.txt");
+    ASSERT_TRUE(added != nullptr);
+    ASSERT_TRUE(deleted != nullptr);
+    if (!added || !deleted) return;
+    ASSERT_EQ(added->additions, (size_t)1);
+    ASSERT_EQ(deleted->deletions, (size_t)1);
+    ASSERT_TRUE(added->patch.find("--- /dev/null") != std::string::npos);
+    ASSERT_TRUE(deleted->patch.find("+++ /dev/null") != std::string::npos);
+}
+
+TEST(a_binary_change_is_named_and_not_counted_as_line_edits) {
+    /* Двоичный файл в отчёте ЕСТЬ, но без строк: у git для него одна
+     * строка вместо hunk'а. Если бы она попала в патч, получился бы
+     * файл с нулём строк и чужой строкой внутри; если бы он молча
+     * пропал — человек увидел бы «изменений нет» при изменённом файле. */
+    SandBox sb("diff_binary");
+    const std::string repo = sb.project();
+    std::ofstream bin(fs::path(repo) / "bin.dat", std::ios::binary);
+    bin << std::string("a\0b", 3) << "\n";
+    bin.close();
+    write_content(repo, "t.txt", "a\n");
+    init_repo(repo);
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m base");
+
+    const Snapshot before = take(repo, sb.store());
+    std::ofstream bin2(fs::path(repo) / "bin.dat", std::ios::binary);
+    bin2 << std::string("a\0c", 3) << "\n";
+    bin2.close();
+    const Snapshot after = take(repo, sb.store());
+
+    const DiffReport r = diff_states(before, after, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)1);
+    const diff::FileDiff* b = find_file(r, "bin.dat");
+    ASSERT_TRUE(b != nullptr);
+    if (!b) return;
+    ASSERT_TRUE(b->binary);
+    ASSERT_EQ(b->additions, (size_t)0);
+    ASSERT_EQ(b->deletions, (size_t)0);
+    ASSERT_TRUE(b->patch.empty());
+    ASSERT_TRUE(!b->note.empty());
+}
+
+TEST(diff_states_works_on_a_directory_copy_too) {
+    /* Тот же вопрос на не-git-проекте: там состояние — это каталог, и
+     std::error_code ec;
+     * diff строится нашим кодом, а не берётся у git. Проверка держит
+     * и содержимое патча, и то, что отчёт НЕ пуст: пустой отчёт при
+     * изменённом файле — это «правок нет», и человек нажал бы отмену
+     * не зная, что вернётся. */
+    SandBox sb("diff_copy");
+    std::error_code ec;
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\ntwo\n");
+    write_content(repo, "b.txt", "keep\n");
+    /* Без init_repo: проект не под git, и take() делает копию каталога. */
+    const Snapshot before = take(repo, sb.store());
+    ASSERT_TRUE(before.kind == Kind::DirCopy);
+
+    write_content(repo, "a.txt", "one\nTWO\n");
+    fs::remove(fs::path(repo) / "b.txt", ec);
+    write_content(repo, "c.txt", "new\n");
+    const Snapshot after = take(repo, sb.store());
+
+    const DiffReport r = diff_states(before, after, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)3);
+    const diff::FileDiff* a = find_file(r, "a.txt");
+    ASSERT_TRUE(a != nullptr);
+    if (!a) return;
+    ASSERT_EQ(a->additions, (size_t)1);
+    ASSERT_EQ(a->deletions, (size_t)1);
+    ASSERT_TRUE(a->patch.find("-two") != std::string::npos);
+    ASSERT_TRUE(a->patch.find("+TWO") != std::string::npos);
+    ASSERT_TRUE(find_file(r, "b.txt") != nullptr);
+    ASSERT_TRUE(find_file(r, "c.txt") != nullptr);
+}
+
+TEST(diff_states_refuses_what_it_cannot_compare_and_says_why) {
+    /* Два отказа, и оба обязаны быть НАЗВАНЫ: пустой отчёт читался бы
+     std::error_code ec;
+     * как «правок нет», и человек счёл бы, что отменять нечего. */
+    DiffReport r = diff_states(Snapshot(), Snapshot(), "");
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("не состоялся") != std::string::npos);
+
+    /* Снимки разных видов: git-путь работает с двумя деревьями, копия —
+     * с двумя каталогами. Молча взять «что-то одно» значило бы показать
+     * diff не того. */
+    SandBox sb("diff_mixed");
+    std::error_code ec;
+    write_content(sb.project(), "a.txt", "x\n");
+    init_repo_with_file(sb.project(), "a.txt", "x\n");
+    const Snapshot git_level = take(sb.project(), sb.store());
+    /* remove_all, а не remove: fs::remove на каталоге молча ничего не
+     * делает (только для пустого), и проверка получала GitTree вместо
+     * DirCopy — то есть проверяла не тот случай, который собиралась. */
+    fs::remove_all(fs::path(sb.project()) / ".git", ec);
+    const Snapshot copy_level = take(sb.project(), sb.store());
+    ASSERT_TRUE(git_level.kind == Kind::GitTree);
+    ASSERT_TRUE(copy_level.kind == Kind::DirCopy);
+
+    r = diff_states(git_level, copy_level, sb.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("разных видов") != std::string::npos);
+}
+
+TEST(diff_step_shows_exactly_what_the_undo_of_that_level_would_change) {
+    /* Вопрос человека, нажимающего «отменить», — «что изменится», а не
+     * «что менялось за сессию». Поэтому уровень сравнивается со СЛЕДУЮЩИМ
+     * уровнем, а не с первым и не с последним. Ошибка здесь выглядит как
+     * работающая отмена с неверным предпросмотром: человек читает diff и
+     * жмёт «отменить» в расчёте на одно, а получает другое. */
+    SandBox sb("diff_step");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());          /* уровень 0: one */
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());          /* уровень 1: two */
+    write_content(repo, "a.txt", "three\n");
+    step_level(stack, repo, sb.store());          /* уровень 2: three */
+    ASSERT_EQ(stack.position(), (size_t)2);
+
+    /* Уровень 0 отвечает на вопрос «что сделал первый шаг»: one → two. */
+    const DiffReport first = stack.diff_step(0, repo, sb.store());
+    ASSERT_TRUE(first.ok);
+    ASSERT_EQ(first.files.size(), (size_t)1);
+    ASSERT_TRUE(first.files.at(0).patch.find("-one") != std::string::npos);
+    ASSERT_TRUE(first.files.at(0).patch.find("+two") != std::string::npos);
+
+    /* Уровень 1: two → three. */
+    const DiffReport second = stack.diff_step(1, repo, sb.store());
+    ASSERT_TRUE(second.ok);
+    ASSERT_EQ(second.files.size(), (size_t)1);
+    ASSERT_TRUE(second.files.at(0).patch.find("-two") != std::string::npos);
+    ASSERT_TRUE(second.files.at(0).patch.find("+three") != std::string::npos);
+
+    /* Верхний уровень сравнивается с тем, что на диске, а оно равно
+     * ему самому, поэтому diff ПУСТ — и это правда, а не сбой: шага
+     * после него не было, смотреть не на что. Первая версия проверки
+     * ждала здесь непустой отчёт и требовала несуществующей правки:
+     * отмена этого уровня вернула бы проект в то же состояние. */
+    const DiffReport top = stack.diff_step(stack.position(), repo, sb.store());
+    ASSERT_TRUE(top.ok);
+    ASSERT_TRUE(top.files.empty());
+}
+
+TEST(diff_step_of_the_top_level_compares_it_with_the_working_directory) {
+    /* У последнего уровня следующего нет — «куда» — это то, что лежит на
+     * диске сейчас. Без этого верхний уровень нельзя было бы посмотреть
+     * вовсе, а именно его человек и смотрит первым: он отвечает на вопрос
+     * «что сделал последний шаг». */
+    SandBox sb("diff_step_top");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "правка на диске\n");
+    /* Файл, которого в уровне нет: отмена его НЕ удалит (отклонение 122),
+     * и diff обязан это показать как добавление, а не промолчать. */
+    write_content(repo, "fresh.txt", "новый\n");
+
+    const DiffReport r = stack.diff_step(0, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    /* Один файл: fresh.txt НЕОТСЛЕЖИВАЕМЫЙ, и в дерево снимка он не
+     * попадает (отклонение 107). Первая версия проверки ждала двух
+     * файлов и удивлялась, что git-путь не видит созданный агентом
+     * файл, то есть требовала нарушения документированной границы.
+     * Здесь граница закреплена проверкой: человек обязан понимать, что
+     * его новый файл отменой не вернётся. */
+    ASSERT_EQ(r.files.size(), (size_t)1);
+    ASSERT_TRUE(find_file(r, "fresh.txt") == nullptr);
+    const diff::FileDiff* a = find_file(r, "a.txt");
+    ASSERT_TRUE(a != nullptr);
+    if (!a) return;
+    ASSERT_TRUE(a->patch.find("+правка на диске") != std::string::npos);
+}
+
+TEST(diff_step_refuses_an_index_the_stack_does_not_have) {
+    /* Отказ с NAMED причиной, а не пустой отчёт: пустой читался бы как
+     * «правок нет». */
+    SandBox sb("diff_step_bad");
+    write_content(sb.project(), "a.txt", "one\n");
+
+    UndoStack stack;
+    const DiffReport empty_stack = stack.diff_step(0, sb.project(), sb.store());
+    ASSERT_FALSE(empty_stack.ok);
+    ASSERT_TRUE(empty_stack.reason.find("ступеней нет") != std::string::npos);
+
+    step_level(stack, sb.project(), sb.store());
+    const DiffReport past_end = stack.diff_step(7, sb.project(), sb.store());
+    ASSERT_FALSE(past_end.ok);
+    ASSERT_TRUE(past_end.reason.find("уровня 7 нет") != std::string::npos);
+}
+
+TEST(level_diff_reads_the_engine_stack_and_changes_nothing_in_it) {
+    /* Шов к UI. Проверяются две вещи, и обе существенны:
+     *   (1) отчёт получился — то есть метод действительно читает стек
+     *       движка, а не пустой синглтон;
+     *   (2) стек после НЕ изменился. Просмотр не имеет права двигать
+     *       позицию: человек открыл посмотреть и нажал «отменить» на
+     *       другом уровне — откат ушёл бы не туда. */
+    EngineState& state = engine_state();
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir.clear();
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+
+    SandBox sb("level_diff");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    HostCallbacks cb;
+    cb.path_data_dir = [&sb] { return sb.store(); };
+    engine().init(cb);
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir = repo;
+    }
+    step_level(state.undo_stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(state.undo_stack, repo, sb.store());
+    write_content(repo, "a.txt", "three\n");
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)2);
+        ASSERT_EQ(state.undo_stack.position(), (size_t)1);
+    }
+
+    const DiffReport r = engine().level_diff(1);
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)1);
+    ASSERT_TRUE(r.files.at(0).patch.find("-two") != std::string::npos);
+    ASSERT_TRUE(r.files.at(0).patch.find("+three") != std::string::npos);
+
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)2);
+        ASSERT_EQ(state.undo_stack.position(), (size_t)1);
+        state.project_dir.clear();
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+}
+
+TEST(the_name_of_a_git_block_must_agree_with_numstat) {
+    /* Сверка обязательна, а проверить её на живом репозитории НЕЛЬЗЯ: ни
+     * один сценарий не заставит git напечатать блок не для того файла.
+     * Поэтому разбор вынесен в отдельную функцию (отклонение 110 — там же
+     * про parse_hash) и проверяется на ТЕКСТЕ.
+     *
+     * Мутация «имя не сверяется с numstat» без такой проверки ВЫЖИЛА, и
+     * механизм назван: имя бралось бы из заголовка блока, а при
+     * несовпадении показывался бы патч ЧУЖОГО файла — молча и целиком. */
+    DiffReport r;
+    const std::string numstat = std::string("1\t1\tfirst.txt", 14) + '\0';
+    const std::string patch =
+        "diff --git a/first.txt b/first.txt\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/first.txt\n"
+        "+++ b/first.txt\n"
+        "@@ -1 +1 @@\n"
+        "-a\n"
+        "+b\n";
+    ASSERT_TRUE(diff_from_git_text(numstat, patch, &r));
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)1);
+    ASSERT_EQ(r.files.at(0).file, std::string("first.txt"));
+
+    /* Тот же блок, но numstat называет ДРУГОЙ файл: показывать нельзя. */
+    const std::string wrong = std::string("1\t1\tsecond.txt", 15) + '\0';
+    ASSERT_FALSE(diff_from_git_text(wrong, patch, &r));
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("first.txt") != std::string::npos);
+    ASSERT_TRUE(r.reason.find("second.txt") != std::string::npos);
+}
+
+TEST(a_binary_git_block_is_paired_with_its_file_by_order) {
+    /* У двоичного файла и у изменения только прав в unified-выводе НЕТ ни
+     * `---`, ни `+++`: имя есть только в неоднозначном заголовке
+     * `diff --git`, и берётся оно из numstat — то есть по ПОРЯДКУ.
+     * Порядок этот проверяется на тексте с двумя блоками, где у первого
+     * имя есть, а у второго нет: если бы порядок был не тот, отчёт показал
+     * бы у первого файла чужое имя — и проверка это увидит. */
+    DiffReport r;
+    std::string numstat;
+    numstat += std::string("1\t1\ta.txt", 9) + '\0';
+    numstat += std::string("-\t-\tbin.dat", 12) + '\0';
+    const std::string patch =
+        "diff --git a/a.txt b/a.txt\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/a.txt\n"
+        "+++ b/a.txt\n"
+        "@@ -1 +1 @@\n"
+        "-x\n"
+        "+y\n"
+        "diff --git a/bin.dat b/bin.dat\n"
+        "index 3333333..4444444 100644\n"
+        "Binary files a/bin.dat and b/bin.dat differ\n";
+    ASSERT_TRUE(diff_from_git_text(numstat, patch, &r));
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)2);
+    ASSERT_EQ(r.files.at(0).file, std::string("a.txt"));
+    ASSERT_EQ(r.files.at(0).additions, (size_t)1);
+    ASSERT_EQ(r.files.at(1).file, std::string("bin.dat"));
+    ASSERT_TRUE(r.files.at(1).binary);
+    ASSERT_EQ(r.files.at(1).additions, (size_t)0);
+    ASSERT_TRUE(r.files.at(1).patch.empty());
+    ASSERT_TRUE(!r.files.at(1).note.empty());
+}
+
+TEST(a_mode_only_change_is_named_and_says_that_there_are_no_lines) {
+    /* Изменились права, а не строки: git печатает `old mode`/`new mode`
+     * и НИ ОДНОЙ строки. Сказать «правок нет» было бы неправдой —
+     * изменение есть, просто не в строках, — поэтому файл называется и
+     * объясняет. */
+    DiffReport r;
+    std::string numstat;
+    numstat += std::string("0\t0\tscript.sh", 13) + '\0';
+    const std::string patch =
+        "diff --git a/script.sh b/script.sh\n"
+        "old mode 100644\n"
+        "new mode 100755\n";
+    ASSERT_TRUE(diff_from_git_text(numstat, patch, &r));
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.files.size(), (size_t)1);
+    ASSERT_EQ(r.files.at(0).file, std::string("script.sh"));
+    ASSERT_EQ(r.files.at(0).additions, (size_t)0);
+    ASSERT_TRUE(r.files.at(0).patch.empty());
+    ASSERT_TRUE(r.files.at(0).note.find("права") != std::string::npos);
+}
+
+TEST(more_git_blocks_than_files_in_numstat_is_a_refusal) {
+    /* На один файл больше блоков, чем имён: значит, показывать нечего
+     * однозначно, и отчёт без предупреждения был бы списком с пропуском,
+     * который выглядел бы как полный. */
+    DiffReport r;
+    const std::string numstat = std::string("1\t1\tonly.txt", 13) + '\0';
+    const std::string patch =
+        "diff --git a/one.txt b/one.txt\n"
+        "--- a/one.txt\n"
+        "+++ b/one.txt\n"
+        "@@ -1 +1 @@\n"
+        "-a\n"
+        "+b\n"
+        "diff --git a/two.txt b/two.txt\n"
+        "--- a/two.txt\n"
+        "+++ b/two.txt\n"
+        "@@ -1 +1 @@\n"
+        "-c\n"
+        "+d\n";
+    ASSERT_FALSE(diff_from_git_text(numstat, patch, &r));
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(!r.reason.empty());
+}
+
+/* ======================================================================
+ * И10.6: тесты — не-git каталог, откат нескольких файлов, целостность
+ *       при прерывании
+ *
+ * Задача 10.6 — coverage, а не код: три названных случая. Что уже было
+ * покрыто до неё и НЕ дублируется здесь: снимок и восстановление на
+ * не-git каталоге (`revert_of_a_copy_snapshot_returns_a_project_without_git`,
+ * `revert_of_a_copy_says_which_files_it_could_not_return`,
+ * `revert_refuses_a_copy_taken_from_another_project`), откат НЕСКОЛЬКИХ
+ * файлов на git-пути (`the_revert_tool_shows_a_long_list_of_returned_files` —
+ * 60 файлов), устойчивость стека при отказе
+ * (`undo_refuses_a_level_it_cannot_restore_and_keeps_the_stack_usable`).
+ * Ниже — то, чего не было: несколько файлов на пути копии каталога, и
+ * то, что прерывание не оставляет снимковый строй в полусостоянии.
+ * ====================================================================== */
+
+TEST(undo_returns_several_files_at_once_from_a_copy_snapshot) {
+    /* Несколько файлов на пути КОПИИ КАТАЛОГА. На git-пути это проверено
+     * (60 файлов), а на копии — нет, а путь другой: файлы сравниваются
+     * побайтно и возвращаются копированием, а не командами git.
+     *
+     * Три вида изменения сразу, потому что на каждом свой чужой путь:
+     * изменённый, созданный и удалённый. Проверяется и список вернувшихся
+     * — он идёт в ответ инструмента и в UI, то есть это не деталь
+     * реализации, а то, что человек читает. */
+    SandBox sb("undo_copy_many");
+    std::error_code ec;
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    write_content(repo, "b.txt", "two\n");
+    write_content(repo, "gone.txt", "three\n");
+
+    UndoStack stack;
+    const Snapshot level = take(repo, sb.store());
+    ASSERT_TRUE(level.kind == Kind::DirCopy);
+    stack.push(level);
+
+    /* Работа шага: правка, создание и удаление разом. */
+    write_content(repo, "a.txt", "ONE\n");
+    write_content(repo, "b.txt", "TWO\n");
+    fs::remove(fs::path(repo) / "gone.txt", ec);
+    write_content(repo, "fresh.txt", "four\n");
+
+    const MoveResult u = stack.undo(repo, sb.store());
+    ASSERT_TRUE(u.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("two\n"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "gone.txt"));
+    /* Созданный после уровня файл ПЕРЕЖИВАЕТ отмену (отклонение 122), и
+     * инструмент обязан сказать об этом словами — иначе модель сочтёт
+     * проект приведённым к состоянию. */
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "fresh.txt"));
+
+    ASSERT_EQ(u.restored.size(), (size_t)3);
+    bool named_a = false, named_b = false, named_gone = false;
+    for (const std::string& f : u.restored) {
+        if (f == "a.txt") named_a = true;
+        if (f == "b.txt") named_b = true;
+        if (f == "gone.txt") named_gone = true;
+    }
+    ASSERT_TRUE(named_a);
+    ASSERT_TRUE(named_b);
+    ASSERT_TRUE(named_gone);
+    ASSERT_TRUE(u.source.find("копия") != std::string::npos);
+    /* Лево остаётся в ответе: файла, который вернуть нельзя, отмена не
+     * создаёт, но сказать о нём обязана — иначе «проект приведён к
+     * состоянию» было бы неправдой. */
+    ASSERT_EQ(u.leftover.size(), (size_t)0);
+    ASSERT_TRUE(u.can_redo);
+    /* Возврат вперёд ЗДЕСЬ отказывает, и это не сбой, а следствие
+     * отклонения 122 на пути копии каталога: отмена не удалила
+     * `fresh.txt`, проект отличается от уровня, а правило «возврат вперёд
+     * умирает на новой работе» проверяет РОВНО это отличие и не может
+     * отличить «файл, оставшийся от отменённого шага», от «новой работы».
+     * На git-пути то же самое работает (там состояние — tree-hash, и
+     * неотслеживаемый файл в него не входит), проверено сравнением.
+     *
+     * Поведение закреплено проверкой, а не обойдено: починка означала бы
+     * хранить в стеке состояние сразу после отката и сравнивать с ним, а
+     * это правка закрытой задачи 10.4 — отдельным коммитом (правило 5). */
+    const MoveResult back = stack.redo(repo, sb.store());
+    ASSERT_FALSE(back.ok);
+    ASSERT_TRUE(back.reason.find("после новых правок") != std::string::npos);
+    /* Стек после отказа остался пригоден: отмена назад работает. */
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+}
+
+TEST(undo_then_redo_works_on_a_copy_snapshot_when_nothing_was_created) {
+    /* Вторая половина предыдущей проверки, без её оговорки: если отменённый
+     * шаг не СОЗДАВАЛ файл, отмена приводит проект к уровню точно, и
+     * возврат вперёд работает. Этот случай обязателен отдельно: одна
+     * проверка с отказом redo ничего не говорит о том, что обычный
+     * откат-вернуть-вернуть работает, а сломать его правкой правила
+     * нельзя было бы незаметно. */
+    SandBox sb("undo_copy_redo");
+    std::error_code ec;
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    write_content(repo, "b.txt", "two\n");
+
+    UndoStack stack;
+    stack.push(take(repo, sb.store()));
+    write_content(repo, "a.txt", "ONE\n");
+    write_content(repo, "b.txt", "TWO\n");
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("two\n"));
+    const MoveResult back = stack.redo(repo, sb.store());
+    ASSERT_TRUE(back.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("ONE\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("TWO\n"));
+    /* И назад: три файла отменены одним нажатием, три вернулись. */
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("two\n"));
+}
+
+TEST(an_interrupted_step_leaves_the_stack_and_the_snapshots_whole) {
+    /* ПРЕРЫВАНИЕ. Проверяется то, что снимковый строй обязан пережить:
+     * шаг начался (снимок и уровень уже есть), агент был прерван ДО
+     * того, как что-то сделал, и следующая задача сняла свой снимок.
+     *
+     * Что здесь ломается, если строй неверен, и как это выглядит:
+     *   - уровень не появился бы → отменять нечего, и человек после
+     *     прерывания не смог бы вернуть последнее сделанное;
+     *   - два одинаковых уровня подряд → «отмена» жала бы вхолостую;
+     *   - last_snapshot потерял бы состояние → пустой hash у revert
+     *     вернул бы проект вперёд, к началу шага (отклонение 118);
+     *   - копия уровня осталась бы в каталоге данных и не была бы
+     *     удалена никем (отклонение 109).
+     *
+     * Граница названа: прерывание модели и прерывание записи НЕ
+     * моделируются. Проверяется целостность ПОСЛЕ того, как шаг снял
+     * снимок, — то есть ровно та граница, на которой снимок и появляется. */
+    EngineState& state = engine_state();
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir.clear();
+        state.last_snapshot = Snapshot();
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+
+    SandBox sb("interrupted");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+
+    HostCallbacks cb;
+    cb.path_data_dir = [&sb] { return sb.store(); };
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir = repo;
+    }
+
+    /* Шаг начался: снимок снят, уровень заведён. Дальше агента прервали
+     * до первого вызова инструмента — то есть файлов он не менял. */
+    const StepSnapshot first = take_step_snapshot(state, cb, nullptr);
+    ASSERT_TRUE(first.after.ok());
+    /* `discard` — контракт вызывающего (шапка StepSnapshot): снимок, не
+     * ставший уровнем, удаляется ПОСЛЕ того, как вызывающий прочитал его
+     * через changed_files. Проверка его не убирала, и копия оставалась
+     * лежать — то есть проверка сама была причиной утечки, которую искала. */
+    discard_copies(first.discard);
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)1);
+        ASSERT_EQ(state.undo_stack.level(0).hash, first.after.hash);
+        /* last_snapshot — состояние на начало шага, то есть тот же
+         * снимок: без этого пустой hash у revert означал бы «начало
+         * ТЕКУЩЕГО шага» не из того состояния. */
+        ASSERT_EQ(state.last_snapshot.hash, first.after.hash);
+    }
+
+    /* Следующая задача после прерывания: состояние не менялось, значит
+     * и уровень не добавляется — иначе «отмена» жала бы вхолостую. */
+    const StepSnapshot second = take_step_snapshot(state, cb, nullptr);
+    ASSERT_TRUE(second.after.ok());
+    discard_copies(second.discard);
+    size_t copies_before;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)1);
+        ASSERT_EQ(state.undo_stack.position(), (size_t)0);
+        /* last_snapshot не сдвинулся на «позже»: он и должен называть
+         * начало текущего шага. */
+        ASSERT_EQ(state.last_snapshot.hash, second.after.hash);
+        copies_before = copy_dirs_in_store(sb.store());
+    }
+    ASSERT_EQ(copies_before, (size_t)1);
+
+    /* Агент всё же поработал, его прервали, и человек нажимает «отменить»
+     * через инструмент — стек обязан быть пригоден после прерывания. */
+    write_content(repo, "a.txt", "one\ntwo\n");
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+    write_content(repo, "a.txt", "one\n");
+    const StepSnapshot after_work = take_step_snapshot(state, cb, nullptr);
+    ASSERT_TRUE(after_work.after.ok());
+    discard_copies(after_work.discard);
+    write_content(repo, "a.txt", "правка после прерывания\n");
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.undo_stack.push(after_work.after);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)1);
+    }
+    /* Каталог копий — ТОТ ЖЕ, что у движка (store_dir от data_dir).
+     * Первая версия звала diff_step с sb.store() напрямую, и тогда
+     * снимок, снятый ради сравнения, ложился на уровень глубже, чем
+     * снимки движка; проверка считала только каталог движка и утечку не
+     * видела — то есть мутация «не убирать копию после diff» выживала
+     * не потому, что утечки нет, а потому, что смотрели не туда. */
+    const DiffReport what_will_change = [&] {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        return state.undo_stack.diff_step(0, repo, store_dir(sb.store()));
+    }();
+    ASSERT_TRUE(what_will_change.ok);
+    ASSERT_EQ(what_will_change.files.size(), (size_t)1);
+
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir.clear();
+        state.last_snapshot = Snapshot();
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+    /* После уборки в каталоге копий ничего не осталось: уровень был
+     * один, и его копия ушла вместе с ним. Мусор, который никто не
+     * удалил, копился бы от прерывания к прерыванию. */
+    ASSERT_EQ(copy_dirs_in_store(sb.store()), (size_t)0);
 }

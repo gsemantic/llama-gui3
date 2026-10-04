@@ -614,13 +614,20 @@ StepSnapshot take_step_snapshot(EngineState& state, HostCallbacks& cb,
     out.after = snapshot::take(project_dir, store);
 
     std::vector<snapshot::Snapshot> trash;
+    bool became_level = false;
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.last_snapshot = out.after;
         if (out.after.ok()) ++state.snapshots_taken;
-        state.undo_stack.push(out.after);
+        became_level = state.undo_stack.push(out.after);
         trash = state.undo_stack.take_trash();
     }
+    /* Снимок, который НЕ стал уровнем, убирается здесь же: на проекте
+     * без git это полная копия каталога, которую не читает ни undo, ни
+     * redo и которая иначе осталась бы на диске навсегда. Шаг без единой
+     * правки (агент ответил текстом) был обычным делом, то есть утечка
+     * шла на каждом таком шаге всей сессии. */
+    if (out.after.ok() && !became_level) out.discard.push_back(out.after);
     snapshot::discard_copies(trash);
 
     /* Пустой каталог проекта — не отказ снимка, а отсутствие проекта:
@@ -697,6 +704,11 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             std::lock_guard<std::mutex> lk(state_.mtx);
             attach_patch_part(state_.session, shots.before, changes);
         }
+        /* Копия снимка, которая не стала уровнем, убирается ПОСЛЕ
+         * сравнения: `after` нужен былchanged_files выше, и удаление
+         * раньше молча дало бы «изменений нет» при полном списке
+         * сделанного. */
+        snapshot::discard_copies(shots.discard);
 
         /* И5.9: у цикла есть ПРЕДУПРЕЖДЕНИЕ о последнем шаге, а не только
          * жёсткий конец. max_steps остаётся предохранителем (о нём ниже), но

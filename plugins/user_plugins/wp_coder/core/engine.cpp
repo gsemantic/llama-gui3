@@ -230,6 +230,22 @@ void Engine::request_abort() {
     permissions_.cancel_all();
 }
 
+snapshot::DiffReport Engine::level_diff(size_t index) {
+    /* Копия стека под локом, подсчёт вне. Стек меняет только рабочий
+     * поток агента, а читает его ещё и окно, поэтому копия нужна:
+     * держать `state_.mtx` на git нельзя (правило 3 SESSION_START). */
+    snapshot::UndoStack stack;
+    std::string project_dir;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        stack = state_.undo_stack;
+        project_dir = state_.project_dir;
+    }
+    const std::string store = snapshot::store_dir(cb_.path_data_dir ? cb_.path_data_dir()
+                                                                   : std::string());
+    return stack.diff_step(index, project_dir, store);
+}
+
 void Engine::clear_session() {
     /* И10.4: уровни сессии обнуляются вместе с ней. «Очистить сессию» —
      * это кнопка «начать с чистого листа», и держать после неё уровни,
