@@ -789,7 +789,10 @@ TEST(every_tool_has_permission_key) {
         real.push_back(d);
     }
     defs = real;
-    ASSERT_EQ(defs.size(), (size_t)55);
+    /* И10.4 добавил undo и redo (55 → 57). Число, а не «≥»: молчаливое
+     * добавление инструмента мимо счётчика означало бы, что проверка
+     * перестала быть проверкой. */
+    ASSERT_EQ(defs.size(), (size_t)57);
     for (const auto& d : defs) {
         if (d.permission_key.empty()) {
             std::cerr << "  инструмент " << d.name << " без ключа разрешения"
@@ -827,8 +830,10 @@ TEST(every_destructive_tool_asks_by_default) {
         }
     }
     /* Список не должен «схлопнуться» до нуля инструментов — иначе тест
-     * выше проходит вхолостую. И10.3 добавил revert (19 → 20). */
-    ASSERT_EQ(destructive, 20);
+     * выше проходит вхолостую. И10.3 добавил revert (19 → 20), И10.4 —
+     * undo и redo (20 → 22); они деструктивны по существу, а не по
+     * привычке: перезаписывают файлы проекта. */
+    ASSERT_EQ(destructive, 22);
 }
 
 /* Ключ и значение вызова — из одного ToolDef, иначе правило «read *.env»

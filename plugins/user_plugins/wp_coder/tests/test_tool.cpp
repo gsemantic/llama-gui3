@@ -212,6 +212,9 @@ TEST(research_mode_blocks_every_writing_tool) {
      * один инструмент, меняющий состояние, не вызывается. */
     const char* forbidden[] = {
         "write_file", "search_replace", "edit_file", "revert",
+        /* И10.4: отмена и возврат перезаписывают файлы проекта, поэтому в
+         * research им самое место — там не пишут вообще. */
+        "undo", "redo",
         "rag_index", "bash", "git_commit", "git_add", "git_checkout",
     };
     for (const char* tool : forbidden) {
@@ -282,8 +285,10 @@ TEST(plan_mode_blocks_execution_and_destructive_tools) {
         /* И10.3: откат к снимку перезаписывает файлы проекта, поэтому в
          * режиме плана он запрещён, а не предложен. «Предложить сотню
          * файлов» — не предложение, и ToolContext::propose_write здесь
-         * неприменим. */
-        "revert",
+         * неприменим. И10.4 `undo`/`redo` — то же действие, тот же
+         * запрет: отмена в режиме плана отменила бы правки, которых
+         * агент не имел права сделать. */
+        "revert", "undo", "redo",
     };
     for (const char* tool : forbidden) {
         const ToolDef* def = ToolsRegistry::instance().find(tool);
@@ -301,10 +306,11 @@ TEST(plan_mode_blocks_execution_and_destructive_tools) {
  * этот тест. */
 TEST(plan_mode_allows_only_known_proposers_to_write) {
     register_all_tools();
-    /* `revert` в списке нет и быть не должен: он помечен TF_DESTRUCTIVE,
-     * то есть в режиме плана запрещён политикой режима, и проверка выше
+    /* `revert`, `undo` и `redo` в списке нет и быть не должны: все трое
+     * помечены TF_DESTRUCTIVE, то есть в режиме плана запрещены политикой
+     * режима, и проверка выше
      * (`plan_mode_blocks_execution_and_destructive_tools`) требует отказа
-     * от него, а не предложения. */
+     * от них, а не предложения. */
     const char* proposers[] = {"write_file", "search_replace", "edit_file",
                              "apply_patch"};
     for (const auto& def : ToolsRegistry::instance().defs()) {

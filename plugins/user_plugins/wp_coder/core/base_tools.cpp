@@ -484,6 +484,124 @@ std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
+/* И10.4: `undo` и `redo` — переходы по стеку уровней сессии.
+ *
+ * ОДИН конструктор на два инструмента, а не две копии тела: два способа
+ * сказать одно и то же — это дрейф (Д2), а здесь совпадает всё, кроме
+ * направления и слов в описании. Отличаются они могут только тем, что
+ * undo идёт назад, а redo вперёд.
+ *
+ * Ключ разрешения — ТОТ ЖЕ, что у revert. Это решение, а не экономия:
+ *   - «всегда разрешить отмену» должно означать отмену, а не отмену плюс
+ *     обычную запись файлов (отклонение 119 — ровно поэтому у revert
+ *     свой ключ, а не write);
+ *   - отмена и возврат — одно и то же право человека на перезапись
+ *     проекта, и спрашивать дважды об одном вопросе незачем;
+ *   - агент-поиск запрещает ключ revert ЦЕЛИКОМ, и новые инструменты под
+ *     тем же ключом скрылись у него сами, без правки его правил
+ *     (проверка deny_whole_key в tests/test_agent_config.cpp).
+ *
+ * TF_DESTRUCTIVE — как у revert: содержимое файлов, которое человек
+ * правил руками, перезаписывается (отклонение 120), поэтому в режиме
+ * плана оба запрещены, а не предложены. Вопрос задаёт ToolRunner::run. */
+static ToolDef make_history_move_tool(const char* name, bool is_undo) {
+    ToolDef def;
+    def.name = name;
+    def.description =
+        is_undo
+            ? "Отменить работу агента: вернуть файлы проекта к состоянию, "
+              "которое было ДО последнего шага, что-то изменившего. "
+              "Повторный вызов отменяет предыдущий шаг — откат "
+              "многоуровневый, а не на одну правку (стек уровней "
+              "ограничен по глубине, и самые старые уровни забываются). "
+              "Шаг, ничего не менявший, уровня не создаёт и не отменяется. "
+              "Файлы, созданные после этого состояния, НЕ удаляются: "
+              "откат возвращает содержимое, но не убирает лишнее. "
+              "Вернуться вперёд можно инструментом redo, пока агент не "
+              "сделал новых правок. Отдельный откат к состоянию, "
+              "которое человек назвал хешем, — инструмент revert."
+            : "Вернуть отменённое: вернуть файлы проекта к состоянию, "
+              "которое было ПОСЛЕ отменённого шага. Работает, только пока "
+              "агент не сделал новых правок: после них состояние, "
+              "возвращённое вперёд, больше не лежит в стеке, и возврат "
+              "был бы прыжком через сделанное. Файлы, созданные после "
+              "возвращаемого состояния, НЕ удаляются.";
+    def.flags = TF_WRITES_FILES | TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+    def.permission_key = "revert";
+    def.parameters = SchemaBuilder().build();
+    def.handler = [is_undo](const json::JsonValue&, ToolContext& ctx) -> ToolOutput {
+        const std::string verb = is_undo ? "undo" : "redo";
+        const std::string title = is_undo ? "отмена шага" : "возврат отменённого";
+        const std::string project_dir = ctx.project_dir();
+        const HostCallbacks& cbs = ctx.callbacks();
+        const std::string store =
+            snapshot::store_dir(cbs.path_data_dir ? cbs.path_data_dir() : "");
+
+        /* Стек копируется под локом и кладётся обратно под локом, а всё
+         * между ними (git, копирование каталогов) идёт без лока: держать
+         * state_.mtx на них — это висящий GUI (D1, правило 3). Копия, а
+         * не ссылка: единственный писатель стека — рабочий поток агента,
+         * и UI его не касается (шапка core/snapshot.h). */
+        snapshot::UndoStack stack;
+        {
+            std::lock_guard<std::mutex> lk(ctx.state().mtx);
+            stack = ctx.state().undo_stack;
+        }
+        const snapshot::MoveResult r =
+            is_undo ? stack.undo(project_dir, store)
+                    : stack.redo(project_dir, store);
+        std::vector<snapshot::Snapshot> trash;
+        {
+            std::lock_guard<std::mutex> lk(ctx.state().mtx);
+            ctx.state().undo_stack = stack;
+            trash = ctx.state().undo_stack.take_trash();
+        }
+        snapshot::discard_copies(trash);
+
+        /* Положение в стеке — в каждом ответе, включая отказ: иначе модель,
+         * получив «отменять нечего», не знает, где стоит, и начинает жать
+         * снова или искать обход. */
+        const std::string where =
+            r.levels == 0
+                ? std::string("уровней нет")
+                : ("уровень " + std::to_string(r.level) + " из " +
+                   std::to_string(r.levels));
+        const std::string what_next =
+            std::string("отменить ещё: ") + (r.can_undo ? "да" : "нет") +
+            ", вернуть вперёд: " + (r.can_redo ? "да" : "нет");
+        if (!r.ok) {
+            return out(title + " не состоялся",
+                       "[" + verb + "] " +
+                           (is_undo ? "отменять нечего или не вышло: "
+                                    : "возвращать нечего или не вышло: ") +
+                           r.reason + " (" + where + "; " + what_next + ")");
+        }
+
+        std::string text = "[" + verb + "] состояние " + r.level_hash + " (" +
+                           r.source + ") возвращено файлов: " +
+                           std::to_string(r.restored.size()) + " (" + where +
+                           ").";
+        text += file_list_lines(r.restored);
+        if (!r.leftover.empty()) {
+            /* Механизм НЕ угадывается — как у revert: для копии каталога
+             * это отказ записи, для git-пути такого быть не должно, и
+             * выдуманная причина в ответе была бы враньём. */
+            text += "Не удалось вернуть (" + std::to_string(r.leftover.size()) +
+                    "): после перехода эти файлы всё ещё отличаются от "
+                    "уровня.\n" + file_list_lines(r.leftover);
+        }
+        text +=
+            "Файлы, которых в состоянии нет, не удалены: снимок не видит "
+            "неотслеживаемые файлы, и откат их не трогает.";
+        if (!r.can_redo && is_undo == false) {
+            text += " Дальше вперёд идти некуда: возвращаться было не с чего.";
+        }
+        text += " " + what_next + ".";
+        return out(title, std::move(text));
+    };
+    return def;
+}
+
 } // anonymous namespace
 
 void register_base_tools() {
@@ -1655,6 +1773,13 @@ void register_base_tools() {
         };
         reg.register_def(std::move(def));
     }
+
+    /* И10.4 `undo`/`redo`: переходы по стеку уровней сессии. Объявлены
+     * здесь, рядом с revert, потому что это один класс действия и один
+     * ключ разрешения; различает их только направление (см.
+     * make_history_move_tool). */
+    reg.register_def(make_history_move_tool("undo", true));
+    reg.register_def(make_history_move_tool("redo", false));
 
     /* И8.7 `task`: делегирование задачи субагенту. Объявлен здесь, а не
      * в своём вызове регистрации, потому что он часть базового набора —

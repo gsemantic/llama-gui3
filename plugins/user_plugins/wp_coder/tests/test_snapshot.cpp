@@ -18,6 +18,7 @@
 
 #include "../core/agent_components.h"
 #include "../core/base_tools.h"
+#include "../core/limits.h"
 #include "../core/shell.h"
 #include "../core/snapshot.h"
 
@@ -129,6 +130,31 @@ void init_repo_with_file(const std::string& dir, const std::string& name,
     write_file(fs::path(dir) / name, text);
     raw_git(dir, "add -A");
     raw_git(dir, "commit -q -m init");
+}
+
+/* Мусор из стека уровней сессии (И10.4): забрать под локом, удалить без
+ * него (правило 3 — под state_.mtx каталоги не удаляют). Живёт здесь, а не
+ * в разделе И10.4, потому что пользуется и фикстура инструментов ниже. */
+void drain_stack_trash(EngineState& state) {
+    std::vector<Snapshot> trash;
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        trash = state.undo_stack.take_trash();
+    }
+    discard_copies(trash);
+}
+
+/* Размер стека и «можно ли отменять» — тоже под локом: стек живёт в
+ * состоянии синглтона, и чтение его полем мимо лока было бы гонкой,
+ * пусть и сегодняшняя проверка однопоточная. */
+size_t stack_size(EngineState& state) {
+    std::lock_guard<std::mutex> lk(state.mtx);
+    return state.undo_stack.size();
+}
+
+bool stack_can_undo(EngineState& state) {
+    std::lock_guard<std::mutex> lk(state.mtx);
+    return state.undo_stack.can_undo();
 }
 
 /* Содержимое файла ВНУТРИ дерева (tree-hash — это дерево, а не путь
@@ -1178,15 +1204,25 @@ struct ToolFixture {
             std::lock_guard<std::mutex> lk(state.mtx);
             state.project_dir = sb.project();
             state.last_snapshot = Snapshot();
+            state.undo_stack.clear();
             state.plan_mode = false;
             state.mode = 0;
         }
     }
     ~ToolFixture() {
         EngineState& state = engine_state();
-        std::lock_guard<std::mutex> lk(state.mtx);
-        state.project_dir.clear();
-        state.last_snapshot = Snapshot();
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.project_dir.clear();
+            state.last_snapshot = Snapshot();
+            /* И10.4: стек — состояние синглтона, и его нельзя оставлять
+             * следующей проверке (см. правило 5 SESSION_START). */
+            state.undo_stack.clear();
+        }
+        drain_stack_trash(state);
+        HostCallbacks safe;
+        safe.chat_event = [](const std::string&) {};
+        Engine::instance().init(safe);
     }
     ToolFixture(const ToolFixture&) = delete;
     ToolFixture& operator=(const ToolFixture&) = delete;
@@ -1196,11 +1232,29 @@ struct ToolFixture {
         if (!hash.empty()) a.set("hash", json::JsonValue(hash));
         return ToolsRegistry::instance().run_output("revert", a);
     }
+    /* Инструмент без аргументов (undo, redo): пустой объект — это весь
+     * их контракт, и отдельный метод защищает проверку от опечатки в
+     * имени инструмента, которая выглядела бы как «инструмент отказал». */
+    ToolOutput run_plain(const std::string& name) {
+        return ToolsRegistry::instance().run_output(
+            name, json::JsonValue::object());
+    }
     /* Снимок кладётся в состояние так же, как его кладёт цикл: откат без
      * пустого hash берёт именно его. */
     void publish(const Snapshot& s) {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
         engine_state().last_snapshot = s;
+    }
+    /* Шаг цикла для инструментов undo/redo: тот же порядок, что в
+     * take_step_snapshot, но без записи в last_snapshot — проверке
+     * переходов состояние последнего шага не нужно. */
+    void step() {
+        const Snapshot s = take(sb.project(), sb.store());
+        ASSERT_TRUE(s.ok());
+        {
+            std::lock_guard<std::mutex> lk(engine_state().mtx);
+            engine_state().undo_stack.push(s);
+        }
     }
 };
 
@@ -1277,4 +1331,773 @@ TEST(the_revert_tool_shows_a_long_list_of_returned_files) {
     ASSERT_TRUE(o.output.find("возвращено файлов: 60") != std::string::npos);
     ASSERT_TRUE(o.output.find("и ещё") != std::string::npos);
     ASSERT_EQ(read_text(fs::path(repo) / "f59.txt"), std::string("one\n"));
+}
+
+/* ======================================================================
+ * И10.4: стек уровней сессии — undo и redo
+ *
+ * Тут то же, что и выше: настоящий git, настоящая файловая система и
+ * никакой модели. Стек — это арифметика над состояниями, и проверять её
+ * прогоном агента с сетью было бы фактически никак.
+ *
+ * Порядок проверок — по цене решения. Первая: ОДНО нажатие отменяет ОДИН
+ * шаг. Ошибка здесь выглядит как работающий откат: файлы вернулись, и
+ * вернулись не туда — на два шага назад вместо одного, то есть модель
+ * потом строит своё следующее действие на состоянии, которого не
+ * существует.
+ * ====================================================================== */
+
+namespace {
+
+/* Шаг цикла агента: снимок состояния становится уровнем. Тот же порядок,
+ * что в take_step_snapshot, и нарочно НЕ вызов той функции: проверка
+ * стека не должна зависеть от кода, который она проверяет. */
+void step_level(UndoStack& stack, const std::string& project,
+                const std::string& store) {
+    const Snapshot s = take(project, store);
+    ASSERT_TRUE(s.ok());
+    stack.push(s);
+}
+
+void write_content(const std::string& project, const char* name,
+                   const std::string& text) {
+    write_file(fs::path(project) / name, text);
+}
+
+/* Обрезка вывода git: ответы приходят с переводом строки, и сравнение
+ * строк целиком проверяло бы формат вывода, а не смысл. */
+std::string trimmed(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+/* Сколько копий каталога лежит в каталоге данных. Именно каталогов, а не
+ * всего содержимого: рядом с каждой копией лежит её отметка `.owner`
+ * (отклонение 123), и счётчик файлов считал бы их парами. */
+size_t copy_dirs(const std::string& store) {
+    std::error_code ec;
+    size_t n = 0;
+    for (fs::directory_iterator it(fs::path(store), ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (it->is_directory(ec) && !ec) ++n;
+    }
+    return n;
+}
+
+} // namespace
+
+TEST(undo_returns_one_step_back_and_redo_returns_it_forward) {
+    SandBox sb("undo_redo");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    /* Шаг 1: состояние «one». */
+    step_level(stack, repo, sb.store());
+    /* Шаг 1 поработал. */
+    write_content(repo, "a.txt", "two\n");
+    /* Шаг 2: состояние «two». */
+    step_level(stack, repo, sb.store());
+    /* Шаг 2 поработал, и мы внутри него — модель зовёт undo посреди хода. */
+    write_content(repo, "a.txt", "три\n");
+
+    const MoveResult u = stack.undo(repo, sb.store());
+    ASSERT_TRUE(u.ok);
+    /* Ровно ОДИН шаг назад: «три» → «two», а не сразу в «one». */
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+    ASSERT_EQ(u.restored.size(), (size_t)1);
+    ASSERT_EQ(u.restored.at(0), std::string("a.txt"));
+    ASSERT_TRUE(u.can_undo);
+    ASSERT_TRUE(u.can_redo);
+    ASSERT_EQ(u.level, (size_t)2);
+    ASSERT_EQ(u.levels, (size_t)3);
+
+    const MoveResult r = stack.redo(repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("три\n"));
+    ASSERT_FALSE(r.can_redo);
+    /* Всё, что было до отмены, вернулось одним уровнем вперёд, а не
+     * «а теперь вернулось ещё и то, что было дальше»: стек кончился. */
+    ASSERT_FALSE(stack.redo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("три\n"));
+}
+
+TEST(undo_walks_back_several_levels_and_redo_walks_forward_again) {
+    /* Многоуровневость — это и есть задача: одно нажатие отменяет один
+     * шаг, а не «всё до начала». Четыре уровня и по два перехода в
+     * каждую сторону: середина стека проверяется обоими краями. */
+    SandBox sb("undo_levels");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    for (int i = 2; i <= 4; ++i) {
+        write_content(repo, "a.txt", "level" + std::to_string(i) + "\n");
+        step_level(stack, repo, sb.store());
+    }
+    write_content(repo, "a.txt", "current\n");
+    ASSERT_EQ(stack.size(), (size_t)4);
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("level4\n"));
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("level3\n"));
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("level2\n"));
+    /* Дальше назад некуда: «one» — это уровень, но добраться до него
+     * можно только ещё одним нажатием, и стек это позволяет. */
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+
+    /* А теперь обратно — до самого верха, то есть до того состояния,
+     * которого на диске уже нет. */
+    for (int i = 2; i <= 4; ++i) {
+        ASSERT_TRUE(stack.redo(repo, sb.store()).ok);
+        ASSERT_EQ(read_text(fs::path(repo) / "a.txt"),
+                  "level" + std::to_string(i) + "\n");
+    }
+    ASSERT_TRUE(stack.redo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("current\n"));
+    ASSERT_FALSE(stack.redo(repo, sb.store()).ok);
+    ASSERT_EQ(stack.size(), (size_t)5);
+}
+
+TEST(a_step_that_changed_nothing_does_not_become_a_level) {
+    /* Уровень — СОСТОЯНИЕ, а не шаг. Если бы пустой шаг завёл уровень,
+     * «отменить» пришлось бы жать вхолостую: модель отменила бы пустоту
+     * и решила, что откат не работает. */
+    SandBox sb("undo_noop");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());
+    /* Шаг, который ничего не сделал. */
+    step_level(stack, repo, sb.store());
+    ASSERT_EQ(stack.size(), (size_t)2);
+
+    write_content(repo, "a.txt", "три\n");
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+}
+
+TEST(undo_says_it_has_nothing_to_undo_and_changes_nothing) {
+    /* Отказ с названной причиной, а не пустой успех: модель, получившая
+     * «отменено» при отказе, продолжила бы считать проект откатанным. */
+    SandBox sb("undo_nothing");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack empty;
+    const MoveResult none = empty.undo(repo, sb.store());
+    ASSERT_FALSE(none.ok);
+    ASSERT_TRUE(none.reason.find("стек уровней пуст") != std::string::npos);
+    ASSERT_EQ(none.level, (size_t)0);
+    ASSERT_EQ(none.levels, (size_t)0);
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    /* Мы стоим на самом раннем уровне и ничего с него не меняли. */
+    const MoveResult first = stack.undo(repo, sb.store());
+    ASSERT_FALSE(first.ok);
+    ASSERT_TRUE(first.reason.find("самое раннее состояние") != std::string::npos);
+    ASSERT_TRUE(first.can_undo);   /* уровень есть, отменять нечего */
+    ASSERT_FALSE(first.can_redo);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+}
+
+TEST(redo_is_refused_while_the_agent_has_edited_after_the_undo) {
+    /* Тот же запрет (правило 2 шапки), но в окне, которого ещё не
+     * закрыл push(): отмена, потом правка посреди того же хода, и
+     * возврат вперёд — уровни впереди в стеке ещё лежат, они просто
+     * больше не впереди. Отказ с названной причиной, а не прыжок через
+     * сделанное. */
+    SandBox sb("undo_redo_edited");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "три\n");
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+
+    /* Агент поработал после отмены — следующего шага ещё не было. */
+    write_content(repo, "a.txt", "снова работа\n");
+    const MoveResult r = stack.redo(repo, sb.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("после новых правок") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"),
+              std::string("снова работа\n"));
+}
+
+TEST(new_work_after_an_undo_kills_the_way_forward) {
+    /* Возврат вперёд не перепрыгивает через сделанное: правило 2 шапки
+     * core/snapshot.h. Проверка содержит и вторую половину — отказ с
+     * причиной, а не «уровень пропал»: по коду ответа модель обязана
+     * понять, что вернуться вперёд больше некуда. */
+    SandBox sb("undo_redo_dead");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "три\n");
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+    ASSERT_TRUE(stack.can_redo());
+
+    /* Новый шаг после отмены: работа агента пошла дальше. */
+    write_content(repo, "a.txt", "four\n");
+    step_level(stack, repo, sb.store());
+    ASSERT_FALSE(stack.can_redo());
+    /* Уровней стало три, а не два: отменённое состояние осталось
+     * уровнем (оно и было целью возврата), а вперёд ушло только то, что
+     * отменять уже не собирались. */
+    ASSERT_EQ(stack.size(), (size_t)3);
+
+    const MoveResult r = stack.redo(repo, sb.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("нечего возвращать вперёд") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("four\n"));
+}
+
+TEST(undo_returns_a_deleted_file_and_keeps_a_created_one) {
+    /* Граница 1 шапки core/snapshot.h: отмена — не обращение функции.
+     * Удалённый файл вернётся, созданный — останется. Обе половины
+     * проверяются здесь, потому что проверить одну и не заметить
+     * вторую легко, а читателю ответа инструмента это стоило бы
+     * сюрприза на следующем же шаге. */
+    SandBox sb("undo_created");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    write_content(repo, "b.txt", "b\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+    write_content(repo, "b.txt", "b\n");
+    raw_git(repo, "add -A");
+    raw_git(repo, "commit -q -m two");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    std::error_code ec;
+    fs::remove(fs::path(repo) / "b.txt", ec);
+    write_content(repo, "new.txt", "создано агентом\n");
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "b.txt"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("b\n"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "new.txt"));
+    ASSERT_EQ(read_text(fs::path(repo) / "new.txt"),
+              std::string("создано агентом\n"));
+}
+
+TEST(undo_refuses_a_level_it_cannot_restore_and_keeps_the_stack_usable) {
+    /* Отказ не должен съедать стек: иначе одна неудачная отмена отняла
+     * бы и возможность вернуться вперёд. Проверяется на копии каталога,
+     * потому что уровень git нельзя испортить руками — его объект живёт
+     * в базе репозитория.
+     *
+     * Проверка составная намеренно: «отказался» мало. Сломанный уровень
+     * лежит ПОД целевым, поэтому проверяется и то, что выбитый уровень
+     * не вычеркнут из стека молча, и то, что ход назад после отказа
+     * по-прежнему работает. */
+    SandBox sb("undo_broken");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "three\n");
+    const Snapshot third = take(repo, sb.store());
+    ASSERT_TRUE(third.kind == Kind::DirCopy);
+    stack.push(third);
+    /* Снимок начала шага, чьи правки отменяются прямо сейчас. */
+    write_content(repo, "a.txt", "four\n");
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("three\n"));
+    const size_t before = stack.size();
+    const size_t at = stack.position();
+
+    /* Уровень, к которому пойдёт следующая отмена, снесли с диска. */
+    const Snapshot second = stack.level(1);
+    std::error_code ec;
+    fs::remove_all(fs::path(second.dir), ec);
+
+    const MoveResult u = stack.undo(repo, sb.store());
+    ASSERT_FALSE(u.ok);
+    ASSERT_TRUE(u.reason.find("не найдена") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("three\n"));
+    /* Стек цел и стоит на месте: ни уровня не вычеркнуто, ни позиция не
+     * съехала. */
+    ASSERT_EQ(stack.size(), before);
+    ASSERT_EQ(stack.position(), at);
+    ASSERT_TRUE(stack.can_redo());
+
+    /* Мусор, собранный на отказе, удаляем — как это делает вызывающий, —
+     * и копия уровня, на котором мы стоим, обязана уцелеть. Снятое на
+     * отказе состояние это ТОТ ЖЕ уровень, и удаление по списку без
+     * сверки снесло бы копию, которая ещё нужна стеку. */
+    const std::vector<Snapshot> trash = stack.take_trash();
+    discard_copies(trash);
+    ASSERT_TRUE(fs::exists(fs::path(stack.level(at).dir)));
+
+    /* Возврат вперёд после отказа работает — и это единственное, что
+     * может доказать, что отказ не испортил стек: содержимое уровня на
+     * месте, отказ его не тронул. */
+    const MoveResult r = stack.redo(repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("four\n"));
+}
+
+TEST(the_stack_is_dropped_when_the_project_changes) {
+    /* Уровни чужого проекта вернули бы сюда его файлы — молча и целиком,
+     * потому что у похожих проектов имена файлов совпадают (то же, чем
+     * отличается приём отклонения 123). Сверка идёт по полю снимка,
+     * потому что проект меняется прямой записью в состояние из UI и
+     * крючка на смену нет. */
+    SandBox sb("undo_project");
+    const std::string other = (fs::path(sb.root) / "other").string();
+    std::error_code ec;
+    fs::create_directories(other, ec);
+    write_content(sb.project(), "a.txt", "one\n");
+
+    UndoStack stack;
+    const Snapshot a = take(sb.project(), sb.store());
+    ASSERT_TRUE(a.ok());
+    stack.push(a);
+    write_content(sb.project(), "a.txt", "two\n");
+    step_level(stack, sb.project(), sb.store());
+    ASSERT_EQ(stack.size(), (size_t)2);
+
+    /* Снимок чужого проекта приходит на первом же его шаге. */
+    write_content(other, "z.php", "<?php\n");
+    stack.push(take(other, sb.store()));
+    ASSERT_EQ(stack.size(), (size_t)1);
+    ASSERT_EQ(stack.level(0).project_dir, other);
+    /* Копия вытесненного уровня удаляется ВЫЗЫВАЮЩИМ (стек только
+     * отдаёт): вне стека её никто не прочтёт, а на не-git-проекте это
+     * целый каталог (отклонение 109). */
+    const std::vector<Snapshot> trash = stack.take_trash();
+    ASSERT_TRUE(!trash.empty());
+    discard_copies(trash);
+    ASSERT_FALSE(fs::exists(fs::path(a.dir)));
+    ASSERT_FALSE(fs::exists(fs::path(a.dir + std::string(kOwnerSuffix))));
+
+    /* Отмена в чужом стеке для прежнего проекта — отказ, а не откат. */
+    const MoveResult r = stack.undo(sb.project(), sb.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("другого проекта") != std::string::npos);
+}
+
+TEST(a_level_that_fell_out_of_the_stack_is_deleted_from_the_store) {
+    /* Предел глубины и уборка копий — решение задачи (отклонение 109):
+     * без них каталог данных плагина рос бы на полную копию проекта
+     * каждый шаг всей сессии. Git-уровни при этом НЕ трогаются: их
+     * объект лежит в базе репозитория, и обещать его удаление было бы
+     * враньём — вместо этого проверяется, что он и не исчезает. */
+    SandBox sb("undo_depth");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    const Snapshot oldest = take(repo, sb.store());
+    ASSERT_TRUE(oldest.kind == Kind::DirCopy);
+    stack.push(oldest);
+    const size_t depth = limits::kSnapshotStackDepth;
+    for (size_t i = 1; i < depth + 1; ++i) {
+        write_content(repo, "a.txt", "step" + std::to_string(i) + "\n");
+        step_level(stack, repo, sb.store());
+    }
+    ASSERT_EQ(stack.size(), depth);
+    /* Мусор снят стеком, но удаляет его вызывающий — поэтому проверка
+     * берёт то, что вернул take_trash(). */
+    const std::vector<Snapshot> trash = stack.take_trash();
+    ASSERT_TRUE(!trash.empty());
+    discard_copies(trash);
+    ASSERT_FALSE(fs::exists(fs::path(oldest.dir)));
+    /* Отменить вытесненное уже нельзя, и это сказано честно: уровней
+     * ровно предел, а не «сколько влезло», и самый ранний из них —
+     * «step1», а не «one». */
+    while (stack.undo(repo, sb.store()).ok) {
+    }
+    ASSERT_EQ(stack.size(), depth);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("step1\n"));
+}
+
+TEST(a_git_level_fallen_out_of_the_stack_is_not_deleted) {
+    /* Вторая половина той же границы: вытесненный уровень под git
+     * остаётся пригодным для revert по хешу — объект в базе репозитория
+     * удалить нечем, да и незачем. Проверка на живой команде git, а не на
+     * том, вернул ли discard_copies() ошибку. */
+    SandBox sb("undo_git_evicted");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    const Snapshot oldest = take(repo, sb.store());
+    ASSERT_TRUE(oldest.kind == Kind::GitTree);
+    discard_copies(std::vector<Snapshot>{oldest});
+    ASSERT_EQ(trimmed(raw_git(repo, "cat-file -t " + oldest.hash)),
+              std::string("tree"));
+    /* И откат по нему по-прежнему работает. */
+    write_content(repo, "a.txt", "two\n");
+    const RestoreResult r = restore(oldest.hash, oldest, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+}
+
+TEST(a_step_snapshot_pushes_a_level_into_the_engine_state) {
+    /* Шов с циклом: уровень заводит ТОТ ЖЕ вызов, что и last_snapshot.
+     * Два вызова означали бы два одинаковых уровня, и «отменить» жало
+     * бы вхолостую на каждом шаге.
+     *
+     * Первая половина — проект без git и без каталога данных: снимок не
+     * состоялся, а значит не появился и уровень с правдоподобным
+     * содержимым. Такой уровень отменял бы несуществующее состояние. */
+    EngineState& state = engine_state();
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir.clear();
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+    HostCallbacks empty_cb;
+    empty_cb.path_data_dir = [] { return ""; };
+    const StepSnapshot none = take_step_snapshot(state, empty_cb, nullptr);
+    ASSERT_FALSE(none.after.ok());
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)0);
+        ASSERT_TRUE(state.undo_stack.can_undo() == false);
+    }
+
+    /* Вторая половина — настоящий проект: два вызова подряд дают ОДИН
+     * уровень, потому что состояние между ними не менялось. */
+    SandBox sb("undo_push");
+    write_content(sb.project(), "a.txt", "one\n");
+    init_repo_with_file(sb.project(), "a.txt", "one\n");
+    HostCallbacks cb;
+    cb.path_data_dir = [&sb] { return sb.store(); };
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir = sb.project();
+    }
+    const StepSnapshot s1 = take_step_snapshot(state, cb, nullptr);
+    const StepSnapshot s2 = take_step_snapshot(state, cb, nullptr);
+    ASSERT_TRUE(s1.after.ok());
+    ASSERT_TRUE(s2.after.ok());
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        ASSERT_EQ(state.undo_stack.size(), (size_t)1);
+        /* Снимок начала шага и уровень — одно и то же состояние. */
+        ASSERT_EQ(state.undo_stack.level(0).hash, s2.before.hash);
+    }
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.project_dir.clear();
+        state.last_snapshot = Snapshot();
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+}
+
+TEST(undo_does_not_move_the_snapshot_of_the_current_step) {
+    /* Граница 4 шапки core/snapshot.h: пустой hash у revert по-прежнему
+     * значит «состояние на начало ТЕКУЩЕГО шага». Если бы undo двигал
+     * last_snapshot, отмена молча превратилась бы в «уже совпадает», и
+     * модель решила бы, что отменённое вернулось назад, а оно лежит
+     * дальше по стеку.
+     *
+     * Проверка уводит отмену ЗА начало шага (две отмены), иначе откат к
+     * снимку начала шага совпал бы с тем, куда отмена уже пришла, и
+     * разницы команд не было бы видно. */
+    SandBox sb("undo_keeps_last");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "три\n");
+    step_level(stack, repo, sb.store());
+    /* Снимок начала ТЕКУЩЕГО шага — «три», а отмены уводят ниже. */
+    const Snapshot step_start = take(repo, sb.store());
+    write_content(repo, "a.txt", "four\n");
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("три\n"));
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+
+    /* Откат к снимку начала шага возвращает проект ВПЕРЁД — и это сказано
+     * словами в шапке, а не здесь. */
+    const RestoreResult r = restore("", step_start, repo, sb.store());
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("три\n"));
+}
+
+/* --- Инструменты `undo` и `redo` (а не только стек) --- */
+
+TEST(the_undo_and_redo_tools_walk_the_stack_and_say_what_is_possible) {
+    /* Проверяется ИНСТРУМЕНТ, а не функция: у него есть ответ, который
+     * читает модель, и этот ответ обязан называть границы. Молчаливый
+     * «отменено» при отказе заставил бы модель считать проект откатанным
+     * и строить следующий шаг на неправде. */
+    ToolFixture fx("undo_tool");
+    const std::string repo = fx.sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+    fx.step();
+    write_content(repo, "a.txt", "two\n");
+    fx.step();
+    write_content(repo, "a.txt", "три\n");
+
+    const ToolOutput u = fx.run_plain("undo");
+    ASSERT_TRUE(u.output.find("[undo]") != std::string::npos);
+    ASSERT_TRUE(u.output.find("возвращено файлов: 1") != std::string::npos);
+    ASSERT_TRUE(u.output.find("a.txt") != std::string::npos);
+    ASSERT_TRUE(u.output.find("уровень 2 из 3") != std::string::npos);
+    /* Что можно дальше — часть ответа, а не деталь реализации: без неё
+     * модель жмёт «redo» наугад. */
+    ASSERT_TRUE(u.output.find("вернуть вперёд: да") != std::string::npos);
+    ASSERT_TRUE(u.output.find("не удалены") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+
+    const ToolOutput r = fx.run_plain("redo");
+    ASSERT_TRUE(r.output.find("[redo]") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("три\n"));
+    ASSERT_TRUE(r.output.find("вернуть вперёд: нет") != std::string::npos);
+    ASSERT_TRUE(r.output.find("отменить ещё: да") != std::string::npos);
+
+    /* Возврат вперёд состоялся, значит отменять есть куда — дважды, до
+     * самого раннего уровня. Инструмент обязан различать «есть куда» и
+     * «уже некуда»: первое — работа, второе — отказ с причиной. */
+    const ToolOutput back = fx.run_plain("undo");
+    ASSERT_TRUE(back.output.find("[undo]") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("two\n"));
+    ASSERT_TRUE(back.output.find("вернуть вперёд: да") != std::string::npos);
+    const ToolOutput back2 = fx.run_plain("undo");
+    ASSERT_TRUE(back2.output.find("уровень 1 из 3") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    /* can_undo() отвечает «есть ли уровень», а не «вернёт ли вызов»:
+     * уровень есть, отменять нечего, и обе правды нужны в ответе. */
+    ASSERT_TRUE(back2.output.find("отменить ещё: да") != std::string::npos);
+    ASSERT_TRUE(back2.output.find("вернуть вперёд: да") != std::string::npos);
+
+    const ToolOutput end = fx.run_plain("undo");
+    ASSERT_TRUE(end.output.find("отменять нечего или не вышло") != std::string::npos);
+    ASSERT_TRUE(end.output.find("самое раннее состояние") != std::string::npos);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+}
+
+TEST(the_undo_and_redo_tools_say_so_when_the_stack_is_empty) {
+    ToolFixture fx("undo_tool_empty");
+    const ToolOutput u = fx.run_plain("undo");
+    ASSERT_TRUE(u.output.find("отменять нечего или не вышло") != std::string::npos);
+    ASSERT_TRUE(u.output.find("стек уровней пуст") != std::string::npos);
+    ASSERT_TRUE(u.output.find("уровней нет") != std::string::npos);
+    /* «уровней нет», а не «уровень 1 из 0» — номер без количества
+     * читался бы как позиция. */
+    ASSERT_TRUE(u.output.find("уровень 1 из") == std::string::npos);
+
+    const ToolOutput r = fx.run_plain("redo");
+    ASSERT_TRUE(r.output.find("возвращать нечего или не вышло") != std::string::npos);
+    ASSERT_TRUE(r.output.find("нечего возвращать вперёд") != std::string::npos);
+}
+
+TEST(the_undo_tools_are_hidden_from_the_looking_agent_by_the_revert_key) {
+    /* Один ключ на три инструмента — не только про удобство вопроса, но
+     * и про правила готовых агентов: агент-поиск запрещает ключ revert
+     * целиком, и undo/redo скрылись у него сами. Отдельная проверка
+     * стоит того: молчаливый переезд на другой ключ оставил бы
+     * агенту-поиску отмену, и счётчик скрытых инструментов это увидел
+     * бы не сразу. */
+    register_base_tools();
+    const auto defs = ToolsRegistry::instance().defs();
+    for (const char* name : {"revert", "undo", "redo"}) {
+        const ToolDef* def = ToolsRegistry::instance().find(name);
+        ASSERT_TRUE(def != nullptr);
+        if (!def) continue;      /* find() вернул nullptr — иначе проверка
+                                   * ниже читала бы несуществующий объект */
+        ASSERT_EQ(def->permission_key, std::string("revert"));
+        ASSERT_TRUE(tf_has(def->flags, TF_DESTRUCTIVE));
+        ASSERT_TRUE(tf_has(def->flags, TF_WRITES_FILES));
+    }
+    ASSERT_TRUE(!defs.empty());
+}
+
+TEST(a_cleared_session_forgets_the_levels_and_drops_their_copies) {
+    /* «Очистить сессию» — это кнопка «начать с чистого листа». Держать
+     * после неё уровни, к которым можно откатиться, значило бы оставить
+     * одну из тех вещей, которые человек только что попросил забыть.
+     *
+     * Копия проверяется на диске, а не в векторе: стек мог бы обнулиться
+     * и оставить каталоги, то есть уборка оказалась бы декларацией. */
+    SandBox sb("undo_clear_session");
+    write_content(sb.project(), "a.txt", "one\n");
+    const Snapshot s = take(sb.project(), sb.store());
+    ASSERT_TRUE(s.kind == Kind::DirCopy);
+    EngineState& state = engine_state();
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.undo_stack.clear();
+    }
+    drain_stack_trash(state);
+    {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.undo_stack.push(s);
+    }
+    ASSERT_EQ(stack_size(state), (size_t)1);
+    ASSERT_TRUE(stack_can_undo(state));
+
+    engine().clear_session();
+
+    ASSERT_EQ(stack_size(state), (size_t)0);
+    ASSERT_FALSE(stack_can_undo(state));
+    ASSERT_FALSE(fs::exists(fs::path(s.dir)));
+    ASSERT_FALSE(fs::exists(fs::path(s.dir + std::string(kOwnerSuffix))));
+}
+
+TEST(undo_at_the_oldest_level_survives_the_depth_limit) {
+    /* Предел глубины не должен съедать уровень, НА КОТОРОМ СТОИТ проект.
+     * Сценарий: стек полон, агент откатился до самого старого уровня,
+     * поправил файл и снова зовёт undo — вытеснение старого уровня увело
+     * бы позицию под ноль, и следующий переход читал бы уровень мимо
+     * массива. Найдено разбором падения мутированного кода, а проверка
+     * написана после, чтобы случай не остался непокрытым: без мутации он
+     * просто молча ломал бы стек в длинной сессии.
+     *
+     * Проект под git — снимок дешёвый (tree-hash), и проверка укладывается
+     * в сторож: 51 уровень и столько же отмен — это команды git, а не
+     * копирование каталога. */
+    SandBox sb("undo_depth_bottom");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+    init_repo_with_file(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    const size_t depth = limits::kSnapshotStackDepth;
+    for (size_t i = 0; i < depth; ++i) {
+        write_content(repo, "a.txt", "step" + std::to_string(i) + "\n");
+        step_level(stack, repo, sb.store());
+    }
+    /* До самого старого уровня. */
+    while (stack.undo(repo, sb.store()).ok) {
+    }
+    ASSERT_EQ(stack.position(), (size_t)0);
+    ASSERT_TRUE(stack.can_undo());
+
+    /* Правка после отката до дна, затем ещё одна отмена. */
+    write_content(repo, "a.txt", "правка после дна\n");
+    const MoveResult u = stack.undo(repo, sb.store());
+    ASSERT_TRUE(u.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"),
+              "step" + std::to_string(0) + "\n");
+    /* Позиция осталась в границах стека, и уровень, на котором мы стоим,
+     * в стеке есть: иначе следующий переход читал бы мимо массива. */
+    ASSERT_TRUE(stack.position() < stack.size());
+    ASSERT_TRUE(!stack.level(stack.position()).hash.empty());
+    /* Стек мог превысить предел на один уровень — стоять на вытесненном
+     * нельзя, а новый уровень появиться может. Назад отмена работает. */
+    ASSERT_TRUE(stack.size() <= depth + 1);
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok == false);
+}
+
+TEST(a_refused_move_leaves_no_copy_of_the_state_it_took) {
+    /* Отказ — тоже снятие состояния: переход берёт копию проекта ДО того,
+     * как узнает, что переходить некуда. На не-git-проекте это целый
+     * каталог, и если такую копию не отдать в мусор, она остаётся на диске
+     * навсегда — а отказ при этом самый частый случай: «отменить» на
+     * самом раннем уровне человек жмёт машинально, и каждый такой press
+     * оставлял бы после себя каталог.
+     *
+     * Проверка ловит не «отказ состоялся», а УТЕЧКУ, и потому смотрит на
+     * каталог копий, а не на ответ. Случай был найден мутацией: снятие
+     * guard-а `!holds(here)` («уровень с таким состоянием уже есть, значит
+     * копию не выбрасывать») ВЫЖИЛО — то есть ни одна проверка этого не
+     * различала.
+     *
+     * Совпадение состояния не делает копию чужой: у снимка DirCopy каталог
+     * свой (идентификатор выдаёт take(), отклонение 123 — отметка `.owner`
+     * лежит рядом), и на отказе снимок в стек не попадает, поэтому
+     * ссылаться на его копию некому. */
+    SandBox sb("undo_refused_copy");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    const size_t before = copy_dirs(sb.store());
+
+    /* Стоим на самом раннем уровне, состояние то же: отказ с причиной. */
+    const MoveResult u = stack.undo(repo, sb.store());
+    ASSERT_FALSE(u.ok);
+    ASSERT_TRUE(u.reason.find("самое раннее состояние") != std::string::npos);
+
+    discard_copies(stack.take_trash());
+    ASSERT_EQ(copy_dirs(sb.store()), before);
+    /* Копия уровня, на котором мы стоим, осталась на месте: отказ не
+     * имеет права убирать то, чем стек пользуется. */
+    ASSERT_TRUE(stack.can_undo());
+    ASSERT_TRUE(!stack.level(stack.position()).dir.empty());
+    ASSERT_TRUE(fs::exists(fs::path(stack.level(stack.position()).dir)));
+}
+
+TEST(a_refused_redo_leaves_no_copy_either) {
+    /* Тот же случай на втором отказе — «после новых правок возвращаться
+     * вперёд нельзя». Отказов у undo три (пустой стек, чужой проект, самое
+     * раннее состояние) и у redo один, и проверять их всех в одной
+     * нельзя было бы дёшево: mutation-прогон снял бы guard во всех трёх
+     * отказах undo сразу и поймал бы утечку в ОДНОМ из них, а остальные два
+     * остались бы непокрытыми навсегда. Здесь — самый частый из отказов
+     * undo плюс отказ redo. */
+    SandBox sb("undo_refused_redo");
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "one\n");
+
+    UndoStack stack;
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "two\n");
+    step_level(stack, repo, sb.store());
+    write_content(repo, "a.txt", "три\n");
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    discard_copies(stack.take_trash());
+    const size_t before = copy_dirs(sb.store());
+
+    /* Агент поработал после отмены: возвращаться вперёд нельзя, но
+     * состояние к отказу всё равно снято. */
+    write_content(repo, "a.txt", "новая работа\n");
+    const MoveResult r = stack.redo(repo, sb.store());
+    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.reason.find("после новых правок") != std::string::npos);
+
+    discard_copies(stack.take_trash());
+    ASSERT_EQ(copy_dirs(sb.store()), before);
+    /* Стек остался пригодным: отказ — не поломка, и вернуться назад
+     * по-прежнему можно. */
+    ASSERT_TRUE(stack.can_undo());
 }

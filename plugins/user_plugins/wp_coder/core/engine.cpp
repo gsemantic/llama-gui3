@@ -12,6 +12,7 @@
 #include "file_lock.h"
 #include "limits.h"
 #include "json_utils.h"
+#include "snapshot.h"
 
 #include <sstream>
 #include <vector>
@@ -230,6 +231,11 @@ void Engine::request_abort() {
 }
 
 void Engine::clear_session() {
+    /* И10.4: уровни сессии обнуляются вместе с ней. «Очистить сессию» —
+     * это кнопка «начать с чистого листа», и держать после неё уровни,
+     * к которым можно откатиться, значило бы оставить одну из тех вещей,
+     * которые человек только что попросил забыть. */
+    std::vector<snapshot::Snapshot> trash;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         state_.session.clear();
@@ -237,7 +243,14 @@ void Engine::clear_session() {
         state_.last_agent_task.clear();
         state_.todos.clear();       /* И4.6: план относится к задаче */
         state_.prompt_dirty = true;
+        state_.undo_stack.clear();
+        trash = state_.undo_stack.take_trash();
     }  /* mtx отпущен — push_event безопасен */
+    /* Копии снимков удаляются ВНЕ лока (правило 3: под state_.mtx не
+     * удаляют каталоги — UI ждёт тот же мьютекс). Здесь это делает
+     * UI-поток, и это единичная операция по кнопке; в цикле агента то же
+     * делает take_step_snapshot на рабочем потоке. */
+    snapshot::discard_copies(trash);
     /* Удаляем и сохранённую на диске сессию (resume, 5.2). Идентификатор
      * сбрасываем: следующая запись должна создать НОВЫЙ файл, а не
      * переписать старый (иначе след прежней сессии остался бы на диске

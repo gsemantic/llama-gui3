@@ -1231,9 +1231,16 @@ TEST(builtin_explore_agent_is_deny_all_with_a_read_only_list) {
      * через список `foreign`: там он просто оказался бы в незнакомом
      * ключе, и запрет «случайно заметного» инструмента выглядел бы так
      * же, как запрет по недосмотру. */
-    const ToolDef* rev = ToolsRegistry::instance().find("revert");
-    ASSERT_TRUE(rev != nullptr);
-    ASSERT_TRUE(explore->denies_whole_key(permission_key_of(*rev)));
+    /* И10.4 добавил undo и redo на ТОТ ЖЕ ключ revert, поэтому запрет
+     * целого ключа накрывает их без правки правил агента. Список, а не
+     * один инструмент: молчаливый переезд нового инструмента на
+     * другой ключ оставил бы агенту-поиску отмену, и проверка на
+     * `revert` этого бы не увидела. */
+    for (const char* name : {"revert", "undo", "redo"}) {
+        const ToolDef* rev = ToolsRegistry::instance().find(name);
+        ASSERT_TRUE(rev != nullptr);
+        ASSERT_TRUE(explore->denies_whole_key(permission_key_of(*rev)));
+    }
 
     /* Промпт требует назвать тщательность: без этого субагент отвечает
      * поверхностно, а вызывающий принимает это за полный обзор. */

@@ -585,14 +585,20 @@ const char* kLastStepReminder =
 
 /* И10.1: снимок рабочего каталога в начале шага.
  *
- * Порядок здесь не косметический, и оба пункта — про блокировки:
+ * Порядок здесь не косметический, и все три пункта — про блокировки:
  *
  *   1. Каталог проекта и предыдущая причина неудачи читаются под
  *      state.mtx и копируются — дальше лок не держится.
  *   2. Сам снимок берётся БЕЗ лока: внутри работает git (до
  *      limits::kSnapshotTimeoutSec) или копируется каталог, а UI ждёт
  *      тот же мьютекс. Лок на этом месте означал бы висящий GUI.
- *   3. Результат кладётся под локом — короткая запись. */
+ *   3. Результат кладётся под локом — короткая запись.
+ *
+ * И10.4: тем же вызовом состояние становится УРОВНЕМ сессии. Это один
+ * вызов, а не два, потому что уровень и есть снимок шага: второй вызов
+ * снял бы то же состояние вторым уровнем, и «отменить» пришлось бы жать
+ * вхолостую. Копии, вытесненные из стека, удаляются ПОСЛЕ лока: под ним
+ * удалять каталоги нельзя (UI ждёт тот же мьютекс). */
 StepSnapshot take_step_snapshot(EngineState& state, HostCallbacks& cb,
                                 AgentEventCallback push_event) {
     StepSnapshot out;
@@ -604,14 +610,18 @@ StepSnapshot take_step_snapshot(EngineState& state, HostCallbacks& cb,
     }
 
     const std::string data_dir = cb.path_data_dir ? cb.path_data_dir() : "";
-    out.after =
-        snapshot::take(project_dir, snapshot::store_dir(data_dir));
+    const std::string store = snapshot::store_dir(data_dir);
+    out.after = snapshot::take(project_dir, store);
 
+    std::vector<snapshot::Snapshot> trash;
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         state.last_snapshot = out.after;
         if (out.after.ok()) ++state.snapshots_taken;
+        state.undo_stack.push(out.after);
+        trash = state.undo_stack.take_trash();
     }
+    snapshot::discard_copies(trash);
 
     /* Пустой каталог проекта — не отказ снимка, а отсутствие проекта:
      * об этом панель говорит отдельно, и второе сообщение на каждом

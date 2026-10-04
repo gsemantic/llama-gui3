@@ -750,5 +750,320 @@ RestoreResult restore(const std::string& hash, const Snapshot& last,
     return r;
 }
 
+/* ======================================================================
+ * И10.4: стек уровней сессии (undo/redo)
+ *
+ * Правила перехода — в шапке snapshot.h; здесь только код. Четыре места,
+ * где легко ошибиться, и все четыре закрыты комментарием при коде:
+ *
+ *   - Уровень — СОСТОЯНИЕ, а не шаг: снимок, совпавший с последним
+ *     уровнем, новым уровнем не становится, и «отменить» не приходится
+ *     жать вхолостую после шага, который ничего не менял.
+ *   - Одно нажатие отменяет ОДИН шаг, а не два. Отсюда различие в цели:
+ *     когда проект УПЕРЕДИ уровня (правки текущего шага), идём к самому
+ *     верхнему уровню, а когда стоит на нём — к предыдущему. Без этого
+ *     различения второе нажатие съедало бы два шага.
+ *   - Возврат вперёд умирает на новой работе (push), а отмена назад — нет.
+ *   - Стек меняется ПОСЛЕ того, как проект вернулся к уровню: иначе
+ *     неудачный переход (нет копии, объект собран git, каталог без прав)
+ *     стёр бы то, к чему не дошёл, то есть отказ съел бы право вернуться.
+ * ====================================================================== */
+
+namespace {
+
+/* Одно и то же состояние?
+ *
+ * Уровень — это СОСТОЯНИЕ, а не его копия, и сравнивать надо именно так.
+ * Дерево git сравнивается по tree-hash: дёшево и точно. А копии каталога
+ * сравниваются ПО СОДЕРЖИМОМУ (diff_dirs), и это не оптимизация, а
+ * исправление: идентификатор копии уникален на каждый take(), и по нему
+ * сравнение всегда давало бы «состояния разные». На проекте без git это
+ * означало бы две поломки сразу — каждый шаг становился бы уровнем, даже
+ * когда агент ничего не менял, и отмена ходила бы по кругу, не сходясь с
+ * уровня (именно это и поймал сторож тестов на проверке глубины).
+ *
+ * Вид тоже сравнивается: переход проекта под git (или обратно) меняет то,
+ * чем снимок назван, и уровень другого вида — не этот. Отсутствующая
+ * копия не равна ничему: сравнивать нечем, и «наверное, то же самое»
+ * здесь было бы отказом от проверки вхолостую.
+ *
+ * Цена решения названа: на не-git-проекте сравнение уровней стоит обхода
+ * дерева, то есть цена уровня удваивается — ровно та же цена, что и
+ * копирование каталога (отклонение 106). */
+bool same_state(const Snapshot& a, const Snapshot& b) {
+    if (!a.ok() || !b.ok() || a.kind != b.kind) return false;
+    if (a.kind == Kind::GitTree) return a.hash == b.hash;
+    if (a.dir.empty() || b.dir.empty()) return false;
+    std::error_code ec;
+    if (!fs::is_directory(a.dir, ec) || !fs::is_directory(b.dir, ec)) {
+        return false;
+    }
+    return diff_dirs(a.dir, b.dir).empty();
+}
+
+} // namespace
+
+void discard_copies(const std::vector<Snapshot>& snapshots) {
+    std::error_code ec;
+    for (const Snapshot& s : snapshots) {
+        /* Только копии каталога: у git-уровня объекты лежат в базе
+         * репозитория, и удалять их отсюда нечем (и незачем — за это есть
+         * git gc). */
+        if (s.kind != Kind::DirCopy || s.dir.empty()) continue;
+        fs::remove_all(fs::path(s.dir), ec);
+        ec.clear();
+        fs::remove(fs::path(s.dir + kOwnerSuffix), ec);
+        ec.clear();
+    }
+}
+
+void UndoStack::push(const Snapshot& s) {
+    /* Снимок не состоялся — уровня нет. Причина остаётся в самом снимке:
+     * терять её нельзя, отказ потом скажет именно ею. */
+    if (!s.ok()) return;
+
+    /* Смена проекта обнуляет стек. Сверка идёт по полю снимка, а не по
+     * отдельному флагу «проект сменился»: проект задаётся настройкой и
+     * меняется из UI прямой записью в состояние, крючка на смену там
+     * нет, а уровни чужого проекта вернули бы сюда его файлы (у похожих
+     * проектов имена файлов совпадают). */
+    if (!project_dir_.empty() && project_dir_ != s.project_dir) {
+        trash_.insert(trash_.end(), levels_.begin(), levels_.end());
+        levels_.clear();
+        pos_ = 0;
+    }
+    project_dir_ = s.project_dir;
+
+    /* Новая работа убивает возврат вперёд: уровни впереди больше не
+     * достижимы. Отсчёт от pos_, а не от конца — после отмены вперёди
+     * лежит хвост, а не один последний уровень. */
+    if (pos_ + 1 < levels_.size()) {
+        trash_.insert(trash_.end(), levels_.begin() + static_cast<long>(pos_) + 1,
+                      levels_.end());
+        levels_.erase(levels_.begin() + static_cast<long>(pos_) + 1,
+                      levels_.end());
+    }
+    /* Тот же уровень дважды не заводим: шаг, ничего не изменивший, не
+     * должен стоить нажатия «отменить». */
+    if (levels_.empty() || !same_state(s, levels_.back())) {
+        levels_.push_back(s);
+    }
+    pos_ = levels_.size() - 1;
+
+    /* Глубина ограничена: уровень на проекте без git — полная копия
+     * каталога, и без предела каталог данных плагина рос бы всю сессию.
+     * Вытесненный уровень отменить уже нельзя, и его копия уходит в
+     * мусор, который удалит вызывающий.
+     *
+     * Здесь условия «не вытеснять текущий уровень» НЕТ и быть не может:
+     * позиция только что поставлена в levels_.size() - 1, а цикл крутится
+     * только когда размер больше предела, то есть pos_ тут заведомо больше
+     * нуля. Мёртвое условие было написано «на всякий случай» и обмануло
+     * мутационный прогон: снятие его ничего не меняло, и прогон объявил бы
+     * выжившей мутацию, которая на деле ничего не трогала. Настоящая
+     * защита стоит в move() (там позиция может быть нулевой). */
+    while (levels_.size() > limits::kSnapshotStackDepth) {
+        trash_.push_back(levels_.front());
+        levels_.erase(levels_.begin());
+        --pos_;
+    }
+}
+
+void UndoStack::clear() {
+    trash_.insert(trash_.end(), levels_.begin(), levels_.end());
+    levels_.clear();
+    pos_ = 0;
+    project_dir_.clear();
+}
+
+std::vector<Snapshot> UndoStack::take_trash() {
+    std::vector<Snapshot> out;
+    out.swap(trash_);
+    return out;
+}
+
+void UndoStack::report_position(MoveResult& r) const {
+    /* Нулевой уровень при пустом стеке — не «первый уровень», а «считать
+     * нечего»: номер без количества читался бы как позиция. */
+    r.level = levels_.empty() ? 0 : pos_ + 1;
+    r.levels = levels_.size();
+    r.can_undo = can_undo();
+    r.can_redo = can_redo();
+}
+
+bool UndoStack::refuse_foreign(MoveResult& r,
+                              const std::string& project_dir) const {
+    if (project_dir.empty()) {
+        r.reason = "не задан каталог проекта: переходить не по чему";
+        return true;
+    }
+    if (!levels_.empty() && !project_dir_.empty() &&
+        project_dir != project_dir_) {
+        r.reason = "уровни стека сняты с другого проекта (" + project_dir_ +
+                   "), а переход запрошен для " + project_dir;
+        return true;
+    }
+    return false;
+}
+
+MoveResult UndoStack::move(int dir, const Snapshot& target,
+                           const Snapshot& here, const std::string& project_dir,
+                           const std::string& store_dir) {
+    MoveResult r;
+    if (refuse_foreign(r, project_dir)) {
+        report_position(r);
+        return r;
+    }
+    if (!target.ok()) {
+        r.reason = "уровня нет: " + target.reason;
+        report_position(r);
+        return r;
+    }
+
+    const RestoreResult res = restore(target.hash, target, project_dir, store_dir);
+    if (!res.ok) {
+        /* Снятое ради перехода состояние в стек не попало и уже не
+         * пригодится: на проекте без git это копия целого каталога, и её
+         * убираем сразу, иначе она осталась бы на диске навсегда.
+         *
+         * Совпадение состояния с уровнем НЕ делает копию чужой: у снимка
+         * DirCopy каталог свой (идентификатор выдаёт take()), и стек на
+         * этот каталог не ссылается — в него попадает только то, что
+         * кладёт push(). Раньше здесь стояло `!holds(here)`, то есть
+         * «уровень с таким состоянием есть — копию не выбрасывать», и
+         * мутация, снимавшая это условие, ВЫЖИЛА: утечку никто не
+         * наблюдал. */
+        trash_.push_back(here);
+        r.reason = res.reason;
+        report_position(r);
+        return r;
+    }
+
+    /* Позиция — это индекс ЦЕЛИ в стеке, и ни вперёд, ни назад стек не
+     * пересобирается целиком.
+     *
+     * ВПЕРЁД цель уже лежит в стеке (это levels_[pos_+1]), поэтому
+     * переход двигает ТОЛЬКО pos_. Уровни впереди — это цели возврата,
+     * и стирать их здесь нельзя: первая версия пересобирала стек по
+     * префиксу и вместе с целями возврата отбрасывала всё, что впереди, —
+     * после чего второй возврат вперёд был невозможен, а стек с каждым
+     * шагом назад терял уровни.
+     *
+     * НАЗАД цель — это либо levels_[pos_] (проект упирался вперёд, то
+     * есть отменяются правки текущего шага), либо levels_[pos_-1]. В
+     * первом случае уходящее состояние встаёт НАД отменённым — иначе
+     * вернуться вперёд было бы некуда. Считать индекс цели в новом
+     * списке пришлось после первой поломки: pos_ = pos_ - 1 «на всякий
+     * случай» уводил позицию на уровень ниже цели (второе нажатие
+     * отменяло шаг через один), а на третьем pos_ уходил под ноль и
+     * индекс читался мимо массива. */
+    const bool ahead = !same_state(here, levels_[pos_]);
+    if (dir > 0) {
+        pos_ += 1;
+    } else if (ahead) {
+        levels_.push_back(here);
+    } else {
+        --pos_;
+    }
+
+    /* Глубина: единственное место, где переход может её превысить —
+     * отмена с новым уровнем над отменённым. Условие pos_ > 0 — то же, что
+     * в push(): уровень, на котором стоит проект, не вытесняется. */
+    while (levels_.size() > limits::kSnapshotStackDepth && pos_ > 0) {
+        trash_.push_back(levels_.front());
+        levels_.erase(levels_.begin());
+        --pos_;
+    }
+
+    r.ok = true;
+    r.source = res.source;
+    r.level_hash = target.hash;
+    r.restored = res.restored;
+    r.leftover = res.leftover;
+    report_position(r);
+    return r;
+}
+
+MoveResult UndoStack::undo(const std::string& project_dir,
+                           const std::string& store_dir) {
+    MoveResult r;
+    if (refuse_foreign(r, project_dir)) {
+        report_position(r);
+        return r;
+    }
+    if (levels_.empty()) {
+        r.reason = "нечего отменять: стек уровней пуст, агент ещё не "
+                   "делал шагов";
+        report_position(r);
+        return r;
+    }
+
+    /* Снимок текущего состояния снимается ОДИН раз и до отката: после
+     * отката снять уже нечего, и вернуться вперёд было бы некуда. */
+    const Snapshot here = take(project_dir, store_dir);
+    if (!here.ok()) {
+        r.reason = "текущее состояние не снято: " + here.reason +
+                   ". Переход не состоялся.";
+        report_position(r);
+        return r;
+    }
+
+    /* Куда идём: если проект уперёд уровня (правки текущего шага) — к
+     * самому верхнему уровню, и это отменяет ровно один шаг. Если проект
+     * стоит на уровне — к предыдущему, иначе второе нажатие отменило бы
+     * два шага сразу. */
+    const bool ahead = !same_state(here, levels_[pos_]);
+    if (!ahead && pos_ == 0) {
+        /* Копия, снятая ради перехода, в стек не попала: на не-git-проекте
+         * это целый каталог, и «отменить» на самом раннем уровне человек
+         * жмёт машинально — без уборки каждый такой press оставлял бы
+         * каталог. Совпадение состояния с уровнем не делает копию чужой
+         * (см. комментарий в move()). */
+        trash_.push_back(here);
+        r.reason = "нечего отменять: это самое раннее состояние сессии, "
+                   "и с него ничего не менялось";
+        report_position(r);
+        return r;
+    }
+    return move(-1, levels_[ahead ? pos_ : pos_ - 1], here, project_dir,
+                store_dir);
+}
+
+MoveResult UndoStack::redo(const std::string& project_dir,
+                           const std::string& store_dir) {
+    MoveResult r;
+    if (refuse_foreign(r, project_dir)) {
+        report_position(r);
+        return r;
+    }
+    if (pos_ + 1 >= levels_.size()) {
+        r.reason = "нечего возвращать вперёд: отменённого шага в стеке нет "
+                   "(новая работа после отмены возвращает вперёд только до "
+                   "этого места)";
+        report_position(r);
+        return r;
+    }
+    const Snapshot target = levels_[pos_ + 1];
+    const Snapshot here = take(project_dir, store_dir);
+    if (!here.ok()) {
+        r.reason = "текущее состояние не снято: " + here.reason +
+                   ". Переход не состоялся.";
+        report_position(r);
+        return r;
+    }
+    /* Проект упирался вперёд от отменённого уровня — то есть после отмены
+     * агент что-то поменял. Возврат вперёд тогда перепрыгнул бы через
+     * сделанное (правило 2 шапки), и отказ честнее: уровни впереди ещё
+     * лежат в стеке, но переход через них уже не наш. */
+    if (!same_state(here, levels_[pos_])) {
+        trash_.push_back(here);
+        r.reason = "после новых правок возвращаться вперёд нельзя: возврат "
+                   "перепрыгнул бы через сделанное";
+        report_position(r);
+        return r;
+    }
+    return move(+1, target, here, project_dir, store_dir);
+}
+
 } // namespace snapshot
 } // namespace coder
