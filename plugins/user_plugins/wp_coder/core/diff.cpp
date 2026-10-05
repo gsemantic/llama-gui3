@@ -807,5 +807,264 @@ std::string format_diff_row(const DiffRow& row, const DiffGutter& gutter) {
     return old_col + " " + new_col + " " + std::string(1, mark) + " " + text;
 }
 
+/* --- И11.2: дифф вызова и подсветка «до/после» (границы — в шапке
+ * core/diff.h) --- */
+
+json::JsonValue filediff_metadata(const std::vector<FileDiff>& files) {
+    json::JsonValue out = json::JsonValue::array();
+    for (const FileDiff& fd : files) {
+        json::JsonValue entry = json::JsonValue::object();
+        entry.set("file", fd.file);
+        entry.set("patch", fd.patch);
+        entry.set("additions", static_cast<long long>(fd.additions));
+        entry.set("deletions", static_cast<long long>(fd.deletions));
+        /* Три поля ниже — не украшение, а отказ показывать пустоту вместо
+         * правки: двоичный файл, обрезанный по пределу патч и объяснение
+         * «почда строк нет» — разные вещи, и без них виджет показал бы
+         * «прав не было» там, где файл изменился (граница 1 шапки). */
+        entry.set("binary", fd.binary);
+        entry.set("truncated", fd.truncated);
+        if (!fd.note.empty()) entry.set("note", fd.note);
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+namespace {
+
+/* Пересчёт счётчиков по патчу: сколько строк показано как «до» и сколько
+ * как «после». Считается по разобранным строкам показа, а не по знакам в
+ * тексте, — тогда счётчики и нарисованные строки описывают одно и то же
+ * (граница 2 шапки). */
+void count_sides(const std::vector<DiffRow>& rows, size_t* before,
+                 size_t* after) {
+    size_t b = 0, a = 0;
+    for (const DiffRow& r : rows) {
+        if (r.role == DiffRowRole::Removed) ++b;
+        if (r.role == DiffRowRole::Added) ++a;
+    }
+    *before = b;
+    *after = a;
+}
+
+void add_note(FileDiff* fd, const std::string& text) {
+    if (!fd->note.empty()) fd->note += "; ";
+    fd->note += text;
+}
+
+} // namespace
+
+bool filediff_from_metadata(const json::JsonValue& metadata,
+                            std::vector<FileDiff>* out, std::string* note) {
+    std::vector<FileDiff> files;
+    std::string reason;
+    auto say = [&reason](const std::string& text) {
+        if (!reason.empty()) reason += "; ";
+        reason += text;
+    };
+
+    const json::JsonValue* list = metadata.is_object()
+                                      ? metadata.find("filediff")
+                                      : nullptr;
+    if (!metadata.is_object()) {
+        if (note) *note = "метаданные вызова — не объект";
+        return false;
+    }
+    if (list == nullptr || list->is_null()) {
+        if (note) *note = "у вызова нет metadata.filediff";
+        return false;
+    }
+    /* Одиночный объект — это ДРУГАЯ форма, и принимать её значило бы
+     * завести вторую (граница 1 шапки). Отказ называет, что делать, чтобы
+     * ошибку не искали потом по симптому «виджет пустой». */
+    if (!list->is_array()) {
+        if (note) {
+            *note = "metadata.filediff — не список записей";
+        }
+        return false;
+    }
+
+    for (size_t i = 0; i < list->size(); ++i) {
+        const json::JsonValue& entry = list->at(i);
+        if (!entry.is_object()) {
+            say("запись " + std::to_string(i + 1) + " не объект — пропущена");
+            continue;
+        }
+        FileDiff fd;
+        fd.file = entry.get_string("file");
+        if (fd.file.empty()) {
+            /* Имя нужно виджету для подписи блока. Подставлять пустое или
+             * чужое имя хуже, чем не показать блок вовсе: человек прочитал
+             * бы правку одного файла на подписи другого. */
+            say("запись " + std::to_string(i + 1) + " без имени файла — пропущена");
+            continue;
+        }
+        const json::JsonValue* patch_value = entry.find("patch");
+        fd.patch = patch_value != nullptr ? patch_value->as_string_or("") : "";
+        fd.binary = entry.get_bool("binary", false);
+        fd.truncated = entry.get_bool("truncated", false);
+        fd.note = entry.get_string("note");
+
+        if (!fd.binary && !fd.patch.empty()) {
+            const std::vector<DiffRow> rows = parse_unified(fd.patch);
+            /* Unified-патч без ЗАГОВОРКА HUNK'А — не unified-патч: это может
+             * быть мусор в поле или чужой формат. Показывать его строки
+             * значило бы показать пустой или тусклый блок вместо причины, а
+             * молча показать ноль строк — «прав не было», то есть ложь о
+             * правке, которая была (граница 3 шапки). */
+            bool has_hunk = false;
+            for (const DiffRow& r : rows) {
+                if (r.role == DiffRowRole::Header) {
+                    has_hunk = true;
+                    break;
+                }
+            }
+            if (!has_hunk) {
+                say(fd.file + ": патч не разобран как unified — строки не"
+                            " показаны");
+                fd.patch.clear();
+                /* Причина дописывается, а не заменяет: у производителя могла
+                 * быть своя (обрезан по пределу, показан срез) — обе правды
+                 * нужны человеку. */
+                add_note(&fd, "патч не разобран как unified (нет заголовка hunk'а)");
+                fd.additions = 0;
+                fd.deletions = 0;
+                files.push_back(std::move(fd));
+                continue;
+            }
+            size_t before = 0, after = 0;
+            count_sides(rows, &before, &after);
+            /* Счётчики из метаданных — сверка, а не источник (граница 2). */
+            if (!fd.truncated) {
+                const long long said_add = entry.get_int("additions", -1);
+                const long long said_del = entry.get_int("deletions", -1);
+                if (said_add != static_cast<long long>(after) ||
+                    said_del != static_cast<long long>(before)) {
+                    add_note(&fd, "счётчики в метаданных не совпали с патчем");
+                }
+            }
+            fd.additions = after;
+            fd.deletions = before;
+        }
+        files.push_back(std::move(fd));
+    }
+
+    if (files.empty()) {
+        if (note) {
+            *note = reason.empty() ? "список filediff пуст" : reason;
+        }
+        return false;
+    }
+    if (out) *out = std::move(files);
+    /* Прочитанное с оговорками — это не отказ: показывать надо, а оговорку
+     * человек обязан видеть. */
+    if (note) *note = reason;
+    return true;
+}
+
+std::vector<DiffChangeBlock> diff_change_blocks(
+    const std::vector<DiffRow>& rows) {
+    std::vector<DiffChangeBlock> blocks;
+    size_t i = 0;
+    while (i < rows.size()) {
+        const bool starts_block =
+            rows[i].role == DiffRowRole::Added ||
+            rows[i].role == DiffRowRole::Removed;
+        if (!starts_block) {
+            ++i;
+            continue;
+        }
+        DiffChangeBlock b;
+        b.first = i;
+        size_t last = i;
+        size_t before = 0, after = 0;
+        for (;;) {
+            const DiffRow& r = rows[last];
+            /* Служебная строка относится к предыдущей изменённой строке, и
+             * разрывом блока она не является (граница в шапке). Заголовок
+             * hunk'а — наоборот: за ним другая правка. */
+            if (r.role == DiffRowRole::Removed) ++before;
+            if (r.role == DiffRowRole::Added) ++after;
+            const bool next_changed =
+                last + 1 < rows.size() &&
+                (rows[last + 1].role == DiffRowRole::Added ||
+                 rows[last + 1].role == DiffRowRole::Removed ||
+                 rows[last + 1].role == DiffRowRole::Meta);
+            if (!next_changed) break;
+            ++last;
+        }
+        b.last = last;
+        b.before = before;
+        b.after = after;
+        if (before > 0 && after > 0) {
+            b.kind = DiffChangeKind::Replacement;
+        } else if (before > 0) {
+            b.kind = DiffChangeKind::Deletion;
+        } else {
+            b.kind = DiffChangeKind::Insertion;
+        }
+        blocks.push_back(b);
+        i = last + 1;
+    }
+    return blocks;
+}
+
+DiffChangeKind diff_row_change(const std::vector<DiffChangeBlock>& blocks,
+                               size_t row_index) {
+    /* Блоки отсортированы по `first` и не пересекаются, поэтому искомый
+     * находится делением, а не перебором: окно спрашивает про каждую
+     * строку блока, и перебор дал бы O(строк × блоков) на кадр. */
+    size_t lo = 0, hi = blocks.size();
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (blocks[mid].last < row_index) {
+            lo = mid + 1;
+        } else if (blocks[mid].first > row_index) {
+            hi = mid;
+        } else {
+            return blocks[mid].kind;
+        }
+    }
+    return DiffChangeKind::None;
+}
+
+DiffColor diff_change_color(DiffChangeKind kind, DiffRowRole role) {
+    DiffColor c;
+    /* Прозрачность ставится ПЕРВОЙ и на всех путях: у DiffColor значение по
+     * умолчанию — a = 1, то есть непрозрачный цвет, и «красить нечего»
+     * вернуло бы полностью непрозрачную полосу под служебной строкой.
+     * (Это не фантазия: путь «нечего красить» сначала возвращал дефолт, и
+     * проверка на нулевую альфу это поймала.) */
+    c.a = 0.0f;
+    const bool removed = role == DiffRowRole::Removed;
+    const bool added = role == DiffRowRole::Added;
+    if (!removed && !added) return c;   /* вне блока красить нечего */
+    if (removed) {
+        c.r = 0.90f; c.g = 0.47f; c.b = 0.45f;
+    } else {
+        c.r = 0.42f; c.g = 0.85f; c.b = 0.47f;
+    }
+    /* Замена — обе стороны рядом, полоса читается как одно изменение; у
+     * вставки и удаления второй стороны нет, и полная сила выдавала бы
+     * больше, чем показано (граница в шапке). */
+    c.a = (kind == DiffChangeKind::Replacement) ? 0.30f : 0.18f;
+    return c;
+}
+
+std::string diff_change_label(const DiffChangeBlock& block) {
+    switch (block.kind) {
+        case DiffChangeKind::Replacement:
+            return "замена " + std::to_string(block.before) + " → " +
+                   std::to_string(block.after);
+        case DiffChangeKind::Insertion:
+            return "добавлено " + std::to_string(block.after);
+        case DiffChangeKind::Deletion:
+            return "удалено " + std::to_string(block.before);
+        case DiffChangeKind::None:
+            break;
+    }
+    return std::string();
+}
+
 } // namespace diff
 } // namespace coder

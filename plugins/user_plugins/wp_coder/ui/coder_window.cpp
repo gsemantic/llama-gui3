@@ -311,6 +311,11 @@ static void render_diff_rows(const coder::diff::FileDiff& fd) {
         coder::diff::parse_unified(fd.patch);
     const size_t trimmed = coder::diff::trim_diff(rows);
     const coder::diff::DiffGutter gutter = coder::diff::diff_number_gutter(rows);
+    /* И11.2: блоки правки. Их вид («замена», «вставка», «удаление») и полоса
+     * под строкой решаются в core: подсветка должна отличать ЗАМЕНУ от
+     * удаления, а по роли строки их не отличить — обе Removed. */
+    const std::vector<coder::diff::DiffChangeBlock> blocks =
+        coder::diff::diff_change_blocks(rows);
 
     ImGui::Checkbox("Перенос строк##diff_wrap", &s_diff_word_wrap);
     ImGui::SameLine();
@@ -330,8 +335,35 @@ static void render_diff_rows(const coder::diff::FileDiff& fd) {
                       ImGuiWindowFlags_HorizontalScrollbar);
     /* 0.0f — перенос по краю окна; отрицательное — не переносить вовсе. */
     ImGui::PushTextWrapPos(s_diff_word_wrap ? 0.0f : -1.0f);
-    for (const coder::diff::DiffRow& row : rows) {
+    size_t block = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const coder::diff::DiffRow& row = rows[i];
+        /* Подпись блока — один раз, на его первой строке. */
+        if (block < blocks.size() && blocks[block].first == i) {
+            ImGui::TextColored(ImVec4(0.62f, 0.62f, 0.68f, 1.0f), "%s",
+                               coder::diff::diff_change_label(blocks[block])
+                                   .c_str());
+            ++block;
+        }
         const coder::diff::DiffColor c = coder::diff::diff_role_color(row.role);
+        /* Полоса подсветки «до/после» — ПОД текстом, а не вместо него:
+         * текст остаётся тем же цветом, что в 11.1, а полоса показывает,
+         * к какой стороне правки строка относится. Рисуется ДО текста, иначе
+         * полупрозрачная заливка легла бы поверх букв. */
+        const coder::diff::DiffColor band = coder::diff::diff_change_color(
+            coder::diff::diff_row_change(blocks, i), row.role);
+        if (band.a > 0.0f) {
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
+            const float width = ImGui::GetContentRegionAvail().x;
+            const float pad = ImGui::GetStyle().FramePadding.x;
+            auto channel = [](float v) { return static_cast<int>(v * 255.0f + 0.5f); };
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(pos.x - pad, pos.y),
+                ImVec2(pos.x + width + pad,
+                       pos.y + ImGui::GetTextLineHeight()),
+                IM_COL32(channel(band.r), channel(band.g), channel(band.b),
+                         channel(band.a)));
+        }
         ImGui::TextColored(ImVec4(c.r, c.g, c.b, c.a), "%s",
                            coder::diff::format_diff_row(row, gutter).c_str());
     }
@@ -411,6 +443,130 @@ static void render_snapshot_diff() {
     ImGui::TreePop();
 }
 
+/* --- И11.2: правки по вызовам (`ToolOutput::metadata.filediff`) ---
+ *
+ * Задача 11.2 — «подсветка diff до/после; diff приходит из
+ * `metadata.filediff`». Данные приходят оттуда и разбираются ОДНИМ
+ * вызовом `diff::filediff_from_metadata`: форма `filediff` объявлена в
+ * core/diff.h и читается там же, и окно не должно знать, что там внутри
+ * объекта (Д2, Д12).
+ *
+ * Правило блокировок — то же, что у diff уровней выше, и по той же
+ * причине: `state_.mtx` берётся на КОПИЮ метаданных и отпускается, а
+ * разбор патчей идёт уже без него. Разбор держит лок — то же, за что
+ * закрыли D1 (окно, ждущее мьютекс агента).
+ *
+ * Предел — `limits::kMaxToolDiffCalls`, и пропущенное называется числом:
+ * панель показывает последние вызовы, и молчаливая часть списка выглядела
+ * бы как «агент правил вот столько». */
+namespace {
+
+struct ToolDiffEntry {
+    std::string tool;
+    std::string call_id;
+    std::vector<coder::diff::FileDiff> files;
+    std::string note;   /* оговорки чтения: счётчики, пропущенные записи */
+};
+
+/* Копия метаданных вызова под локом — ровно столько записей, сколько
+ * панель покажет. `out` заполняется уже без лока. */
+std::vector<ToolDiffEntry> collect_tool_diffs(size_t* omitted_calls) {
+    std::vector<ToolDiffEntry> entries;
+    size_t kept_calls = 0, kept_files = 0, dropped = 0;
+    {
+        auto& st = engine_state();
+        std::lock_guard<std::mutex> lk(st.mtx);
+        for (const Message& m : st.session) {
+            for (const MessagePart& p : m.parts) {
+                if (!p.is(PartKind::Tool) || !p.has_result()) continue;
+                const json::JsonValue& md = p.output().metadata;
+                const json::JsonValue* list =
+                    md.is_object() ? md.find("filediff") : nullptr;
+                if (list == nullptr || !list->is_array()) continue;
+                /* Проверка предела — до копии метаданных: копировать всё
+                 * содержимое сессии ради десяти показываемых блоков значило
+                 * бы платить за невидимое. */
+                if (kept_calls >= limits::kMaxToolDiffCalls ||
+                    kept_files + list->size() > limits::kMaxDiffFiles) {
+                    ++dropped;
+                    continue;
+                }
+                ToolDiffEntry e;
+                e.tool = p.tool_name();
+                e.call_id = p.call_id();
+                coder::json::JsonValue copied = md;
+                std::vector<coder::diff::FileDiff> files;
+                diff::filediff_from_metadata(copied, &files, &e.note);
+                if (files.empty()) continue;
+                kept_calls += 1;
+                kept_files += list->size();
+                e.files = std::move(files);
+                entries.push_back(std::move(e));
+            }
+        }
+    }
+    *omitted_calls = dropped;
+    return entries;
+}
+
+} // namespace
+
+static void render_tool_diffs() {
+    size_t omitted = 0;
+    const std::vector<ToolDiffEntry> entries = collect_tool_diffs(&omitted);
+
+    char head[96];
+    std::snprintf(head, sizeof(head), "Правки по вызовам: %zu вызовов",
+                  entries.size());
+    if (!ImGui::TreeNodeEx(head, ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    if (entries.empty()) {
+        ImGui::TextDisabled("пишущих вызовов с diff в сессии нет");
+        ImGui::TreePop();
+        return;
+    }
+    if (omitted > 0) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "Показаны последние вызовы: ещё %zu осталось за "
+                           "кадром (предел — показывать, сколько влезло)",
+                           omitted);
+    }
+    for (const ToolDiffEntry& e : entries) {
+        ImGui::PushID(e.call_id.c_str());
+        char line[192];
+        std::snprintf(line, sizeof(line), "%s — файлов: %zu", e.tool.c_str(),
+                      e.files.size());
+        if (ImGui::TreeNodeEx(line, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!e.note.empty()) {
+                ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s",
+                                   e.note.c_str());
+            }
+            for (const coder::diff::FileDiff& fd : e.files) {
+                ImGui::PushID(fd.file.c_str());
+                char fline[320];
+                std::snprintf(fline, sizeof(fline), "%s  +%zu −%zu",
+                              fd.file.c_str(), fd.additions, fd.deletions);
+                if (ImGui::TreeNodeEx(fline, ImGuiTreeNodeFlags_DefaultOpen)) {
+                    /* Двоичный файл, изменение прав, обрезанный патч и
+                     * «прав не было» приходят с пустым `patch`: строк нет, и
+                     * вместо них показывается причина (граница 2 шапки
+                     * core/diff.h). */
+                    if (!fd.note.empty()) {
+                        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                                           "%s", fd.note.c_str());
+                    }
+                    render_diff_rows(fd);
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
+}
+
 static void render_session() {
     if (!g_api->window_is_visible(g_host, g_win_session)) return;
     ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
@@ -454,6 +610,7 @@ static void render_session() {
     }
 
     render_snapshot_diff();
+    render_tool_diffs();
 
     /* Лента событий (последние 40). */
     ImGui::BeginChild("session_events", ImVec2(0, 0), ImGuiChildFlags_Borders);

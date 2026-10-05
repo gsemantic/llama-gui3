@@ -11,6 +11,7 @@
 #include "instruction.h"
 #include "apply_patch.h"
 #include "text_edit.h"
+#include "diff.h"
 #include "file_lock.h"
 #include "json_utils.h"
 #include "snapshot.h"
@@ -457,6 +458,37 @@ ToolOutput out(std::string title, std::string text) {
     return o;
 }
 
+/* И11.2: diff «до/после» в метаданных результата вызова.
+ *
+ * Форму собирает core (`diff::filediff_metadata`) — одна на все пишущие
+ * инструменты; здесь только пристегнуть её к ToolOutput. Существующие
+ * метаданные НЕ затираются: у `apply_patch` в них свои счётчики и список
+ * файлов, и появление diff не должно стирать их (объект создаётся, только
+ * если его не было).
+ *
+ * Кто вызывает: инструменты, которые реально записали (или предложили
+ * записать) файл. Отказ и запрет diff не несут: ничего не изменилось, и
+ * показывать нечего. */
+ToolOutput with_filediff(ToolOutput o,
+                         const std::vector<diff::FileDiff>& files) {
+    if (files.empty()) return o;
+    if (!o.metadata.is_object()) o.metadata = json::JsonValue::object();
+    o.metadata.set("filediff", diff::filediff_metadata(files));
+    return o;
+}
+
+/* И11.2: прочитать содержимое файла ДО записи — «до» для diff. Отсутствие
+ * файла и ошибка чтения дают пустое содержимое, а не отказ: файл, который
+ * нечем прочитать, инструмент запишет иначе (например, создаст), и пустая
+ * «до» тогда честна, а отказ здесь означал бы, что правку не показали бы
+ * вовсе. */
+std::string read_existing(const std::string& abs) {
+    std::ifstream fin(abs, std::ios::binary);
+    if (!fin) return std::string();
+    return std::string((std::istreambuf_iterator<char>(fin)),
+                       std::istreambuf_iterator<char>());
+}
+
 /* Список путей в ответ инструмента. Показывается начало, а не всё, и
  * число остальных названо: список без хвоста молчал бы, что вернулось
  * двадцать файлов, а вернулось семьдесят. Потолок — тот же, что у
@@ -814,12 +846,20 @@ void register_base_tools() {
              * CRLF-файла через LF молча ломает .gitattributes и
              * .bat/.sh, а BOM ждут Windows-редакторы и часть CI. */
             const std::string body = preserve_file_format(abs, content);
+            /* И11.2: «до» читается под уже взятой блокировкой файла и до
+             * записи, иначе читать было бы нечего. Сравнивается ровно то,
+             * что уйдёт в файл (`body`, а не `content`): diff, посчитанный
+             * не по тому, что записано, врал бы о числе правок. */
+            const std::string before_raw = read_existing(abs);
+            const diff::FileDiff fd = diff::make_file_diff(rel, before_raw, body);
             std::ofstream f(abs, std::ios::binary | std::ios::trunc);
             if (!f) return out("[ошибка] не удалось записать: " + abs);
             f << body;
             f.close();
-            return out("записано " + rel, "[записано] " + abs + " ("
-                       + std::to_string(body.size()) + " байт)");
+            return with_filediff(
+                out("записано " + rel, "[записано] " + abs + " (" +
+                           std::to_string(body.size()) + " байт)"),
+                {fd});
         };
         reg.register_def(std::move(def));
     }
@@ -1128,11 +1168,15 @@ void register_base_tools() {
             std::stringstream report;
             int added = 0, updated = 0, deleted = 0, moved = 0, proposed = 0;
             json::JsonValue files_meta = json::JsonValue::array();
+            /* И11.2: один патч меняет сколько угодно файлов, поэтому diff
+             * копится и уходит одним списком — форма `filediff` одна и для
+             * одного файла (граница 1 в шапке core/diff.h). */
+            std::vector<diff::FileDiff> fds;
 
             /* Отказ посреди патча. К этому моменту часть файлов могла уже
              * быть записана, и молчать об этом нельзя: модель и пользователь
              * решили бы, что не тронуто ничего, и потеряли бы правки. */
-            auto refuse = [&report](const std::string& what) {
+            auto refuse = [&report, &fds](const std::string& what) {
                 std::stringstream s;
                 if (report.str().empty()) {
                     s << "[apply_patch: отказ, ничего не изменено]\n" << what;
@@ -1144,7 +1188,10 @@ void register_base_tools() {
                       << "Остальные файлы патча не тронуты. Перечитай их и"
                          " пришли оставшиеся операции отдельным патчем.";
                 }
-                return out("apply_patch", s.str());
+                /* И11.2: частично применённый патт — половина которого уже
+                 * в проекте, — отдаёт diff того, что УЖЕ записано: текст
+                 * отказа перечисляет файлы, а подсветка показывает правку. */
+                return with_filediff(out("apply_patch", s.str()), fds);
             };
 
             for (const auto& f : p.files) {
@@ -1179,7 +1226,14 @@ void register_base_tools() {
                         report << "  создан " << f.path << " ("
                                << content.size() << " байт)\n";
                     }
+                    /* И11.2: у нового файла «до» нет вовсе — это и есть
+                     * создание, и виджет покажет сплошное добавление. */
+                    fds.push_back(diff::make_file_diff(f.path, "", content));
                 } else if (f.op == patch::Op::Delete) {
+                    /* И11.2: содержимое читается ДО удаления — после
+                     * удаления читать нечего, и удалённый файл остался бы
+                     * без единой строки в панели. */
+                    const std::string was = read_existing(abs);
                     std::error_code ec;
                     fs::remove(abs, ec);
                     if (ec)
@@ -1187,6 +1241,14 @@ void register_base_tools() {
                                       + ec.message());
                     ++deleted;
                     report << "  удалён " << f.path << "\n";
+                    diff::FileDiff fd = diff::make_file_diff(f.path, was, "");
+                    if (fd.additions == 0 && fd.deletions == 0) {
+                        /* Пустой удалённый файл сравнить не с чем: без
+                         * этой оговорки он выглядел бы как «содержимое
+                         * совпадает», то есть как правки, которой не было. */
+                        fd.note = "файл удалён";
+                    }
+                    fds.push_back(std::move(fd));
                 } else {
                     std::ifstream fi(abs, std::ios::binary);
                     if (!fi) return refuse("не удалось прочитать: " + abs);
@@ -1225,6 +1287,12 @@ void register_base_tools() {
                         }
                         report << "\n";
                     }
+                    /* И11.2: имя файла в diff — ТО, по которому правка
+                     * теперь лежит. При перемещении это новый путь: подписать
+                     * правку старым именем значило бы показать изменение
+                     * файла, которого по этому имени уже нет. */
+                    fds.push_back(diff::make_file_diff(
+                        f.move_to.empty() ? f.path : f.move_to, raw, result));
                 }
                 json::JsonValue meta = json::JsonValue::object();
                 meta.set("path", f.path);
@@ -1251,7 +1319,9 @@ void register_base_tools() {
             o.metadata.set("moved", static_cast<long long>(moved));
             o.metadata.set("proposed", static_cast<long long>(proposed));
             o.metadata.set("files", std::move(files_meta));
-            return o;
+            /* И11.2: diff идёт в те же метаданные, а не заменяет их: свои
+             * счётчики у патча свои, и стирать их из-за чужого поля нельзя. */
+            return with_filediff(std::move(o), fds);
         };
         reg.register_def(std::move(def));
     }
@@ -1340,12 +1410,18 @@ void register_base_tools() {
             const EditResult r = apply_edit(split_text(raw), req);
             if (!r.ok) return out("замена в " + rel, "[search_replace] " + r.error);
             const std::string result = join_text(r.file);
+            /* И11.2: обе стороны уже в руках — прочитанное `raw` и то, что
+             * уйдёт в файл (`result`). Пересчёт по патчу не нужен, форма
+             * та же, что у остальных инструментов. */
+            const diff::FileDiff fd = diff::make_file_diff(rel, raw, result);
 
             if (ctx.propose_write(rel, result)) {
-                return out("предложено " + rel,
-                           "[предложено] " + abs + " (search_replace, строка "
-                               + std::to_string(r.line) + ", стадия "
-                               + edit_strategy_name(r.used) + ")");
+                return with_filediff(
+                    out("предложено " + rel,
+                        "[предложено] " + abs + " (search_replace, строка "
+                            + std::to_string(r.line) + ", стадия "
+                            + edit_strategy_name(r.used) + ")"),
+                    {fd});
             }
 
             std::string perm = guard_permission(ctx, abs);
@@ -1365,7 +1441,7 @@ void register_base_tools() {
                  * что правка попала по сходству, а не по точному тексту. */
                 rep << " [ВНИМАНИЕ: совпадение нечёткое, проверь результат!]";
             }
-            return out("замена в " + rel, rep.str());
+            return with_filediff(out("замена в " + rel, rep.str()), {fd});
         };
         reg.register_def(std::move(def));
     }
@@ -1661,9 +1737,17 @@ void register_base_tools() {
             tf.trailing_newline = src.trailing_newline;
             const std::string new_content = join_text(tf);
 
+            /* И11.2: обе стороны уже в руках — `raw` (прочитанное) и `new_content`
+             * (то, что уйдёт в файл). */
+            const diff::FileDiff fd = diff::make_file_diff(rel, raw, new_content);
+
             if (ctx.propose_write(rel, new_content)) {
-                return out("предложено " + rel, "[предложено] " + abs + " (edit_file, строки "
-                           + std::to_string(start) + "-" + std::to_string(end) + ")");
+                return with_filediff(
+                    out("предложено " + rel,
+                        "[предложено] " + abs + " (edit_file, строки "
+                            + std::to_string(start) + "-" + std::to_string(end)
+                            + ")"),
+                    {fd});
             }
 
             std::string perm = guard_permission(ctx, abs);
@@ -1672,8 +1756,11 @@ void register_base_tools() {
             if (!fout) return out("[ошибка] не удалось записать: " + abs);
             fout << new_content;
             fout.close();
-            return out("правка " + rel, "[edit_file] " + abs + ": заменены строки "
-                       + std::to_string(start) + "-" + std::to_string(end));
+            return with_filediff(
+                out("правка " + rel,
+                    "[edit_file] " + abs + ": заменены строки "
+                        + std::to_string(start) + "-" + std::to_string(end)),
+                {fd});
         };
         reg.register_def(std::move(def));
     }

@@ -254,6 +254,11 @@ if(WP_CODER_BUILD_TESTS)
         # test_iteration_iv_invariants.cpp; стоит после test_diff.cpp,
         # потому что читает его патчи.
         tests/test_diff_view.cpp
+        # И11.2: diff вызова (`metadata.filediff`) и подсветка «до/после».
+        # Инструментов не регистрирует (только зовёт зарегистрированные), но
+        # проверяет, что ПИШУЩИЕ инструменты отдают diff, поэтому стоит после
+        # test_base_tools.cpp и до регистрации модульных инструментов.
+        tests/test_diff_tool.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp
