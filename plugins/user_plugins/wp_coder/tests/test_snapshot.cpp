@@ -1598,6 +1598,59 @@ TEST(new_work_after_an_undo_kills_the_way_forward) {
     ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("four\n"));
 }
 
+TEST(new_work_after_an_undo_is_itself_undoable) {
+    /* Продолжение предыдущей проверки: новый шаг после ДВУХ отмен не только
+     * убивает возврат вперёд, но и сам обязан отменяться.
+     *
+     * Именно две отмены, а не одна: состояние, оставленное переходом,
+     * непустое только там, куда переход уже приходил.
+     *
+     * Здесь ломается РАСХОЖДЕНИЕ ИНДЕКСОВ. Стек помнит состояние, которое
+     * оставил переход (шапка UndoStack, отклонение 122), и держит его
+     * параллельно уровням. Новый шаг подрезает хвост уровней вперёд — и
+     * хвост состояний обязан уйти вместе с ним: если он останется, то
+     * после подрезки и push() индексы разъедутся, состояние, оставленное
+     * ОТМЕНЁННЫМ уровнем, встанет на место нового уровня, и следующая
+     * отмена решит, что проект упирается вперёд, — то есть отменит уже
+     * отменённый шаг вместо нового. Проверка ловит это содержимым файла,
+     * а не падением.
+     *
+     * Второй эффект того же расхождения — копии: оставшиеся состояния
+     * никто не удалит (отклонение 109), а на не-git-проекте это каталоги. */
+    SandBox sb("undo_after_new_work");
+    std::error_code ec;
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "v0\n");
+
+    UndoStack stack;
+    stack.push(take(repo, sb.store()));            /* уровень 0 */
+    write_content(repo, "a.txt", "v1\n");
+    stack.push(take(repo, sb.store()));            /* уровень 1 */
+    write_content(repo, "a.txt", "v2\n");
+    write_content(repo, "side.txt", "создано вторым шагом\n");
+    stack.push(take(repo, sb.store()));            /* уровень 2 */
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v1\n"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "side.txt"));
+    /* Вторая отмена: без неё расхождение индексов не видно — состояние,
+     * оставленное на уровне 2, при подрезке хвоста ещё пустое и на место
+     * нового уровня не встаёт. */
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v0\n"));
+
+    /* Новая работа: уровни 1 и 2 и их состояния уходят в хвост. */
+    write_content(repo, "a.txt", "v3\n");
+    stack.push(take(repo, sb.store()));
+    ASSERT_EQ(stack.size(), (size_t)2);
+    ASSERT_FALSE(stack.can_redo());
+
+    /* Отмена нового шага обязана вернуть ИМЕННО его. */
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v0\n"));
+    (void)ec;
+}
+
 TEST(undo_returns_a_deleted_file_and_keeps_a_created_one) {
     /* Граница 1 шапки core/snapshot.h: отмена — не обращение функции.
      std::error_code ec;
@@ -2729,22 +2782,102 @@ TEST(undo_returns_several_files_at_once_from_a_copy_snapshot) {
      * состоянию» было бы неправдой. */
     ASSERT_EQ(u.leftover.size(), (size_t)0);
     ASSERT_TRUE(u.can_redo);
-    /* Возврат вперёд ЗДЕСЬ отказывает, и это не сбой, а следствие
-     * отклонения 122 на пути копии каталога: отмена не удалила
-     * `fresh.txt`, проект отличается от уровня, а правило «возврат вперёд
-     * умирает на новой работе» проверяет РОВНО это отличие и не может
-     * отличить «файл, оставшийся от отменённого шага», от «новой работы».
-     * На git-пути то же самое работает (там состояние — tree-hash, и
-     * неотслеживаемый файл в него не входит), проверено сравнением.
+    /* Возврат вперёд ПОСЛЕ ОТМЕНЫ, ОСТАВИВШЕЙ ФАЙЛ, РАБОТАЕТ (отклонение
+     * 122 закрыто): сравнение идёт с состоянием, которое оставил отменённый
+     * уровень, а не с состоянием уровня. До починки сравнение шло с
+     * уровнем, файл `fresh.txt` в него не входил, и отказ был неизбежен —
+     * то есть на не-git-проекте вернуться вперёд после отмены было нельзя
+     * никогда, а на git-проекте можно (там состояние — tree-hash, и
+     * неотслеживаемый файл в него не входит).
      *
-     * Поведение закреплено проверкой, а не обойдено: починка означала бы
-     * хранить в стеке состояние сразу после отката и сравнивать с ним, а
-     * это правка закрытой задачи 10.4 — отдельным коммитом (правило 5). */
+     * Поведение закреплено проверкой с обеих сторон: раньше здесь стоял
+     * `ASSERT_FALSE(back.ok)`, и починка обязана была перевернуть именно
+     * эту строку, а не добавить рядом вторую проверку. */
     const MoveResult back = stack.redo(repo, sb.store());
-    ASSERT_FALSE(back.ok);
-    ASSERT_TRUE(back.reason.find("после новых правок") != std::string::npos);
-    /* Стек после отказа остался пригоден: отмена назад работает. */
+    ASSERT_TRUE(back.ok);
+    /* Откат не удаляет созданный файл — и на ОТКАТЕ НАЗАД, тоже: возврат
+     * вперёд приводит файлы к состоянию уровня, а `fresh.txt` в этом
+     * состоянии не было. Он остаётся, и это сказано словами. */
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("ONE\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("TWO\n"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "gone.txt"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "fresh.txt"));
+    /* И назад: возврат вперёд не сломал отмену. */
+    const MoveResult again = stack.undo(repo, sb.store());
+    ASSERT_TRUE(again.ok);
     ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("one\n"));
+    ASSERT_EQ(read_text(fs::path(repo) / "b.txt"), std::string("two\n"));
+    /* Стек после всего этого остался пригоден, и стоит он на самом раннем
+     * состоянии: следующая отмена обязана ОТКАЗАТЬ, а не отменить уже
+     * отменённый шаг (файл `fresh.txt`, переживший отмену, до починки
+     * делал ровно это — см. вторую половину проверки ниже). */
+    const MoveResult early = stack.undo(repo, sb.store());
+    ASSERT_FALSE(early.ok);
+    ASSERT_TRUE(early.reason.find("самое раннее") != std::string::npos);
+}
+
+TEST(two_undos_in_a_row_each_cancel_exactly_one_step_when_a_file_survived_the_first) {
+    /* ТО ЖЕ, ЧТО ПЕРВАЯ ПОЛОВИНА, НО НА ТРЁХ УРОВНЯХ: два отменённых
+     * шага подряд, и на каждом шаге остаётся файл, который отмена не
+     * уносит.
+     *
+     * Здесь ломается ровно то, что не видит проверка выше. Отмена первого
+     * шага оставила `new1.txt`; второе нажатие «отменить» сравнивало проект
+     * с УРОВНЕМ, видело файл, которого в уровне нет, и считало, что проект
+     * упирается вперёд, — то есть отменяло тот же первый шаг вместо
+     * второго. На третьем нажатии позиция уехала в начало сессии.
+     *
+     * Проверяется не «отмена вообще работает», а ЧТО ИМЕННО ОТМЕНЕНО на
+     * каждом нажатии: файлы шага. Граница названа: сравнение ведётся с
+     * состоянием, которое оставил переход, и для этого состояния снимается
+     * свой снимок — на не-git-проекте это копия каталога, и она снимается
+     * только когда отличается от уровня (шапка UndoStack). */
+    SandBox sb("undo_copy_two_steps");
+    std::error_code ec;
+    const std::string repo = sb.project();
+    write_content(repo, "a.txt", "v0\n");
+
+    UndoStack stack;
+    stack.push(take(repo, sb.store()));       /* уровень 0 */
+
+    write_content(repo, "a.txt", "v1\n");
+    write_content(repo, "new1.txt", "n1\n");
+    stack.push(take(repo, sb.store()));       /* уровень 1 */
+
+    write_content(repo, "a.txt", "v2\n");
+    write_content(repo, "new2.txt", "n2\n");
+    stack.push(take(repo, sb.store()));       /* уровень 2 */
+
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v1\n"));
+    /* Второе нажатие отменяет ВТОРОЙ шаг, а не первый повторно. */
+    ASSERT_TRUE(stack.undo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v0\n"));
+    /* Оба переживших файла на месте: откат не удаляет (отклонение 122). */
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "new1.txt"));
+    ASSERT_TRUE(fs::exists(fs::path(repo) / "new2.txt"));
+    /* Третье нажатие — отказ, а не «отмена уровня 0 в третий раз». */
+    ASSERT_FALSE(stack.undo(repo, sb.store()).ok);
+    /* И обратно вперёд на два шага: возврат перескакивает через
+     * пережившие файлы, а не упирается в них. */
+    ASSERT_TRUE(stack.redo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v1\n"));
+    ASSERT_TRUE(stack.redo(repo, sb.store()).ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v2\n"));
+    /* Копии, снятые ради состояния «после отката», не остаются лежать: их
+     * отдаёт take_trash, и на не-git-проекте это каталоги (отклонение
+     * 109). Проверяется то, что доступно: стек жив и отмена работает. */
+    /* Хеш цели в ответе читается ПОСЛЕ того, как стек расширился отменённым
+     * состоянием. Пока move() держал ссылку на элемент levels_ и читал её
+     * после push_back, это было чтение освобождённой памяти: на мусоре
+     * проверка не падала, а на переиспользованном буфере — сегфолтом.
+     * Поэтому сверяется ЗНАЧЕНИЕ, а не «не упало». */
+    const MoveResult last = stack.undo(repo, sb.store());
+    ASSERT_TRUE(last.ok);
+    ASSERT_EQ(read_text(fs::path(repo) / "a.txt"), std::string("v1\n"));
+    ASSERT_FALSE(last.level_hash.empty());
+    ASSERT_EQ(last.level_hash, stack.level(1).hash);
+    (void)ec;
 }
 
 TEST(undo_then_redo_works_on_a_copy_snapshot_when_nothing_was_created) {

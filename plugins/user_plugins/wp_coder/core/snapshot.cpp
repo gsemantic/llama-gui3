@@ -29,7 +29,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -1227,7 +1226,9 @@ bool UndoStack::push(const Snapshot& s) {
      * проектов имена файлов совпадают). */
     if (!project_dir_.empty() && project_dir_ != s.project_dir) {
         trash_.insert(trash_.end(), levels_.begin(), levels_.end());
+        trash_.insert(trash_.end(), landed_.begin(), landed_.end());
         levels_.clear();
+        landed_.clear();
         pos_ = 0;
     }
     project_dir_ = s.project_dir;
@@ -1238,8 +1239,12 @@ bool UndoStack::push(const Snapshot& s) {
     if (pos_ + 1 < levels_.size()) {
         trash_.insert(trash_.end(), levels_.begin() + static_cast<long>(pos_) + 1,
                       levels_.end());
+        trash_.insert(trash_.end(), landed_.begin() + static_cast<long>(pos_) + 1,
+                      landed_.end());
         levels_.erase(levels_.begin() + static_cast<long>(pos_) + 1,
                       levels_.end());
+        landed_.erase(landed_.begin() + static_cast<long>(pos_) + 1,
+                      landed_.end());
     }
     /* Тот же уровень дважды не заводим: шаг, ничего не изменивший, не
      * должен стоить нажатия «отменить». */
@@ -1247,6 +1252,11 @@ bool UndoStack::push(const Snapshot& s) {
         return false;
     }
     levels_.push_back(s);
+    /* Уровень, поставленный шагом, и есть то состояние, на котором после
+     * него стоит проект: помнить рядом с ним другое незачем, а незаполненный
+     * элемент landed_ означает ровно это (шапка стека, блок про отклонение
+     * 122). */
+    landed_.push_back(Snapshot());
     pos_ = levels_.size() - 1;
 
     /* Глубина ограничена: уровень на проекте без git — полная копия
@@ -1263,7 +1273,9 @@ bool UndoStack::push(const Snapshot& s) {
      * защита стоит в move() (там позиция может быть нулевой). */
     while (levels_.size() > limits::kSnapshotStackDepth) {
         trash_.push_back(levels_.front());
+        trash_.push_back(landed_.front());
         levels_.erase(levels_.begin());
+        landed_.erase(landed_.begin());
         --pos_;
     }
     return true;
@@ -1271,7 +1283,9 @@ bool UndoStack::push(const Snapshot& s) {
 
 void UndoStack::clear() {
     trash_.insert(trash_.end(), levels_.begin(), levels_.end());
+    trash_.insert(trash_.end(), landed_.begin(), landed_.end());
     levels_.clear();
+    landed_.clear();
     pos_ = 0;
     project_dir_.clear();
 }
@@ -1310,17 +1324,31 @@ MoveResult UndoStack::move(int dir, const Snapshot& target,
                            const Snapshot& here, const std::string& project_dir,
                            const std::string& store_dir) {
     MoveResult r;
+    /* target — ССЫЛКА на элемент levels_, а levels_ ниже расширяется
+     * (levels_.push_back(here)) и стирается (вытеснение по глубине).
+     * Читать target после этого — читать освобождённую память.
+     *
+     * Дефект был ДО починки отклонения 122 и молчал: последнее чтение —
+     * `r.level_hash = target.hash` — попадало в буфер, который push_back
+     * только что освободил, и обычно тот кусок памяти ещё читался. Как
+     * только между расширением и чтением появилась ещё одна выделение
+     * (состояние «после отката»), освобождённый буфер переиспользовался —
+     * и чтение стало сегфолтом. То есть правка отклонения 122 не создала
+     * дефекта, а вскрыла чужой, и без неё он ждал бы своего первого
+     * показа. Копия стоит копей (снимок — это строки и путь, а не копия
+     * каталога), а ссылка стоила бы use-after-free в чужом месте. */
+    const Snapshot tgt = target;
     if (refuse_foreign(r, project_dir)) {
         report_position(r);
         return r;
     }
-    if (!target.ok()) {
-        r.reason = "уровня нет: " + target.reason;
+    if (!tgt.ok()) {
+        r.reason = "уровня нет: " + tgt.reason;
         report_position(r);
         return r;
     }
 
-    const RestoreResult res = restore(target.hash, target, project_dir, store_dir);
+    const RestoreResult res = restore(tgt.hash, tgt, project_dir, store_dir);
     if (!res.ok) {
         /* Снятое ради перехода состояние в стек не попало и уже не
          * пригодится: на проекте без git это копия целого каталога, и её
@@ -1357,11 +1385,12 @@ MoveResult UndoStack::move(int dir, const Snapshot& target,
      * случай» уводил позицию на уровень ниже цели (второе нажатие
      * отменяло шаг через один), а на третьем pos_ уходил под ноль и
      * индекс читался мимо массива. */
-    const bool ahead = !same_state(here, levels_[pos_]);
+    const bool ahead = !same_state(here, landed(pos_));
     if (dir > 0) {
         pos_ += 1;
     } else if (ahead) {
         levels_.push_back(here);
+        landed_.push_back(Snapshot());   /* стоим на нём, состояние = он сам */
     } else {
         --pos_;
     }
@@ -1371,13 +1400,37 @@ MoveResult UndoStack::move(int dir, const Snapshot& target,
      * в push(): уровень, на котором стоит проект, не вытесняется. */
     while (levels_.size() > limits::kSnapshotStackDepth && pos_ > 0) {
         trash_.push_back(levels_.front());
+        trash_.push_back(landed_.front());
         levels_.erase(levels_.begin());
+        landed_.erase(landed_.begin());
         --pos_;
+    }
+
+    /* Состояние, которое переход ОСТАВИЛ, а не состояние уровня: откат
+     * ничего не удаляет (отклонение 122), поэтому после него проект стоит
+     * на уровне плюс хвосты из файлов, созданных позже. Пока это состояние
+     * не помечено в landed_, следующий переход сравнил бы проект с уровнем,
+     * увидел хвост и объявил новую работу — то есть отмена не отменила бы
+     * шаг, а возврат вперёд отказал бы после собственной отмены.
+     *
+     * Помечается только РАЗЛИЧАЮЩЕЕ состояние: если после отката проект
+     * совпал с уровнем (отменили правки файлов — обычный случай), хранить
+     * нечего, и копия снятого состояния уходит в мусор. Иначе на
+     * не-git-проекте стек держал бы по копии каталога на каждый уровень
+     * (отклонение 109), то есть вдвое дороже прежнего. */
+    {
+        const Snapshot left = take(project_dir, store_dir);
+        if (!left.ok() || same_state(left, levels_[pos_])) {
+            trash_.push_back(left);       /* ненужная копия — в мусор */
+        } else {
+            if (landed_[pos_].ok()) trash_.push_back(landed_[pos_]);
+            landed_[pos_] = left;
+        }
     }
 
     r.ok = true;
     r.source = res.source;
-    r.level_hash = target.hash;
+    r.level_hash = tgt.hash;
     r.restored = res.restored;
     r.leftover = res.leftover;
     report_position(r);
@@ -1411,8 +1464,14 @@ MoveResult UndoStack::undo(const std::string& project_dir,
     /* Куда идём: если проект уперёд уровня (правки текущего шага) — к
      * самому верхнему уровню, и это отменяет ровно один шаг. Если проект
      * стоит на уровне — к предыдущему, иначе второе нажатие отменило бы
-     * два шага сразу. */
-    const bool ahead = !same_state(here, levels_[pos_]);
+     * два шага сразу.
+     *
+     * Сравнение идёт с тем состоянием, которое стек ОСТАВИЛ на этом уровне
+     * (шапка стека, отклонение 122): сравнение с уровнем увидело бы файл,
+     * переживший отмену, и решило бы, что проект упирается вперёд, — то
+     * есть второе нажатие «отменить» отменило бы уже отменённый шаг, а на
+     * третье вернулось бы в начало сессии. */
+    const bool ahead = !same_state(here, landed(pos_));
     if (!ahead && pos_ == 0) {
         /* Копия, снятая ради перехода, в стек не попала: на не-git-проекте
          * это целый каталог, и «отменить» на самом раннем уровне человек
@@ -1454,8 +1513,15 @@ MoveResult UndoStack::redo(const std::string& project_dir,
     /* Проект упирался вперёд от отменённого уровня — то есть после отмены
      * агент что-то поменял. Возврат вперёд тогда перепрыгнул бы через
      * сделанное (правило 2 шапки), и отказ честнее: уровни впереди ещё
-     * лежат в стеке, но переход через них уже не наш. */
-    if (!same_state(here, levels_[pos_])) {
+     * лежат в стеке, но переход через них уже не наш.
+     *
+     * Сравниваем с состоянием, которое ОСТАВИЛ отменённый уровень (шапка
+     * стека, отклонение 122): файл, созданный отменённым шагом и переживший
+     * отмену, в состояние уровня не входит, и сравнение с уровнем назвало
+     * бы его новой работой — то есть возврат вперёд после собственной отмены
+     * был бы невозможен на не-git-проекте (там состояние — копия каталога и
+     * файл в ней виден; на git-проекте он и не виден, и отказ законный). */
+    if (!same_state(here, landed(pos_))) {
         trash_.push_back(here);
         r.reason = "после новых правок возвращаться вперёд нельзя: возврат "
                    "перепрыгнул бы через сделанное";
