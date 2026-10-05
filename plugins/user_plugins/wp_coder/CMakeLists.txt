@@ -248,6 +248,12 @@ if(WP_CODER_BUILD_TESTS)
         # test_iteration_iv_invariants.cpp; стоит после test_snapshot.cpp,
         # потому что проверяет то, чем снимок кормит.
         tests/test_diff.cpp
+        # И11.1: строки показа diff (разбор патча, trim_diff, вид строки).
+        # Инструментов не регистрирует и состояние движка не трогает,
+        # поэтому может стоять где угодно до
+        # test_iteration_iv_invariants.cpp; стоит после test_diff.cpp,
+        # потому что читает его патчи.
+        tests/test_diff_view.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

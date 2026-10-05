@@ -271,14 +271,18 @@ static void render_tools() {
 }
 
 /* --- Окно: Сессия (5.1) --- */
-/* И10.5: diff по уровням стека сессии.
+/* И10.5: diff по уровням стека сессии. И11.1: виджет diff.
  *
  * Задача 10.5 — «diff для каждого снапшота доступен UI», и здесь ровно
  * «доступен»: список уровней, по кнопке — что изменит отмена этого
- * уровня. Настоящий виджет с тематизацией строк, переключателем
- * word-wrap и номерами строк — это И11.1/И11.2; здесь сознательно
- * простой текст, иначе 10.5 и 11.1 были бы одной задачей, а И11.1
- * потом нечего было бы делать.
+ * уровня. Дальше И11.1 заменила простой текст на виджет: строки с тематизацией
+ * по виду, номера с разной окраской и переключатель переноса.
+ *
+ * Рисование — тонкий слой. Всё решение (разбор патча на строки с видом и
+ * номерами, срезание общего отступа, цвет по виду, ширина колонки номеров и
+ * ширина содержимого) лежит в core/diff.h и покрыто проверками, потому что
+ * тестового харнесса для ImGui нет, а 11.13 будет сверять именно готовую
+ * строку. Здесь остаётся три вещи: позвать core, покрасить и напечатать.
  *
  * Два правила, которые видны в этой функции и обязаны быть названы:
  *   - `state_.mtx` НЕ держится на время подсчёта: снимки читаются под
@@ -291,6 +295,49 @@ static void render_tools() {
 static bool s_diff_loaded = false;
 static size_t s_diff_index = 0;
 static snapshot::DiffReport s_diff_report;
+/* Перенос строк в виджете diff. По умолчанию ВКЛЮЧЁН, и это решение, а не
+ * умолчание ImGui: без переноса длинная строка обрезается по краю окна, и
+ * конец правки не виден вовсе — то есть человек нажимает «отменить», не
+ * прочитав того, что отменит. */
+static bool s_diff_word_wrap = true;
+
+/* Строки одного файла: тематизация по виду, номера, перенос.
+ *
+ * Ширина содержимого задаётся по самой широкой строке блока, и это нужно
+ * только БЕЗ переноса: строка должна помещаться целиком, иначе полоса
+ * прокрутки не появится и конец правки просто пропадёт. */
+static void render_diff_rows(const coder::diff::FileDiff& fd) {
+    std::vector<coder::diff::DiffRow> rows =
+        coder::diff::parse_unified(fd.patch);
+    const size_t trimmed = coder::diff::trim_diff(rows);
+    const coder::diff::DiffGutter gutter = coder::diff::diff_number_gutter(rows);
+
+    ImGui::Checkbox("Перенос строк##diff_wrap", &s_diff_word_wrap);
+    ImGui::SameLine();
+    if (trimmed > 0) {
+        ImGui::TextDisabled("срезано общих отступов: %zu", trimmed);
+    } else {
+        ImGui::TextDisabled("общих отступов нет");
+    }
+
+    if (!s_diff_word_wrap) {
+        const float char_w = ImGui::CalcTextSize("0").x;
+        const size_t cols = coder::diff::diff_content_width(rows, gutter);
+        ImGui::SetNextWindowContentSize(
+            ImVec2(static_cast<float>(cols + 1) * char_w, 0.0f));
+    }
+    ImGui::BeginChild("##diff_rows", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    /* 0.0f — перенос по краю окна; отрицательное — не переносить вовсе. */
+    ImGui::PushTextWrapPos(s_diff_word_wrap ? 0.0f : -1.0f);
+    for (const coder::diff::DiffRow& row : rows) {
+        const coder::diff::DiffColor c = coder::diff::diff_role_color(row.role);
+        ImGui::TextColored(ImVec4(c.r, c.g, c.b, c.a), "%s",
+                           coder::diff::format_diff_row(row, gutter).c_str());
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+}
 
 static void render_snapshot_diff() {
     size_t levels = 0;
@@ -352,27 +399,11 @@ static void render_snapshot_diff() {
                 ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s",
                                    fd.note.c_str());
             }
-            /* Патч печатается построчно: строки `+`/`-` в окне без
-             * подсветки читаются тем же глазом, что и текст, а
-             * раскраска строк — это И11.1. */
-            size_t pos = 0;
-            while (pos < fd.patch.size()) {
-                const size_t nl = fd.patch.find('\n', pos);
-                const std::string one = nl == std::string::npos
-                                            ? fd.patch.substr(pos)
-                                            : fd.patch.substr(pos, nl - pos);
-                if (!one.empty() && one[0] == '+') {
-                    ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s",
-                                       one.c_str());
-                } else if (!one.empty() && one[0] == '-') {
-                    ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "%s",
-                                       one.c_str());
-                } else {
-                    ImGui::TextUnformatted(one.c_str());
-                }
-                if (nl == std::string::npos) break;
-                pos = nl + 1;
-            }
+            /* И11.1: настоящий виджет. Строки, номера, тематизация и
+             * перенос решаются в core/diff.h; двоичный файл, изменение
+             * прав и обрезанный патч приходят с пустым `patch`, и для них
+             * выше сказано почему — здесь строк нет и рисовать нечего. */
+            render_diff_rows(fd);
             ImGui::TreePop();
         }
         ImGui::PopID();

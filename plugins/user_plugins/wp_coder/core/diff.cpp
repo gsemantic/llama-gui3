@@ -9,8 +9,10 @@
 #include "diff.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "core/limits.h"
 #include "text_edit.h"
@@ -478,6 +480,331 @@ std::string parse_git_header_name(const std::string& field) {
         return name;
     }
     return "";
+}
+
+/* --- И11.1: строки показа (границы — в шапке core/diff.h) --- */
+
+namespace {
+
+/* Патч без завершающего перевода: `render_hunk` его не оставляет, и
+ * `strip_git_preamble` срезает. Но разбор не должен зависеть от того, чем
+ * именно патча владеет вызывающий: завершающий перевод дал бы лишнюю
+ * ПУСТУЮ строку, а она внутри hunk'а была бы прочитана как строка файла и
+ * сдвинула бы нумерацию. */
+std::vector<std::string> split_patch_lines(const std::string& patch) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos < patch.size()) {
+        const size_t nl = patch.find('\n', pos);
+        if (nl == std::string::npos) {
+            out.push_back(patch.substr(pos));
+            break;
+        }
+        out.push_back(patch.substr(pos, nl - pos));
+        pos = nl + 1;
+    }
+    if (!out.empty() && out.back().empty() && !patch.empty() &&
+        patch.back() == '\n') {
+        out.pop_back();
+    }
+    return out;
+}
+
+/* Число из заголовка hunk'а: `@@ -12,7 +13,4 @@`. Возвращает false, если
+ * это не заголовок или числа в нём нет. Проверка строгая намеренно: догадка
+ * («нумерация с нуля») показала бы в колонке номера чужой номер, а
+ * пропуск строки сдвинул бы нумерацию всего hunk'а. */
+bool read_number(const std::string& s, size_t* pos, size_t* out) {
+    if (*pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[*pos]))) {
+        return false;
+    }
+    size_t value = 0;
+    while (*pos < s.size() && std::isdigit(static_cast<unsigned char>(s[*pos]))) {
+        const size_t digit = static_cast<size_t>(s[*pos] - '0');
+        if (value > (static_cast<size_t>(1) << 40)) return false;  /* мусор */
+        value = value * 10 + digit;
+        ++*pos;
+    }
+    *out = value;
+    return true;
+}
+
+bool parse_hunk_header(const std::string& line, size_t* old_start,
+                       size_t* new_start) {
+    if (line.compare(0, 3, "@@ ") != 0 && line.compare(0, 3, "@@-") != 0) {
+        return false;
+    }
+    size_t pos = 3;
+    if (pos >= line.size() || line[pos] != '-') return false;
+    ++pos;
+    if (!read_number(line, &pos, old_start)) return false;
+    if (pos < line.size() && line[pos] == ',') {
+        ++pos;
+        size_t count = 0;
+        if (!read_number(line, &pos, &count)) return false;
+        (void)count;   /* длину не сверяем: патч бывает обрезан (откл. 137) */
+    }
+    /* Между диапазонами пробел: unified печатает `@@ -12,7 +13,4 @@`, и без
+     * его пропуска заголовок не читался бы ВООБЩЕ — то есть ни одного
+     * номера ни в одной строке блока. */
+    while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) ++pos;
+    if (pos >= line.size() || line[pos] != '+') return false;
+    ++pos;
+    if (!read_number(line, &pos, new_start)) return false;
+    if (pos < line.size() && line[pos] == ',') {
+        ++pos;
+        size_t count = 0;
+        if (!read_number(line, &pos, &count)) return false;
+        (void)count;
+    }
+    return true;
+}
+
+bool starts_with(const std::string& s, const char* prefix) {
+    return s.compare(0, std::strlen(prefix), prefix) == 0;
+}
+
+bool all_whitespace(const std::string& s) {
+    for (char c : s) {
+        if (c != ' ' && c != '\t' && c != '\r') return false;
+    }
+    return true;
+}
+
+/* Сколько символов отступа в начале строки. */
+size_t leading_blanks(const std::string& s) {
+    size_t n = 0;
+    while (n < s.size() && (s[n] == ' ' || s[n] == '\t')) ++n;
+    return n;
+}
+
+/* Ширина строки В СИМВОЛАХ, а не в байтах: кириллица в UTF-8 занимает два
+ * байта на букву, и по байтам любая русская строка выглядела бы вдвое
+ * длиннее, чем она есть. */
+size_t char_width(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s) {
+        if ((c & 0xC0) != 0x80) ++n;   /* не продолжение UTF-8-последовательности */
+    }
+    return n;
+}
+
+void pad_left(std::string* out, size_t width) {
+    if (char_width(*out) >= width) return;
+    std::string pad(width - char_width(*out), ' ');
+    *out = pad + *out;
+}
+
+} // namespace
+
+std::vector<DiffRow> parse_unified(const std::string& patch) {
+    std::vector<DiffRow> out;
+    const std::vector<std::string> lines = split_patch_lines(patch);
+    bool in_hunk = false;
+    bool numbered = false;
+    size_t old_no = 0;
+    size_t new_no = 0;
+    for (const std::string& line : lines) {
+        size_t old_start = 0;
+        size_t new_start = 0;
+        const bool looks_like_header = starts_with(line, "@@ ");
+        if (looks_like_header &&
+            parse_hunk_header(line, &old_start, &new_start)) {
+            DiffRow h;
+            h.role = DiffRowRole::Header;
+            h.text = line;
+            out.push_back(h);
+            in_hunk = true;
+            numbered = true;
+            old_no = old_start;
+            new_no = new_start;
+            continue;
+        }
+        if (looks_like_header) {
+            /* Заголовок, из которого числа не читаются. Сам он — служебная
+             * строка, но тело после него всё равно тело: иначе каждая
+             * строка правки попала бы в Meta и колонка номеров у блока
+             * пропала бы целиком (граница 3 шапки). Нумерация при этом
+             * выключена — номера остаются нулевыми, то есть колонка
+             * пустая, а не чужая. */
+            DiffRow m;
+            m.role = DiffRowRole::Meta;
+            m.text = line;
+            out.push_back(m);
+            in_hunk = true;
+            numbered = false;
+            old_no = 0;
+            new_no = 0;
+            continue;
+        }
+        if (!in_hunk) {
+            /* Заголовки файла: `--- a/путь` и `+++ b/путь`. Имя в шапке
+             * патча — то же, что виджет печатает над блоком, поэтому в
+             * строки показа оно не идёт (граница 2 шапки). */
+            if (starts_with(line, "--- ") || starts_with(line, "+++ ")) {
+                continue;
+            }
+            DiffRow m;
+            m.role = DiffRowRole::Meta;
+            m.text = line;
+            out.push_back(m);
+            continue;
+        }
+        DiffRow row;
+        /* Пустая строка внутри hunk'а — это контекстная строка пустого
+         * содержания: unified печатает её одним пробелом, но некоторые
+         * инструменты срезают этот пробел, и прочитать такую строку как
+         * служебную значило бы сдвинуть нумерацию всего hunk'а на единицу.
+         * Поэтому пустая строка трактуется как признак ' ', а не как
+         * «строка без признака». */
+        const char mark = line.empty() ? ' ' : line[0];
+        /* Текст строки — всё после признака; у пустой строки признака нет
+         * физически, и substr(1) на ней бросил бы исключение. */
+        const std::string body = line.empty() ? std::string() : line.substr(1);
+        switch (mark) {
+            case '+':
+                row.role = DiffRowRole::Added;
+                row.text = body;
+                if (numbered) row.new_no = new_no++;
+                break;
+            case '-':
+                row.role = DiffRowRole::Removed;
+                row.text = body;
+                if (numbered) row.old_no = old_no++;
+                break;
+            case ' ':
+                row.role = DiffRowRole::Context;
+                row.text = body;
+                if (numbered) {
+                    row.old_no = old_no++;
+                    row.new_no = new_no++;
+                }
+                break;
+            default:
+                /* Всё остальное — служебное: `\ No newline at end of file`
+                 * и строка, которую опознать не удалось. Показать её
+                 * тусклой честнее, чем выбросить (граница 4 шапки). */
+                row.role = DiffRowRole::Meta;
+                row.text = line;
+                break;
+        }
+        out.push_back(row);
+    }
+    return out;
+}
+
+size_t trim_diff(std::vector<DiffRow>& rows) {
+    bool any = false;
+    size_t common = 0;
+    for (const DiffRow& r : rows) {
+        if (r.role != DiffRowRole::Context && r.role != DiffRowRole::Added &&
+            r.role != DiffRowRole::Removed) {
+            continue;   /* служебные строки отступом не меряются */
+        }
+        if (all_whitespace(r.text)) continue;   /* пустая строка не мерит */
+        const size_t n = leading_blanks(r.text);
+        if (!any || n < common) common = n;
+        any = true;
+    }
+    if (!any || common == 0) return 0;
+    for (DiffRow& r : rows) {
+        if (r.role != DiffRowRole::Context && r.role != DiffRowRole::Added &&
+            r.role != DiffRowRole::Removed) {
+            continue;
+        }
+        /* Срезается не больше, чем есть: у пробельной строки отступ может
+         * оказаться короче общего, и съедание «лишнего» съело бы текст. */
+        const size_t n = leading_blanks(r.text);
+        const size_t cut = n < common ? n : common;
+        r.text.erase(0, cut);
+    }
+    return common;
+}
+
+DiffColor diff_role_color(DiffRowRole role) {
+    DiffColor c;
+    switch (role) {
+        case DiffRowRole::Added:
+            c.r = 0.42f; c.g = 0.85f; c.b = 0.47f; c.a = 1.0f;
+            break;
+        case DiffRowRole::Removed:
+            c.r = 0.90f; c.g = 0.47f; c.b = 0.45f; c.a = 1.0f;
+            break;
+        case DiffRowRole::Meta:
+            /* Тусклый серый: служебная строка не текст файла, и цветом
+             * текста она бы выдавалась за содержимое. */
+            c.r = 0.62f; c.g = 0.62f; c.b = 0.68f; c.a = 1.0f;
+            break;
+        case DiffRowRole::Header:
+            c.r = 0.45f; c.g = 0.62f; c.b = 0.90f; c.a = 1.0f;
+            break;
+        case DiffRowRole::Context:
+        default:
+            c.r = 0.80f; c.g = 0.80f; c.b = 0.84f; c.a = 1.0f;
+            break;
+    }
+    return c;
+}
+
+DiffGutter diff_number_gutter(const std::vector<DiffRow>& rows) {
+    size_t max_no = 0;
+    for (const DiffRow& r : rows) {
+        if (r.old_no > max_no) max_no = r.old_no;
+        if (r.new_no > max_no) max_no = r.new_no;
+    }
+    DiffGutter g;
+    size_t digits = 1;
+    for (size_t v = max_no; v >= 10; v /= 10) ++digits;
+    g.digits = digits < 3 ? 3 : digits;
+    /* две колонки номеров, пробел между ними, знак, пробел после знака */
+    g.chars = g.digits * 2 + 4;
+    return g;
+}
+
+size_t diff_widest_row(const std::vector<DiffRow>& rows) {
+    size_t widest = 0;
+    for (const DiffRow& r : rows) {
+        /* Служебные строки ширину содержимого не задают: заголовок hunk'а
+         * короткий, а `\ No newline at end of file` — 29 символов, и он
+         * растягивал бы окно каждого файла (граница 6 шапки). */
+        if (r.role == DiffRowRole::Header || r.role == DiffRowRole::Meta) {
+            continue;
+        }
+        const size_t n = char_width(r.text);
+        if (n > widest) widest = n;
+    }
+    return widest;
+}
+
+size_t diff_content_width(const std::vector<DiffRow>& rows,
+                          const DiffGutter& gutter) {
+    return gutter.chars + diff_widest_row(rows);
+}
+
+std::string format_diff_row(const DiffRow& row, const DiffGutter& gutter) {
+    std::string number;
+    if (row.old_no != 0) number = std::to_string(row.old_no);
+    std::string old_col = number;
+    pad_left(&old_col, gutter.digits);
+    number.clear();
+    if (row.new_no != 0) number = std::to_string(row.new_no);
+    std::string new_col = number;
+    pad_left(&new_col, gutter.digits);
+
+    char mark = ' ';
+    if (row.role == DiffRowRole::Added) mark = '+';
+    if (row.role == DiffRowRole::Removed) mark = '-';
+
+    std::string text = row.text;
+    /* Завершающий CR у CRLF-строки — часть её содержания (отклонение 135),
+     * и именно поэтому такая строка и отличается от LF-версии: так
+     * считаются изменённые строки. Но в тексте виджета это непечатаемый
+     * символ, который ломает раскладку строки, поэтому здесь он
+     * снимается: показать его нечем, а потерять из-за него признак правки
+     * нельзя. Один, в самом конце: CR внутри строки остаётся. */
+    if (!text.empty() && text.back() == '\r') text.pop_back();
+
+    return old_col + " " + new_col + " " + std::string(1, mark) + " " + text;
 }
 
 } // namespace diff
