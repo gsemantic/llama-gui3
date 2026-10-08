@@ -5,13 +5,16 @@
 #include "../core/module_api.h"
 #include "../core/project.h"
 #include "../core/security.h"
+#include "../core/session_store.h"
 #include "../core/snapshot.h"
 #include "../core/timeline.h"
+#include "../core/tool_display.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
 
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <algorithm>
 #include <sstream>
@@ -584,15 +587,237 @@ static void render_tool_diffs() {
  *
  * Лента событий ниже остаётся: она несёт события движка, которых нет в
  * сессии (составление плана, ожидание разрешения, ошибки цикла), и таймлайн
- * их не заменяет. */
+ * их не заменяет.
+ *
+ * И11.4: вызов стал ВЕТКОЙ, а тело ветки рисует виджет по типу инструмента
+ * (core/tool_display.h). Здесь по-прежнему только «позвать core, покрасить,
+ * напечатать»: вид строки, подписи и числа решаются в core, потому что
+ * 11.13 сверяет готовую строку, а собранную в окне сверять нечем.
+ */
+
+/* Раскрытые вызовы — ИДЕНТИФИКАТОРЫ, а не снимки и не тела виджетов.
+ *
+ * Снимок берётся отдельно и под локом (правило 3 SESSION_START, D1), а
+ * список раскрытого — это то, чем окно управляет, и живёт он в UI по
+ * определению. Держать здесь готовое тело значило бы завести второе место
+ * правды о вызове: тело в кэше окна разошлось бы с сессией, и человек
+ * увидел бы вывод, которого вызов уже не даёт. */
+static std::vector<std::string> s_open_calls;
+
+/* И11.5: режим показа деталей — переключатель ГЛОБАЛЬНЫЙ, то есть один на
+ * панель, а не на вызов. Живёт в окне рядом с раскрытыми ветками и по той
+ * же причине, почему живут они: это ВИД, а не свойство сессии, и в файл
+ * сессии он не пишется.
+ *
+ * По умолчанию ВКЛЮЧЕНО (`Details::All`): 11.4 только что отдал тела
+ * вызовов, и выключенный по умолчанию режим отнял бы их у того, кто
+ * переключатель не трогал. Обоснование и границы режима — в шапке
+ * core/timeline.h, где решение и живёт. */
+static bool s_show_details = true;
+
+static bool call_is_open(const std::string& call_id) {
+    return std::find(s_open_calls.begin(), s_open_calls.end(), call_id) !=
+           s_open_calls.end();
+}
+
+static void toggle_call(const std::string& call_id) {
+    const auto it = std::find(s_open_calls.begin(), s_open_calls.end(), call_id);
+    if (it != s_open_calls.end()) {
+        s_open_calls.erase(it);
+    } else {
+        s_open_calls.push_back(call_id);
+    }
+}
+
+/* Дерево ходов субагента: по КНОПКЕ, а не на каждом кадре.
+ *
+ * Тот же приём и по той же причине, что у diff уровня (10.5) и панели
+ * правок: это чтение с диска, а окно не должно делать его на каждом кадре.
+ * Кэш keyed по вызову и по идентификатору сессии: перечитывание при смене
+ * идентификатора не даёт показать чужое дерево после «продолжить задачу»
+ * (И8.9), где тот же вызов `task` уже ведёт другую сессию. */
+struct ChildTree {
+    std::string session;
+    timeline::Timeline tl;
+    std::string note;
+    bool loaded = false;
+};
+static std::map<std::string, ChildTree> s_child_trees;
+
+static std::string subagent_data_dir() {
+    const HostCallbacks& cb = engine().callbacks();
+    if (!cb.path_data_dir) return std::string();
+    return cb.path_data_dir();
+}
+
+static void render_child_tree(const std::string& call_id,
+                             const tool_display::Widget& w) {
+    if (w.child_session.empty()) return;
+    if (w.child_pending) {
+        /* Фоновая постановка: работа ещё идёт, файла ещё нет. Молчаливая
+         * пустота читалась бы как «у субагента не было ходов» — то есть как
+         * «дерево пустое», а не как «дерева пока нет». */
+        ImGui::TextDisabled("вложенное дерево: субагент ещё работает, файл "
+                            "появится после");
+        return;
+    }
+    if (!w.child_saved) {
+        /* Фоновая постановка и несохранённая сессия: файла нет, и читать
+         * нечего. */
+        ImGui::TextDisabled("вложенное дерево: сессия субагента не записана");
+        return;
+    }
+    ChildTree& cached = s_child_trees[call_id];
+    if (cached.session != w.child_session) {
+        /* Смена идентификатора сбрасывает кэш: показывать дерево прошлой
+         * сессии под новым вызовом значило бы соврать о том, что делал
+         * субагент. */
+        cached = ChildTree();
+        cached.session = w.child_session;
+    }
+    if (!cached.loaded) {
+        if (ImGui::Button("Прочитать дерево ходов субагента##child")) {
+            SessionFile file;
+            std::string error;
+            const std::string path = SessionArchive::subagent_file_path(
+                subagent_data_dir(), w.child_session);
+            /* Тот же путь, что читает resume субагента (core/subagent.cpp):
+             * второй способ найти файл сессии стал бы вторым местом одного
+             * факта. */
+            if (SessionArchive::load(path, file, &error)) {
+                cached.tl = timeline::build_timeline(timeline::timeline_source(
+                    file.messages, limits::kMaxTimelineTurns));
+                cached.note.clear();
+            } else {
+                cached.note = error;
+            }
+            cached.loaded = true;
+        }
+        ImGui::TextDisabled("чтение файла — по нажатию: окно не читает диск "
+                            "на каждом кадре");
+        return;
+    }
+    if (!cached.note.empty()) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s",
+                           cached.note.c_str());
+        return;
+    }
+    if (cached.tl.turns.empty()) {
+        ImGui::TextDisabled("в файле сессии субагента ходов нет");
+        return;
+    }
+    if (cached.tl.omitted_turns > 0) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "Показаны последние ходы субагента: ещё %zu за кадром",
+                           cached.tl.omitted_turns);
+    }
+    /* Тем же деревом, что основное (core/timeline.h): второе дерево вызовов
+     * разъехалось бы с первым при первом же новом поле. */
+    for (const timeline::Turn& turn : cached.tl.turns) {
+        ImGui::PushID(("sub_" + turn.id).c_str());
+        if (ImGui::TreeNodeEx(timeline::turn_label(turn).c_str())) {
+            for (const timeline::Call& call : turn.calls) {
+                const timeline::StatusColor c = timeline::status_color(call.status);
+                ImGui::TextColored(ImVec4(c.r, c.g, c.b, 1.0f), "%s",
+                                   timeline::call_label(call).c_str());
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+}
+
+/* Тело раскрытого вызова: виджет по типу инструмента. */
+static void render_call_body(const timeline::Call& call,
+                             const tool_display::Snapshots& shots) {
+    const tool_display::CallView* view = nullptr;
+    for (const tool_display::CallView& v : shots.views) {
+        if (v.call_id == call.call_id) {
+            view = &v;
+            break;
+        }
+    }
+    if (view == nullptr) {
+        /* Снимок берётся ДО отрисовки (лок отпускается до любого вызова
+         * ImGui), поэтому тело раскрытого вызова появляется на кадр позже
+         * самого раскрытия. Если же вызов попал за предел — об этом говорит
+         * шапка панели, молчаливую пустоту здесь показывать нельзя. Слова
+         * «раскрытых» здесь нет намеренно (11.5): при выключенных деталях
+         * тело нужно и вызову, показанному целиком, а не раскрытому. */
+        if (shots.omitted > 0) {
+            ImGui::TextDisabled(
+                "тело вызова появится на следующем кадре: %zu вызовов за кадром "
+                "не показано",
+                shots.omitted);
+        } else {
+            ImGui::TextDisabled("тело вызова появится на следующем кадре");
+        }
+        return;
+    }
+
+    const tool_display::Widget w = tool_display::build(*view);
+    /* Подпись тела — СВОЯ строка core-формата, а не та, что в дереве: у
+     * дерева она про вызов целиком (имя, состояние, время), а здесь — про то,
+     * чем закончился вызов (exit, файлов, пунктов). */
+    ImGui::TextUnformatted(w.head.c_str());
+    if (!w.note.empty()) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s",
+                           w.note.c_str());
+    }
+    for (const std::string& line : w.lines) {
+        ImGui::TextUnformatted(line.c_str());
+    }
+    /* Виджет diff — УЖЕ НАПИСАННЫЙ (11.1), тот же, что у панели правок по
+     * вызовам: два виджета diff рядом разъехались бы номерами строк и
+     * цветами (Д2, Д12). */
+    for (const coder::diff::FileDiff& fd : w.files) {
+        ImGui::PushID(fd.file.c_str());
+        char fline[320];
+        std::snprintf(fline, sizeof(fline), "%s  +%zu −%zu", fd.file.c_str(),
+                      fd.additions, fd.deletions);
+        if (ImGui::TreeNodeEx(fline, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!fd.note.empty()) {
+                ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s",
+                                   fd.note.c_str());
+            }
+            render_diff_rows(fd);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (w.kind == tool_display::Kind::Task) {
+        render_child_tree(call.call_id, w);
+    }
+}
+
 static void render_timeline() {
-    timeline::Source source;
+    /* И11.5: одно решение на кадр, и решение — в core. Здесь только флаг из
+     * переключателя; что из него следует — договаривается в core/timeline.h
+     * (`call_show`), чтобы окно не решало «показан ли вызов» второй раз. */
+    const timeline::Details details = s_show_details ? timeline::Details::All
+                                                    : timeline::Details::OnlyProblems;
+    timeline::Timeline tl;
+    tool_display::Snapshots shots;
     {
         auto& st = engine_state();
         std::lock_guard<std::mutex> lk(st.mtx);
-        source = timeline::timeline_source(st.session, limits::kMaxTimelineTurns);
+        /* И11.4: снимки тел — ПОД ТОТ ЖЕ ЛОК и той же строкой, что проекция
+         * дерева. Копия ограничена пределом и берётся только для тех
+         * вызовов, тело которых кадр покажет; разбор и подписи идут уже без
+         * лока (то же, за что закрыли D1 — окно, ждущее мьютекс агента).
+         *
+* И11.5: дерево и список нужных тел собираются ТОЖЕ под этим локом,
+         * а не после него. Второе взятие лока ради снимков означало бы, что
+         * проекция и снимки взяты из РАЗНЫХ состояний, и подпись разошлась
+         * бы с картинкой. Само дерево строк не строит (`build_timeline`
+         * копирует мелкие структуры, подписи зовутся при отрисовке), то
+         * есть лок удлиняется на копирование, а не на разбор вывода. */
+        tl = timeline::build_timeline(
+            timeline::timeline_source(st.session, limits::kMaxTimelineTurns));
+        shots = tool_display::snapshot_open_calls(
+            st.session, timeline::body_call_ids(tl, s_open_calls, details),
+            limits::kMaxToolDisplayOpen, limits::kMaxToolDisplayChars);
     }
-    const timeline::Timeline tl = timeline::build_timeline(source);
 
     if (!ImGui::TreeNodeEx("Таймлайн вызовов",
                            ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -603,6 +828,12 @@ static void render_timeline() {
         ImGui::TreePop();
         return;
     }
+    /* И11.5: переключатель деталей. Подпись под ним собирает core: окно не
+     * должно ни считать скрытые вызовы, ни собирать о них строку (11.13
+     * сверяет готовую строку, а собранная в окне непроверяема). */
+    ImGui::Checkbox("Показывать детали всех вызовов##show_details",
+                    &s_show_details);
+    ImGui::TextDisabled("%s", timeline::details_line(tl, details).c_str());
     ImGui::TextDisabled("%s", timeline::timeline_head(tl).c_str());
     /* Пропущенное называется числом: молча показанная часть дерева
      * выглядела бы как «агент сделал вот столько вызовов». Тот же вопрос и
@@ -613,19 +844,68 @@ static void render_timeline() {
                            " (предел — показывать, сколько влезло)",
                            tl.omitted_turns);
     }
+    /* И11.4: что панель показывает по типам. Без этой строки человек видел
+     * бы серые блоки и не знал бы, что половина инструментов не описана, —
+     * а это решение автора панели, а не свойство инструментов. */
+    if (!shots.views.empty()) {
+        ImGui::TextDisabled("%s", tool_display::panel_head(shots.views.size(),
+                                                            shots.omitted).c_str());
+        ImGui::TextDisabled("%s", tool_display::kinds_line().c_str());
+    }
     for (const timeline::Turn& turn : tl.turns) {
         ImGui::PushID(turn.id.c_str());
         const ImGuiTreeNodeFlags flags = turn.default_open
             ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
         if (ImGui::TreeNodeEx(timeline::turn_label(turn).c_str(), flags)) {
             for (const timeline::Call& call : turn.calls) {
-                /* Вызов — строка, а не ветка: веткой он станет в 11.4
-                 * (виджет по типу инструмента), а пустая ветка сейчас
-                 * показала бы стрелку, которая ничего не раскрывает. */
+                ImGui::PushID(call.call_id.c_str());
+                /* И11.4: вызов — ветка, и её тело рисует виджет по типу
+                 * инструмента. У 11.3 он был строкой намеренно: пустая ветка
+                 * тогда показала бы стрелку, которая ничего не раскрывает.
+                 *
+                 * И11.5: как именно показан вызов, решает core — тремя
+                 * способами, и окно их только рисует:
+                 *   Row    — одна строка, стрелки нет: успешный вызов при
+                 *            выключенных деталях;
+                 *   Branch — как в 11.4, стрелка и тело по раскрытию;
+                 *   Body   — строка и тело всегда на экране: неуспешный
+                 *            вызов, который иначе спрятался бы под
+                 *            раскрытием (шапка core/timeline.h). */
+                const timeline::CallShow show = timeline::call_show(call, details);
                 const timeline::StatusColor c =
                     timeline::status_color(call.status);
-                ImGui::TextColored(ImVec4(c.r, c.g, c.b, 1.0f), "%s",
-                                   timeline::call_label(call).c_str());
+                if (show == timeline::CallShow::Row) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4(c.r, c.g, c.b, 1.0f));
+                    ImGui::TextUnformatted(timeline::call_label(call).c_str());
+                    ImGui::PopStyleColor();
+                } else if (show == timeline::CallShow::Body) {
+                    /* Отступ — тот же, что у содержимого ветки: показанный
+                     * целиком вызов должен читаться как находящийся внутри
+                     * хода, а не как соседняя строка того же уровня. */
+                    ImGui::Indent();
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4(c.r, c.g, c.b, 1.0f));
+                    ImGui::TextUnformatted(timeline::call_label(call).c_str());
+                    ImGui::PopStyleColor();
+                    render_call_body(call, shots);
+                    ImGui::Unindent();
+                } else {
+                    const bool open = call_is_open(call.call_id);
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4(c.r, c.g, c.b, 1.0f));
+                    const bool shown = ImGui::TreeNodeEx(
+                        timeline::call_label(call).c_str(),
+                        open ? ImGuiTreeNodeFlags_DefaultOpen
+                             : ImGuiTreeNodeFlags_None);
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemToggledOpen()) toggle_call(call.call_id);
+                    if (shown) {
+                        render_call_body(call, shots);
+                        ImGui::TreePop();
+                    }
+                }
+                ImGui::PopID();
             }
             ImGui::TreePop();
         }

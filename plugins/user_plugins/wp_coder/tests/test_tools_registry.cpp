@@ -18,7 +18,7 @@ using namespace coder;
 
 static void register_echo() {
     ToolDef def;
-    def.name = "echo";
+    def.name = "test_echo";
     def.description = "Echo test tool";
     def.flags = TF_READ_ONLY;
     SchemaBuilder b;
@@ -38,17 +38,17 @@ TEST(tools_registry_register_and_run) {
     reg.clear();
     register_echo();
 
-    ASSERT_TRUE(reg.has("echo"));
+    ASSERT_TRUE(reg.has("test_echo"));
     ASSERT_FALSE(reg.has("nonexistent"));
 
     json::JsonValue args = json::JsonValue::object();
     args.set("query", "hello");
-    ASSERT_EQ(reg.run("echo", args), std::string("echo:hello"));
+    ASSERT_EQ(reg.run("test_echo", args), std::string("echo:hello"));
 
     /* Старый путь из 8 слотов идёт через ту же валидацию и вызов. */
     ToolArgs legacy;
     legacy.query = "hello";
-    ASSERT_EQ(reg.run("echo", legacy), std::string("echo:hello"));
+    ASSERT_EQ(reg.run("test_echo", legacy), std::string("echo:hello"));
 }
 
 TEST(tools_registry_list) {
@@ -100,9 +100,9 @@ TEST(tools_registry_tool_without_handler_reports_error) {
 TEST(tools_registry_clear) {
     auto& reg = ToolsRegistry::instance();
     register_echo();
-    ASSERT_TRUE(reg.has("echo"));
+    ASSERT_TRUE(reg.has("test_echo"));
     reg.clear();
-    ASSERT_FALSE(reg.has("echo"));
+    ASSERT_FALSE(reg.has("test_echo"));
 }
 
 /* --- Каталог для промпта строится из схем (И1.5) --- */
@@ -112,7 +112,7 @@ TEST(tools_registry_catalogue_comes_from_schema) {
     reg.clear();
     register_echo();
 
-    std::string entry = reg.describe_tool("echo");
+    std::string entry = reg.describe_tool("test_echo");
     /* Имя, описание, имя параметра, его тип и обязательность. */
     ASSERT_TRUE(entry.find("echo") != std::string::npos);
     ASSERT_TRUE(entry.find("Echo test tool") != std::string::npos);

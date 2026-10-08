@@ -49,6 +49,7 @@ set(CORE_SOURCES
     core/snapshot.cpp
     core/diff.cpp
     core/timeline.cpp
+    core/tool_display.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -239,6 +240,14 @@ if(WP_CODER_BUILD_TESTS)
         # живого реестра (новый ключ обязан быть либо разрешён, либо
         # запрещён) — на неполном реестре она прошла бы на его неполноте.
         tests/test_harness_profile.cpp
+        # И11.4: виджет вызова по типу инструмента. Инструментов НЕ
+        # регистрирует сам, но сверяет ПОЛНОТУ своего перечня с живым
+        # реестром — поэтому обязан стоять после файлов, регистрирующих
+        # модульные инструменты (test_wp_tools.cpp, test_task_tool.cpp,
+        # test_python_tools.cpp, test_devops_tools.cpp), иначе сверка шла бы
+        # по неполному реестру и прошла бы на его неполноте. То же основание,
+        # что у test_harness_profile.cpp выше.
+        tests/test_tool_display.cpp
         # И10.1: снимки рабочего каталога. Инструментов не регистрирует,
         # поэтому может стоять где угодно до test_iteration_iv_invariants.cpp;
         # стоит после файлов, зовущих цикл агента (test_agent_loop.cpp),

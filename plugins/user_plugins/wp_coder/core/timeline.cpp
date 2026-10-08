@@ -4,6 +4,7 @@
 
 #include "json_utils.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace coder {
@@ -259,6 +260,62 @@ std::string timeline_head(const Timeline& timeline) {
            ", вызовов " + std::to_string(timeline.calls_total) +
            ", время вызовов: " +
            duration_with_gaps(timeline.duration_ms, timeline.untimed_calls);
+}
+
+/* --- И11.5: режим показа деталей. Решение — в шапке core/timeline.h, --- */
+
+CallShow call_show(const Call& call, Details details) {
+    if (details == Details::All) return CallShow::Branch;
+    /* Успешным считается РОВНО Completed: Pending, Running и Error
+     * показываются целиком. Перечень «хороших» состояний здесь намеренно
+     * не заводится — он разошёлся бы с ToolState (шапка, Д2/Д12). */
+    return call.status == ToolState::Completed ? CallShow::Row : CallShow::Body;
+}
+
+std::vector<std::string> body_call_ids(const Timeline& timeline,
+                                       const std::vector<std::string>& open_ids,
+                                       Details details) {
+    /* Список короткий (тела нужны десяткам вызовов при пределе 8), поэтому
+     * поиск линейный — то же основание, что у snapshot_open_calls. Имя
+     * списка — НЕ `ids`: в core есть функция `coder::ids()`, и локальная
+     * переменная с тем же именем закрывала бы её внутри лямбды. */
+    std::vector<std::string> wanted;
+    const auto is_open = [&open_ids](const std::string& id) {
+        return std::find(open_ids.begin(), open_ids.end(), id) != open_ids.end();
+    };
+    for (const Turn& turn : timeline.turns) {
+        for (const Call& call : turn.calls) {
+            const CallShow show = call_show(call, details);
+            /* Порядок ветвей — от «всегда» к «по клику»: показанный целиком
+             * вызов попадает в список независимо от того, раскрыт ли он.
+             * Дедупликации по идентификатору здесь НЕТ и она не нужна: список
+             * не предел, предел применяется к СНИМКАМ, а снимок на
+             * идентификатор один (deviation, И11.5) — отбрасывать повтор
+             * здесь значило бы только спрятать его от счётчика пропущенных. */
+            if (show == CallShow::Body ||
+                (show == CallShow::Branch && is_open(call.call_id))) {
+                wanted.push_back(call.call_id);
+            }
+            /* CallShow::Row: тела нет и оно не собирается. */
+        }
+    }
+    return wanted;
+}
+
+std::string details_line(const Timeline& timeline, Details details) {
+    if (details == Details::All) return "детали: тела всех вызовов";
+    size_t hidden = 0;
+    /* Считается ТЕМ ЖЕ решением, которым окно рисует, а не отдельным
+     * условием по статусу: два места, где решается «скрыт ли вызов», —
+     * это ровно тот дрейф, из-за которого на экране и в подписи разошлись
+     * бы числа (Д2, Д12). */
+    for (const Turn& turn : timeline.turns) {
+        for (const Call& call : turn.calls) {
+            if (call_show(call, details) == CallShow::Row) ++hidden;
+        }
+    }
+    return "детали: тела только неуспешных вызовов; успешных скрыто: " +
+           std::to_string(hidden);
 }
 
 StatusColor status_color(ToolState status) {
