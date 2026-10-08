@@ -1014,3 +1014,44 @@ TEST(the_turn_records_the_files_it_changed) {
     const std::string talk = fx.host.transcript(1);
     ASSERT_TRUE(talk.find("новый-файл.md") != std::string::npos);
 }
+
+/* ======================================================================
+ * И11.3: длительность вызова появляется на НАСТОЯЩЕМ ходе цикла
+ * ======================================================================
+ *
+ * Отдельная проверка, потому что модульные проверки длительности (в
+ * test_message.cpp) доказывают механизм на части, которую собрали руками,
+ * и ничего не говорят о том, что цикл вообще его применяет. Две половины
+ * по отдельности ничего не значат: замер без цикла — мёртвый код, цикл без
+ * замера — дерево, у которого у всех вызовов «время неизвестно». Именно
+ * эта пара и проверяется здесь, на живом ходе с настоящим вызовом. */
+
+TEST(the_loop_leaves_the_tool_call_with_the_time_it_took) {
+    LoopFixture fx;
+    fx.host.replies = {call_block("list_skills", ""), long_answer("Готово.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    const MessagePart* part = first_tool_part(h[1]);
+    ASSERT_TRUE(part != nullptr);
+    ASSERT_EQ(part->state(), ToolState::Completed);
+    /* Время измерено: вызов начат циклом (set_running) и закрыт
+     * синхронизацией вызова (sync_tool_parts → set_result), то есть обе
+     * границы замера проставлены РЕАЛЬНЫМ кодом цикла. */
+    if (!part->has_duration()) {
+        std::cerr << "  вызов " << part->tool_name()
+                  << " остался без длительности: цикл не отмерил его"
+                  << std::endl;
+    }
+    ASSERT_TRUE(part->has_duration());
+    /* И это не ноль и не отрицательное: «мгновенно» было бы утверждением,
+     * которого никто не делал. */
+    ASSERT_TRUE(part->duration_ms() >= 0);
+}

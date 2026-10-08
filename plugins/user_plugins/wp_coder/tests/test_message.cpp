@@ -886,3 +886,142 @@ TEST(a_turn_with_nothing_to_answer_answers_nothing) {
     pending.parts.push_back(MessagePart::tool("call_1", "bash").set_result(none));
     ASSERT_EQ(pending.task_answer(), std::string());
 }
+
+/* ======================================================================
+ * И11.3: длительность вызова
+ * ======================================================================
+ *
+ * Проверяется МЕХАНИЗМ, а не то, что «время где-то есть»: до И11.3 в
+ * модели не было ни одного поля времени, и «длительность хода» было нечем
+ * показать. Источник выбран один (шапка core/timeline.h, отклонение 152) —
+ * интервал между двумя переходами состояния, которые у вызова и так есть.
+ *
+ * Сон здесь НЕ украшение: без реального интервала между set_running и
+ * set_result проверка «время посчиталось» была бы зелёной и на коде, где
+ * длительность всегда 0. */
+
+namespace {
+
+/* Пауза, после которой длительность обязана быть не меньше. Сон короче
+ * запрошенного не бывает, а длиннее — бывает, поэтому проверки только
+ * на «не меньше». */
+void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+
+} // namespace
+
+TEST(the_duration_of_a_call_is_measured_between_its_start_and_its_outcome) {
+    MessagePart call = MessagePart::tool("call_0", "read_file");
+    /* До старта времени нет, и это НЕ ноль: ноль означал бы «отработал
+     * мгновенно», а правды здесь не известно. */
+    ASSERT_EQ(call.state(), ToolState::Pending);
+    ASSERT_FALSE(call.has_duration());
+    ASSERT_TRUE(call.duration_ms() < 0);
+
+    call.set_running();
+    ASSERT_EQ(call.state(), ToolState::Running);
+    /* У работающего вызова времени ещё нет — закрывать его нечем, и
+     * «работает, 0 мс» на дереве читалось бы как «отработал мгновенно». */
+    ASSERT_TRUE(call.duration_ms() < 0);
+
+    sleep_ms(30);
+    call.set_result(ToolOutput());
+    ASSERT_EQ(call.state(), ToolState::Completed);
+    ASSERT_TRUE(call.has_duration());
+    if (call.duration_ms() < 30) {
+        std::cerr << "  длительность " << call.duration_ms()
+                  << " мс корота интервала 30 мс" << std::endl;
+    }
+    ASSERT_TRUE(call.duration_ms() >= 30);
+}
+
+TEST(a_refused_call_is_timed_too_and_not_only_a_successful_one) {
+    /* Отказ — тоже исход вызова. Без времени остались бы ровно те
+     * вызовы, о которых человек хочет знать больше всего: тот, который
+     * он не разрешил, и тот, которому отказал режим. */
+    MessagePart refused = MessagePart::tool("call_1", "bash").set_running();
+    sleep_ms(20);
+    refused.set_error("[отказ] пользователь не разрешил");
+    ASSERT_EQ(refused.state(), ToolState::Error);
+    if (refused.duration_ms() < 20) {
+        std::cerr << "  у отказавшегося вызова длительность "
+                  << refused.duration_ms() << " мс" << std::endl;
+    }
+    ASSERT_TRUE(refused.duration_ms() >= 20);
+}
+
+TEST(the_second_set_running_does_not_move_the_start_of_the_call) {
+    /* Ровно то, что делает цикл: set_running перед запуском инструмента,
+     * а потом sync_tool_parts закрывает вызов — и по дороге может снова
+     * коснуться состояния. Если бы второе касание двигало начало, у части
+     * с задержкой между стартом и закрытием длительность съехала бы в
+     * ноль, и это молча выглядело бы как «инструмент отработал мгновенно». */
+    MessagePart call = MessagePart::tool("call_2", "bash");
+    call.set_running();
+    sleep_ms(25);
+    call.set_running();
+    sleep_ms(25);
+    call.set_result(ToolOutput());
+    if (call.duration_ms() < 50) {
+        std::cerr << "  повторный set_running съел начало: длительность "
+                << call.duration_ms() << " мс вместо 50+ мс" << std::endl;
+    }
+    ASSERT_TRUE(call.duration_ms() >= 50);
+}
+
+TEST(a_part_that_never_ran_has_no_duration_and_a_text_part_never_gets_one) {
+    /* Вызов, закрытый ошибкой ещё в адаптере (мусорный блок вызова),
+     * никогда не начинал работу — и времени у него нет. То же у части не
+     * того вида: состояние инструмента не может быть у текстовой
+     * части. */
+    MessagePart broken = MessagePart::tool("call_3", "bash");
+    broken.set_error("[ошибка] блок вызова не разобран");
+    ASSERT_EQ(broken.state(), ToolState::Error);
+    ASSERT_FALSE(broken.has_duration());
+
+    MessagePart text = MessagePart::text("просто текст");
+    text.set_running();
+    text.set_result(ToolOutput());
+    ASSERT_EQ(text.kind(), PartKind::Text);
+    ASSERT_FALSE(text.has_duration());
+}
+
+TEST(the_second_outcome_does_not_measure_the_call_again) {
+    /* Ровно то, что делает цикл с ходом из ДВУХ вызовов: синхронизация
+     * закрывает все вызовы ответа, поэтому после второго инструмента
+     * первый закрывается ВТОРЫМ разом. Без защиты «посчитать один раз» его
+     * длительность выросла бы на время второго вызова, и дерево показало
+     * бы первому вызову время, которого он не занимал. */
+    MessagePart first = MessagePart::tool("call_0", "read_file").set_running();
+    sleep_ms(20);
+    first.set_result(ToolOutput());
+    const long long after_first = first.duration_ms();
+    ASSERT_TRUE(after_first >= 20);
+    /* Второй вызов отработал, синхронизация прошла по обоим. */
+    MessagePart second = MessagePart::tool("call_1", "bash").set_running();
+    sleep_ms(20);
+    second.set_result(ToolOutput());
+    first.set_result(ToolOutput());
+    if (first.duration_ms() != after_first) {
+        std::cerr << "  повторный исход переписал длительность: было "
+                  << after_first << ", стало " << first.duration_ms()
+                  << " мс" << std::endl;
+    }
+    ASSERT_EQ(first.duration_ms(), after_first);
+}
+
+TEST(a_duration_that_came_from_the_file_is_a_value_and_not_a_measurement) {
+    /* Разбор файла сессии — единственный законный путь восстановить
+     * длительность: процесса, который её мерил, после перезагрузки уже
+     * нет. Значение поэтому просто кладётся, а не вычисляется заново. */
+    MessagePart restored = MessagePart::tool("call_4", "read_file");
+    restored.restore_duration_ms(1500);
+    ASSERT_TRUE(restored.has_duration());
+    ASSERT_EQ(restored.duration_ms(), 1500LL);
+    ASSERT_EQ((int)restored.state(), (int)ToolState::Pending);
+
+    /* Отрицательное значение — не длительность: правдоподобная цифра из
+     * битой строки не должна становиться временем вызова. */
+    MessagePart bad = MessagePart::tool("call_5", "read_file");
+    bad.restore_duration_ms(-7);
+    ASSERT_FALSE(bad.has_duration());
+}

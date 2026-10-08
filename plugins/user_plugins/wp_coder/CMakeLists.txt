@@ -48,6 +48,7 @@ set(CORE_SOURCES
     core/harness_profile.cpp
     core/snapshot.cpp
     core/diff.cpp
+    core/timeline.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -259,6 +260,12 @@ if(WP_CODER_BUILD_TESTS)
         # проверяет, что ПИШУЩИЕ инструменты отдают diff, поэтому стоит после
         # test_base_tools.cpp и до регистрации модульных инструментов.
         tests/test_diff_tool.cpp
+        # И11.3: дерево вызовов инструментов по ходам. Инструментов не
+        # регистрирует и состояние движка не трогает (работает на
+        # сообщениях, собранных вручную), поэтому может стоять где угодно до
+        # test_iteration_iv_invariants.cpp; стоит после test_message.cpp,
+        # потому что длительность вызова живёт в модели сообщений.
+        tests/test_timeline.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

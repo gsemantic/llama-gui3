@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -85,6 +86,11 @@ SessionFile full_session() {
     done.metadata = json::JsonValue::object();
     done.metadata.set("lines", 404);
     done.truncated = true;
+    /* Длительность — настоящим замером, а не подставленной цифрой: файл
+     * сессии обязан перевезти именно то, что измерил вызов, и подставленное
+     * значение проверило бы только чтение, но не запись. */
+    turn.parts.back().set_running();
+    std::this_thread::sleep_for(std::chrono::milliseconds(12));
     turn.parts.back().set_result(done);
     /* Вывод, убранный прореживанием (И7.9): в файле он остаётся целиком,
      * а модель видит метку. Метка обязана пережить перезагрузку, иначе
@@ -135,6 +141,22 @@ SessionFile full_session() {
     return s;
 }
 
+/* Записано ли в файл сессии непустое поле `duration_ms` у части сообщения
+ * с таким идентификатором. Отвечает на вопрос «а записано ли оно вообще»,
+ * на который сравнение «-1 == -1» ответить не может. */
+bool json_has_duration(const json::JsonValue& root, const std::string& msg_id) {
+    const json::JsonValue& msgs = root.get("messages");
+    for (size_t i = 0; i < msgs.size(); ++i) {
+        const json::JsonValue& m = msgs.at(i);
+        if (m.get_string("id", "") != msg_id) continue;
+        const json::JsonValue& parts = m.get("parts");
+        for (size_t j = 0; j < parts.size(); ++j) {
+            if (parts.at(j).has("duration_ms")) return true;
+        }
+    }
+    return false;
+}
+
 void compare(const MessagePart& a, const MessagePart& b) {
     ASSERT_EQ(part_kind_name(a.kind()), std::string(part_kind_name(b.kind())));
     ASSERT_EQ(a.text(), b.text());
@@ -153,6 +175,11 @@ void compare(const MessagePart& a, const MessagePart& b) {
     ASSERT_EQ(a.task_id(), b.task_id());
     ASSERT_EQ(a.subagent(), b.subagent());
     ASSERT_EQ(a.output_cleared(), b.output_cleared());
+    /* И11.3: длительность вызова переживает перезагрузку — иначе дерево
+     * после перезагрузки сессии показывало бы «время неизвестно» у всех
+     * завершённых вызовов. */
+    ASSERT_EQ(a.has_duration(), b.has_duration());
+    ASSERT_EQ(a.duration_ms(), b.duration_ms());
     ASSERT_EQ(std::to_string(a.attempt()), std::to_string(b.attempt()));
     ASSERT_EQ(std::to_string(a.next_attempt_in_ms()),
               std::to_string(b.next_attempt_in_ms()));
@@ -185,6 +212,20 @@ TEST(session_file_roundtrip_keeps_every_part) {
         ASSERT_EQ(a.parts.size(), b.parts.size());
         for (size_t j = 0; j < a.parts.size(); ++j) compare(a.parts[j], b.parts[j]);
     }
+    /* Измеренная длительность доехала до восстановленной сессии. Без этой
+     * строки round-trip остался бы зелёным на коде, который вообще не
+     * пишет поле в файл: сравнение -1 с -1 ничего не значит. */
+    ASSERT_TRUE(original.messages[1].parts[2].has_duration());
+    ASSERT_TRUE(original.messages[1].parts[2].duration_ms() >= 12);
+    ASSERT_EQ(loaded.messages[1].parts[2].duration_ms(),
+              original.messages[1].parts[2].duration_ms());
+    /* А у вызова, который не начинал работать, времени нет — и в файле
+     * для него нет ничего лишнего: «не измерено» и «измерено, но ноль» —
+     * разные вещи, и второе было бы выдумкой. */
+    ASSERT_FALSE(loaded.messages[2].parts[0].has_duration());
+    ASSERT_FALSE(json_has_duration(SessionArchive::to_json(original),
+                                   "msg_000000000012"));
+
     /* И восстановленная сессия рендерится в ту же реплику модели, что и
      * до записи: иначе resume незаметно меняет то, что увидит модель. */
     ASSERT_EQ(to_model_messages(loaded.messages).size(),

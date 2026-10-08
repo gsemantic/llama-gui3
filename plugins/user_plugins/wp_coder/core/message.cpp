@@ -239,8 +239,28 @@ const std::vector<std::string>& MessagePart::replaced_ids() const {
 
 /* --- Переходы состояния вызова --- */
 
+void MessagePart::begin_timing() {
+    /* Начало пишется ОДИН раз. Повторный set_running (синхронизация
+     * состояния вызова, sync_tool_parts) не должен сдвигать начало: иначе
+     * длительность считалась бы от последнего касания, а не от старта. */
+    if (!timing_started_) {
+        timing_started_ = true;
+        started_at_ = std::chrono::steady_clock::now();
+    }
+}
+
+void MessagePart::finish_timing() {
+    if (!timing_started_ || duration_ms_ >= 0) return;
+    duration_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - started_at_)
+                       .count();
+}
+
 MessagePart& MessagePart::set_running() {
-    if (is_tool_part(*this)) state_ = ToolState::Running;
+    if (is_tool_part(*this)) {
+        begin_timing();
+        state_ = ToolState::Running;
+    }
     return *this;
 }
 
@@ -249,6 +269,13 @@ MessagePart& MessagePart::set_result(ToolOutput out) {
     output_ = std::move(out);
     error_.clear();
     state_ = ToolState::Completed;
+    finish_timing();
+    return *this;
+}
+
+MessagePart& MessagePart::restore_duration_ms(long long ms) {
+    if (!is_tool_part(*this) || ms < 0) return *this;
+    duration_ms_ = ms;
     return *this;
 }
 
@@ -269,6 +296,12 @@ MessagePart& MessagePart::set_error(std::string error) {
      * как результат текущего. */
     output_ = ToolOutput();
     state_ = ToolState::Error;
+    /* Отказ — тоже исход вызова, и он занимал столько же времени, сколько
+     * занял бы успех: сюда попадает и ожидание разрешения человека, и
+     * отказ режима. Длительность без исхода осталась бы «не измерено»,
+     * то есть у дерева не было бы времени именно у тех вызовов, о которых
+     * человек хочет знать больше всего. */
+    finish_timing();
     return *this;
 }
 

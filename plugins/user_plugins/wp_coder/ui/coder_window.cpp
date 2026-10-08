@@ -6,6 +6,7 @@
 #include "../core/project.h"
 #include "../core/security.h"
 #include "../core/snapshot.h"
+#include "../core/timeline.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -567,6 +568,72 @@ static void render_tool_diffs() {
     ImGui::TreePop();
 }
 
+/* --- И11.3: дерево вызовов инструментов по ходам ---
+ *
+ * Задача — «таймлайн/дерево вызовов по ходам, сворачиваемое, с длительностью
+ * и статусом каждого хода». Как в 11.1 и 11.2, решение принимает core
+ * (core/timeline.h): что является узлом, какие у вызова статус и
+ * длительность, как печатается время и как называется ход. Здесь остаётся
+ * позвать core, покрасить и напечатать — иначе 11.13 было бы нечего
+ * сверять, потому что тестового харнесса для ImGui нет.
+ *
+ * Правило блокировок — то же, что у панели правок выше, и по той же
+ * причине: под `state_.mtx` берётся ТОЛЬКО проекция (шесть полей на вызов),
+ * лок отпускается, а дерево и подписи строятся уже без него. Разбор держит
+ * лок — то же, за что закрыли D1 (окно, ждущее мьютекс агента).
+ *
+ * Лента событий ниже остаётся: она несёт события движка, которых нет в
+ * сессии (составление плана, ожидание разрешения, ошибки цикла), и таймлайн
+ * их не заменяет. */
+static void render_timeline() {
+    timeline::Source source;
+    {
+        auto& st = engine_state();
+        std::lock_guard<std::mutex> lk(st.mtx);
+        source = timeline::timeline_source(st.session, limits::kMaxTimelineTurns);
+    }
+    const timeline::Timeline tl = timeline::build_timeline(source);
+
+    if (!ImGui::TreeNodeEx("Таймлайн вызовов",
+                           ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    if (tl.turns.empty()) {
+        ImGui::TextDisabled("ходов агента ещё не было");
+        ImGui::TreePop();
+        return;
+    }
+    ImGui::TextDisabled("%s", timeline::timeline_head(tl).c_str());
+    /* Пропущенное называется числом: молча показанная часть дерева
+     * выглядела бы как «агент сделал вот столько вызовов». Тот же вопрос и
+     * то же правило, что у панели правок по вызовам. */
+    if (tl.omitted_turns > 0) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "Показаны последние ходы: ещё %zu осталось за кадром"
+                           " (предел — показывать, сколько влезло)",
+                           tl.omitted_turns);
+    }
+    for (const timeline::Turn& turn : tl.turns) {
+        ImGui::PushID(turn.id.c_str());
+        const ImGuiTreeNodeFlags flags = turn.default_open
+            ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
+        if (ImGui::TreeNodeEx(timeline::turn_label(turn).c_str(), flags)) {
+            for (const timeline::Call& call : turn.calls) {
+                /* Вызов — строка, а не ветка: веткой он станет в 11.4
+                 * (виджет по типу инструмента), а пустая ветка сейчас
+                 * показала бы стрелку, которая ничего не раскрывает. */
+                const timeline::StatusColor c =
+                    timeline::status_color(call.status);
+                ImGui::TextColored(ImVec4(c.r, c.g, c.b, 1.0f), "%s",
+                                   timeline::call_label(call).c_str());
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
+}
+
 static void render_session() {
     if (!g_api->window_is_visible(g_host, g_win_session)) return;
     ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
@@ -611,6 +678,7 @@ static void render_session() {
 
     render_snapshot_diff();
     render_tool_diffs();
+    render_timeline();
 
     /* Лента событий (последние 40). */
     ImGui::BeginChild("session_events", ImVec2(0, 0), ImGuiChildFlags_Borders);
