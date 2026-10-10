@@ -51,6 +51,7 @@ set(CORE_SOURCES
     core/timeline.cpp
     core/tool_display.cpp
     core/stream_panel.cpp
+    core/todo_panel.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -283,6 +284,7 @@ if(WP_CODER_BUILD_TESTS)
         # граница между ними («таймлайн — закрытые ходы, панель — текущий»)
         # проверяется на одном и том же материале.
         tests/test_stream_panel.cpp
+        tests/test_todo_panel.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

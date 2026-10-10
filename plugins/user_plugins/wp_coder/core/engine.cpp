@@ -4,6 +4,7 @@
 #include "agent_registry.h"
 #include "command_policy.h"
 #include "harness_profile.h"
+#include "todo_panel.h"
 #include "prompts.h"
 #include "shell.h"
 #include "engine.h"
@@ -725,6 +726,24 @@ void Engine::pending_discard(size_t idx) {
     std::lock_guard<std::mutex> lk(state_.mtx);
     if (idx >= state_.pending.size()) return;
     state_.pending.erase(state_.pending.begin() + idx);
+}
+
+/* И11.7: клик по чекбобксу плана. Зовётся с UI-потока. */
+bool Engine::toggle_todo(const std::string& id) {
+    bool changed = false;
+    {
+        /* Лок берётся на время ТОЛЬКО правки плана и отпускается до
+         * invalidate_prompt_cache(): тот сам ничего под локом не берёт,
+         * а держать `state_.mtx` лишний раз нельзя — его ждёт окно. */
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        changed = todo_panel::apply_toggle(state_.todos, id);
+    }
+    /* Сброс кэша ВНЕ лока и только при реальном изменении: план печатается
+     * в системном промпте, и без этого модель видела бы старый список до
+     * конца сессии. Клик по несуществующему пункту (план успел измениться
+     * между кадром и кликом) кэша не касается — менять нечего. */
+    if (changed) invalidate_prompt_cache();
+    return changed;
 }
 
 std::string Engine::check_external_permission(const std::string& abs_path) {

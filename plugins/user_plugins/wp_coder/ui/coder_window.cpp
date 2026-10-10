@@ -10,6 +10,7 @@
 #include "../core/timeline.h"
 #include "../core/tool_display.h"
 #include "../core/stream_panel.h"
+#include "../core/todo_panel.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -791,6 +792,70 @@ static void render_call_body(const timeline::Call& call,
     }
 }
 
+/* --- И11.7: панель плана с чекбоксами ---
+ *
+ * Окно рисует ГОТОВОЕ и ничего не решает: что показано, что заблокировано
+ * и какой статус получит пункт по клику — всё вычислено в
+ * core/todo_panel.h.
+ *
+ * Единственное действие окна — клик, и оно уходит в
+ * `Engine::toggle_todo`, а не правит состояние здесь. Причина в том, что
+ * правка без сброса кэша промпта осталась бы для модели невидимой: план
+ * печатается в системном промпте, и человек увидел бы отмеченную галочку
+ * при плане, о котором модель не знает. Сброс внутри той же функции —
+ * поэтому забыть его нельзя. */
+static void render_todo_panel() {
+    coder::todo_panel::Panel panel;
+    {
+        auto& st = engine_state();
+        std::lock_guard<std::mutex> lk(st.mtx);
+        /* Копия, а не ссылка: план переписывает инструмент `todowrite` на
+         * потоке агента, и ссылка пережила бы освобождение лока (то же, за
+         * что закрыли D1). */
+        panel = coder::todo_panel::build(st.todos);
+    }
+    if (!panel.visible) return;
+
+    if (!ImGui::TreeNodeEx("План задачи", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    ImGui::TextDisabled("%s", panel.counter_line.c_str());
+
+    for (size_t i = 0; i < panel.items.size(); ++i) {
+        const coder::todo_panel::Item& item = panel.items[i];
+        ImGui::PushID(static_cast<int>(i));
+        /* Идентификатор уходит в ImGui как ID, чтобы два пункта с
+         * одинаковым текстом не делили одно состояние галочки. */
+        ImGui::PushID(item.id.c_str());
+
+        if (item.locked) {
+            /* Заблокированный пункт рисуется БЕЗ чекбокса, а не
+             * неактивным: неактивный чекбокс выглядит как «можно, но
+             * нельзя», и человек тратит клик, чтобы выяснить почему. */
+            ImGui::TextDisabled("%s %s (без идентификатора — правка невозможна)",
+                                item.checked ? "[x]" : "[ ]", item.content.c_str());
+        } else {
+            bool checked = item.checked;
+            /* Ключ ImGui — идентификатор пункта: без него два
+             * одинаковых по тексту пункта делили бы одну галочку, и
+             * отметка «прыгала» бы между ними. */
+            if (ImGui::Checkbox(("##todo" + item.id).c_str(), &checked)) {
+                /* Правку просит ДВИЖОК, а не окно: она обязана сбросить
+                 * кэш промпта, а окно про кэш не знает. */
+                engine().toggle_todo(item.id);
+            }
+            ImGui::SameLine();
+            /* Статус подписан словами, а не только галочкой: у
+             * `in_progress` и `pending` галочка одинаковая, а человек
+             * должен видеть разницу. */
+            ImGui::TextUnformatted(item.content.c_str());
+        }
+        ImGui::PopID();
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
+}
+
 static void render_timeline() {
     /* И11.5: одно решение на кадр, и решение — в core. Здесь только флаг из
      * переключателя; что из него следует — договаривается в core/timeline.h
@@ -1062,6 +1127,7 @@ static void render_session() {
      * ходы. Наоборот (таймлайн выше) панель оказалась бы внизу экрана
      * именно тогда, когда в неё смотрят. */
     render_stream_panel();
+    render_todo_panel();
     render_timeline();
 
     /* Лента событий (последние 40). */
