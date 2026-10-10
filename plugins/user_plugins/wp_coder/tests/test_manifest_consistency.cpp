@@ -618,3 +618,91 @@ TEST(limits_file_is_single_source_of_truth) {
      * пользователя без его запроса, и её правка меняет поведение у всех. */
     ASSERT_EQ((int)limits::kBackgroundTurnLimit, 3);
 }
+
+/* --- И11.14: ход агента ходит через LlmClient (D23) --- */
+
+TEST(agent_turns_do_not_bypass_the_llm_client) {
+    /* D23: Planner, AgentLoop, хвостовой ход и ход субагента звали
+     * `llm_source::fetch` — блокирующий путь. Следствия были все молчаливые:
+     * дельты не доходили до UI (рисовать было нечего, И11.6), «стоп» не
+     * прерывал ожидание ответа (отмена живёт в LlmClient, а цикл проверял
+     * флаг только МЕЖДУ шагами), а И6.9 сверял две ветки LlmClient между
+     * собой — обе совпадали, и цикл не шёл ни по одной.
+     *
+     * Проверка по СОСТАВУ дерева, потому что «LlmClient покрывает ход»
+     * иначе проверяется только чтением: пять мест зова выглядят
+     * одинаково, и возврат одного к блокирующему пути не изменил бы ни
+     * одного числа в сборке.
+     *
+     * Единственные исключения названы файлами, а не «всё остальное»:
+     * иначе новая фоновая задача попала бы в исключение автоматически.
+     *
+     *  - agent_components.cpp — сводка (compaction): не ход агента, у неё
+     *    нет EngineState, откуда берётся токен хода;
+     *  - llm_client.cpp — САМ единый вход: блокирующий путь у него не
+     *    обход, а fallback на старом хосте без llm_chat_stream (И6.5) и
+     *    откат, когда хост отказался запускать поток. Запретить их здесь
+     *    означало бы запретить сам LlmClient. */
+    static const char* kBlockingAllowed[] = {
+        "agent_components.cpp",  /* summarizer_turn — сводка, не ход агента */
+        "llm_client.cpp"        /* fallback блокирующего пути — он и есть
+                                 * единый вход, обхода тут быть не может */
+    };
+
+    const fs::path core = plugin_root() / "core";
+    int seen = 0;
+    for (const auto& e : fs::recursive_directory_iterator(core)) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() != ".cpp") continue;
+        const std::string name = e.path().filename().string();
+        const std::string code = code_only(read_file(e.path()));
+        size_t at = 0;
+        while ((at = code.find("llm_source::fetch", at)) != std::string::npos) {
+            ++seen;
+            bool exempt = false;
+            for (const char* n : kBlockingAllowed) exempt = exempt || name == n;
+            if (!exempt) {
+                std::cerr << "  " << name << " зовёт llm_source::fetch в обход"
+                          << " LlmClient: дельты не доедут до UI, а «стоп»"
+                          << " не прервёт запрос (D23). Ход агента обязан"
+                          << " идти через LlmClient::fetch с токеном хода"
+                          << std::endl;
+                ASSERT_TRUE(false);
+            }
+            at += 17;
+        }
+    }
+    /* Ни одного зова не нашлось — проверка зелена на пустом дереве, то
+     * есть переименование llm_source выключило бы её молча. */
+    ASSERT_TRUE(seen > 0);
+}
+
+TEST(every_agent_turn_passes_the_abort_token) {
+    /* Отмена, которую никто не передаёт, не существует. Проверяется не
+     * «есть ли токен вообще», а то, что у каждого зова LlmClient в файле
+     * ходов свой токен: без него компилятор ничего не скажет, потому
+     * что параметр имеет значение по умолчанию и пропуск не виден.
+     *
+     * Счётчики, а не «≥»: возврат одного хода на блокирующий путь
+     * уменьшил бы их, и это должно быть падением. */
+    const std::string code =
+        code_only(read_file(plugin_root() / "core" / "agent_components.cpp"));
+
+    int calls = 0;
+    size_t at = 0;
+    while ((at = code.find("LlmClient::fetch", at)) != std::string::npos) {
+        ++calls;
+        at += 16;
+    }
+    /* Четыре хода: planner, основной цикл, хвостовой ход, субагент. */
+    ASSERT_EQ(calls, 4);
+
+    int tokens = 0;
+    at = 0;
+    while ((at = code.find("turn_abort.get()", at)) != std::string::npos) {
+        ++tokens;
+        at += 15;
+    }
+    /* Столько же: каждый зов хода обязан взять свой токен под локом. */
+    ASSERT_EQ(tokens, calls);
+}

@@ -8,6 +8,7 @@
 #include "limits.h"
 #include "json_utils.h"
 #include "llm_source.h"
+#include "llm_client.h"
 #include "snapshot.h"
 
 #include <sstream>
@@ -482,8 +483,19 @@ bool Planner::plan(const std::string& sys_prompt) {
 
     this->push_event_(AgentEvent::Status, "Составляю план...");
     std::vector<LlmEvent> events;
+    /* И11.14: planner идёт через LlmClient, а не напрямую (D23). Раньше
+     * план был самым «долгим» запросом без отмены: он идёт до модели
+     * один раз за задачу, и «стоп» на нём ждал бы полный таймаут.
+     * Токен берётся под локом, потому что он СВОЙ у хода (И6.7) и
+     * читать его без лока — гонка с новым ходом. */
+    AbortToken* plan_abort = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        plan_abort = state_.turn_abort.get();
+    }
     const bool plan_ok =
-        llm_source::fetch(cb_, sys_prompt, plan_msgs, events);
+        LlmClient::fetch(cb_, sys_prompt, plan_msgs, events,
+                         nullptr, -1, plan_abort);
     const LlmResponse plan = llm_source::fold(events);
     if (plan_ok && !plan.text().empty() && !state_.abort_requested.load()) {
         {
@@ -755,7 +767,20 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         std::cerr << "[wp_coder] agent_loop: step " << (step+1) << " calling LLM..." << std::endl;
         auto t0 = std::chrono::steady_clock::now();
         std::vector<LlmEvent> events;
-        const bool ok = llm_source::fetch(cb_, sys_prompt, model_msgs, events);
+        /* И11.14: ход агента идёт через LlmClient (D23). Именно этот зов
+         * делал отмену фикцией: цикл проверял abort_requested только МЕЖДУ
+         * шагами, и «стоп» посреди шага ждал ответа провайдера до конца —
+         * кнопка «стоп» на самом долгом месте работы не работала ни разу.
+         *
+         * Токен читается под локом: он СВОЙ у хода, и следующий ход
+         * заменит указатель, пока этот ещё ждёт. */
+        AbortToken* step_abort = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            step_abort = state_.turn_abort.get();
+        }
+        const bool ok = LlmClient::fetch(cb_, sys_prompt, model_msgs, events,
+                                         nullptr, -1, step_abort);
         auto t1 = std::chrono::steady_clock::now();
         const double llm_s =
             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1000.0;
@@ -789,7 +814,23 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             + " tok, " + std::to_string((int)llm_s) + "s");
 
         /* Ответа нет — это не пустой ход, а сбой: иначе модель молча
-         * получила бы пустую историю и повторила бы тот же запрос. */
+         * получила бы пустую историю и повторила бы тот же запрос.
+         *
+         * И11.14: ОТМЕНА — не сбой, и разбирается ДО общей ветки. Иначе
+         * «стоп» печатал бы «[ошибка] LLM: Прервано пользователем» и
+         * уходил с признаком сбоя: человек нажал «стоп», а ему сообщили
+         * про провайдера. Ровно то, что И6.8 разводит терминально, и
+         * вид сбоя Aborted для этого и заведён. */
+        if (!ok && response.failure() == FailureKind::Aborted) {
+            this->push_event_(AgentEvent::Status, "[прервано пользователем]");
+            full_response += "\n\n[прервано пользователем]";
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                state_.session.clear();
+                state_.state = AgentState::Aborted;
+            }
+            return true;
+        }
         if (!ok) {
             const std::string err =
                 response.error().empty() ? "не ответил" : response.error();
@@ -1074,7 +1115,15 @@ bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
     }
 
     std::vector<LlmEvent> events;
-    const bool ok = llm_source::fetch(cb_, sys_prompt, msgs, events);
+    /* И11.14: хвостовой ход — тоже ход, и отмена в нём нужна тем же
+     * основанием, что в основном цикле (D23). */
+    AbortToken* tail_abort = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        tail_abort = state_.turn_abort.get();
+    }
+    const bool ok = LlmClient::fetch(cb_, sys_prompt, msgs, events,
+                                     nullptr, -1, tail_abort);
     const LlmResponse answer = llm_source::fold(events);
     if (!ok || answer.text().empty()) {
         /* И6.8: хвостовой ход — тоже ход. Раньше он просто возвращал false,
@@ -1194,8 +1243,18 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
                           snapshot::changed_files(shots.before, shots.after));
 
         std::vector<LlmEvent> events;
-        const bool ok = llm_source::fetch(
-            cb, sys_prompt, to_model_messages(history), events);
+        /* И11.14: субагент идёт через LlmClient с тем же токеном, что и
+         * родитель (D23). Токен берётся под локом субагента — состояние
+         * у него своё, и общий токен сессии отменил бы ход не того
+         * агента. */
+        AbortToken* sub_abort = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            sub_abort = state.turn_abort.get();
+        }
+        const bool ok = LlmClient::fetch(
+            cb, sys_prompt, to_model_messages(history), events,
+            nullptr, -1, sub_abort);
         LlmResponse response = llm_source::fold(events);
         /* Токены ребёнка — токены сессии: они оплачены тем же запросом и
          * занимают то же окно. Метрики берутся из usage того же события

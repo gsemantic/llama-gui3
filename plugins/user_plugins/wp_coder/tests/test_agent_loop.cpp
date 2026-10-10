@@ -36,9 +36,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace coder;
@@ -1054,4 +1057,87 @@ TEST(the_loop_leaves_the_tool_call_with_the_time_it_took) {
     /* И это не ноль и не отрицательное: «мгновенно» было бы утверждением,
      * которого никто не делал. */
     ASSERT_TRUE(part->duration_ms() >= 0);
+}
+
+/* --- И11.14: «стоп» посреди хода обрывает запрос (D23) --- */
+
+namespace {
+
+/* Струминговый хост, который сам ход НЕ закрывает: on_done приходит
+ * только если тест его доиграет. Нужен именно такой: при обычном хосте
+ * ход завершился бы успехом раньше, чем отмена успела бы подействовать,
+ * и проверка ничего не сказала бы об отмене.
+ *
+ * Состояние вынесено наружу и отдаётся по ссылке, а не спрятано в
+ * структуре: проверке нужно ПОСЛЕ отмены увидеть, что handle дошёл до
+ * llm_chat_cancel, — то есть из другого потока, чем тот, где ждёт цикл. */
+struct StreamHostState {
+    std::atomic<int> cancel_calls{0};
+    std::atomic<bool> entered{false};
+    std::atomic<void*> cancelled_handle{nullptr};
+};
+
+HostCallbacks never_finishing_stream(StreamHostState& st) {
+    HostCallbacks cb;
+    StreamHostState* s = &st;
+    cb.llm_chat_stream =
+        [s](const std::string&, const std::vector<ModelMessage>&,
+            const std::string&, std::function<void(void*)> on_started,
+            std::function<void(const char*, int)> on_delta,
+            std::function<void(const char*, const char*, const char*)>,
+            std::function<void(const std::string&)>) -> bool {
+            static int handle = 1;
+            if (on_started) on_started(&handle);
+            if (on_delta) on_delta("думаю", 0);
+            s->entered.store(true);
+            return true;   /* on_done не будет — ход висит до отмены */
+        };
+    cb.llm_chat_cancel = [s](void* handle) {
+        s->cancel_calls.fetch_add(1);
+        s->cancelled_handle.store(handle);
+    };
+    cb.llm_is_connected = []() { return true; };
+    cb.settings_set = [](const std::string&, const std::string&) {};
+    cb.settings_get = [](const std::string&, const std::string& d) { return d; };
+    cb.chat_event = [](const std::string&) {};
+    return cb;
+}
+
+}  // namespace
+
+TEST(stop_during_a_turn_breaks_the_request_and_not_just_the_wait) {
+    /* Пункт 3 И11.14: «стоп» посреди хода обрывает ИМЕННО запрос. До
+     * И11.14 ход агента шёл блокирующим путём (D23), и кнопка «стоп» на
+     * нём не работала ни разу — цикл проверял флаг только между шагами.
+     *
+     * Проверяется не «вернулся ли цикл» — он вернулся бы и по таймауту,
+     * — а то, что handle дошёл до llm_chat_cancel. Только это означает,
+     * что провайдерский запрос оборван, а не просто перестали ждать. */
+    LoopFixture fx;
+    StreamHostState st;
+    HostCallbacks cb = never_finishing_stream(st);
+
+    engine().init(cb);
+    fx.prepare();
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+
+    std::thread runner([&] { fx.run(loop, response); });
+
+    /* Ждём входа в ход: «стоп» до запроса проверил бы другое. */
+    for (int i = 0; i < 300 && !st.entered.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(st.entered.load());
+
+    engine().request_abort();
+    runner.join();
+
+    /* Запрос оборван — а не просто «перестали ждать». */
+    ASSERT_EQ(std::to_string(st.cancel_calls.load()), std::to_string(1));
+    ASSERT_TRUE(st.cancelled_handle.load() != nullptr);
+    ASSERT_EQ(static_cast<int>(engine_state().state),
+              static_cast<int>(AgentState::Aborted));
 }
