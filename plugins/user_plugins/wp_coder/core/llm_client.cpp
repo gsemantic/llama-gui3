@@ -7,8 +7,11 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <iomanip>
+#include <locale>
 #include <map>
 #include <mutex>
+#include <sstream>
 
 namespace coder {
 namespace {
@@ -128,6 +131,54 @@ LlmReply reply_from_result(const std::string& json_text)
     return reply;
 }
 
+/* И11.14: request_json из активного профиля harness (И9.7).
+ *
+ * Это ЕДИНСТВЕННОЕ место, где параметры генерации доезжают до хоста:
+ * `llm_chat_stream` шлёт request_json, и хост читает из него
+ * temperature/max_tokens/top_p/top_k/stop
+ * (src/plugins/plugin_manager.cpp:585). До И11.14 здесь была пустая
+ * строка, и четыре поставленных профиля были файлами, которые читает,
+ * но не применяет, никто.
+ *
+ * Пустой результат — НЕ ошибка: профиль не задан, или в нём этих полей
+ * нет, и тогда хост берёт свои умолчания. Пустая строка и «{}» для
+ * хоста равнозначны, а «{}» вводит в заблуждение при отладке.
+ *
+ * Копия, а не ссылка: профиль принадлежит состоянию движка, и читать его
+ * после отпускания лока — читать из чужой памяти. */
+std::string request_json_for_active_profile()
+{
+    harness::Profile p;
+    std::string error;
+    if (!engine().session_profile(&p, &error)) return std::string();
+
+    std::string j = "{";
+    bool first = true;
+    const auto sep = [&] {
+        if (!first) j += ",";
+        first = false;
+    };
+    /* max_tokens — только положительный: хост трактует v > 0 как
+     * «применить», а ноль и отрицательное отбросил бы сам (там `if (v >
+     * 0)`), но слать их всё равно незачем. */
+    if (p.has_max_tokens && p.max_tokens > 0) {
+        sep();
+        j += "\"max_tokens\":" + std::to_string(p.max_tokens);
+    }
+    if (p.has_temperature) {
+        sep();
+        /* Дробное без локали: std::to_string даёт «0.700000», и хост
+         * принимает это как число, но печать в лог выглядела бы
+         * неопрятно. */
+        std::ostringstream os;
+        os.imbue(std::locale::classic());
+        os << p.temperature;
+        j += "\"temperature\":" + os.str();
+    }
+    j += "}";
+    return first ? std::string() : j;
+}
+
 } // namespace
 
 bool LlmClient::fetch(const HostCallbacks& cb, const std::string& sys_prompt,
@@ -186,7 +237,12 @@ int timeout_ms,
      * wait_for, а не удержание лока.
      */
     const bool started = cb.llm_chat_stream(
-        sys_prompt, history, std::string(),
+        sys_prompt, history,
+        /* И11.14: параметры генерации активного профиля harness. Раньше
+         * здесь была пустая строка, и поля профиля, о которых И9.7
+         * писал «применяется на стриминговом пути», не применялись
+         * нигде. */
+        request_json_for_active_profile(),
         /* handle приходит до входа в хоста: отменять можно только живой
          * поток, и узнать его handle иначе неоткуда. */
         [turn](void* handle) { turn->host_handle = handle; },

@@ -33,6 +33,7 @@
 #include "../core/command_policy.h"
 #include "../core/engine.h"
 #include "../core/harness_profile.h"
+#include "../core/llm_client.h"
 #include "../core/permission.h"
 #include "../core/security.h"
 #include "../core/subagent.h"
@@ -1029,4 +1030,130 @@ TEST(панель_берёт_имя_профиля_из_состояния_а_н
      * выглядел бы как «настройка не работает», и человек счёл бы себя в
      * аудите, ничем не ограниченном. */
     ASSERT_TRUE(ui.find("Профиль не применён") != std::string::npos);
+}
+
+/* --- И11.14: поля профиля доезжают до хоста (И9.7) --- */
+
+namespace {
+
+/* Хост, который запоминает request_json и отвечает успехом. */
+std::string g_last_request_json;
+
+HostCallbacks recording_host() {
+    HostCallbacks cb;
+    cb.llm_chat_stream =
+        [](const std::string&, const std::vector<ModelMessage>&,
+           const std::string& request_json,
+           std::function<void(void*)>, std::function<void(const char*, int)>,
+           std::function<void(const char*, const char*, const char*)>,
+           std::function<void(const std::string&)> on_done) -> bool {
+            g_last_request_json = request_json;
+            on_done("{\"ok\":1,\"content\":\"ок\",\"finish_reason\":\"stop\"}");
+            return true;
+        };
+    return cb;
+}
+
+bool json_has_number(const std::string& j, const std::string& key,
+                     const std::string& value)
+{
+    return j.find("\"" + key + "\":" + value) != std::string::npos;
+}
+
+}  // namespace
+
+TEST(профиль_агента_задаёт_temperature_и_max_tokens_в_запросе) {
+    /* И9.7 писал: поля разбираются и хранятся, «чтобы И11.14 не
+     * пришлось догадываться». Проверяется, что они действительно
+     * доезжают: request_json — единственный канал параметров генерации
+     * до хоста, и пустая строка означала бы, что четыре поставленных
+     * профиля остаются файлами, которые читает, но не применяет, никто. */
+    Engine& eng = engine();
+    ProfileGuard guard(eng);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().has_profile = true;
+        eng.state().profile = harness::Profile();
+        eng.state().profile.name = "test_gen";
+        eng.state().profile.has_temperature = true;
+        eng.state().profile.temperature = 0.25;
+        eng.state().profile.has_max_tokens = true;
+        eng.state().profile.max_tokens = 2048;
+    }
+
+    g_last_request_json = "не задан";
+    std::vector<LlmEvent> events;
+    LlmClient::fetch(recording_host(), "sys", {{"user", "x"}}, events,
+                     nullptr, 1000);
+
+    ASSERT_TRUE(json_has_number(g_last_request_json, "max_tokens", "2048"));
+    ASSERT_TRUE(json_has_number(g_last_request_json, "temperature", "0.25"));
+}
+
+TEST(профиль_без_этих_полей_не_добавляет_мусора_в_запрос) {
+    /* Пустой request_json вместо «{}»: хост трактует их одинаково, но
+     * «{}» в логе выглядит как «профиль применился и ничего не задал».
+     * Проверка фиксирует именно форму, а не смысл. */
+    Engine& eng = engine();
+    ProfileGuard guard(eng);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().has_profile = true;
+        eng.state().profile = harness::Profile();
+        eng.state().profile.name = "test_empty";
+        eng.state().profile.has_temperature = false;
+        eng.state().profile.has_max_tokens = false;
+    }
+
+    g_last_request_json = "не задан";
+    std::vector<LlmEvent> events;
+    LlmClient::fetch(recording_host(), "sys", {{"user", "x"}}, events,
+                     nullptr, 1000);
+
+    ASSERT_EQ(g_last_request_json, std::string());
+}
+
+TEST(без_профиля_запрос_остаётся_пустым) {
+    /* Профиль не задан — хост берёт свои умолчания, и подставлять
+     * ничего нельзя: выдуманное значение молча изменило бы поведение
+     * у всех, кто профиль не настраивал. */
+    Engine& eng = engine();
+    ProfileGuard guard(eng);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().has_profile = false;
+    }
+
+    g_last_request_json = "не задан";
+    std::vector<LlmEvent> events;
+    LlmClient::fetch(recording_host(), "sys", {{"user", "x"}}, events,
+                     nullptr, 1000);
+
+    ASSERT_EQ(g_last_request_json, std::string());
+}
+
+TEST(неположительный_max_tokens_не_уходит_к_хосту) {
+    /* Хост применяет значение только при v > 0, поэтому слать ноль или
+     * отрицательное — значит отправлять значение, которое заведомо
+     * будет отброшено, и делать вид, что оно задано. */
+    Engine& eng = engine();
+    ProfileGuard guard(eng);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().has_profile = true;
+        eng.state().profile = harness::Profile();
+        eng.state().profile.name = "test_zero";
+        eng.state().profile.has_temperature = true;
+        eng.state().profile.temperature = 0.5;
+        eng.state().profile.has_max_tokens = true;
+        eng.state().profile.max_tokens = 0;
+    }
+
+    g_last_request_json = "не задан";
+    std::vector<LlmEvent> events;
+    LlmClient::fetch(recording_host(), "sys", {{"user", "x"}}, events,
+                     nullptr, 1000);
+
+    ASSERT_TRUE(g_last_request_json.find("max_tokens") == std::string::npos);
+    ASSERT_TRUE(json_has_number(g_last_request_json, "temperature", "0.5"));
 }
