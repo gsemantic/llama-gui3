@@ -134,9 +134,26 @@ bool LlmClient::fetch(const HostCallbacks& cb, const std::string& sys_prompt,
                       const std::vector<ModelMessage>& history,
                       std::vector<LlmEvent>& out_events,
                       const std::function<void(const LlmEvent&)>& on_event,
-                      int timeout_ms,
-                      AbortToken* abort)
+int timeout_ms,
+                       AbortToken* abort)
 {
+    /* И11.14: токен отменён ДО зова — ход не начинается вовсе.
+     *
+     * Без этой проверки отменённый ход всё равно уходил бы провайдеру:
+     * ожидание начиналось бы со срезом в 50 мс, за это время хост отвечал
+     * (или почти отвечал), и `done` побеждал `aborted` — то есть
+     * «стоп» тихо превращался в успешный ход. Проверка найдена
+     * проверкой, а не рассуждением: на исходном коде падал
+     * `abort_before_the_call_stops_the_turn`.
+     *
+     * Стоит ли он того: «стоп» нажали, а ход всё равно оплачен провайдеру
+     * и разобран циклом как обычный ответ. */
+    if (abort && abort->aborted()) {
+        out_events.push_back(LlmEvent::aborted("Прервано пользователем"));
+        if (on_event) on_event(out_events.back());
+        return false;
+    }
+
     /* Нет стриминга (старый хост) — блокирующий путь. Колбэк при этом всё
      * равно получает события, иначе вызывающему пришлось бы держать две
      * ветки поведения, и одна со временем была бы забыта. */
@@ -210,8 +227,86 @@ bool LlmClient::fetch(const HostCallbacks& cb, const std::string& sys_prompt,
 
         const int wait_ms = timeout_ms > 0 ? timeout_ms : engine().state().llm_timeout_ms;
         std::unique_lock<std::mutex> guard(turn->mtx);
-        const bool finished = turn->done_cv.wait_for(
-            guard, std::chrono::milliseconds(wait_ms), [&] { return turn->done; });
+        /* И11.14: ждём ТРИ условия, а не одно.
+         *
+         * Прежде здесь был `wait_for(..., предикат done)`, а параметр
+         * `abort` принимался и не читался нигде: отмена, описанная в
+         * шапке llm_client.h, не существовала. «Стоп» посреди хода ждал
+         * ответа провайдера до конца — то есть выглядел как «он думает».
+         *
+         * Почему срез, а не предикат с abort->aborted(): у токена СВОЙ
+         * condition_variable, и разбудить чужое ожидание из него нельзя
+         * — а ждать приходится именно на done_cv. Поэтому ожидание
+         * нарезается срезами и между ними спрашивается токен.
+         *
+         * Срез — 50 мс: отмена ощущается мгновенно, а ложных
+         * пробуждений за минуту ожидания около тысячи, и каждая —
+         * lock/unlock на мьютексе токена. Обратная сторона названа прямо:
+         * это опрос, и его НЕЛЬЗЯ применять там, где отмена должна
+         * будить работу (инструмент ждёт kill по токену — И6.7). Здесь
+         * ждать и нечего: ход уже идёт, его прерывание делает хост. */
+        constexpr int kAbortSliceMs = 50;
+        bool finished = false;
+        bool aborted = false;
+        if (abort) {
+            int waited = 0;
+            while (waited < wait_ms) {
+                const int slice = (wait_ms - waited) < kAbortSliceMs
+                                      ? (wait_ms - waited) : kAbortSliceMs;
+                if (turn->done_cv.wait_for(guard, std::chrono::milliseconds(slice),
+                                           [&] { return turn->done; })) {
+                    finished = true;
+                    break;
+                }
+                if (abort->aborted()) {
+                    aborted = true;
+                    break;
+                }
+                waited += slice;
+            }
+        } else {
+            finished = turn->done_cv.wait_for(
+                guard, std::chrono::milliseconds(wait_ms),
+                [&] { return turn->done; });
+        }
+
+        if (aborted) {
+            /* Порядок «done важнее отмены» — не из вежливости, а из
+             * безопасности хоста. `aborted` выставляется только в ветке,
+             * где `done` ложно: если on_done уже пришёл, поток ЗАКРЫТ и
+             * handle освобождён host'ом, а `llm_chat_cancel` по нему
+             * обратился бы к освобождённому объекту. Поэтому отменяется
+             * только живой поток — ровно то, что значит «отменять
+             * запрос», и ровно то, чего нельзя сделать с уже пришедшим
+             * ответом.
+             *
+             * Плата названа: если ответ успел прийти в то же окно, что и
+             * «стоп», ход будет обработан как успешный. Это безопасно —
+             * цикл всё равно проверяет abort_requested между шагами и
+             * остановится, то есть лишнего действия агента не будет. */
+            /* Ход рвётся НАСТОЯЩИМ отменением запроса, а не «перестаём
+             * ждать»: иначе провайдер продолжал бы жечь деньги и держать
+             * слот, а пользователь — смотреть на «печать», которой уже
+             * никто не слушает.
+             *
+             * handle берётся ПОД локом и обнуляется: хост зовёт on_done
+             * уже после отмены, и второй отменяющий вызов по тому же
+             * handle был бы вызовом освобождённого объекта.
+             *
+             * Порядок «сначала флаг, потом unlock» обязателен: пока
+             * ждёт on_done, он берёт тот же лок, и отмена, сделанная
+             * после unlock, оставила бы колбэк дописывать в UI. */
+            void* handle = turn->host_handle;
+            turn->host_handle = nullptr;
+            turn->abandoned.store(true);
+            guard.unlock();
+            if (handle && cb.llm_chat_cancel) cb.llm_chat_cancel(handle);
+            /* Вид сбоя — Aborted, а не Provider: «стоп» не повторяют, а
+             * «провайдер не ответил» повторяют (И6.8). */
+            out_events.push_back(LlmEvent::aborted("Прервано пользователем"));
+            return false;
+        }
+
         if (!finished) {
             /* Хост не закрыл поток. Поток может прийти и позже, поэтому он
              * помечается брошенным: иначе «печать» продолжилась бы в UI

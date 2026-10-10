@@ -291,6 +291,16 @@ LlmEvent LlmEvent::provider_error(std::string error) {
     return e;
 }
 
+/* И11.14: отмена пользователем. Вид события тот же (ход не состоялся), а
+ * вид СБОЯ — Aborted: именно по нему вызывающий отличает «стоп» от
+ * «провайдер не ответил» и не повторяет попытку (И6.8). */
+LlmEvent LlmEvent::aborted(std::string reason) {
+    LlmEvent e(LlmEventKind::ProviderError);
+    e.text_ = std::move(reason);
+    e.failure_ = FailureKind::Aborted;
+    return e;
+}
+
 /* --- Аксессоры --- */
 
 const std::string& LlmEvent::delta() const {
@@ -600,8 +610,16 @@ void LlmResponse::reduce(LlmResponse& state, const LlmEvent& event) {
             /* И6.8: вид сбоя ставится ЗДЕСЬ, тем же событием, что и текст.
              * Классифицировать текст ошибки в другом месте означало бы
              * второй разбор того же самого — и рано или поздно он разошёлся
-             * бы с событием (например, «429» в сообщении пользователя). */
-            state.failure_ = FailureKind::Provider;
+             * бы с событием (например, «429» в сообщении пользователя).
+             *
+             * И11.14: вид берётся У СОБЫТИЯ, а не назначается здесь
+             * безусловно. `aborted()` несёт Aborted, и без этого чтения
+             * он тут же затирался бы на Provider — то есть объявленный в
+             * И6.8 вид снова остался бы неназначаемым, а «стоп» выглядел
+             * бы как падение сети. */
+            state.failure_ = event.failure() != FailureKind::None
+                                 ? event.failure()
+                                 : FailureKind::Provider;
             break;
 
         case LlmEventKind::kCount:

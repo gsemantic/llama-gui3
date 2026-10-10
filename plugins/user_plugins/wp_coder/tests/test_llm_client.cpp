@@ -13,7 +13,9 @@
 #include "core/llm_source.h"
 #include "test_framework.h"
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace coder;
@@ -434,4 +436,188 @@ TEST(nothing_is_delivered_after_a_timeout) {
     g_late_delta = nullptr;
     g_late_tool = nullptr;
     g_late_done = nullptr;
+}
+
+/* --- И11.14: отмена хода пользователем ---
+ *
+ * До И11.14 параметр `abort` принимался и не читался нигде: шапка
+ * llm_client.h описывала настоящее прерывание запроса, которого не было.
+ * Все проверки ниже падают на исходном коде — не потому, что требуют
+ * нового поведения, а потому, что отмены не было вовсе. */
+
+TEST(abort_before_the_call_stops_the_turn) {
+    /* Токен отменён ДО зова: ход не должен состояться, даже если хост
+     * ответил бы мгновенно. Таймаут намеренно огромный — «вернуться»
+     * здесь может только отмена. */
+    Script script;
+    script.deltas = {{"ответ", 0}};
+    script.done_json = ok_json("ответ");
+    g_script = &script;
+
+    AbortToken token;
+    token.abort();
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 30000, &token);
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    ASSERT_EQ(static_cast<int>(llm_source::fold(events).failure()),
+              static_cast<int>(FailureKind::Aborted));
+}
+
+TEST(abort_midway_stops_the_turn_and_keeps_its_kind) {
+    /* Отмена, случившаяся ВО ВРЕМЯ запроса, — это отмена, а не сбой
+     * провайдера: вид сбоя обязан быть Aborted, иначе вызывающий
+     * повторил бы ход после «стопа» (И6.8). */
+    Script script;
+    script.deltas = {{"начало", 0}};
+    script.never_finishes = true;
+    g_script = &script;
+
+    AbortToken token;
+    token.abort();
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 30000, &token);
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    const LlmResponse response = llm_source::fold(events);
+    ASSERT_EQ(static_cast<int>(response.failure()),
+              static_cast<int>(FailureKind::Aborted));
+    ASSERT_TRUE(response.error().find("Прервано") != std::string::npos);
+}
+
+TEST(abort_actually_cancels_the_host_request) {
+    /* «Перестать ждать» — не отмена: провайдер продолжал бы жечь деньги
+     * и держать слот. Проверяется, что handle уходит в llm_chat_cancel
+     * — то есть рвётся ЖИВОЙ запрос хоста.
+     *
+     * Отмена приходит ПО ХОДУ, из отдельного потока: отменённый заранее
+     * ход до хоста не доходит вовсе (проверяет
+     * `abort_before_the_call_stops_the_turn`), и проверять по нему
+     * «рвётся ли запрос» бессмысленно — запроса не было. */
+    Script script;
+    script.never_finishes = true;
+    g_script = &script;
+
+    void* cancelled_handle = nullptr;
+    HostCallbacks cb = callbacks_with_stream();
+    cb.llm_chat_cancel = [&](void* handle) { cancelled_handle = handle; };
+
+    AbortToken token;
+    std::thread aborter([&token] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        token.abort();
+    });
+
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(cb, "sys", {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 30000, &token);
+    aborter.join();
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    ASSERT_TRUE(cancelled_handle != nullptr);
+}
+
+TEST(without_a_cancel_callback_abort_still_stops_the_turn) {
+    /* Старый хост без llm_chat_cancel: отмена означает «перестать ждать».
+     * Это ограничение хоста, а не повод вернуть успешный ход. */
+    Script script;
+    script.never_finishes = true;
+    g_script = &script;
+
+    HostCallbacks cb = callbacks_with_stream();
+    cb.llm_chat_cancel = nullptr;
+
+    AbortToken token;
+    token.abort();
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(cb, "sys", {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 30000, &token);
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    ASSERT_EQ(static_cast<int>(llm_source::fold(events).failure()),
+              static_cast<int>(FailureKind::Aborted));
+}
+
+TEST(no_abort_token_keeps_the_timeout_path_unchanged) {
+    /* Без токена поведение прежнее: ждём до таймаута. Регрессия на
+     * путь отмены поймала бы это. */
+    Script script;
+    script.never_finishes = true;
+    g_script = &script;
+
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 120);
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    ASSERT_EQ(static_cast<int>(llm_source::fold(events).failure()),
+              static_cast<int>(FailureKind::Provider));
+}
+
+TEST(nothing_is_delivered_after_an_abort) {
+    /* Отмена, как и таймаут, оставляет ход брошенным: иначе модель
+     * дописала бы текст в UI уже после ухода цикла. Отмена — по ходу,
+     * из потока: заранее отменённый ход до колбэков не доходит вовсе, и
+     * проверять «не доставляется после» было бы на пустом множестве. */
+    Script script;
+    script.deltas = {{"При", 0}};
+    script.never_finishes = true;
+    script.capture_callbacks = true;
+    g_script = &script;
+
+    int delivered = 0;
+    AbortToken token;
+    std::thread aborter([&token] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        token.abort();
+    });
+
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [&](const LlmEvent&) { ++delivered; },
+                                     30000, &token);
+    const int before_abort = delivered;
+    aborter.join();
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    ASSERT_TRUE(before_abort > 0);
+    ASSERT_TRUE(static_cast<bool>(g_late_delta));
+    g_late_delta("вет, поздно", 0);
+    g_late_done("{\"ok\":1,\"content\":\"Привет\",\"finish_reason\":\"stop\"}");
+    ASSERT_EQ(std::to_string(delivered), std::to_string(before_abort));
+
+    g_late_delta = nullptr;
+    g_late_tool = nullptr;
+    g_late_done = nullptr;
+}
+
+TEST(provider_error_is_not_mistaken_for_an_abort) {
+    /* Обратная сторона разведения видов: обычный отказ провайдера обязан
+     * остаться Provider, иначе «сеть упала» выглядела бы как «стоп». */
+    Script script;
+    script.done_json = "{\"ok\":0,\"error\":\"HTTP 500\"}";
+    g_script = &script;
+
+    AbortToken token;   /* токен есть, но не отменён */
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 1000, &token);
+    g_script = nullptr;
+
+    ASSERT_FALSE(ok);
+    ASSERT_EQ(static_cast<int>(llm_source::fold(events).failure()),
+              static_cast<int>(FailureKind::Provider));
 }
