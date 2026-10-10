@@ -775,12 +775,41 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * Токен читается под локом: он СВОЙ у хода, и следующий ход
          * заменит указатель, пока этот ещё ждёт. */
         AbortToken* step_abort = nullptr;
+        int step_no = 0;
         {
             std::lock_guard<std::mutex> lk(state_.mtx);
             step_abort = state_.turn_abort.get();
+            step_no = step + 1;
         }
+        /* И11.6: живая доставка дельт в панель стриминга. До И11.6 здесь
+         * стоял `nullptr`, то есть дельты вычислялись LlmClient'ом и уходили
+         * в никуда: канал появился в И11.14, а потребителя у него не было.
+         *
+         * Колбэк берёт `state_.mtx` на каждой дельте. Это короткая
+         * операция (склейка строки под пределом) и единственное место, где
+         * UI-поток и поток агента встречаются, поэтому блокировка взята
+         * ОДИН раз на доставку, а не на весь ход: держать её минуту
+         * означало бы повесить окно на всё время ответа модели. */
+        auto on_event = [this, step_no](const LlmEvent& e) {
+            if (e.kind() == LlmEventKind::StepStart) {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                stream_panel::feed(state_.stream, e);
+                state_.stream.step = step_no;
+                return;
+            }
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            stream_panel::feed(state_.stream, e);
+        };
         const bool ok = LlmClient::fetch(cb_, sys_prompt, model_msgs, events,
-                                         nullptr, -1, step_abort);
+                                         on_event, -1, step_abort);
+        {
+            /* Ход закрылся — панель гаснет. Буфер очищается НЕ сразу: пока
+             * цикл не записал ход в историю, текст из буфера — единственное
+             * место, где он ещё виден. `finish_turn` только снимает признак
+             * активности, содержимое переживает до следующего StepStart. */
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            stream_panel::finish_turn(state_.stream);
+        }
         auto t1 = std::chrono::steady_clock::now();
         const double llm_s =
             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1000.0;

@@ -21,6 +21,7 @@
 #include "tool_protocol.h"
 #include "permission_engine.h"
 #include "message.h"
+#include "stream_panel.h"
 #include "limits.h"
 #include "snapshot.h"
 
@@ -239,6 +240,19 @@ struct EngineState {
     mutable std::mutex mtx;
     std::condition_variable permission_cv;
     bool waiting_in_sync = false;
+
+    /* И11.6: живой буфер незакрытого хода для панели стриминга.
+     *
+     * Живёт в состоянии, а не в окне: дельты приходят на ПОТОКЕ АГЕНТА, а
+     * окно рисуется на UI-потоке, и буфер, живший в окне, пришлось бы
+     * трогать из двух мест без всякой синхронизации.
+     *
+     * Отдельное поле, а не часть сессии: незакрытый ход в истории ещё не
+     * лежит (его запишет цикл по завершении), и «дописать текст в
+     * MessagePart из колбэка» означало бы писать в историю до того, как
+     * цикл признает ход состоявшимся. Панель показывает предпросмотр,
+     * история — authoritative. */
+    stream_panel::StreamBuffer stream;
 
     /* Метрики последнего ответа (честные, из usage LLM-вызовов). */
     double last_response_time = 0;          // полное время задачи, сек

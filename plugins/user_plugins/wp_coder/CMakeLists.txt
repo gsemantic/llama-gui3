@@ -50,6 +50,7 @@ set(CORE_SOURCES
     core/diff.cpp
     core/timeline.cpp
     core/tool_display.cpp
+    core/stream_panel.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -275,6 +276,13 @@ if(WP_CODER_BUILD_TESTS)
         # test_iteration_iv_invariants.cpp; стоит после test_message.cpp,
         # потому что длительность вызова живёт в модели сообщений.
         tests/test_timeline.cpp
+        # И11.6: панель стриминга — что видно, пока ход не закрыт.
+        # Инструментов не регистрирует и состояние движка не трогает
+        # (работает на буфере, собранном вручную), поэтому стоит после
+        # test_timeline.cpp: обе панели показывают работу агента, и
+        # граница между ними («таймлайн — закрытые ходы, панель — текущий»)
+        # проверяется на одном и том же материале.
+        tests/test_stream_panel.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

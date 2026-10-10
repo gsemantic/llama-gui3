@@ -9,6 +9,7 @@
 #include "../core/snapshot.h"
 #include "../core/timeline.h"
 #include "../core/tool_display.h"
+#include "../core/stream_panel.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -806,7 +807,7 @@ static void render_timeline() {
          * вызовов, тело которых кадр покажет; разбор и подписи идут уже без
          * лока (то же, за что закрыли D1 — окно, ждущее мьютекс агента).
          *
-* И11.5: дерево и список нужных тел собираются ТОЖЕ под этим локом,
+         * И11.5: дерево и список нужных тел собираются ТОЖЕ под этим локом,
          * а не после него. Второе взятие лока ради снимков означало бы, что
          * проекция и снимки взяты из РАЗНЫХ состояний, и подпись разошлась
          * бы с картинкой. Само дерево строк не строит (`build_timeline`
@@ -914,6 +915,104 @@ static void render_timeline() {
     ImGui::TreePop();
 }
 
+/* --- И11.6: панель стриминга ---
+ *
+ * Окно рисует ГОТОВОЕ и ничего не решает: что видно, что скрыто, какой
+ * инструмент активен — всё вычислено в core/stream_panel.h. Здесь нет ни
+ * одного условия «показывать ли», потому что окно ImGui юнит-тестом не
+ * проверяется, и решение здесь было бы непроверяемым (тот же довод, что
+ * у 11.1, 11.4, 11.5).
+ *
+ * Два блока состояния снимаются ОДНИМ взятием `st.mtx`: буфер и активный
+ * инструмент. Второе взятие лока дало бы панель, составленную из двух
+ * разных моментов времени — например, текст шага и инструмент уже
+ * следующего. */
+static void render_stream_panel() {
+    coder::stream_panel::Panel panel;
+    {
+        auto& st = engine_state();
+        std::lock_guard<std::mutex> lk(st.mtx);
+        /* Активный инструмент берётся из ИСТОРИИ, а не из отдельного поля
+         * состояния: вызов, помеченный `set_running()`, уже лежит в
+         * сессии, и второе место правды «что работает» разъехалось бы при
+         * первой же правке (шапка stream_panel.h, п. 3). */
+        coder::stream_panel::ActiveTool active;
+        for (auto it = st.session.rbegin(); it != st.session.rend(); ++it) {
+            for (const coder::MessagePart& part : it->parts) {
+                if (part.kind() != coder::PartKind::Tool) continue;
+                if (part.state() != coder::ToolState::Running) continue;
+                active.call_id = part.call_id();
+                active.tool_name = part.tool_name();
+                if (part.has_duration()) {
+                    active.elapsed_ms = static_cast<std::size_t>(
+                        part.duration_ms() < 0 ? 0 : part.duration_ms());
+                }
+                break;
+            }
+            if (!active.tool_name.empty()) break;
+        }
+        panel = coder::stream_panel::build(st.stream, active);
+    }
+
+    if (!panel.visible) return;
+
+    if (!ImGui::TreeNodeEx("Стриминг", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+
+    /* Подпись шага — из core, не собирается здесь. */
+    if (!panel.step_line.empty()) {
+        ImGui::TextDisabled("%s", panel.step_line.c_str());
+    }
+
+    /* Размышление идёт ПЕРВЫМ и по времени появления, а не по важности:
+     * модель печатает его раньше ответа, и человек ждёт именно его. */
+    if (!panel.reasoning.empty()) {
+        ImGui::TextDisabled("размышление");
+        ImGui::TextWrapped("%s%s", panel.reasoning.c_str(),
+                           panel.reasoning_open ? "▌" : "");
+        if (panel.reasoning_open) ImGui::SameLine();
+        ImGui::Spacing();
+    }
+
+    /* Инструмент показывается и когда текста нет: ход, в котором модель
+     * молча зовёт `bash`, не печатает ничего, и без этой строки человек
+     * видел бы пустую панель при работающем инструменте. */
+    if (panel.has_tool) {
+        if (panel.tool.elapsed_ms > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
+                               "%s... (%.1f с)", panel.tool.tool_name.c_str(),
+                               panel.tool.elapsed_ms / 1000.0);
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
+                               "%s...", panel.tool.tool_name.c_str());
+        }
+    }
+
+    /* Пишет аргументы вызова: имя уже есть, а блок ещё не разобран —
+     * показывать нечего, и без этой строки человек видел бы паузу без
+     * причины. */
+    if (panel.tool_open) {
+        ImGui::TextDisabled("пишет аргументы вызова %s",
+                            panel.tool_call_id.c_str());
+    }
+
+    if (!panel.text.empty()) {
+        ImGui::TextWrapped("%s%s", panel.text.c_str(),
+                           panel.text_open ? "▌" : "");
+    }
+
+    /* Отброшенный текст назван ЧИСЛОМ: молча обрезанный текст выглядел бы
+     * как «модель так начала», и человек искал бы причину не там. */
+    if (panel.dropped_chars > 0) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "начало показа скрыто: предел панели, отброшено %zu символов",
+                           panel.dropped_chars);
+    }
+
+    ImGui::TreePop();
+}
+
 static void render_session() {
     if (!g_api->window_is_visible(g_host, g_win_session)) return;
     ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
@@ -958,6 +1057,11 @@ static void render_session() {
 
     render_snapshot_diff();
     render_tool_diffs();
+    /* И11.6: панель стриминга идёт ПЕРЕД таймлайном. Пока ход открыт,
+     * человек смотрит на живой текст; таймлайн под ним — уже закрытые
+     * ходы. Наоборот (таймлайн выше) панель оказалась бы внизу экрана
+     * именно тогда, когда в неё смотрят. */
+    render_stream_panel();
     render_timeline();
 
     /* Лента событий (последние 40). */
