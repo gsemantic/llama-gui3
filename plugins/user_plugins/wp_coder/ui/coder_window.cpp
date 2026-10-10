@@ -11,6 +11,7 @@
 #include "../core/tool_display.h"
 #include "../core/stream_panel.h"
 #include "../core/todo_panel.h"
+#include "../core/permission_panel.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -571,6 +572,59 @@ static void render_tool_diffs() {
         ImGui::PopID();
     }
     ImGui::TreePop();
+}
+
+/* --- И11.8: диалог разрешения ---
+ *
+ * Решение — что показать, какие кнопки есть и что будет с остальными
+ * вопросами — принимает `core/permission_panel.h`; здесь только отрисовка
+ * готовых полей. Обоснование в шапке того файла.
+ *
+ * Снимок берётся ДО отрисовки и БЕЗ `st.mtx`: PermissionEngine живёт под
+ * своим мьютексом и правилу D-6 не подчиняется — вычисления отдельно,
+ * рисование отдельно. */
+static void render_permission_dialog() {
+    const coder::permission_panel::Panel panel =
+        coder::permission_panel::build(engine().permission_pending());
+    if (!panel.visible) return;
+
+    ImGui::Separator();
+    ImGui::TextUnformatted(panel.ask.headline.c_str());
+    if (!panel.ask.metadata.empty()) {
+        ImGui::TextWrapped("%s", panel.ask.metadata.c_str());
+    }
+    for (const std::string& pat : panel.ask.patterns) {
+        ImGui::TextDisabled("шаблон: %s", pat.c_str());
+    }
+    if (!panel.ask.suggest_line.empty()) {
+        ImGui::TextDisabled("%s", panel.ask.suggest_line.c_str());
+    }
+    /* Каскад назван ДО кнопок, а не после нажатия: «Отклонить» без этой
+     * строки тихо убивает ещё N вопросов, которых человек не видел. */
+    if (!panel.ask.cascade_line.empty()) {
+        ImGui::TextDisabled("%s", panel.ask.cascade_line.c_str());
+    }
+
+    /* Ответ идёт по id, а не по позиции: очередь меняется между кадром и
+     * кликом (каскад снимает вопросы пачкой), и ответ по позиции ушёл бы
+     * не тому. */
+    const std::string id = std::to_string(panel.ask.id);
+    if (ImGui::SmallButton((panel.ask.once_label + "##perm" + id).c_str())) {
+        engine().permission_reply(panel.ask.id, coder::PermissionReply::Once);
+    }
+    /* Кнопки «Всегда» нет, когда записывать нечего (пустой suggested):
+     * показать её — значит пообещать постоянное разрешение, которого не
+     * будет. На doom_loop она была в точности «Разрешить разово». */
+    if (panel.ask.can_always) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton((panel.ask.always_label + "##perm" + id).c_str())) {
+            engine().permission_reply(panel.ask.id, coder::PermissionReply::Always);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton((panel.ask.reject_label + "##perm" + id).c_str())) {
+        engine().permission_reply(panel.ask.id, coder::PermissionReply::Reject);
+    }
 }
 
 /* --- И11.3: дерево вызовов инструментов по ходам ---
@@ -1347,41 +1401,9 @@ void render_extras() {
         }
     }
 
-    /* Запросы системы разрешений И2. Снимок берётся ДО отрисовки и без
-     * st.mtx: PermissionEngine живёт под своим мьютексом, и правило
-     * D-6 здесь буквальное — вычисления отдельно, рисование отдельно.
-     * Запросов может быть несколько: показываем первый, кнопки отвечают
-     * по его id. */
-    {
-        std::vector<coder::PermissionRequest> asks = engine().permission_pending();
-        if (!asks.empty()) {
-            const coder::PermissionRequest& r = asks.front();
-            ImGui::Separator();
-            ImGui::Text("Требуется разрешение: %s", r.permission.c_str());
-            if (!r.metadata.empty()) ImGui::TextWrapped("%s", r.metadata.c_str());
-            for (const auto& p : r.patterns) {
-                ImGui::TextDisabled("шаблон: %s", p.c_str());
-            }
-            if (!r.suggested.empty()) {
-                ImGui::TextDisabled("«всегда» разрешит: %s", r.suggested.c_str());
-            }
-            if (asks.size() > 1) {
-                ImGui::TextDisabled("ещё в очереди: %zu", asks.size() - 1);
-            }
-            const std::string id = std::to_string(r.id);
-            if (ImGui::SmallButton(("Разрешить (один раз)##perm" + id).c_str())) {
-                engine().permission_reply(r.id, coder::PermissionReply::Once);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(("Всегда##perm" + id).c_str())) {
-                engine().permission_reply(r.id, coder::PermissionReply::Always);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(("Отклонить##perm" + id).c_str())) {
-                engine().permission_reply(r.id, coder::PermissionReply::Reject);
-            }
-        }
-    }
+    /* Запросы системы разрешений И2 рисует render_permission_dialog —
+     * решение о подписях и кнопках принимает core/permission_panel.h. */
+    render_permission_dialog();
 
     /* Диалог разрешения доступа. */
     {
