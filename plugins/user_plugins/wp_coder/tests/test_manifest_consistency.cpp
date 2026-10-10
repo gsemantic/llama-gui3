@@ -20,6 +20,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace coder;
@@ -510,6 +511,76 @@ TEST(session_start_file_has_no_volatile_data) {
             ASSERT_TRUE(false);
         }
         i = (j > i) ? j : i + 1;
+    }
+}
+
+/* --- И11.5: временный каталог фикстуры обязан быть убираемым --- */
+
+TEST(every_tmp_fixture_registers_its_dir_or_cleans_it_itself) {
+    /* Уборка мусора из /tmp держится на ДВУХ независимых механизмах, и
+     * ни один из них не проверялся: `register_tmp_tree()` (уборка в
+     * конце прогона, test_framework.h) и RAII-деструктор фикстуры,
+     * который сносит свой каталог сам. Проверки green говорили «каталоги
+     * убираются» — и не говорили, потому что НИ ОДНА проверка не смотрит
+     * на /tmp вообще. Настоящий дефект это вскрыл: `test_tool_display`
+     * создавал каталог и не регистрировал его, и прогон оставлял 16
+     * каталогов, тогда как журнал плана уже отчитался «0 каталогов
+     * после прогона».
+     *
+     * Проверка идёт по СОСТАВУ, а не по факту прогона: содержимое /tmp
+     * после тестов — это состояние машины, а не свойство дерева, и его
+     * сравнение сработало бы один раз и молчало дальше.
+     *
+     * Самообъявляющийся список ИСКЛЮЧЕНИЙ обязателен: девять файлов
+     * убирают каталог деструктором, и это не дефект, а другой
+     * механизм. Список назван файлами, а не «все остальные» — иначе
+     * новая фикстура попала бы в исключение автоматически, и ровно
+     * тот дефект, который проверка ловит, прошёл бы мимо неё. */
+    static const char* kSelfCleaning[] = {
+        "test_agent_loop.cpp",    /* ~LoopFixture */
+        "test_diff.cpp",          /* ~RepoBox */
+        "test_diff_view.cpp",     /* remove_all в теле проверки */
+        "test_harness_profile.cpp",  /* ~TempDir */
+        "test_instruction.cpp",   /* ~TempDir */
+        "test_snapshot.cpp",      /* ~SandBox */
+        "test_task_tool.cpp",     /* ~TaskFixture */
+        "test_tool.cpp"};         /* remove_all в теле проверки */
+
+    const fs::path tdir = plugin_root() / "tests";
+    std::vector<std::string> exempt(kSelfCleaning,
+                                    kSelfCleaning + sizeof(kSelfCleaning) / sizeof(*kSelfCleaning));
+    int seen = 0;
+    for (const auto& e : fs::directory_iterator(tdir)) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() != ".cpp") continue;
+        const std::string name = e.path().filename().string();
+        const std::string code = code_only(read_file(e.path()));
+        /* Только код: имя каталога может встретиться в комментарии как
+         * объяснение, и комментарий фикстурой не является. */
+        if (code.find("temp_directory_path") == std::string::npos) continue;
+        ++seen;
+        if (code.find("register_tmp_tree") != std::string::npos) continue;
+        auto it = std::find(exempt.begin(), exempt.end(), name);
+        if (it != exempt.end()) {
+            exempt.erase(it);
+            continue;
+        }
+        std::cerr << "  " << name << " создаёт временный каталог, но не"
+                  << " регистрирует его (register_tmp_tree) и не значится"
+                  << " в списке самоубирающихся фикстур проверки"
+                  << " every_tmp_fixture_registers_its_dir_or_cleans_it_itself"
+                  << std::endl;
+        ASSERT_TRUE(false);
+    }
+    /* Каталог создаёт кто-то — иначе проверка зелена на пустом дереве. */
+    ASSERT_TRUE(seen > 0);
+    /* Исключение, которого больше нет, — протухшая запись: она молча
+     * разрешает новому дефекту в файле, который когда-то убирал себя. */
+    for (const std::string& n : exempt) {
+        std::cerr << "  исключение проверки уборки /tmp устарело: " << n
+                  << " — файла нет либо он уже регистрирует каталог"
+                  << std::endl;
+        ASSERT_TRUE(false);
     }
 }
 

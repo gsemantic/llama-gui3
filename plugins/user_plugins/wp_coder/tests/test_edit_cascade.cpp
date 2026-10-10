@@ -39,6 +39,8 @@ fs::path make_tmp_tree() {
            + std::to_string(std::rand()));
     fs::remove_all(tmp);
     fs::create_directories(tmp);
+    /* И11.5: каталог убирается в конце прогона (test_framework.h), а не остаётся в /tmp до следующего. */
+    register_tmp_tree(tmp.string());
     return tmp;
 }
 

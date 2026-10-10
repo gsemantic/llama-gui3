@@ -16,12 +16,49 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 #include <functional>
 #include <mutex>
+
+/* --- Уборка временных каталогов, созданных тестами ---
+ *
+ * Хелперы вида `make_tmp_tree()` снимают мусор ПЕРЕД созданием и не снимают
+ * ПОСЛЕ: имя каталога включает pid, а pid у каждого прогона свой, то есть
+ * снимать нечего, и каждый прогон оставлял свой набор каталогов. За сессию
+ * это набегало сотнями каталогов на десятки мегабайт — в /tmp, где их и
+ * видно только потому, что они никуда не делись.
+ *
+ * Уборка идёт ОДИН раз на прогон, в конце, по списку зарегистрированных
+ * путей. Перебирать каталоги по префиксу имени нельзя: под теми же
+ * именами работает живой плагин (сессии субагентов, каталоги снимков), и
+ * `remove_all` по маске снёс бы чужое. Регистрация добровольная: фикстуры,
+ * которые убирают каталог сами (RAII-деструктор), ничего регистрировать не
+ * должны — иначе уборка удаляла бы уже удалённое. */
+inline std::vector<std::string>& tmp_trees() {
+    static std::vector<std::string> paths;
+    return paths;
+}
+
+inline void register_tmp_tree(const std::string& path) {
+    tmp_trees().push_back(path);
+}
+
+inline void cleanup_tmp_trees() {
+    for (const std::string& p : tmp_trees()) {
+        std::error_code ec;
+        std::filesystem::remove_all(p, ec);
+        /* Ошибка уборки МОЛЧИТ: это не проверка, а уборка мусора, и падать
+         * из-за неё после зелёного прогона значило бы превратить её в
+         * проверку, которой она не является. Мусор, который не удалился,
+         * виден в /tmp сам. */
+    }
+    tmp_trees().clear();
+}
 
 struct TestCase {
     std::string name;
@@ -135,5 +172,6 @@ struct TestRegistrar {
         } \
         std::cout << "\n=== " << passed << " passed, " << failed \
                   << " failed ===" << std::endl; \
+        cleanup_tmp_trees(); \
         return failed > 0 ? 1 : 0; \
     }
