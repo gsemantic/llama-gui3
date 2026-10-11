@@ -53,6 +53,7 @@ set(CORE_SOURCES
     core/stream_panel.cpp
     core/todo_panel.cpp
     core/permission_panel.cpp
+    core/token_panel.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -291,6 +292,11 @@ if(WP_CODER_BUILD_TESTS)
         # проверяет живой PermissionEngine (задаёт вопрос с потока и ждёт
         # ответа), поэтому стоит после файлов, поднимающих разрешения.
         tests/test_permission_panel.cpp
+        # И11.9: панель токенов и стоимости. Зовёт record_turn_usage и
+        # reset_task_metrics на живом состоянии движка (они вынесены в
+        # engine.h именно ради этого), поэтому стоит после файлов,
+        # поднимающих движок, — как и test_permission_panel.cpp выше.
+        tests/test_token_panel.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

@@ -1039,6 +1039,32 @@ void Engine::load_settings() {
             setting_get(cb_, "wp_coder.compaction_prune", "false") == "true";
     }
 
+    /* И11.9: цены за 1M токенов — панель стоимости. Читаются здесь, а не
+     * по месту показа, по той же причине, что лимиты выше: у хоста цену
+     * модели взять нечем (`settings_get` отдаёт только custom-настройки
+     * плагина), а читать настройку во время рисования — значит показать
+     * человеку цифру, посчитанную по значению, которое он уже успел
+     * изменить.
+     *
+     * Разбор СТРОГИЙ, как у лимитов, и по той же причине: мусор и
+     * отрицательное значение → 0 → «цена не задана». Стойко неверная цена
+     * хуже отсутствующей, потому что отсутствие видно, а неверное число
+     * принимается за правду и умножается на все токены сессии. */
+    {
+        const auto read_price = [this](const char* key) -> double {
+            const std::string t = setting_get(cb_, key, "");
+            if (t.empty()) return 0.0;
+            try {
+                const double v = std::stod(t);
+                return v > 0.0 ? v : 0.0;
+            } catch (...) {
+                return 0.0;
+            }
+        };
+        state_.price_input_per_1m = read_price("wp_coder.price_input_per_1m");
+        state_.price_output_per_1m = read_price("wp_coder.price_output_per_1m");
+    }
+
     state_.allowed_external_paths.clear();
     std::string paths_json = setting_get(cb_, "wp_coder.allowed_external_paths", "[]");
     {
@@ -1291,9 +1317,48 @@ void reset_task_metrics(EngineState& state) {
     state.llm_total_time = 0;
     state.total_prompt_tokens = 0;
     state.total_completion_tokens = 0;
+    /* И11.9: сбрасываются ВСЕ пять, а не два. Забытый здесь счётчик
+     * кэша жил бы в панели следующей задачи как «дешёвый запрос, который
+     * тот агент не делал» — и заметить это можно было бы только
+     * сравнением с журналом. */
+    state.total_reasoning_tokens = 0;
+    state.total_cache_read_tokens = 0;
+    state.total_cache_write_tokens = 0;
     state.last_tokens_per_second = 0;
+    /* И11.9: сбрасывается вместе со скоростью — иначе флаг оценки от
+     * прошлой задачи пометил бы оценкой скорость следующей, измеренную
+     * по-настоящему (шапка engine.h, поле `tokens_estimated`). */
+    state.tokens_estimated = false;
     state.steps = 0;
     state.measured_input_tokens = 0;
+}
+
+void apply_task_speed(EngineState& state, const std::string& response,
+                      double llm_seconds) {
+    /* Итоговая скорость задачи (И11.9).
+     *
+     * Когда провайдер не прислал usage, выходных токенов у задачи нет, и
+     * вместо них подставляется ОЦЕНКА chars/4. Число после подстановки от
+     * измеренного неотличимо, поэтому рядом ставится флаг: панель токенов
+     * обязана сказать словами, что это оценка, а не измерение (token_panel.h,
+     * п. 5). Пока флага не было, панель показала бы «42 ток/с» тем же
+     * шрифтом, что и честную скорость.
+     *
+     * Отдельная функция — по той же причине, что и `reset_task_metrics`:
+     * из лямбды `cleanup()` её не достать, а единственный писатель флага,
+     * не покрытый проверкой, — это ровно тот дефект, который искала
+     * мутация «флаг оценки не ставится» (выжила, разобрана в журнале).
+     *
+     * Лок НЕ берётся: вызывающий уже держит `state_.mtx`. */
+    int comp_tokens = state.total_completion_tokens;
+    state.tokens_estimated = false;
+    if (comp_tokens <= 0 && !response.empty()) {
+        comp_tokens = std::max(1, static_cast<int>(response.size() / 4));
+        state.tokens_estimated = true;
+    }
+    state.last_tokens_generated = comp_tokens;
+    state.last_tokens_per_second =
+        (llm_seconds > 0.0) ? (double)comp_tokens / llm_seconds : 0.0;
 }
 
 void Engine::run_task(std::string task) {
@@ -1349,10 +1414,10 @@ void Engine::run_task(std::string task) {
 
             int comp_tokens = state_.total_completion_tokens;
             double llm_t = state_.llm_total_time;
-            if (comp_tokens <= 0 && !state_.last_response.empty())
-                comp_tokens = std::max(1, static_cast<int>(state_.last_response.size() / 4));
-            state_.last_tokens_generated = comp_tokens;
-            state_.last_tokens_per_second = (llm_t > 0.0) ? (double)comp_tokens / llm_t : 0.0;
+            /* И11.9: подстановка оценки и её опознание — в отдельной функции
+             * `apply_task_speed` (рядом, она вынесена по той же причине,
+             * что и reset_task_metrics: из cleanup() не достать). */
+            apply_task_speed(state_, full_response, llm_t);
 
             state_.response_ready = true;
         }

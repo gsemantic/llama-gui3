@@ -260,7 +260,31 @@ struct EngineState {
     int last_tokens_generated = 0;          // completion_tokens
     int total_prompt_tokens = 0;
     int total_completion_tokens = 0;
+    /* И11.9: остальные три счётчика Usage, которых до этого задачи не
+     * было. Копятся тем же record_turn_usage, что и input/output, и по
+     * той же причине: показывать их можно было только из usage
+     * последнего хода, а человеку нужен итог за сессию.
+     *
+     * Имена не переименованы у старых двух: `total_prompt_tokens` стоит
+     * в коде и в тестах, а переименование в `total_input_tokens`
+     * растянуло бы задачу на правку чужого кода без выигрыша.
+     *
+     * ИНВАРИАНТ (не «договорённость»): input = non_cached_input +
+     * cache_read + cache_write, поэтому сумма трёх полей равна
+     * total_prompt_tokens. Нарушение ловит
+     * `session_usage_counts_match_the_usage_invariants`. */
+    long long total_reasoning_tokens = 0;
+    long long total_cache_read_tokens = 0;
+    long long total_cache_write_tokens = 0;
     double last_tokens_per_second = 0;
+    /* И11.9: `last_tokens_per_second` посчитан по ОЦЕНКЕ, а не по usage.
+     * Флаг ставится там же, где оценка подставляется (run_task), потому что
+     * по самому числу это не различить: 42 ток/с по измерению и 42 ток/с по
+     * длине ответа выглядят одинаково, а панель обязана их различать
+     * (token_panel.h, п. 5). Обнуляется вместе с остальными метриками
+     * задачи — иначе флаг от прошлой задачи пометил бы оценкой скорость
+     * следующей, измеренную по-настоящему. */
+    bool tokens_estimated = false;
     int steps = 0;                          // число шагов ReAct
 
     /* Проект. */
@@ -397,6 +421,14 @@ struct EngineState {
     compaction::ModelLimits model_limits;
     compaction::CompactionConfig compaction_config;
 
+    /* И11.9: цены за 1M токенов. Отдельная пара, а не поля рядом с
+     * лимитами, потому что у них разная судьба: лимит отсутствия означает
+     * «работаем как раньше», а цена отсутствия — «сумму не показываем».
+     * Ноль = «не задана» (не «бесплатно»), см. шапку core/token_panel.h,
+     * п. 2 и 3: с одной ставкой сумма не считается вовсе. */
+    double price_input_per_1m = 0;
+    double price_output_per_1m = 0;
+
     /* Агент. */
     std::deque<AgentEvent> events;
     std::queue<std::string> inbox;
@@ -531,6 +563,33 @@ struct EngineState {
  * Лок НЕ берётся: вызывающий уже держит state_.mtx, а он нерекурсивный
  * и общий с UI-потоком. */
 void reset_task_metrics(EngineState& state);
+
+/* Учёт токенов хода (И7.2, дополнено И11.9).
+ *
+ * Объявлено здесь по той же причине, что и `reset_task_metrics`: сумма
+ * счётчиков — ровно то, что показывает панель токенов, и проверять её
+ * иначе нечем. Проверка на живом цикле гоняла бы LLM и ждала ответа
+ * провайдера, то есть проверяла бы сеть вместо арифметики.
+ *
+ * Лок берётся ВНУТРИ: вызывающие цикла лока не держат (`state_.mtx`
+ * нерекурсивный и общий с UI). Поэтому вызывающий, который уже держит
+ * лок, повесится — и проверка на это тоже есть. */
+void record_turn_usage(EngineState& state, const Usage& usage);
+
+/* Итоговая скорость задачи (И11.9).
+ *
+ * Вынесена из лямбды `cleanup()` по той же причине, что и
+ * `reset_task_metrics`: единственный писатель флага `tokens_estimated`
+ * жил внутри `run_task`, недостижимого из теста, — и проверки на честность
+ * скорости в панели не существовало (мутация «флаг не ставится» выжила).
+ *
+ * Побочный эффект подстановки оценки chars/4 неотличим от измерения, и
+ * поэтому функция ОБЯЗАНА ставить флаг: панель читает его и говорит словами
+ * «оценка по длине ответа, провайдер не прислал usage».
+ *
+ * Лок НЕ берётся: вызывающий уже держит `state_.mtx`. */
+void apply_task_speed(EngineState& state, const std::string& response,
+                      double llm_seconds);
 
 /* Проверка, находится ли путь за пределами project_dir. */
 inline bool is_path_outside(const std::string& abs_path, const std::string& project_dir) {

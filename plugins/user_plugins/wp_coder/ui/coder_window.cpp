@@ -12,6 +12,7 @@
 #include "../core/stream_panel.h"
 #include "../core/todo_panel.h"
 #include "../core/permission_panel.h"
+#include "../core/token_panel.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -856,7 +857,7 @@ static void render_call_body(const timeline::Call& call,
  * `Engine::toggle_todo`, а не правит состояние здесь. Причина в том, что
  * правка без сброса кэша промпта осталась бы для модели невидимой: план
  * печатается в системном промпте, и человек увидел бы отмеченную галочку
- * при плане, о котором модель не знает. Сброс внутри той же функции —
+ * при плане, о котором модель не знал. Сброс внутри той же функции —
  * поэтому забыть его нельзя. */
 static void render_todo_panel() {
     coder::todo_panel::Panel panel;
@@ -907,6 +908,85 @@ static void render_todo_panel() {
         ImGui::PopID();
         ImGui::PopID();
     }
+    ImGui::TreePop();
+}
+
+/* --- И11.9: панель токенов и стоимости ---
+ *
+ * Снимок и сборка панели.
+ *
+ * Отдельная функция, а не часть `render_token_panel`, потому что панель
+ * рисуется в ДВУХ местах (окно сессии и панель агента в главном окне), а
+ * снимок с локом должен быть один: две копии разошлись бы по полям при
+ * первой же правке счётчика, и одна из них показывала бы не то, что
+ * показала бы другая на том же кадре.
+ *
+ * Лок берётся и отпускается ВНУТРИ: наружу отдаётся готовая панель, то
+ * есть ровно то, что ушло в отрисовку. Держать `state_.mtx` под ImGui
+ * нельзя (D1, правило 3 SESSION_START) — мьютекс общий с потоком агента
+ * и нерекурсивный. */
+static coder::token_panel::Panel take_token_panel() {
+    auto& st = engine_state();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    coder::token_panel::Snapshot snap;
+    snap.input = st.total_prompt_tokens;
+    snap.output = st.total_completion_tokens;
+    snap.reasoning = st.total_reasoning_tokens;
+    snap.cache_read = st.total_cache_read_tokens;
+    snap.cache_write = st.total_cache_write_tokens;
+    snap.tokens_per_second = st.last_tokens_per_second;
+    snap.tokens_estimated = st.tokens_estimated;
+    snap.response_seconds = st.last_response_time;
+    snap.llm_seconds = st.llm_total_time;
+    snap.steps = st.steps;
+    snap.input_price_per_1m = st.price_input_per_1m;
+    snap.output_price_per_1m = st.price_output_per_1m;
+    /* Источник контекста и порог окна берутся ТЕМИ ЖЕ функциями, что у
+     * компакшна: панель не пересчитывает их своими формулами, иначе её
+     * «доля контекста» разошлась бы с порогом, по которому агент сжимает
+     * историю (token_panel.h, п. 6). */
+    snap.context = coder::compaction::context_usage(st.measured_input_tokens,
+                                                    st.session);
+    snap.context_room = coder::compaction::usable(st.model_limits,
+                                                  st.compaction_config);
+    return coder::token_panel::build(snap);
+}
+
+/* Разделительный цвет для контекста: единственное место в панели, где
+ * цвет значим, — порог пройден и дальше история начнёт сжиматься сама. */
+static void draw_token_lines(const coder::token_panel::Panel& panel) {
+    ImGui::TextUnformatted(panel.input_line.c_str());
+    ImGui::TextUnformatted(panel.output_line.c_str());
+    /* Стоимость и скорость могут объяснять, почему их нет. Такая строка —
+     * не ошибка, поэтому она рисуется обычным цветом, а не красным:
+     * красным в этом окне помечают отказ, а здесь всё в порядке. */
+    ImGui::TextUnformatted(panel.cost_line.c_str());
+    ImGui::TextUnformatted(panel.speed_line.c_str());
+    if (panel.context_tight) {
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "%s",
+                           panel.context_line.c_str());
+    } else {
+        ImGui::TextUnformatted(panel.context_line.c_str());
+    }
+    ImGui::TextDisabled("%s", panel.steps_line.c_str());
+}
+
+/* Панель токенов в окне сессии. Здесь НЕТ ни одного решения «что
+ * показывать»: лок отпущен до отрисовки, и рисуется то, что вернуло
+ * `token_panel::build`.
+ *
+ * Все числа — за ЗАДАЧУ, а не за сессию: `reset_task_metrics` обнуляет их
+ * на каждой задаче. Заголовок говорит об этом прямо, потому что «итого»
+ * без уточнения читалось бы как сумма за всё время работы. */
+static void render_token_panel() {
+    const coder::token_panel::Panel panel = take_token_panel();
+    if (!panel.visible) return;
+
+    if (!ImGui::TreeNodeEx("Токены и стоимость (за задачу)",
+                           ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    draw_token_lines(panel);
     ImGui::TreePop();
 }
 
@@ -1145,12 +1225,6 @@ static void render_session() {
     {
         std::lock_guard<std::mutex> lk(st.mtx);
         ImGui::Text("Состояние: %s", coder::agent_state_name(st.state));
-        char stats[200];
-        std::snprintf(stats, sizeof(stats),
-            "токены: %d | скорость: %.1f tok/s | LLM: %.1fs | шаги: %d",
-            st.total_completion_tokens, st.last_tokens_per_second,
-            st.llm_total_time, st.steps);
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "%s", stats);
         /* И9.7: активный профиль harness. Показывается, потому что профиль
          * СУЖАЕТ права, и человек, не видя его имени, не может понять,
          * почему агент вдруг не может записать файл. Плюс причина, если
@@ -1182,6 +1256,9 @@ static void render_session() {
      * именно тогда, когда в неё смотрят. */
     render_stream_panel();
     render_todo_panel();
+    /* И11.9: панель токенов идёт после плана и перед таймлайном — она про
+     * всю задачу целиком, а таймлайн про один ход. */
+    render_token_panel();
     render_timeline();
 
     /* Лента событий (последние 40). */
@@ -1265,17 +1342,20 @@ void render_extras() {
             if ( ImGui::Button("Стоп", {-1, 0}) ) {
                 engine().request_abort();
             }
-        } else if (st.last_response_time > 0) {
-            char stats[160];
-            std::snprintf(stats, sizeof(stats),
-                "%d tok | %.1f tok/s | %ds (LLM %.1fs) | %d steps",
-                st.last_tokens_generated,
-                st.last_tokens_per_second,
-                (int)st.last_response_time,
-                (int)st.llm_total_time,
-                st.steps);
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "%s", stats);
         }
+        /* И11.9: строка «N tok | X tok/s | …» из этой ветки убрана. Панель
+         * токенов ниже показывает те же числа плюс стоимость, кэш и долю
+         * контекста, и держать вторую форму тех же данных значило бы
+         * получить две правды о расходе: старая строка печатала оценку
+         * chars/4 тем же шрифтом, что измерение (Д2, Д12). */
+    }
+
+    /* И11.9: панель токенов — в главном окне агента тоже, из того же
+     * снимка, что и в окне сессии. Показывается, когда задача что-то
+     * измерила; решение «показывать ли» — в core. */
+    {
+        const coder::token_panel::Panel tokens = take_token_panel();
+        if (tokens.visible) draw_token_lines(tokens);
     }
 
     /* План-режим. */

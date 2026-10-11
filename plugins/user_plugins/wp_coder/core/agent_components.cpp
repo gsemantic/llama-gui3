@@ -423,9 +423,7 @@ const char* kPlanPrompt =
 
 } // namespace
 
-namespace {
-
-/* Учёт токенов хода (И7.2).
+/* Учёт токенов хода (И7.2) — тело ниже, объявление в engine.h.
  *
  * ОДНО место на три точки вызова — планировщик, цикл и хвостовой ход.
  * Списком по три строки в каждой точке они и раньше дублировались, и
@@ -435,6 +433,8 @@ namespace {
  *
  * Лок берётся внутри — вызывающие цикла лока НЕ держат (state_.mtx
  * нерекурсивный, общий с UI: та же причина, что у permission_outcome).
+ * Объявление функции — в engine.h: единственный способ проверить, что
+ * счётчики копятся, — звать их на живом состоянии, а цикл требует LLM.
  *
  * Считается именно input, а не total: контекстом является то, что ушло
  * В модель, а ответ следующего шага будет другим. */
@@ -442,10 +442,19 @@ void record_turn_usage(EngineState& state, const Usage& usage) {
     std::lock_guard<std::mutex> lk(state.mtx);
     state.total_prompt_tokens += static_cast<int>(usage.input);
     state.total_completion_tokens += static_cast<int>(usage.output);
+    /* И11.9: копятся и остальные три счётчика. До этого задачи они
+     * терялись: провайдер их присылал, а состояние их не хранило, и
+     * панель токенов показала бы input/output и молчала бы про кэш —
+     * то есть человек не увидел бы, сколько запросов было дешёвыми.
+     *
+     * Порядок сложения неважен, порядок СБРОСА важен: сбрасываются все
+     * пять в `Engine::reset_task_metrics` (engine.cpp), иначе после новой
+     * задачи панель сложила бы старый кэш с новым входом. */
+    state.total_reasoning_tokens += usage.reasoning;
+    state.total_cache_read_tokens += usage.cache_read;
+    state.total_cache_write_tokens += usage.cache_write;
     if (usage.input > 0) state.measured_input_tokens = usage.input;
 }
-
-} // namespace
 
 /* ======================================================================
  * Planner
