@@ -13,6 +13,7 @@
 #include "../core/todo_panel.h"
 #include "../core/permission_panel.h"
 #include "../core/token_panel.h"
+#include "../core/cancel.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -990,6 +991,96 @@ static void render_token_panel() {
     ImGui::TreePop();
 }
 
+/* --- И11.10: индикатор отменяемости ---
+ *
+ * Кнопка «Стоп» одна и та же, а означает разное: ожидание модели рвётся
+ * мгновенно, `bash` убивается мгновенно, а запись файла нельзя прервать на
+ * середине — там отмена сработает после вызова. Без подписи человек
+ * нажимал «Стоп» на `write_file` и видел, что ничего не происходит, и
+ * заключал, что кнопка сломана (то же, что в И6.7 с командой, которая
+ * продолжала работать в фоне).
+ *
+ * Снимок берётся ПОД ЛОКОМ и отдаётся копией — тот же довод, что у
+ * `take_token_panel` и `render_stream_panel`: `state_.mtx` нерекурсивный
+ * и общий с UI-потоком, удерживать его под ImGui нельзя (D1). Полное
+ * снятие лока из отрисовки — И11.12.
+ *
+ * Активный инструмент берётся из ИСТОРИИ (вызов в состоянии Running), а не
+ * из отдельного поля состояния: второе место правды разъехалось бы при
+ * первой же правке (stream_panel.h, п. 3). */
+static coder::cancel::Panel take_cancel_panel() {
+    auto& st = engine_state();
+    coder::cancel::Snapshot snap;
+    /* И11.8: вопрос PermissionEngine — отдельный механизм со своим
+     * мьютексом, и его ожидание снимает `cancel_all()`, то есть отмена
+     * доходит до него мимо хода. Панели об этом сказать надо: иначе
+     * «Стоп» выглядел бы неработающим именно там, где человек ждёт его
+     * чаще всего.
+     *
+     * Список снимается ДО лока состояния, а не внутри: у PermissionEngine
+     * своя блокировка, и взять её, держа state_.mtx, — значит встать сразу
+     * в два мьютекса (тот же порядок блокировок, что в правиле 3: сначала
+     * чужой механизм, потом состояние). `PermissionEngine::ask` берёт
+     * state_.mtx сам, и обратный порядок — это взаимный дедлок с
+     * UI-потоком. */
+    snap.waiting_permission = !engine().permission_pending().empty();
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        snap.phase = coder::cancel::phase_of(st.state);
+        snap.state_name = coder::agent_state_name(st.state);
+        /* PermissionGate (путь за пределами проекта) живёт в состоянии, а
+         * не в PermissionEngine, поэтому его состояние — отдельная
+         * проверка. */
+        if (st.state == coder::AgentState::WaitingPermission)
+            snap.waiting_permission = true;
+        for (auto it = st.session.rbegin(); it != st.session.rend(); ++it) {
+            for (const coder::MessagePart& part : it->parts) {
+                if (part.kind() != coder::PartKind::Tool) continue;
+                if (part.state() != coder::ToolState::Running) continue;
+                snap.tool_name = part.tool_name();
+                if (part.has_duration() && part.duration_ms() > 0) {
+                    snap.tool_elapsed_ms = part.duration_ms();
+                }
+                break;
+            }
+            if (!snap.tool_name.empty()) break;
+        }
+    }
+    /* Флаг читается без лока: он атомарный, и лок под ним брать было бы
+     * лишним (D1). */
+    snap.cancel_requested = st.abort_requested.load();
+    return coder::cancel::build(snap);
+}
+
+/* Отрисовка индикатора + кнопки. Окно НИЧЕГО не решает: видно ли панель,
+ * что напечатать и каким цветом — всё сказано в core/cancel.h.
+ *
+ * Две части (строка «что делает» и строка «что сделает Стоп» + кнопка)
+ * разведены потому, что окно агента печатает первую строку со своим
+ * спиннером: агенту нужно «работает» как признак живости, а «Выполняется
+ * bash, 12.0 с» — как ответ на вопрос, что именно он делает. Обе строки
+ * приходят из core, окно их только размещает. */
+static void draw_cancel_status(const coder::cancel::Panel& panel) {
+    if (!panel.visible || panel.head_line.empty()) return;
+    ImGui::TextUnformatted(panel.head_line.c_str());
+}
+
+static void draw_cancel_stop(const coder::cancel::Panel& panel) {
+    if (!panel.visible) return;
+    /* Акцентом — только то, что срабатывает сейчас: отличать «остановит
+     * мгновенно» от «дождётся конца вызова» иначе пришлось бы читать
+     * мелкий шрифт. */
+    if (panel.stop_now) {
+        ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s",
+                           panel.stop_line.c_str());
+    } else {
+        ImGui::TextDisabled("%s", panel.stop_line.c_str());
+    }
+    if (ImGui::Button("Стоп", {-1, 0})) {
+        engine().request_abort();
+    }
+}
+
 static void render_timeline() {
     /* И11.5: одно решение на кадр, и решение — в core. Здесь только флаг из
      * переключателя; что из него следует — договаривается в core/timeline.h
@@ -1242,10 +1333,23 @@ static void render_session() {
                                    "Профиль не применён: %s", perror_text.c_str());
             }
         }
-        if (st.state != AgentState::Idle && ImGui::Button("Стоп", {-1, 0})) {
-            engine().request_abort();
-        }
+        /* И11.10: кнопка «Стоп» уехала из этого блока — в `draw_cancel_stop`,
+         * рядом со строкой «что именно она остановит». Здесь она стояла под
+         * локом состояния, то есть сама кнопка работала с разблокированным
+         * мьютексом (D1); теперь лок здесь держится только на чтении, и
+         * условие показания то же — «есть что отменять», его решает
+         * `cancel::phase_of`. */
         ImGui::Separator();
+    }
+
+    /* И11.10: индикатор отменяемости — НА ТОМ ЖЕ МЕСТЕ, где была кнопка,
+     * то есть сразу под состоянием и профилем. Ниже (после диффов) она
+     * уехала бы вниз экрана ровно тогда, когда человек ищет «стоп», а под
+     * открытым деревом диффов это ещё и несколько экранов вниз. */
+    {
+        const coder::cancel::Panel panel = take_cancel_panel();
+        draw_cancel_status(panel);
+        draw_cancel_stop(panel);
     }
 
     render_snapshot_diff();
@@ -1329,19 +1433,22 @@ void render_all_windows() {
 void render_extras() {
     auto& st = engine_state();
 
-/* Индикатор статуса агента + кнопка Стоп. */
+/* Индикатор статуса агента + кнопка Стоп + И11.10: что именно остановит
+     * отмена. Лок больше не держится на отрисовке: снимок берётся
+     * функцией и отдаётся копией (D1, правило 3 SESSION_START). */
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        if (st.state != coder::AgentState::Idle) {
+        const coder::cancel::Panel panel = take_cancel_panel();
+        if (panel.visible) {
+            /* Спиннер — признак живости, а не состояние: состояние и что
+             * делает агент приходят из core-панели (И11.10). Раньше здесь
+             * печаталось «Агент работает... (Выполнение)» своей строкой,
+             * то есть вторая форма одних и тех же данных (Д2). */
             float t = (float)ImGui::GetTime();
             const char spinner[] = "|/-\\";
             int idx = (int)(t * 4.0f) % 4;
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
-                "%c Агент работает... (%s)", spinner[idx],
-                coder::agent_state_name(st.state));
-            if ( ImGui::Button("Стоп", {-1, 0}) ) {
-                engine().request_abort();
-            }
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "%c %s",
+                               spinner[idx], panel.head_line.c_str());
+            draw_cancel_stop(panel);
         }
         /* И11.9: строка «N tok | X tok/s | …» из этой ветки убрана. Панель
          * токенов ниже показывает те же числа плюс стоимость, кэш и долю

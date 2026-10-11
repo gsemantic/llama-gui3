@@ -237,6 +237,15 @@ Result find(const std::string& root, const std::string& pattern,
             res.walk_capped = true;
             break;
         }
+        /* И11.10: «стоп» посреди обхода. Проверка стоит ДО работы с записью,
+         * чтобы уже собранное осталось в result — и вызывающий сказал бы
+         * «найдено 40 из 4000», а не «ничего не найдено». Останавливается
+         * обход, а не поиск: то, что нашлось до отмены, остаётся
+         * результатом. */
+        if (options.should_stop && options.should_stop()) {
+            res.cancelled = true;
+            break;
+        }
         std::error_code ec2;
         const fs::path p = it->path();
         const bool is_dir = it->is_directory(ec2);

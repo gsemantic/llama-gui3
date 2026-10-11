@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <sstream>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 
 namespace fs = std::filesystem;
@@ -38,10 +39,17 @@ std::string python_run(const std::string& path) {
     return result.empty() ? "[python_run: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
-std::string pip_install(const std::string& pkg) {
+std::string pip_install(const std::string& pkg,
+                        const std::function<bool()>& should_cancel) {
     if (pkg.empty()) return "[ошибка] укажи имя пакета (query)";
     std::string cmd = "pip install " + shell::shell_quote(pkg);
-    std::string result = shell::run_capture(cmd, 120);
+    /* И11.10: установка пакета идёт долго и обрывается на полпути, если её
+     * не остановить; без отметки об отмене модель сочтёт установку
+     * успешной. */
+    shell::RunStats stats;
+    std::string result =
+        shell::run_capture_cancel(cmd, 120, should_cancel, stats);
+    if (stats.cancelled) result += shell::cancelled_note();
     return result.empty() ? "[pip install: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
@@ -53,12 +61,18 @@ std::string django_manage(const std::string& args, const std::string& project_di
     return result.empty() ? "[django: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
-std::string pytest_run(const std::string& path, const std::string& marker) {
+std::string pytest_run(const std::string& path, const std::string& marker,
+                       const std::function<bool()>& should_cancel) {
     std::string cmd = "python3 -m pytest";
     if (!path.empty()) cmd += " " + shell::shell_quote(project_resolve(path));
     if (!marker.empty()) cmd += " -m " + shell::shell_quote(marker);
     cmd += " -v";
-    std::string result = shell::run_capture(cmd, 120);
+    /* И11.10: прогон тестов — самый частый долгий вызов, и самый частый
+     * повод нажать «стоп». */
+    shell::RunStats stats;
+    std::string result =
+        shell::run_capture_cancel(cmd, 120, should_cancel, stats);
+    if (stats.cancelled) result += shell::cancelled_note();
     return result.empty() ? "[pytest: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
@@ -108,8 +122,9 @@ void register_python_tools() {
         SchemaBuilder b;
         b.str("query", "имя пакета (например requests)").required("query");
         def.parameters = b.build();
-        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
-            return out("pip", pip_install(arg_str(a, "query")));
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            return out("pip", pip_install(arg_str(a, "query"),
+                                          [&ctx]() { return ctx.cancelled(); }));
         };
         reg.register_def(std::move(def));
     }
@@ -142,8 +157,9 @@ void register_python_tools() {
         b.str("path", "файл или каталог с тестами; пусто = весь проект")
          .str("query", "маркер pytest, например «unit»");
         def.parameters = b.build();
-        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
-            return out("pytest", pytest_run(arg_str(a, "path"), arg_str(a, "query")));
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            return out("pytest", pytest_run(arg_str(a, "path"), arg_str(a, "query"),
+                                            [&ctx]() { return ctx.cancelled(); }));
         };
         reg.register_def(std::move(def));
     }

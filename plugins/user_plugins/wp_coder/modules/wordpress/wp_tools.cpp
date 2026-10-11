@@ -17,6 +17,7 @@
 #include <regex>
 #include <cstdio>
 #include <algorithm>
+#include <functional>
 #include <iostream>
 
 namespace fs = std::filesystem;
@@ -298,9 +299,10 @@ std::string validate() {
 }
 
 /* ===== deploy ===== */
-std::string deploy() {
+std::string deploy(const std::function<bool()>& should_cancel) {
     const auto& st = engine_state();
     if (st.project_dir.empty()) return "[ошибка] не задан project_dir";
+    shell::RunStats stats;
     if (st.deploy_proto == "rsync") {
         if (st.deploy_host.empty() || st.deploy_remote_dir.empty())
             return "[ошибка] не заданы deploy_host / deploy_remote_dir";
@@ -310,13 +312,20 @@ std::string deploy() {
         std::string cmd = "rsync -az --delete --exclude=wp-config.php --exclude=.git --exclude=node_modules "
             + shell::shell_quote(st.project_dir + "/") + " "
             + target + ":" + shell::shell_quote(st.deploy_remote_dir) + "/";
-        std::string out = shell::run_capture(cmd, 300);
+        /* И11.10: rsync оборван на середине оставляет сервер в состоянии
+         * «половина нового, половина старого» — поэтому отмена здесь не
+         * молчит, а говорит в ответ, что перенос не доведён до конца. */
+        std::string out =
+            shell::run_capture_cancel(cmd, 300, should_cancel, stats);
+        if (stats.cancelled) out += shell::cancelled_note();
         return "[deploy rsync] " + (out.empty() ? "успешно" : shell::cap(out, 4000));
     }
     fs::path script = fs::path(st.project_dir) / "deploy.sh";
     if (!fs::exists(script))
         return "[ошибка] proto=" + st.deploy_proto + ", но нет " + script.string();
-    std::string out = shell::run_capture(shell::shell_quote(script.string()), 300);
+    std::string out = shell::run_capture_cancel(shell::shell_quote(script.string()),
+                                                300, should_cancel, stats);
+    if (stats.cancelled) out += shell::cancelled_note();
     return "[deploy " + st.deploy_proto + "] " + (out.empty() ? "успешно" : shell::cap(out, 4000));
 }
 
@@ -526,10 +535,11 @@ void register_wp_tools() {
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW;
         def.permission_key = "deploy";
         def.parameters = SchemaBuilder().build();
-        def.handler = [](const json::JsonValue&, ToolContext&) -> ToolOutput {
+        def.handler = [](const json::JsonValue&, ToolContext& ctx) -> ToolOutput {
             ToolOutput o;
             o.title = "deploy";
-            o.output = deploy();
+            /* И11.10: деплой — команда на минуты, и она отменяема. */
+            o.output = deploy([&ctx]() { return ctx.cancelled(); });
             return o;
         };
         reg.register_def(std::move(def));

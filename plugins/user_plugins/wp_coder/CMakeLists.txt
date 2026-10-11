@@ -54,6 +54,7 @@ set(CORE_SOURCES
     core/todo_panel.cpp
     core/permission_panel.cpp
     core/token_panel.cpp
+    core/cancel.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -297,6 +298,11 @@ if(WP_CODER_BUILD_TESTS)
         # engine.h именно ради этого), поэтому стоит после файлов,
         # поднимающих движок, — как и test_permission_panel.cpp выше.
         tests/test_token_panel.cpp
+        # И11.10: отмена работающего инструмента и индикатор отменяемости.
+        # Зовёт инструменты на живом реестре (glob/list/grep_search с
+        # отменённым токеном), сверяет перечень отменяемых с реестром и с
+        # исходниками, поэтому стоит после файлов с инструментами.
+        tests/test_cancel_panel.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

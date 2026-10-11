@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <functional>
 
 namespace coder {
 namespace devops {
@@ -36,6 +37,22 @@ ToolOutput out(std::string text) {
     return o;
 }
 
+/* И11.10: запуск команды, которую человек может остановить.
+ *
+ * Отдельная функция, а не три повтора в обработчиках: правило «долгая
+ * команда обязана отменяться» иначе выполнилось бы для тех инструментов,
+ * про которые автор вспомнил, и молча нарушилось бы для остальных. */
+std::string run_cancelable(const std::string& cmd, unsigned timeout_sec,
+                           const std::function<bool()>& should_cancel) {
+    shell::RunStats stats;
+    std::string result =
+        shell::run_capture_cancel(cmd, timeout_sec, should_cancel, stats);
+    /* Отмена обязана быть ВИДНА в ответе: у оборванной команды вывод
+     * непустой, и без отметки модель читала бы его как успешный итог. */
+    if (stats.cancelled) result += shell::cancelled_note();
+    return result;
+}
+
 } // anonymous namespace
 
 void register_devops_tools() {
@@ -54,12 +71,16 @@ void register_devops_tools() {
         b.str("path", "путь к Dockerfile; пусто = Dockerfile по умолчанию")
          .str("query", "контекст сборки; пусто = текущий каталог");
         def.parameters = b.build();
-        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
-            std::string ctx = arg_str(a, "query");
-            ctx = ctx.empty() ? "." : shell::shell_quote(ctx);
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            std::string ctxdir = arg_str(a, "query");
+            ctxdir = ctxdir.empty() ? "." : shell::shell_quote(ctxdir);
             std::string file = arg_str(a, "path");
             file = file.empty() ? "" : " -f " + shell::shell_quote(file);
-            std::string result = shell::run_capture("docker build" + file + " " + ctx, 300);
+            /* И11.10: сборка образа идёт минутами — «стоп» обязан её
+             * останавливать, а не ждать timeout(1). */
+            std::string result = run_cancelable(
+                "docker build" + file + " " + ctxdir, 300,
+                [&ctx]() { return ctx.cancelled(); });
             return out("docker build", result.empty() ? "[docker build: нет вывода]"
                                                        : shell::cap(result, kDevopsMaxOutput));
         };
@@ -76,7 +97,7 @@ void register_devops_tools() {
         b.str("cli", "аргументы docker run, например «-d -p 8080:80 nginx»")
          .required("cli");
         def.parameters = b.build();
-        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             std::string cli = arg_str(a, "cli");
             if (cli.empty()) return out("[ошибка] укажи параметры запуска (cli)");
             /* docker run args сложны: --name, -p, -v и т.д.
@@ -88,7 +109,10 @@ void register_devops_tools() {
                     return out("[запрещено] shell-инъекция в docker run");
                 }
             }
-            std::string result = shell::run_capture("docker run " + cli, 120);
+            /* И11.10: контейнер может работать и работать — отменяемо. */
+            std::string result = run_cancelable(
+                "docker run " + cli, 120,
+                [&ctx]() { return ctx.cancelled(); });
             return out("docker run", result.empty() ? "[docker run: нет вывода]"
                                                     : shell::cap(result, kDevopsMaxOutput));
         };
@@ -278,7 +302,7 @@ void register_devops_tools() {
          .str("cli", "команда для выполнения")
          .required("query").required("cli");
         def.parameters = b.build();
-        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             std::string raw_host = arg_str(a, "query");
             std::string host = security::sanitize_ident(raw_host);
             /* Допускаем user@host формат. */
@@ -293,7 +317,10 @@ void register_devops_tools() {
             }
             std::string cmd = "ssh " + shell::shell_quote(host) + " " +
                               shell::shell_quote(arg_str(a, "cli"));
-            std::string result = shell::run_capture(cmd, 120);
+            /* И11.10: удалённая команда тоже может идти долго (deploy по
+             * ssh), а локальный kill обрывает и дерево на той стороне. */
+            std::string result = run_cancelable(
+                cmd, 120, [&ctx]() { return ctx.cancelled(); });
             return out("ssh", result.empty() ? "[ssh: нет вывода]"
                                              : shell::cap(result, kDevopsMaxOutput));
         };

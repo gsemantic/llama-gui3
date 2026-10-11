@@ -366,6 +366,38 @@ inline std::string next_spill_path(const std::string& data_dir,
     return dir + "/" + tool + "-" + std::to_string(counter.fetch_add(1)) + ".log";
 }
 
+/* И11.10: запуск команды, который человек может остановить.
+ *
+ * Отдельная функция, а не новый аргумент у run_capture: run_capture идёт
+ * через popen, а popen не отдаёт pid — без pid нельзя ни убить процесс, ни
+ * его потомков (см. комментарий у run_capture_stream). Ставить отмену
+ * внутрь run_capture значило бы либо не отменять вовсе, либо сменить путь
+ * исполнения у КАЖДОГО вызова, включая служебные (проверки окружения в
+ * project.cpp, снимки в snapshot.cpp), где отменять нечего. Здесь путь
+ * один — тот же, что у `bash` (run_capture_stream), и отменяемым становится
+ * ровно тот вызов, который её позвал.
+ *
+ * Вывод — ТЕЛО кольца (хвост), как у bash: у команды, которую остановили,
+ * важнее конец. stats.cancelled обязан быть передан дальше и показан
+ * модели: оборванный вывод без отметки выглядит полным, и «docker build»
+ * без отметки об отмене читался бы как собранный образ. */
+inline std::string run_capture_cancel(const std::string& cmd,
+                                      unsigned timeout_sec,
+                                      const std::function<bool()>& should_cancel,
+                                      RunStats& stats) {
+    RunOptions opt;
+    opt.timeout_sec = timeout_sec;
+    opt.should_cancel = should_cancel;
+    return run_capture_stream(cmd, opt, stats);
+}
+
+/* Отметка об остановленной команде. Обязательна при stats.cancelled:
+ * частичный вывод, названный своим именем, — это ложь, и модель пойдёт
+ * дальше строить выводы из того, чего не случилось. */
+inline const char* cancelled_note() {
+    return "\n[команда остановлена пользователем — вывод обрезан]";
+}
+
 /* Обрезать длинный вывод, сохранив маркер обрезки. */
 inline std::string cap(const std::string& s, size_t limit) {
     std::string clean = text::is_valid_utf8(s) ? s : text::sanitize_utf8(s);

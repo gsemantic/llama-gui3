@@ -33,6 +33,17 @@ namespace {
 const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
                                             "__pycache__"};
 
+/* И11.10: маркер оборванного обхода.
+ *
+ * Одно слово на пять инструментов и по делу: проверка предела вывода
+ * (tests/test_iteration_iv_invariants.cpp) требует, чтобы инструмент,
+ * помеченный `ToolOutput::truncated`, СКАЗАЛ словами, что вывод неполон.
+ * Обход, прерванный пользователем, ставит этот признак — список, который
+ * выглядит полным, а неполон, хуже отказа: модель приняла бы «найдено 40
+ * файлов» за «найдено всё». */
+const char* kWalkCancelledNote =
+    "[обход прерван пользователем — список обрезан, найдено не всё]";
+
 /* Лимиты вывода — единый источник: core/limits.h (Фаза 4.5). */
 using limits::kMaxToolOutput;
 using limits::kMaxGrepMatches;
@@ -146,9 +157,14 @@ std::string preserve_file_format(const std::string& abs,
 /* Разрешить относительный путь относительно корня проекта.
  * Единая реализация — project_resolve() (см. core/project.h). */
 
-/* grep_search: поиск по файлам — НАСТОЯЩЕЕ регулярное выражение (ECMAScript). */
+/* grep_search: поиск по файлам — НАСТОЯЩЕЕ регулярное выражение (ECMAScript).
+ *
+ * И11.10: should_stop — «стоп» посреди поиска. Проверяется и на обходе, и
+ * по строкам внутри файла: поиск по проекту с одним файлом на 100 МБ идёт
+ * секундами, а отмена ждала бы именно там. */
 std::string base_grep(const std::string& root, const std::string& pattern,
-                    const std::string& project_dir) {
+                    const std::string& project_dir,
+                    const std::function<bool()>& should_stop = {}) {
     if (pattern.empty())
         return "[ошибка] пустой PATTERN — укажи регулярное выражение";
 
@@ -167,17 +183,31 @@ std::string base_grep(const std::string& root, const std::string& pattern,
         return "[ошибка] каталог не существует: " + base;
 
     std::vector<std::string> files;
-    file_utils::walk_files(base, files, 2000, kSkipDirs);
+    const bool walk_done =
+        file_utils::walk_files(base, files, 2000, kSkipDirs, "", should_stop);
 
     std::stringstream out;
     size_t found = 0;
     for (const auto& fp : files) {
+        /* Прерванный обход НЕ означает «проверенные файлы проверены, а
+         * непринятые не нужны»: оставшиеся не проверялись. */
+        if (should_stop && should_stop()) {
+            out << "\n" << kWalkCancelledNote << "\n[проверено файлов: "
+                << files.size() << " из большего — совпадений ниже может"
+                   " быть больше]\n";
+            return out.str();
+        }
         std::ifstream f(fp);
         if (!f) continue;
         std::string line;
         size_t ln = 0;
         while (std::getline(f, line)) {
             ++ln;
+            if (ln % 512 == 0 && should_stop && should_stop()) {
+                out << "\n" << kWalkCancelledNote << "\n[досмотрено файлов: "
+                    << fp << " — совпадений ниже может быть больше]\n";
+                return out.str();
+            }
             std::smatch m;
             if (std::regex_search(line, m, re)) {
                 out << fp << ":" << ln << "  " << line << "\n";
@@ -192,13 +222,26 @@ std::string base_grep(const std::string& root, const std::string& pattern,
             }
         }
     }
-    out << "[найдено совпадений: " << found << " в " << files.size() << " файлах]";
+    out << "[найдено совпадений: " << found << " в " << files.size()
+        << " файлах]";
+    /* Обход упёрся в лимит файлов (не в отмену): найдено не всё дерево, и
+     * модель должна знать это раньше, чем сделает вывод «совпадений нет».
+     * И11.10: та же честность для отмены. */
+    if (!walk_done)
+        out << "\n" << kWalkCancelledNote << "\n[проверено файлов: "
+            << files.size() << " — совпадений в остальных тоже могут быть]";
     return out.str();
 }
 
-/* repo_map: компактный обзор каталога (с кэшем на текущую задачу — B2). */
+/* repo_map: компактный обзор каталога (с кэшем на текущую задачу — B2).
+ *
+ * И11.10: обход спрашивает should_stop. Прерванный обход НЕ кэшируется:
+ * кэш задачи отдаётся следующему repo_map с пометкой «из кэша задачи», то
+ * есть выглядел бы полным, а неполон — ровно то, чего кэш не должен делать
+ * (шапка cancel.h, п. «атомарные инструменты»). */
 std::string base_repo_map(const std::string& root,
-                         const std::string& project_dir) {
+                         const std::string& project_dir,
+                         const std::function<bool()>& should_stop = {}) {
     std::string base = root.empty() ? project_dir : root;
     if (base.empty()) return "[ошибка] не задан ROOT и не задан project_dir";
 
@@ -213,14 +256,28 @@ std::string base_repo_map(const std::string& root,
     }
 
     std::vector<std::string> files;
-    file_utils::walk_files(base, files, 1500, kSkipDirs);
-    if (files.empty()) return "[repo_map: файлы не найдены в " + base + "]";
+    const bool walk_done =
+        file_utils::walk_files(base, files, 1500, kSkipDirs, "", should_stop);
+    if (files.empty() && walk_done)
+        return "[repo_map: файлы не найдены в " + base + "]";
 
     std::stringstream out;
     out << "[repo_map] " << files.size() << " файлов:\n";
+    /* И11.10: complete — «обзор увидел всё дерево». Обход может закончиться
+     * целиком и быть прерванным на чтении файлов, поэтому флаг один и на
+     * то, и на другое: кэшировать и помечать неполным можно только по
+     * нему, а не по одному лишь walk_done. */
+    bool complete = walk_done;
     for (const auto& fp : files) {
         if (out.str().size() >= kMaxToolOutput) {
             out << "...\n[repo_map: вывод обрезан]";
+            break;
+        }
+        /* И11.10: отмена и посреди чтения файлов. */
+        if (should_stop && should_stop()) {
+            out << kWalkCancelledNote << "\n[досмотрено файлов: "
+                << files.size() << " — остальные не просмотрены]\n";
+            complete = false;
             break;
         }
         std::string rel = fp;
@@ -277,6 +334,13 @@ std::string base_repo_map(const std::string& root,
         out << "\n";
     }
     std::string result = out.str();
+    /* И11.10: прерванный обход не кэшируется (см. шапку base_repo_map). */
+    if (!complete) {
+        result += "\n" + std::string(kWalkCancelledNote) +
+                  "\n[просмотрено файлов: " + std::to_string(files.size()) +
+                  " — остальные не просмотрены]";
+        return result;
+    }
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
         engine_state().repo_map_cache_root = base;
@@ -875,7 +939,9 @@ void register_base_tools() {
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             std::string root = arg_str(a, "root");
-            return out("repo_map", base_repo_map(root, ctx.project_dir()));
+            /* И11.10: «стоп» обрывает обход, а не ждёт его конца. */
+            return out("repo_map", base_repo_map(root, ctx.project_dir(),
+                                                [&ctx]() { return ctx.cancelled(); }));
         };
         reg.register_def(std::move(def));
     }
@@ -893,7 +959,8 @@ void register_base_tools() {
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             return out("grep", base_grep(arg_str(a, "root"), arg_str(a, "pattern"),
-                                        ctx.project_dir()));
+                                        ctx.project_dir(),
+                                        [&ctx]() { return ctx.cancelled(); }));
         };
         reg.register_def(std::move(def));
     }
@@ -926,6 +993,8 @@ void register_base_tools() {
             if (!perm.empty()) return out(std::move(perm));
 
             fileglob::Options opt;
+            /* И11.10: «стоп» обрывает обход, а не ждёт его конца. */
+            opt.should_stop = [&ctx]() { return ctx.cancelled(); };
             const std::string include = arg_str(a, "include");
             if (!include.empty()) {
                 std::string cur;
@@ -951,6 +1020,12 @@ void register_base_tools() {
                 if (r.walk_capped)
                     s << " [обход остановлен на " << r.visited << " записях —"
                          " ищи в каталоге поуже]";
+                /* И11.10: пустой результат прерванного обхода — это НЕ
+                 * «ничего не найдено»: найти не успели. Молчание здесь
+                 * выглядело бы как честный ответ. */
+                if (r.cancelled)
+                    s << " [" << kWalkCancelledNote << ", осмотрено "
+                      << r.visited << " записей]";
                 s << "\n";
             } else {
                 s << r.entries.size();
@@ -959,15 +1034,22 @@ void register_base_tools() {
                       << " — сузь шаблон или укажи path)";
                 s << ", свежие сверху:\n";
                 for (const auto& e : r.entries) s << e.path << "\n";
+                if (r.cancelled)
+                    s << kWalkCancelledNote << " (осмотрено " << r.visited
+                      << " записей — в остальных могут быть совпадения)\n";
             }
             ToolOutput o;
             o.title = "glob " + pattern;
             o.output = shell::cap(s.str(), kMaxToolOutput);
-            o.truncated = r.truncated || r.walk_capped;
+            /* Прерванный обход — это тоже «вывод неполон»: признак один и
+             * тот же у лимита, предохранителя и отмены, потому что модель
+             * отличает их одинаково — по полноте списка. */
+            o.truncated = r.truncated || r.walk_capped || r.cancelled;
             o.metadata = json::JsonValue::object();
             o.metadata.set("count", static_cast<long long>(r.entries.size()));
             o.metadata.set("matched", static_cast<long long>(r.matched));
             o.metadata.set("truncated", r.truncated);
+            o.metadata.set("cancelled", r.cancelled);
             o.metadata.set("root", root);
             return o;
         };
@@ -1505,10 +1587,11 @@ void register_base_tools() {
             opt.spill_path = shell::next_spill_path(data_dir, "bash");
             /* И6.7: «стоп» обязан убивать команду, а не только ожидание. Без
              * этого агент уходил на следующий шаг, а команда в фоне
-             * продолжала работать и писать файлы. */
-            if (AbortToken* token = ctx.abort()) {
-                opt.should_cancel = [token]() { return token->aborted(); };
-            }
+             * продолжала работать и писать файлы.
+             * И11.10: спрашиваем `cancelled()`, а не носим токен в лямбде:
+             * одна форма проверки на все инструменты — по ней и
+             * составляется перечень отменяемых (core/cancel.h). */
+            opt.should_cancel = [&ctx]() { return ctx.cancelled(); };
             /* Живой признак жизни: раз в секунду в ленту приложения.
              * Без него «docker build» две минуты выглядит как зависание,
              * и пользователь жмёт «стоп» на живом процессе. */
@@ -1618,6 +1701,8 @@ void register_base_tools() {
             opt.max_depth = depth;
             opt.newest_first = false;   /* список читают сверху вниз */
             opt.limit = limits::kListLimit;
+            /* И11.10: «стоп» обрывает обход. */
+            opt.should_stop = [&ctx]() { return ctx.cancelled(); };
             const fileglob::Result r = fileglob::find(root, "**", opt);
             if (!r.error.empty()) return out("list", "[ошибка] " + r.error);
 
@@ -1632,15 +1717,21 @@ void register_base_tools() {
             if (r.walk_capped)
                 s << "[обход остановлен: осмотрено " << r.visited
                   << " записей]\n";
+            /* И11.10: прерванный список помечается так же, как усечённый:
+             * молчаливый неполный список — это ложь, а не экономия места. */
+            if (r.cancelled)
+                s << kWalkCancelledNote << " (осмотрено " << r.visited
+                  << " записей)\n";
 
             ToolOutput o;
             o.title = "list " + (rel.empty() ? std::string(".") : rel);
             o.output = shell::cap(s.str(), limits::kMaxToolOutput);
-            o.truncated = r.truncated || r.walk_capped;
+            o.truncated = r.truncated || r.walk_capped || r.cancelled;
             o.metadata = json::JsonValue::object();
             o.metadata.set("count", static_cast<long long>(r.entries.size()));
             o.metadata.set("depth", static_cast<long long>(depth));
             o.metadata.set("truncated", r.truncated);
+            o.metadata.set("cancelled", r.cancelled);
             return o;
         };
         reg.register_def(std::move(def));
@@ -1898,14 +1989,25 @@ void register_rag_tools() {
             if (base.empty()) base = ctx.project_dir();
             if (base.empty()) return out("[ошибка] не задан корень индексации");
             std::vector<std::string> files;
-            file_utils::walk_files(base, files, 4000, kSkipDirs, ".php");
+            /* И11.10: индексация большого проекта идёт минутами, а «стоп»
+             * ждал бы её конца — и обходом, и разбором файлов. */
+            const bool walk_done = file_utils::walk_files(
+                base, files, 4000, kSkipDirs, ".php",
+                [&ctx]() { return ctx.cancelled(); });
             const auto& cb = ctx.callbacks();
             int ok = 0;
+            size_t done_files = 0;
             for (const auto& fp : files) {
+                if (ctx.cancelled()) break;
+                ++done_files;
                 if (cb.rag_process_document && cb.rag_process_document(fp)) ++ok;
             }
             std::stringstream s;
-            s << "[проиндексировано " << ok << "/" << files.size() << " php-файлов в RAG]";
+            s << "[проиндексировано " << ok << "/" << done_files << " php-файлов в RAG]";
+            if (!walk_done || done_files < files.size())
+                s << "\n" << kWalkCancelledNote
+                  << " (найдено файлов: " << files.size()
+                  << " — индекс неполный, повтори после отмены хода)";
             return out("rag_index", s.str());
         };
         reg.register_def(std::move(def));
