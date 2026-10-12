@@ -314,6 +314,12 @@ if(WP_CODER_BUILD_TESTS)
         # состояния движка не трогает — читает ui/coder_window.cpp и
         # core/engine.cpp, поэтому может стоять где угодно.
         tests/test_window_locks.cpp
+        # И11.13: снапшоты отрисовки (golden) для diff и таймлайна, плюс
+        # проверки отсутствия дедлока при ЖИВОМ агенте. Зовёт цикл агента
+        # (engine().submit на хосте, который не отвечает), поэтому стоит
+        # после файлов, поднимающих движок и цикл (test_engine.cpp,
+        # test_agent_loop.cpp). Инструментов не регистрирует.
+        tests/test_render_golden.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp
