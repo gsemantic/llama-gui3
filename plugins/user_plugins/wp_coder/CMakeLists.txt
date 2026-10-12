@@ -55,6 +55,7 @@ set(CORE_SOURCES
     core/permission_panel.cpp
     core/token_panel.cpp
     core/cancel.cpp
+    core/hotkeys.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -303,6 +304,12 @@ if(WP_CODER_BUILD_TESTS)
         # отменённым токеном), сверяет перечень отменяемых с реестром и с
         # исходниками, поэтому стоит после файлов с инструментами.
         tests/test_cancel_panel.cpp
+        # И11.11: горячие клавиши. Зовёт только core/hotkeys (чистая функция
+        # решения, без ImGui и без состояния движка), поэтому может стоять
+        # где угодно; стоит после test_cancel_panel.cpp, потому что сверяет
+        # своё «Esc работает ровно когда работает кнопка» с фазой оттуда —
+        # иначе сверяться было бы не с чем.
+        tests/test_hotkeys.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

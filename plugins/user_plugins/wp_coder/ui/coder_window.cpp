@@ -14,6 +14,7 @@
 #include "../core/permission_panel.h"
 #include "../core/token_panel.h"
 #include "../core/cancel.h"
+#include "../core/hotkeys.h"
 
 #include "imgui.h"
 #include "plugins/plugin_api.h"
@@ -520,6 +521,20 @@ std::vector<ToolDiffEntry> collect_tool_diffs(size_t* omitted_calls) {
 
 } // namespace
 
+/* И11.11: «Правки по вызовам» должны раскрываться по Ctrl+O, а окно Сессии —
+ * подниматься. Обе вещи — ВИД, а не свойство сессии, поэтому живут в окне
+ * рядом с `s_show_details` и по той же причине. Флаг одноразовый: раскрыв
+ * панель один раз, человек дальше открывает и закрывает её сам, и клавиша не
+ * должна воевать с ним за узел. */
+static bool s_force_open_diffs = false;
+
+/* И11.11: окно Сессии после Ctrl+O. Фокус ставится при отрисовке, а не в
+ * обработчике: `window_set_focus` в ABI хоста нет, а окно, которого ещё не
+ * видно, нечего фокусировать (ImGui всё равно не знает про окно до
+ * `Begin`). Заголовок — тот же, что регистрируется в `init_windows`. */
+static bool s_focus_session_window = false;
+static const char kSessionTitle[] = "AI Coder — Сессия";
+
 static void render_tool_diffs() {
     size_t omitted = 0;
     const std::vector<ToolDiffEntry> entries = collect_tool_diffs(&omitted);
@@ -527,6 +542,14 @@ static void render_tool_diffs() {
     char head[96];
     std::snprintf(head, sizeof(head), "Правки по вызовам: %zu вызовов",
                   entries.size());
+    /* И11.11: раскрытие по требованию. `ImGuiCond_Always` сбрасывает и
+     * состояние узла, поэтому флаг снимается сразу — иначе панель
+     * возвращалась бы к закрытой только после щелчка по узлу, то есть
+     * Ctrl+O работал бы через раз. */
+    if (s_force_open_diffs) {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+        s_force_open_diffs = false;
+    }
     if (!ImGui::TreeNodeEx(head, ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if (entries.empty()) {
@@ -1081,6 +1104,106 @@ static void draw_cancel_stop(const coder::cancel::Panel& panel) {
     }
 }
 
+/* --- И11.11: горячие клавиши ---
+ *
+ * ЧТО ЗДЕСЬ ЕСТЬ И ЧЕГО НЕТ. Окно НЕ решает, что означает нажатие: перевод
+ * состояния ImGui в `Event`, вызов `hotkeys::action_for` и выполнение
+ * вернувшегося действия. Смысл каждого сочетания живёт в core/hotkeys.h —
+ * иначе его нечем проверять (тот же расклад, что у cancel.h и timeline.h).
+ *
+ * ПОЧЕМУ НЕ ЧЕРЕЗ `command_register(..., "Ctrl+O")`. Регистрация сочетания
+ * хоста выглядит готовым решением и им не является: строка кладётся в
+ * `CommandManager::shortcuts_`, а единственный её читатель
+ * `executeShortcut` (src/ui/command_manager.cpp:64) не имеет ни одного
+ * вызывающего во всём репозитории, и `handleKeyboardShortcuts` хоста —
+ * заглушка. Клавиатура плагина поэтому читается здесь, в его же кадре.
+ * Разбор — в шапке core/hotkeys.h.
+ *
+ * ГДЕ ВЫЗЫВАЕТСЯ. Один раз за кадр, из `render_all_windows()` — и именно
+ * там, а не в `render_session()`: тот выход начинается с проверки видимости,
+ * и в закрытом окне Сессии опрос не дошёл бы, то есть «стоп» был бы мёртв
+ * ровно тогда, когда он нужен. `render_extras()` отпадает по другой
+ * причине: он зовётся из чата хоста и рисует ту же кнопку «Стоп», а кадр
+ * чата с кадром плагина не обязан совпадать — одно нажатие сработало бы
+ * дважды.
+ *
+ * ПРО ПОРЯДОК ОПРОСА. `IsKeyPressed` спрашивает «нажата ли сейчас», и ответ
+ * не тратится, поэтому опрос без побочных эффектов безопасен в любом
+ * порядке. Но состояние ImGui меняется по ходу кадра (`IsAnyItemActive`
+ * становится истинным сразу после отрисовки поля), поэтому контекст
+ * собирается ОДИН раз перед решением, а не после каждой проверки.
+ */
+static void handle_hotkeys() {
+    using namespace coder;
+
+    hotkeys::Event ev;
+    ev.mods.ctrl = ImGui::GetIO().KeyCtrl;
+    ev.mods.shift = ImGui::GetIO().KeyShift;
+    ev.mods.alt = ImGui::GetIO().KeyAlt;
+    /* KeypadEnter приводится к тому же Enter: иначе «одобрить план» работало
+     * бы на одной части клавиатур и молчало на другой. */
+    if (ImGui::IsKeyPressed(ImGuiKey_O)) ev.key = hotkeys::Key::O;
+    else if (ImGui::IsKeyPressed(ImGuiKey_B)) ev.key = hotkeys::Key::B;
+    else if (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) ev.key = hotkeys::Key::Enter;
+    else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ev.key = hotkeys::Key::Escape;
+    if (ev.key == hotkeys::Key::None) return;
+
+    /* Контекст — копия под локом (D1): `state_.mtx` общий с UI-потоком и
+     * нерекурсивный, удерживать его под ImGui нельзя. */
+    hotkeys::Context ctx;
+    {
+        auto& st = engine_state();
+        std::lock_guard<std::mutex> lk(st.mtx);
+        ctx.phase = cancel::phase_of(st.state);
+        ctx.plan_mode = st.plan_mode;
+    }
+    /* Активный элемент и открытый диалог — вне лока: это состояние ImGui, а
+     * не движка. Проверяется ПОСЛЕ освобождения лока. */
+    ctx.item_active = ImGui::IsAnyItemActive();
+    ctx.popup_open = ImGui::IsPopupOpen(
+        nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+
+    switch (hotkeys::action_for(ev, ctx)) {
+        case hotkeys::Action::None:
+            break;
+        case hotkeys::Action::OpenEdits:
+            s_force_open_diffs = true;
+            /* Фокус — через сам ImGui, а не через ABI: `window_set_focus` в
+             * `LlamaHostApi` нет, а добавлять поле нельзя (правило 14 —
+             * структура append-only, и вставка сдвинула бы всё после себя).
+             * Заголовок окна — тот же, что в `init_windows`, и обе строки
+             * держатся рядом, чтобы не разъехаться. */
+            s_focus_session_window = true;
+            if (g_api && g_win_session) {
+                g_api->window_set_visible(g_host, g_win_session, 1);
+            }
+            break;
+        case hotkeys::Action::ApprovePlan:
+            /* Тот же флаг, что у чекбокса план-режима, и той же функцией:
+             * решение «одобрить» уже принято в core (hotkeys.h), здесь
+             * только исполнение. Кэш промпта не сбрасывается — план-режим
+             * не входит в текст системного промпта, он читается в
+             * `check_tool_mode_policy` на каждом вызове (core/tool.cpp:458),
+             * и сброс был бы лишним пересчётом. */
+            {
+                auto& st = engine_state();
+                std::lock_guard<std::mutex> lk(st.mtx);
+                st.plan_mode = false;
+            }
+            break;
+        case hotkeys::Action::Stop:
+            /* Тот же вызов, что у кнопки выше. */
+            engine().request_abort();
+            break;
+        case hotkeys::Action::ToggleDetails:
+            /* ТОТ ЖЕ флаг, что у чекбокса в render_timeline(): своя копия
+             * разъехалась бы с ним при первом же щелчке мышью. */
+            s_show_details = !s_show_details;
+            break;
+    }
+}
+
 static void render_timeline() {
     /* И11.5: одно решение на кадр, и решение — в core. Здесь только флаг из
      * переключателя; что из него следует — договаривается в core/timeline.h
@@ -1306,8 +1429,15 @@ static void render_stream_panel() {
 static void render_session() {
     if (!g_api->window_is_visible(g_host, g_win_session)) return;
     ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
+    /* И11.11: фокус после Ctrl+O. Ставится ДО `Begin` (у окна, которого ещё
+     * нет, нечего фокусировать) и снимается сразу: иначе окно забирало бы
+     * фокус у чата на каждом кадре, пока флаг не сброшен. */
+    if (s_focus_session_window) {
+        ImGui::SetNextWindowFocus();
+        s_focus_session_window = false;
+    }
     bool open = true;
-    ImGui::Begin("AI Coder — Сессия", &open);
+    ImGui::Begin(kSessionTitle, &open);
     if (!open) g_api->window_set_visible(g_host, g_win_session, 0);
 
     auto& st = engine_state();
@@ -1351,6 +1481,13 @@ static void render_session() {
         draw_cancel_status(panel);
         draw_cancel_stop(panel);
     }
+
+    /* И11.11: сочетания названы на экране. Клавиша, о которой не сказано,
+     * не существует для человека: он не знает, что `Esc` что-то делает, и
+     * не догадается нажать. Строка собирается в core из того же перечня,
+     * которым пользуется `action_for`, — перечень один, поэтому подсказка
+     * не может перечислить сочетание, которого нет. */
+    ImGui::TextDisabled("%s", coder::hotkeys::help_line().c_str());
 
     render_snapshot_diff();
     render_tool_diffs();
@@ -1417,13 +1554,26 @@ void init_windows() {
     g_win_project = g_api->window_register(g_host, "ai_coder_project", "AI Coder — Проект");
     g_win_modules = g_api->window_register(g_host, "ai_coder_modules", "AI Coder — Модули");
     g_win_tools   = g_api->window_register(g_host, "ai_coder_tools", "AI Coder — Инструменты");
-    g_win_session = g_api->window_register(g_host, "ai_coder_session", "AI Coder — Сессия");
+    g_win_session = g_api->window_register(g_host, "ai_coder_session", kSessionTitle);
 
     init_buffers();
 }
 
 /* --- Рендер --- */
 void render_all_windows() {
+    /* И11.11: клавиши читаются ОДИН раз за кадр и здесь, а не внутри
+     * `render_session()`. Тот выход начинается с `if (!window_is_visible)
+     * return;` — то есть в скрытом окне Сессии опрос не дошёл бы и сочетания
+     * были бы мертвы ровно тогда, когда окно закрыто, а человек жмёт
+     * «стоп». `ll_plugin_render` зовётся каждый кадр (`registerWindow(...,
+     * render_always=true)` в plugin_manager.cpp:1581), поэтому здесь опрос
+     * не зависит от видимости ничего.
+     *
+     * Именно поэтому здесь, а не в `render_extras()`: тот рисует ту же
+     * кнопку «Стоп», но зовётся из чата хоста, и кадр чата с кадром плагина
+     * не обязан совпадать — одно нажатие сработало бы дважды. */
+    handle_hotkeys();
+
     render_project();
     render_modules();
     render_tools();
