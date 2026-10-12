@@ -310,6 +310,10 @@ if(WP_CODER_BUILD_TESTS)
         # своё «Esc работает ровно когда работает кнопка» с фазой оттуда —
         # иначе сверяться было бы не с чем.
         tests/test_hotkeys.cpp
+        # И11.12: в окне не держится st.mtx под ImGui. Ничего не зовёт и
+        # состояния движка не трогает — читает ui/coder_window.cpp и
+        # core/engine.cpp, поэтому может стоять где угодно.
+        tests/test_window_locks.cpp
         tests/test_manifest_consistency.cpp
         tests/test_plan_consistency.cpp
         tests/test_grammars_lock.cpp

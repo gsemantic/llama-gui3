@@ -184,24 +184,41 @@ static void render_project() {
     ImGui::Separator();
     ImGui::TextDisabled("Корень: %s", st.project_dir.c_str());
 
-    /* Настройки агента (5.3): лимиты, переопределяют дефолты core/limits.h. */
+    /* Настройки агента (5.3): лимиты, переопределяют дефолты core/limits.h.
+     *
+     * И11.12: лок берётся на ЧТЕНИЕ ДВУХ ЧИСЕЛ и отпускается до отрисовки.
+     * `ImGui::InputInt` под `st.mtx` означал, что каждое нажатие клавиши в
+     * этом поле ждёт, пока агент отпустит мьютекс, — то есть окно,
+     * зависшее на чужом локе (D-6/D1). Обратная запись тоже вне лока:
+     * `engine().save_settings()` пишет в настройки хоста, и делать это,
+     * держа чужой мьютекс, — значит зажать его ещё и на время записи. */
     ImGui::Separator();
     ImGui::Text("Агент:");
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        int steps = st.max_steps;
+        int steps = 0;
+        int budget_kb = 0;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            steps = st.max_steps;
+            budget_kb = (int)(st.session_budget / 1024);
+        }
         if (ImGui::InputInt("Лимит шагов", &steps, 1, 5)) {
             if (steps < 1) steps = 1;
             if (steps > 100) steps = 100;
-            st.max_steps = steps;
+            {
+                std::lock_guard<std::mutex> lk(st.mtx);
+                st.max_steps = steps;
+            }
             engine().save_settings();
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Максимум шагов ReAct-цикла на задачу (по умолчанию 12)");
-        int budget_kb = (int)(st.session_budget / 1024);
         if (ImGui::InputInt("Бюджет сессии (КБ)", &budget_kb, 8, 64)) {
             if (budget_kb < 8) budget_kb = 8;
-            st.session_budget = (size_t)budget_kb * 1024;
+            {
+                std::lock_guard<std::mutex> lk(st.mtx);
+                st.session_budget = (size_t)budget_kb * 1024;
+            }
             engine().save_settings();
         }
         if (ImGui::IsItemHovered())
@@ -1442,10 +1459,22 @@ static void render_session() {
 
     auto& st = engine_state();
 
-    /* Статус FSM + метрики. */
+    /* Статус FSM + метрики.
+     *
+     * И11.12: ЗДЕСЬ БЫЛ ЖИВОЙ ДЕДЛОК, а не «риск». `engine().session_profile`
+     * берёт `state_.mtx` САМ (тело `session_profile` в core/engine.cpp), а
+     * блок ниже держал тот же нерекурсивный мьютекс и звал его из-под лока —
+     * то есть окно Сессии висело НАВСЕГДА при первом же показе профиля.
+     * Ровно тот случай, ради которого написано правило 1 SESSION_START: из
+     * кода, который уже держит лок, метод `Engine` не звать. Теперь лок и
+     * `session_profile` не пересекаются вовсе. */
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        ImGui::Text("Состояние: %s", coder::agent_state_name(st.state));
+        std::string state_name;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            state_name = coder::agent_state_name(st.state);
+        }
+        ImGui::Text("Состояние: %s", state_name.c_str());
         /* И9.7: активный профиль harness. Показывается, потому что профиль
          * СУЖАЕТ права, и человек, не видя его имени, не может понять,
          * почему агент вдруг не может записать файл. Плюс причина, если
@@ -1466,9 +1495,8 @@ static void render_session() {
         /* И11.10: кнопка «Стоп» уехала из этого блока — в `draw_cancel_stop`,
          * рядом со строкой «что именно она остановит». Здесь она стояла под
          * локом состояния, то есть сама кнопка работала с разблокированным
-         * мьютексом (D1); теперь лок здесь держится только на чтении, и
-         * условие показания то же — «есть что отменять», его решает
-         * `cancel::phase_of`. */
+         * мьютексом (D1); теперь лок здесь не держится вовсе, а условие
+         * показания то же — «есть что отменять», его решает `cancel::phase_of`. */
         ImGui::Separator();
     }
 
@@ -1502,13 +1530,24 @@ static void render_session() {
     render_token_panel();
     render_timeline();
 
-    /* Лента событий (последние 40). */
+    /* Лента событий (последние 40).
+     *
+     * И11.12: раньше лок держался на ВСЮ отрисовку ленты, то есть на сорок
+     * вызовов `TextColored` подряд. Агент при этом пишет события на каждом
+     * шаге, поэтому лок брался постоянно и надолго — окно ждало его, агент
+     * ждал окно. Теперь лок берётся на копию последних сорока записей и
+     * отпускается: `AgentEvent` — копируемая структура (вид и текст), то
+     * есть копия целостна и не требует лока на отрисовку. */
     ImGui::BeginChild("session_events", ImVec2(0, 0), ImGuiChildFlags_Borders);
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        size_t from = st.events.size() > 40 ? st.events.size() - 40 : 0;
-        for (size_t i = from; i < st.events.size(); ++i) {
-            const auto& e = st.events[i];
+        std::vector<AgentEvent> events;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            const size_t from = st.events.size() > 40 ? st.events.size() - 40 : 0;
+            events.assign(st.events.begin() + static_cast<long>(from),
+                          st.events.end());
+        }
+        for (const AgentEvent& e : events) {
             switch (e.kind) {
                 case AgentEvent::Assistant:
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%s", e.text.c_str());
@@ -1615,20 +1654,39 @@ void render_extras() {
         if (tokens.visible) draw_token_lines(tokens);
     }
 
-    /* План-режим. */
+    /* План-режим.
+     *
+     * И11.12: чекбокс рисуется по локальной копии флага, а запись — под
+     * коротким локом после него. `ImGui::Checkbox` под `st.mtx` брал чужой
+     * мьютекс на всё время отрисовки виджета (D-6). */
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        bool pm = st.plan_mode;
-        if (ImGui::Checkbox("План-режим (правки не применяются сразу)", &pm))
+        bool pm = false;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            pm = st.plan_mode;
+        }
+        if (ImGui::Checkbox("План-режим (правки не применяются сразу)", &pm)) {
+            std::lock_guard<std::mutex> lk(st.mtx);
             st.plan_mode = pm;
+        }
     }
 
-    /* Продолжение сессии и очистка. */
+    /* Продолжение сессии и очистка.
+     *
+     * И11.12: то же, что выше, и `save_settings()` — уже вне лока: он пишет
+     * в настройки хоста, и держать чужой мьютекс на время записи значило бы
+     * зажать его ещё дольше. */
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        bool cc = st.continue_conversation;
+        bool cc = false;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            cc = st.continue_conversation;
+        }
         if (ImGui::Checkbox("Продолжать сессию", &cc)) {
-            st.continue_conversation = cc;
+            {
+                std::lock_guard<std::mutex> lk(st.mtx);
+                st.continue_conversation = cc;
+            }
             engine().save_settings();
         }
         if (ImGui::IsItemHovered())
@@ -1654,13 +1712,25 @@ void render_extras() {
      * выглядело бы как обещание, и «не влезает» пришлось бы ловить по
      * факту отказа провайдера. Пока порога нет, подпись говорит об
      * этом словами. */
+    /* И11.12: под локом считается ТОЛЬКО число — два маленьких значения, а не
+     * рисуется виджет. `context_usage` по оценке обходит всю историю, поэтому
+     * лок здесь всё равно берётся (снимок должен быть целостным), но
+     * отрисовка и подсказка уехали из-под него: именно они держали чужой
+     * мьютекс дольше всего. */
     {
-        std::lock_guard<std::mutex> lk(st.mtx);
-        if (!st.session.empty()) {
-            const compaction::ContextUsage used = compaction::context_usage(
-                st.measured_input_tokens, st.session);
-            const long long room =
-                compaction::usable(st.model_limits, st.compaction_config);
+        bool has_session = false;
+        compaction::ContextUsage used;
+        long long room = 0;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            has_session = !st.session.empty();
+            if (has_session) {
+                used = compaction::context_usage(st.measured_input_tokens,
+                                                 st.session);
+                room = compaction::usable(st.model_limits, st.compaction_config);
+            }
+        }
+        if (has_session) {
             ImGui::SameLine();
             if (room > 0) {
                 ImGui::TextDisabled("ctx: %lld ток / %lld (%s)",
