@@ -220,6 +220,11 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_agent_registry.cpp
         tests/test_agent_config.cpp
         tests/test_instruction.cpp
+        # И12.1: выбор базового промпта по семейству модели. Инструментов
+        # не регистрирует и цикл агента не зовёт, поэтому может стоять где
+        # угодно до test_iteration_iv_invariants.cpp; стоит рядом с
+        # test_instruction.cpp — оба проверяют вид Engine::build_system_prompt.
+        tests/test_system_prompt.cpp
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp
