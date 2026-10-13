@@ -143,5 +143,12 @@ void LlamaInterface::process_async_requests() {
     pImpl->process_async_requests();
 }
 
+/* И12.2: вызывающий (мост плагинов) решает по этому выводу, слать ли tools
+ * дальше. Без него отказ сервера был бы виден только внутри реализации,
+ * которая молча повторяет запрос без инструментов. */
+llama_gui::core::ToolsSupport llama_gui::core::LlamaInterface::tools_support() const {
+    return pImpl->tools_support();
+}
+
 } // namespace core
 } // namespace llama_gui

@@ -265,6 +265,61 @@ std::string ToolsRegistry::build_tool_catalogue(
     return s;
 }
 
+/* И12.2: те же инструменты, что в каталоге, но в виде массива
+ * OpenAI-совместимых спецификаций — для нативного вызова.
+ *
+ * Источник истины тот же, что у build_tool_catalogue: ToolDef. Отдельное
+ * описание для нативного вызова означало бы ровно D2 — модель в одном ходе
+ * получила бы два списка инструментов, и они разошлись бы при первой же
+ * правке. Динамическое описание (И8.13) берётся тем же способом, что и в
+ * describe_tool: список субагентов у `task` меняется от сессии к сессии, и
+ * второе место, где оно заморожено, отстало бы от первого.
+ *
+ * Схема параметров уходит ЦЕЛИКОМ, а не пересобирается по строкам: у
+ * провайдера должна быть ровно та же схема, по которой проверяются
+ * аргументы, иначе модель пришлёт то, что валидатор не примет. */
+static json::JsonValue tool_spec_json(const ToolDef& def) {
+    json::JsonValue fn = json::JsonValue::object();
+    fn.set("name", json::JsonValue(def.name));
+    const std::string description =
+        def.describe_dynamic ? def.describe_dynamic() : def.description;
+    if (!description.empty()) fn.set("description", json::JsonValue(description));
+    if (def.parameters.is_object()) {
+        fn.set("parameters", def.parameters);
+    } else {
+        /* Инструмент без схемы — всё равно объявляется: без `parameters`
+         * провайдер отвергает спецификацию, а инструмент без параметров
+         * вызвать нельзя. Пустая объектная схема означает «аргументов нет»
+         * и проходит валидацию так же, как её отсутствие. */
+        json::JsonValue params = json::JsonValue::object();
+        params.set("type", json::JsonValue("object"));
+        params.set("properties", json::JsonValue::object());
+        fn.set("parameters", params);
+    }
+    json::JsonValue entry = json::JsonValue::object();
+    entry.set("type", json::JsonValue("function"));
+    entry.set("function", fn);
+    return entry;
+}
+
+std::string ToolsRegistry::build_tool_specs_json() const {
+    json::JsonValue arr = json::JsonValue::array();
+    for (const auto& kv : tools_) arr.push_back(tool_spec_json(kv.second));
+    return arr.dump();
+}
+
+std::string ToolsRegistry::build_tool_specs_json(
+        const std::vector<std::string>& visible) const {
+    if (visible.empty()) return build_tool_specs_json();
+    json::JsonValue arr = json::JsonValue::array();
+    for (const auto& name : visible) {
+        auto it = tools_.find(name);
+        if (it == tools_.end()) continue;
+        arr.push_back(tool_spec_json(it->second));
+    }
+    return arr.dump();
+}
+
 std::string ToolsRegistry::join_tools() const {
     std::vector<std::string> names = list_tools();
     std::string s;

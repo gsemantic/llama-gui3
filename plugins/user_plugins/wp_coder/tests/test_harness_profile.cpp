@@ -1091,7 +1091,13 @@ TEST(профиль_агента_задаёт_temperature_и_max_tokens_в_за�
 }
 
 TEST(профиль_без_этих_полей_не_добавляет_мусора_в_запрос) {
-    /* Пустой request_json вместо «{}»: хост трактует их одинаково, но
+    /* И12.2: проверка теперь об АПРОСХОДНЫХ ПОЛЯХ профиля, а не о пустоте
+     * всего запроса. Запрос перестал быть пустым: в нём всегда идут
+     * инструменты для нативного вызова, и к профилю они отношения не
+     * имеют. Прежняя формулировка «пустой request_json» стала бы ложью
+     * не сегодня — она начала бы проверять отсутствие СОДЕРЖИМОГО, а
+     * отсутствие полей профиля проверять перестала. */
+    /* Пустой набор полей вместо «{}»: хост трактует их одинаково, но
      * «{}» в логе выглядит как «профиль применился и ничего не задал».
      * Проверка фиксирует именно форму, а не смысл. */
     Engine& eng = engine();
@@ -1110,7 +1116,14 @@ TEST(профиль_без_этих_полей_не_добавляет_мусо�
     LlmClient::fetch(recording_host(), "sys", {{"user", "x"}}, events,
                      nullptr, 1000);
 
-    ASSERT_EQ(g_last_request_json, std::string());
+    /* И12.2: ни одного поля ПРОФИЛЯ — а не «запрос пуст». Инструменты в
+     * запросе есть всегда, и их отсутствие означало бы, что нативный
+     * вызов выключен, а не то, что профиль пуст. */
+    ASSERT_TRUE(g_last_request_json.find("max_tokens") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("temperature") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("top_p") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("top_k") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("stop") == std::string::npos);
 }
 
 TEST(без_профиля_запрос_остаётся_пустым) {
@@ -1129,7 +1142,14 @@ TEST(без_профиля_запрос_остаётся_пустым) {
     LlmClient::fetch(recording_host(), "sys", {{"user", "x"}}, events,
                      nullptr, 1000);
 
-    ASSERT_EQ(g_last_request_json, std::string());
+    /* И12.2: ни одного поля ПРОФИЛЯ — а не «запрос пуст». Инструменты в
+     * запросе есть всегда, и их отсутствие означало бы, что нативный
+     * вызов выключен, а не то, что профиль пуст. */
+    ASSERT_TRUE(g_last_request_json.find("max_tokens") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("temperature") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("top_p") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("top_k") == std::string::npos);
+    ASSERT_TRUE(g_last_request_json.find("stop") == std::string::npos);
 }
 
 TEST(неположительный_max_tokens_не_уходит_к_хосту) {

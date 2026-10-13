@@ -58,11 +58,41 @@ public:
     /* Готовый кусок текста (облачный путь отдаёт токен, а не чанк). */
     void push_text(const std::string& text);
 
+    /* И12.2: кусок нативного вызова от облачного клиента, который разбирает
+     * delta.tool_calls сам и отдаёт куски.
+     *
+     * Собирает вызов ТОТ ЖЕ код, что и feed(), через общий
+     * absorb_tool_call: два накопителя аргументов разошлись бы при первом
+     * же провайдере, присылающем вызов по частям, — и один из них тихо
+     * склеил бы аргументы двух вызовов в один.
+     *
+     * Облачный путь не может отдать мосту сырой чанк: клиент отдаёт
+     * вызывающему токен, а не протокол, и это договорились с чатом
+     * приложения. */
+    void push_tool_fragment(int index, const std::string& name,
+                            const std::string& arguments);
+
     /* Метрики из финального чанка. */
     void set_usage(int prompt_tokens, int completion_tokens);
 
     /* Ответ закрыт провайдером. */
     void set_finish_reason(const std::string& reason);
+
+    /* И12.2: что произошло с tools в этом ходе.
+     *
+     * rejected — НЕ «tools не сработали», а именно отказ провайдера:
+     * от «модель вызвала инструмент текстом» это неотличимо, и по такому
+     * признаку нативный вызов выключался бы навсегда после первой
+     * неудачной модели. Отказ — доказательство, отсутствие вызова — нет.
+     *
+     * Оба флага сразу, а не два метода: «слали ли» и «отказал ли» —
+     * один факт о запросе, и разъехаться они могут только вместе с
+     * ошибкой вызывающего.
+     *
+     * Ключ появляется в done_json ТОЛЬКО когда tools слались: отсутствие
+     * ключа и «отказа не было» выглядели бы одинаково, и плагин выключил
+     * бы нативный вызов у провайдера, которому tools не предлагали. */
+    void note_tools(bool sent, bool rejected);
 
     /* Провайдер сообщил об ошибке в конце потока. */
     void set_error(const std::string& error);
@@ -91,6 +121,9 @@ private:
 
     void emit_text(const std::string& text, int kind);
     void emit_tool_delta(const ToolCallSlot& slot, const std::string& fragment);
+    /* Общий приём одного куска вызова: и из чанка, и от облачного клиента. */
+    void absorb_tool_call(int index, const std::string& provider_id,
+                          const std::string& name, const std::string& arguments);
 
     void* user_data_;
     DeltaFn on_delta_;
@@ -103,6 +136,9 @@ private:
     int completion_tokens_ = 0;
     int skipped_chunks_ = 0;
     bool closed_ = false;
+    /* tools слались, и провайдер их отверг (И12.2). */
+    bool tools_sent_ = false;
+    bool tools_rejected_ = false;
     /* Индекс вызова → его идентификатор и имя. */
     std::map<int, ToolCallSlot> tool_calls_;
 };

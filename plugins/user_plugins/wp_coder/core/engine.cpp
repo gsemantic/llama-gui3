@@ -116,6 +116,22 @@ void Engine::init(HostCallbacks callbacks) {
     permissions_.bind(&state_, [this](const std::string& text) {
         push_event(AgentEvent::Tool, text);
     });
+    /* И12.2: вывод о нативном вызове НЕ переживает переинициализацию.
+     *
+     * Он про ПРОВАЙДЕРА, а не про плагин: переинициализация означает, что
+     * хост переставил колбэки, то есть речь может идти о другом сервере, у
+     * которого отказ от tools держится в сильнейшем месте — в самом хосте.
+     * Унаследованный Rejected отключил бы нативный вызов у провайдера,
+     * который им умеет, и промпт остался бы текстовым до перезапуска
+     * приложения.
+     *
+     * Сброс — под ЛОКОМ и ДО load_settings(): настройки читают провайдера,
+     * и вывод должен быть свежим к моменту, когда их применят. */
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        state_.native_tools = NativeToolSupport::Unknown;
+    }
+    invalidate_prompt_cache();
     load_settings();
 }
 
@@ -491,6 +507,82 @@ void Engine::attach_instructions(std::vector<Instruction> more) const {
     invalidate_prompt_cache();
 }
 
+/* И12.2: провайдер ОТКАЗАЛ из-за tools.
+ *
+ * Отказ — единственный вывод, который выключает нативный вызов. Отсутствие
+ * вызова доказательством не является: модель может просто ответить текстом,
+ * и тогда нативный вызов выключался бы на каждом таком ходу, то есть
+ * плагин возвращался бы к текстовому протоколу вслед за любой нетривиальной
+ * репликой человека. Именно поэтому вызов приходит отдельным ключом ответа,
+ * а не вычисляется по факту отсутствия вызовов.
+ *
+ * rejected == false ничего не меняет: «не отказали» не равно «умеет», и
+ * переключение туда было бы выводом из отсутствия события.
+ *
+ * Кэш промпта сбрасывается, потому что протокол вызова в промпте меняется:
+ * без сброса модель ещё ход получила бы требование писать блок. */
+void Engine::note_tools_rejected(bool rejected) {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        const NativeToolSupport next = rejected ? NativeToolSupport::Rejected
+                                                : NativeToolSupport::Unknown;
+        if (state_.native_tools != next) {
+            state_.native_tools = next;
+            changed = true;
+        }
+    }
+    /* Смена агента или модели сбрасывает вывод: у нового провайдера всё может
+     * быть иначе, а унаследованный отказ выключил бы нативный вызов у того,
+     * кто его умеет. */
+    if (changed) invalidate_prompt_cache();
+}
+
+/* И12.2: модель вернула нативный вызов — протокол можно переключать.
+ *
+ * Единственное ДОКАЗАТЕЛЬСТВО, что нативный вызов работает: не «сервер
+ * принял tools» (это он и так делает молча), а то, что модель им
+ * воспользовалась. До этого момента промпт требует оба протокола сразу —
+ * они не противоречат ничному, пока ни один не подтверждён.
+ *
+ * Из Rejected тоже выходим: человек мог переключить провайдера, и унаследованный
+ * отказ держал бы текстовый протокол у модели, которая нативный вызов уже
+ * показала, что умеет. */
+void Engine::note_native_tool_seen() {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        if (state_.native_tools != NativeToolSupport::Confirmed) {
+            state_.native_tools = NativeToolSupport::Confirmed;
+            changed = true;
+        }
+    }
+    if (changed) invalidate_prompt_cache();
+}
+
+NativeToolSupport Engine::native_tool_support() const {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    return state_.native_tools;
+}
+
+std::vector<std::string> Engine::visible_tools() const {
+    /* И8.7: у агента правила СВОИ (agent::Info уже сложил поверх них
+     * правила сессии), у хода сессии — правила сессии. Та же функция
+     * visible_tool_names на оба ответа. */
+    std::shared_ptr<agent::Info> info;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        info = state_.scope.info;
+    }
+    std::vector<ToolDef> all = ToolsRegistry::instance().defs();
+    if (info) {
+        return visible_tool_names(all, [&info](const std::string& key) {
+            return info->denies_whole_key(key);
+        });
+    }
+    return permissions_.visible_tools(all);
+}
+
 std::string Engine::build_system_prompt() const {
     /* И9.3: порядок блоков — ПОРЯДОК ПЛАНА (session/llm/request.ts:58),
      * и он проверяется тестом, а не держится на память о том, в каком
@@ -526,9 +618,14 @@ std::string Engine::build_system_prompt() const {
      * половина промпта собралась бы по правилам сессии, а половина — по
      * правилам агента. */
     std::shared_ptr<agent::Info> info;
+    NativeToolSupport native_tools = NativeToolSupport::Unknown;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         info = state_.scope.info;
+        /* И12.2: тот же лок, что и область. Отдельный заход локом здесь
+         * стоил бы лишнего захвата на каждой сборке промпта, а взятое
+         * значение пережило бы лок — копия, не ссылка. */
+        native_tools = state_.native_tools;
     }
     const agent::Info* agent_rules = info.get();
 
@@ -577,8 +674,24 @@ std::string Engine::build_system_prompt() const {
      * обязан узнать в приписке «ровно один блок за сообщение», а блок,
      * поясняющий то, чего в промпте больше нет, противоречил бы ему
      * прямо. */
+    /* И12.2: протокол вызова инструмента.
+     *
+     * Текстовый блок уходит модели ТОЛЬКО пока нет доказательства, что
+     * нативный вызов работает. Как только модель хотя бы раз вернула
+     * tool_call (note_native_tool_seen), требование писать блок становится
+     * указанием сделать то, чего она больше не делает, и модель начинает
+     * терять вызовы.
+     *
+     * Обратный переход — по ОТКАЗУ провайдера, а не по отсутствию вызова:
+     * отсутствие вызова не доказательство, и по нему текстовый протокол
+     * возвращался бы на каждый ход, где модель просто ответила текстом. */
+    const SystemPrompt::Protocol protocol =
+        native_tools == NativeToolSupport::Confirmed
+            ? SystemPrompt::Protocol::Native
+            : SystemPrompt::Protocol::Text;
+
     sys += state_.agent_system_prompt.empty()
-        ? SystemPrompt::provider(model_id)
+        ? SystemPrompt::provider(model_id, protocol)
         : state_.agent_system_prompt;
 
     /* И8.7: промпт агента — ДОПОЛНЕНИЕ к базовому, а не замена. Базовый
@@ -653,20 +766,24 @@ std::string Engine::build_system_prompt() const {
      * сложил поверх них правила сессии), и фильтр тот же, что у
      * сессии, — одна функция на оба ответа (visible_tool_names). */
     {
-        std::vector<ToolDef> all = ToolsRegistry::instance().defs();
-        std::vector<std::string> visible;
-        if (agent_rules) {
-            visible = visible_tool_names(all, [agent_rules](const std::string& key) {
-                return agent_rules->denies_whole_key(key);
-            });
-        } else {
-            visible = permissions_.visible_tools(all);
-        }
-        std::string cat =
-            ToolsRegistry::instance().build_tool_catalogue(visible);
-        if (!cat.empty()) {
-            sys += "\n\n";
-            sys += cat;
+        /* И12.2: при подтверждённом нативном вызове каталога в промпте НЕТ.
+         *
+         * Он был бы второй копией того же, что уже ушло в запрос полем
+         * tools: та же схема, те же описания, тот же динамический список
+         * субагентов. Платить за него надо на КАЖДОМ ходе, а пользы он не
+         * добавляет — при нативном вызове модель читает схему из запроса.
+         *
+         * До подтверждения каталог остаётся: модель, которая нативный вызов
+         * не поддержит (или провайдер, который его отверг), иначе осталась бы
+         * без описания инструментов и без единого способа их позвать. */
+        if (protocol != SystemPrompt::Protocol::Native) {
+            const std::vector<std::string> visible = visible_tools();
+            std::string cat =
+                ToolsRegistry::instance().build_tool_catalogue(visible);
+            if (!cat.empty()) {
+                sys += "\n\n";
+                sys += cat;
+            }
         }
     }
 

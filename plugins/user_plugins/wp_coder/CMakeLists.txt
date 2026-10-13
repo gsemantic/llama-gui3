@@ -225,6 +225,11 @@ if(WP_CODER_BUILD_TESTS)
         # угодно до test_iteration_iv_invariants.cpp; стоит рядом с
         # test_instruction.cpp — оба проверяют вид Engine::build_system_prompt.
         tests/test_system_prompt.cpp
+        # И12.2: нативный вызов инструмента — запрос, отказ провайдера и
+        # переключение протокола промпта. Инструментов не регистрирует
+        # (работает с уже зарегистрированными), поэтому может стоять где
+        # угодно до test_iteration_iv_invariants.cpp.
+        tests/test_native_tools.cpp
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp

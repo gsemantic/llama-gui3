@@ -97,6 +97,23 @@ struct OpenRouterRequestParams {
 
     // Системный промпт
     std::string system_prompt;
+
+    /*
+     * И12.2: инструменты для нативного вызова.
+     *
+     * Пустой список — поля в тело запроса не уходят: сервер, который их не
+     * понимает, отверг бы запрос, и обычный чат (единственный, который
+     * этим классом пользовался до И12.2) сломался бы из-за поля, которого
+     * никто не просил.
+     */
+    struct Tool {
+        std::string name;
+        std::string description;
+        std::string parameters;  /* JSON-схема объекта, строка */
+    };
+    std::vector<Tool> tools;
+    /* "", "auto", "none", "required" */
+    std::string tool_choice;
     
     // История диалога (для chat completion)
     struct Message {

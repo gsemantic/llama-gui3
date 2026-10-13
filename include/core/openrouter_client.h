@@ -58,8 +58,28 @@ public:
 
     // Генерация текста
     OpenRouterCompletionResponse complete(const OpenRouterRequestParams& params);
+    /*
+     * И12.2: кусок нативного вызова инструмента.
+     *
+     * Отдельный колбэк, а не поле в StreamCallback, потому что у вызова
+     * ТРИ части (индекс, имя, кусок аргументов), а StreamCallback сделан
+     * для токена текста, и его сигнатуру трогать нельзя: ею пользуется
+     * чат приложения (src/ui/chat_message_send.cpp).
+     *
+     * Сборку вызова по индексу делает НЕ этот класс: она живёт в
+     * StreamBridge, как и для локального пути. Здесь — только разбор
+     * `delta.tool_calls` и перекладывание кусков, потому что два
+     * накопителя аргументов разошлись бы при первом же провайдере,
+     * присылающем вызов по частям.
+     *
+     * on_tool = nullptr — обычный чат, которому инструменты не нужны.
+     */
+    using ToolChunkCallback = std::function<void(int index, const std::string& name,
+                                                 const std::string& arguments)>;
+
     bool complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback,
-                                 OpenRouterCompletionResponse* out_response = nullptr);
+                                 OpenRouterCompletionResponse* out_response = nullptr,
+                                 ToolChunkCallback on_tool = nullptr);
 
     // API
     bool is_api_available();

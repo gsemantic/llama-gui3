@@ -361,7 +361,53 @@ void test_new_host_api_fields_are_append_only() {
                       sizeof(LlamaHostApi));
 }
 
+/* --- И12.2: отказ провайдера по tools сообщается плагину --- */
+
+/* Ключ появляется ТОЛЬКО когда инструменты действительно слались. Без
+ * этого условия плагин выключил бы нативный вызов у провайдера, который
+ * tools и не получал: у него не отказа, а поле просто отсутствует, и
+ * «отсутствует» не значит «отказали». */
+void test_no_tools_no_rejection_field() {
+    Recorder rec;
+    StreamBridge bridge(&rec, Recorder::on_delta, Recorder::on_tool_delta);
+    bridge.push_text("просто ответ");
+    bridge.set_finish_reason("stop");
+    const json out = json::parse(bridge.done_json(""));
+    TEST_ASSERT(!out.contains("tools_rejected"));
+}
+
+/* Отказ виден И ЧИСЛОМ, а не булевым значением.
+ *
+ * Плагин читает этот JSON самодельным json::int_, который булево значение
+ * не принимает и молча возвращает 0. Расхождение формата было бы самым
+ * дорогим из возможных: провайдер без поддержки tools продолжал бы
+ * получать их и отказывать на каждом ходу, а плагин считал бы, что отказа
+ * не было, — и нативный вызов не выключался бы НИКОГДА. */
+void test_tools_rejection_is_a_number_not_a_boolean() {
+    Recorder rec;
+    StreamBridge bridge(&rec, Recorder::on_delta, Recorder::on_tool_delta);
+    bridge.push_text("ответ без вызова");
+    bridge.set_finish_reason("stop");
+    bridge.note_tools(true, true);
+    const json out = json::parse(bridge.done_json(""));
+    TEST_ASSERT(out.contains("tools_rejected"));
+    TEST_ASSERT(out["tools_rejected"].is_number_integer());
+    TEST_ASSERT_EQUAL(out["tools_rejected"].get<int>(), 1);
+    /* Отказ — не ошибка хода: ok остаётся 1, иначе плагин показал бы
+     * человеку ошибку там, где ответа просто не было в формате вызова. */
+    TEST_ASSERT_EQUAL(out["ok"].get<int>(), 1);
+
+    StreamBridge ok_bridge(&rec, Recorder::on_delta, Recorder::on_tool_delta);
+    ok_bridge.push_text("ответ");
+    ok_bridge.set_finish_reason("stop");
+    ok_bridge.note_tools(true, false);
+    const json ok_out = json::parse(ok_bridge.done_json(""));
+    TEST_ASSERT_EQUAL(ok_out["tools_rejected"].get<int>(), 0);
+}
+
 int main() {
+    REGISTER_TEST(test_no_tools_no_rejection_field);
+    REGISTER_TEST(test_tools_rejection_is_a_number_not_a_boolean);
     REGISTER_TEST(test_text_deltas_arrive_one_by_one_in_order);
     REGISTER_TEST(test_empty_delta_is_not_delivered);
     REGISTER_TEST(test_reasoning_is_not_part_of_the_answer);

@@ -566,6 +566,51 @@ std::string cloud_api_key(core::Settings* settings) {
     return core::EnvManager::read_key(key_name, settings->get_profiles_directory());
 }
 
+/* Один инструмент из request_json → ToolSpec.
+ *
+ * Форма — ровно та, что build_chat_body уводит в тело запроса
+ * (llama_interface_impl.cpp:123), то есть OpenAI-совместимая:
+ * {"type":"function","function":{name, description, parameters}}.
+ * Строгая, как остальной разбор: неизвестный `type`, не-объект
+ * `function` или отсутствие `name` — ошибка плагина, а не повод
+ * отправить серверу инструмент без имени.
+ *
+ * Короткая форма {"name":…} принимается: провайдеры её принимают тоже,
+ * и принимать её бесплатно — не вводить у плагина второй формат, который
+ * придётся поддерживать вечно. */
+static bool parse_tool_spec(const nlohmann::json& entry, core::ToolSpec& out,
+                            std::string& error) {
+    using nlohmann::json;
+    if (!entry.is_object()) {
+        error = "tools: элемент не объект";
+        return false;
+    }
+    const json& fn = entry.contains("function") ? entry["function"] : entry;
+    if (!fn.is_object()) {
+        error = "tools: function не объект";
+        return false;
+    }
+    if (!fn.contains("name") || !fn["name"].is_string() ||
+        fn["name"].get<std::string>().empty()) {
+        error = "tools: нет имени инструмента";
+        return false;
+    }
+    if (entry.contains("type") && entry["type"].is_string()) {
+        out.type = entry["type"].get<std::string>();
+    }
+    out.name = fn["name"].get<std::string>();
+    if (fn.contains("description") && fn["description"].is_string()) {
+        out.description = fn["description"].get<std::string>();
+    }
+    if (fn.contains("parameters")) {
+        /* parameters — СХЕМА, а не значение: любой JSON здесь допустим,
+         * и проверять его нечем. Отсутствующее поле оставляет null, а
+         * build_chat_body подставит пустой объект сам. */
+        out.parameters = fn["parameters"];
+    }
+    return true;
+}
+
 /* Параметры генерации из request_json.
  *
  * Отсутствующее поле — «как у llm_chat_messages», а не значение по
@@ -576,9 +621,20 @@ std::string cloud_api_key(core::Settings* settings) {
  *
  * Мусор в request_json — ошибка плагина, и она возвращается вызывающему,
  * а не заменяется молча значениями по умолчанию: иначе модель получила
- * бы чужую температуру, и никто бы об этом не узнал. */
-bool apply_request_json(const char* request_json, core::ChatCompletionRequest& req,
-                        std::string& error) {
+ * бы чужую температуру, и никто бы об этом не узнал.
+ *
+ * И12.2. Кроме генерации разбираются `tools`, `tool_choice` и
+ * `response_format`. До этой задачи apply_request_json их молча
+ * выбрасывал, а сериализация в тело запроса и разбор ответа в
+ * llm_stream_bridge уже были — то есть нативный вызов был полностью
+ * разобран со стороны ответа и полностью недоступен со стороны запроса,
+ * и ничто об этом не говорило.
+ *
+ * `tool_choice` без `tools` ИГНОРИРУЕТСЯ, а не отвергается: сервер без
+ * tools отверг бы такой запрос (400), то есть целиком отключил бы
+ * генерацию из-за поля, которое плагин послал вместе с пустым списком. */
+static bool apply_request_json(const char* request_json, core::ChatCompletionRequest& req,
+                               std::string& error) {
     if (!request_json || !*request_json) return true;
     using nlohmann::json;
     try {
@@ -604,6 +660,38 @@ bool apply_request_json(const char* request_json, core::ChatCompletionRequest& r
             req.stop.clear();
             for (const auto& s : parsed["stop"]) {
                 if (s.is_string()) req.stop.push_back(s.get<std::string>());
+            }
+        }
+        if (parsed.contains("tools")) {
+            if (!parsed["tools"].is_array()) {
+                error = "tools is not an array";
+                return false;
+            }
+            req.tools.clear();
+            for (const auto& entry : parsed["tools"]) {
+                core::ToolSpec spec;
+                if (!parse_tool_spec(entry, spec, error)) return false;
+                req.tools.push_back(std::move(spec));
+            }
+        }
+        /* Мусор в tool_choice без tools не трогаем: см. шапку. С мусором
+         * при непустых tools — отказ, потому что серверу это уйдёт. */
+        if (!req.tools.empty() && parsed.contains("tool_choice")) {
+            if (!parsed["tool_choice"].is_string()) {
+                error = "tool_choice is not a string";
+                return false;
+            }
+            req.tool_choice = parsed["tool_choice"].get<std::string>();
+        }
+        if (parsed.contains("response_format")) {
+            const json& rf = parsed["response_format"];
+            if (!rf.is_object() || !rf.contains("type") || !rf["type"].is_string()) {
+                error = "response_format has no type";
+                return false;
+            }
+            req.response_format.type = rf["type"].get<std::string>();
+            if (rf.contains("json_schema")) {
+                req.response_format.schema = rf["json_schema"];
             }
         }
     } catch (const std::exception& e) {
@@ -941,6 +1029,25 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
     }
     for (const auto& m : msgs) local_req.messages.push_back(m);
 
+    /* И12.2: инструменты для ОБЛАЧНОГО пути. Берутся из того же
+     * local_req, который наполнил apply_request_json: второй разбор
+     * request_json здесь означал бы два места, читающих один формат, а они
+     * разошлись бы при первой правке схемы инструмента.
+     *
+     * Собираются ДО потока, потому что поток здесь чужой, и тащить в его
+     * захват ещё и структуру запроса — значит продлить её жизнь на всю
+     * генерацию ради копии, которая не меняется. */
+    std::vector<core::OpenRouterRequestParams::Tool> cloud_tools;
+    cloud_tools.reserve(local_req.tools.size());
+    for (const auto& t : local_req.tools) {
+        core::OpenRouterRequestParams::Tool out;
+        out.name = t.name;
+        out.description = t.description;
+        if (!t.parameters.is_null()) out.parameters = t.parameters.dump();
+        cloud_tools.push_back(std::move(out));
+    }
+    const std::string cloud_tool_choice = local_req.tool_choice;
+
     const std::string api_key = cloud_api_key(settings);
     const bool local_ok = !force_cloud && li && li->is_server_healthy();
     if (!local_ok && api_key.empty()) {
@@ -970,11 +1077,26 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
     };
 
     if (local_ok) {
+        /* И12.2: tools слались? Сервер принял их или отказал?
+         *
+         * Отказ виден плагину только здесь: реализация интерфейса молча
+         * повторяет запрос без инструментов, и без этой пары флагов плагин
+         * увидел бы нормальный ответ и решил бы, что модель просто не
+         * вызвала инструмент. Значение читается в финальном колбэке,
+         * то есть ПОСЛЕ remember_tools_support (строка 500 в
+         * llama_interface_impl.cpp) и потому уже актуальное.
+         *
+         * Unknown (не проверяли / сетевой сбой) отказом НЕ считается:
+         * один сбой связи выключил бы нативный вызов навсегда. */
+        const bool tools_sent = !local_req.tools.empty();
         register_stream(user_data, cancel);
         li->create_chat_completion_streaming(
             local_req,
-            [bridge, finish](const std::string& chunk, bool is_final) {
+            [bridge, finish, li, tools_sent](const std::string& chunk, bool is_final) {
                 if (is_final) {
+                    bridge->note_tools(tools_sent,
+                                       tools_sent && li->tools_support() ==
+                                                        core::ToolsSupport::Rejected);
                     finish(std::string());
                     return;
                 }
@@ -987,7 +1109,7 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
     /* Облако. complete_streaming_async работает синхронно (клиент обязан
      * дожить конца запроса), поэтому поток хоста — наш. */
     std::thread([bridge, finish, msgs, api_key, settings, system_prompt,
-                 user_data]() {
+                 cloud_tools, cloud_tool_choice, user_data]() {
         auto client = std::make_shared<core::OpenRouterClient>(api_key);
         const auto& cp = settings->cloud_provider();
         client->set_timeout(cp.timeout_ms);
@@ -1016,6 +1138,8 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
             out.content = m.content;
             params.messages.push_back(std::move(out));
         }
+        params.tools = cloud_tools;
+        params.tool_choice = cloud_tool_choice;
 
         core::OpenRouterCompletionResponse usage;
         /* Облако отмены не знает (его клиент синхронный), но handle из
@@ -1035,7 +1159,16 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
                 }
                 bridge->push_text(token);
             },
-            &usage);
+            &usage,
+            /* И12.2: куски нативного вызова. Отказ облака от tools молча
+             * не отличить от «модель не вызвала инструмент»: облачный
+             * клиент не повторяет запрос без них и вердикта не отдаёт, так
+             * что плагину здесь сообщается «инструменты были отданы, отказа
+             * не было», и он решает по фактическим вызовам. */
+            [bridge](int index, const std::string& name,
+                     const std::string& arguments) {
+                bridge->push_tool_fragment(index, name, arguments);
+            });
 
         if (!ok) {
             finish("облачный провайдер не ответил");
@@ -1047,6 +1180,7 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
          * достовернее поля: без него bridge счёл бы поток оборванным. */
         bridge->set_finish_reason(usage.finish_reason.empty() ? "stop"
                                                               : usage.finish_reason);
+        bridge->note_tools(!params.tools.empty(), false);
         finish(std::string());
     }).detach();
 

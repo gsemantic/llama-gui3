@@ -154,6 +154,13 @@ public:
     void set_ssl_verify(bool verify) { ssl_verify_ = verify; }
     bool get_ssl_verify() const { return ssl_verify_; }
 
+    // И12.2: что сервер умеет — наружу. Значение относится к последнему
+    // завершённому запросу с tools; Unknown означает «не проверяли или не
+    // смогли проверить», и НЕ выключает нативный вызов (сетевой сбой).
+    ToolsSupport tools_support() const {
+        return static_cast<ToolsSupport>(tools_support_.load());
+    }
+
 private:
     // Применить настройки SSL к curl-хендлу (VERIFYPEER/VERIFYHOST)
     void apply_ssl_options(CURL* curl) const;
@@ -192,6 +199,9 @@ private:
      * должен выключать нативный вызов навсегда.
      */
     std::atomic<int> tools_support_{static_cast<int>(ToolsSupport::Unknown)};
+
+    // Метод-перечислитель снят в public (И12.2): поле остаётся здесь, под
+    // локом доступа, потому что пишет его только remember_tools_support.
     
     // Internal methods
     void initialize_curl();
@@ -204,12 +214,6 @@ private:
      */
     void remember_tools_support(ToolsSupport support);
 
-    // Что сервер умеет (И6.2) — для вызывающего, который решает, слать ли
-    // tools. Unknown означает «ещё не проверено», а не «не умеет».
-    ToolsSupport tools_support() const {
-        return static_cast<ToolsSupport>(tools_support_.load());
-    }
-    
     // Slot operations
     bool save_slot_kv_cache_impl(int slot_id, const std::string& filename);
     bool restore_slot_kv_cache_impl(int slot_id, const std::string& filename);

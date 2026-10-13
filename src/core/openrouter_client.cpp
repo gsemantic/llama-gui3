@@ -304,6 +304,39 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
         }
     }
 
+    /* И12.2: инструменты уходят только когда их наполнили, и в том же
+     * OpenAI-совместимом виде, что и локальный путь
+     * (llama_interface_impl.cpp:123). Два сборщика одного поля — это
+     * дрейф по построению: правка формата в одном месте разошлась бы с
+     * другим, и облако отвергло бы то, что локальный сервер принял.
+     *
+     * Схема параметров приходит строкой и вставляется РАЗОБРАННОЙ: если
+     * завернуть её в строку, провайдер получил бы вместо объекта
+     * схемы строку со схемой, и tools не сработали бы нигде. */
+    if (!params.tools.empty()) {
+        nlohmann::json tools = nlohmann::json::array();
+        for (const auto& t : params.tools) {
+            nlohmann::json fn;
+            fn["name"] = t.name;
+            if (!t.description.empty()) fn["description"] = t.description;
+            if (!t.parameters.empty()) {
+                nlohmann::json parsed =
+                    nlohmann::json::parse(t.parameters, nullptr, false);
+                /* Мусор в схеме — не повод отправлять её как есть: пустой
+                 * объект означает «без параметров» и пройдёт у провайдера,
+                 * тогда как битая схема отвергла бы весь запрос целиком,
+                 * вместе с текстовым режимом. */
+                fn["parameters"] = parsed.is_discarded()
+                    ? nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}}
+                    : parsed;
+            }
+            tools.push_back(nlohmann::json{{"type", "function"},
+                                           {"function", std::move(fn)}});
+        }
+        request_body["tools"] = std::move(tools);
+        if (!params.tool_choice.empty()) request_body["tool_choice"] = params.tool_choice;
+    }
+
     request_body["stream"] = params.stream;
 
     return request_body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -379,7 +412,8 @@ OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestP
 }
 
 bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback,
-                                                OpenRouterCompletionResponse* out_response) {
+                                                OpenRouterCompletionResponse* out_response,
+                                                ToolChunkCallback on_tool) {
     if (!callback) return false;
 
     OpenRouterCompletionResponse acc_usage;  // Аккумулятор usage (токены) за всю генерацию
@@ -417,7 +451,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         std::string error_message;
 
         http_client_.make_streaming_request("chat/completions", body,
-            [this, &callback, &delivered_content, &any_content_delivered, &failed, &retryable, &error_message, &acc_usage](
+            [this, &callback, on_tool, &delivered_content, &any_content_delivered, &failed, &retryable, &error_message, &acc_usage](
                 const std::string& data, bool is_error, bool is_done, bool is_retryable) {
                 if (is_done) {
                     if (is_error) {
@@ -456,6 +490,34 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                                 delivered_content = true;
                                 any_content_delivered = true;
                                 callback(token, false);
+                            }
+                        }
+                        /* И12.2: нативный вызов. Ход, состоящий ТОЛЬКО из
+                         * вызова, не содержит content вовсе, и без этого
+                         * блока «пустой ответ от сервера» (ниже) объявил
+                         * бы такой ход сбоем и повторил запрос — то есть
+                         * успешный вызов инструмента выглядел бы как
+                         * ошибка сети. */
+                        if (on_tool && choice.contains("delta") &&
+                            choice["delta"].contains("tool_calls") &&
+                            choice["delta"]["tool_calls"].is_array()) {
+                            for (const auto& call : choice["delta"]["tool_calls"]) {
+                                if (!call.is_object()) continue;
+                                const int index = call.value("index", 0);
+                                std::string name;
+                                std::string arguments;
+                                if (call.contains("function") && call["function"].is_object()) {
+                                    name = call["function"].value("name", "");
+                                    if (call["function"].contains("arguments") &&
+                                        call["function"]["arguments"].is_string()) {
+                                        arguments =
+                                            call["function"]["arguments"].get<std::string>();
+                                    }
+                                }
+                                if (name.empty() && arguments.empty()) continue;
+                                delivered_content = true;
+                                any_content_delivered = true;
+                                on_tool(index, name, arguments);
                             }
                         }
                     }

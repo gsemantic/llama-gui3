@@ -118,30 +118,51 @@ void StreamBridge::feed(const char* chunk_json) {
     if (!delta.contains("tool_calls") || !delta["tool_calls"].is_array()) return;
     for (const json& call : delta["tool_calls"]) {
         if (!call.is_object()) continue;
-        const int index = call.value("index", 0);
-
-        ToolCallSlot& slot = tool_calls_[index];
-        if (slot.call_id.empty()) {
-            /* Провайдер с идентификаторами отдаёт свой, остальные нумеруют
-             * вызовы индексом — его и превращаем в call_N. */
-            slot.call_id = (call.contains("id") && call["id"].is_string())
-                               ? call["id"].get<std::string>()
-                               : call_id_for_index(index);
+        std::string provider_id;
+        if (call.contains("id") && call["id"].is_string()) {
+            provider_id = call["id"].get<std::string>();
         }
+        std::string name;
+        std::string arguments;
         if (call.contains("function") && call["function"].is_object()) {
-            /* Имя приходит только в первом фрагменте вызова, а куски
-             * аргументов идут следующими: без запоминания имени второй
-             * фрагмент пришёл бы с пустым tool_name, и плагин не понял бы,
-             * чьи это аргументы. */
-            const std::string name = call["function"].value("name", "");
-            if (!name.empty()) slot.name = name;
+            name = call["function"].value("name", "");
             if (call["function"].contains("arguments") &&
                 call["function"]["arguments"].is_string()) {
-                emit_tool_delta(
-                    slot, call["function"]["arguments"].get<std::string>());
+                arguments = call["function"]["arguments"].get<std::string>();
             }
         }
+        absorb_tool_call(call.value("index", 0), provider_id, name, arguments);
     }
+}
+
+void StreamBridge::absorb_tool_call(int index, const std::string& provider_id,
+                                    const std::string& name,
+                                    const std::string& arguments) {
+    ToolCallSlot& slot = tool_calls_[index];
+    if (slot.call_id.empty()) {
+        /* Провайдер с идентификаторами отдаёт свой, остальные нумеруют
+         * вызовы индексом — его и превращаем в call_N. */
+        slot.call_id = provider_id.empty() ? call_id_for_index(index)
+                                           : provider_id;
+    }
+    /* Имя приходит только в первом фрагменте вызова, а куски аргументов
+     * идут следующими: без запоминания имени второй фрагмент пришёл бы с
+     * пустым tool_name, и плагин не понял бы, чьи это аргументы. */
+    if (!name.empty()) slot.name = name;
+    emit_tool_delta(slot, arguments);
+}
+
+void StreamBridge::push_tool_fragment(int index, const std::string& name,
+                                      const std::string& arguments) {
+    /* provider_id пуст: облачный клиент отдаёт индекс, и синтезированный
+     * call_N там же и нужен — иначе два параллельных вызова получили бы
+     * один идентификатор, и результат второго достался бы не тому. */
+    absorb_tool_call(index, std::string(), name, arguments);
+}
+
+void StreamBridge::note_tools(bool sent, bool rejected) {
+    tools_sent_ = sent;
+    tools_rejected_ = rejected;
 }
 
 std::string StreamBridge::done_json(const std::string& error) const {
@@ -170,6 +191,18 @@ std::string StreamBridge::done_json(const std::string& error) const {
     out["prompt_tokens"] = prompt_tokens_;
     out["completion_tokens"] = completion_tokens_;
     if (skipped_chunks_ > 0) out["skipped_chunks"] = skipped_chunks_;
+    /* И12.2: отказ виден плагину ТОЛЬКО когда tools действительно слались.
+     * Безусловно выставленный ключ выключил бы нативный вызов у
+     * провайдера, которому tools не предлагали, — и сделал бы это
+     * молча, потому что «ключа нет» и «отказа не было» выглядели бы
+     * одинаково. */
+    /* И12.2: ЧИСЛОМ, а не true/false — как ключ `ok` рядом. Плагин читает
+     * этот JSON функцией json::int_, которая булево значение не принимает и
+     * вернула бы 0, то есть «отказа не было». Расхождение было бы молчаливым
+     * и самым дорогим из возможных: нативный вызов не выключался бы никогда,
+     * а провайдер без его поддержки продолжал бы получать tools и отказывать
+     * на каждом ходу. */
+    if (tools_sent_) out["tools_rejected"] = tools_rejected_ ? 1 : 0;
     return out.dump();
 }
 

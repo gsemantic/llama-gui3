@@ -41,22 +41,44 @@ namespace {
  * исходников, — это проверка ИМЕННО ТОГО, что акцент дописан, а база
  * на месте; собирать его автоматически означало бы проверять, что
  * промпт совпадает с собой. */
-const char* const kProtocolStrings[] = {
-    "wp_action",
-    "```json",
+const char* const kSharedStrings[] = {
     "[Old tool result content cleared]",
     "<task id=",
     "<task_result>",
     "task_id",
     "<skill_content name=",
     "## Instructions from: <",
+    "## РАБОТА С ПУТЯМИ",
+    "## ИТОГОВЫЙ ОТВЕТ",
 };
 
-bool contains_all_protocol_strings(const std::string& prompt) {
-    for (const char* s : kProtocolStrings) {
-        if (prompt.find(s) == std::string::npos) return false;
+/* Строго ТЕКСТОВОГО протокола: формат вызова, который пишет модель. */
+const char* const kTextOnlyStrings[] = {
+    "wp_action",
+    "```json",
+    "РОВНО ОДИН wp_action блок за сообщение",
+};
+
+/* Строго НАТИВНОГО: при нативном вызове модель не пишет вызов сама, и
+ * требование писать его было бы указанием сделать то, чего она не делает.
+ * Проверка отрицательная намеренно: именно она ловит ситуацию, когда
+ * нативный промпт уехал вместе с текстовой половиной. */
+const char* const kForbiddenInNative[] = {
+    "wp_action",
+    "```json",
+};
+
+bool contains_all(const std::string& prompt, const char* const* items,
+                  size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (prompt.find(items[i]) == std::string::npos) return false;
     }
     return true;
+}
+
+bool contains_all_protocol_strings(const std::string& prompt) {
+    return contains_all(prompt, kSharedStrings,
+                        sizeof(kSharedStrings) / sizeof(kSharedStrings[0]));
 }
 
 /* Правила сессии для from_def: агенту нужно на чём-то собираться, и
@@ -174,13 +196,20 @@ TEST(семейство_определяется_подстрокой_имени
     }
 }
 
-TEST(неизвестная_модель_получает_базовый_промпт_без_изменений) {
+TEST(неизвестная_модель_получает_текстовый_промпт_без_акцента) {
     /* Побайтно, а не «содержит базу»: пустой model_id у хода сессии без
      * агента, и добавка в этом случае означала бы, что промпт стал
-     * длиннее у всех, у кого модель не объявлена. */
-    ASSERT_EQ(SystemPrompt::provider(""), std::string(kBaseSystemPrompt));
-    ASSERT_EQ(SystemPrompt::provider("mistral-7b-instruct"),
-              std::string(kBaseSystemPrompt));
+     * длиннее у всех, у кого модель не объявлена.
+     *
+     * И12.2: к базе добавлен заголовок каталога инструментов — он уехал из
+     * хвоста в провайдер, потому что при нативном вызове списка нет, а
+     * заголовок со словами «список ниже» остался бы враньём. Заголовок
+     * печатает движок вместе со списком, а заголовок при этом остаётся
+     * ПЕРЕД ним — то есть ровно там, где был. */
+    const std::string expected =
+        std::string(kBaseSystemPrompt) + kToolCatalogueSection;
+    ASSERT_EQ(SystemPrompt::provider(""), expected);
+    ASSERT_EQ(SystemPrompt::provider("mistral-7b-instruct"), expected);
 }
 
 TEST(у_каждого_семейства_свой_текст_и_каждый_длиннее_базы) {
@@ -211,6 +240,56 @@ TEST(ни_один_вариант_не_теряет_строки_формата_
                            "mistral-7b"}) {
         const std::string p = SystemPrompt::provider(id);
         ASSERT_TRUE(contains_all_protocol_strings(p));
+        /* Формат вызова проверяется только для текстового протокола: при
+         * нативном его нет by design, и требование было бы ложью. */
+        ASSERT_TRUE(contains_all(p, kTextOnlyStrings,
+                                 sizeof(kTextOnlyStrings) /
+                                     sizeof(kTextOnlyStrings[0])));
+    }
+}
+
+TEST(нативный_промпт_не_требует_писать_вызов_текстом) {
+    /* И12.2: главная проверка переключения. Модель с нативным вызовом
+     * отдаёт вызов полем, и текстовый блок в её промпте — указание сделать
+     * то, чего она не делает. Обратная ошибка не менее дорога: без блока
+     * модель БЕЗ нативного вызова не сможет позвать инструмент вовсе. */
+    const std::string native_prompt = SystemPrompt::provider(
+        "qwen3-coder", SystemPrompt::Protocol::Native);
+
+    for (const char* forbidden : kForbiddenInNative) {
+        if (native_prompt.find(forbidden) != std::string::npos) {
+            std::cerr << "  в нативном промпте осталось: " << forbidden
+                      << std::endl;
+        }
+        ASSERT_TRUE(native_prompt.find(forbidden) == std::string::npos);
+    }
+    /* Общая часть на месте: половина промпта не потерялась вместе с
+     * текстовым протоколом. */
+    ASSERT_TRUE(contains_all_protocol_strings(native_prompt));
+    /* И нативный блок на месте — иначе «нет wp_action» означало бы, что
+     * промпт просто не про вызовы. */
+    ASSERT_TRUE(native_prompt.find("вызови его по имени") !=
+                std::string::npos);
+    /* Семейственный акцент тоже переключился: совет про JSON у локальной
+     * модели при нативном вызове был бы враньём. */
+    ASSERT_TRUE(native_prompt.find("ТОЛЬКО JSON-объект") ==
+                std::string::npos);
+    ASSERT_TRUE(native_prompt.find("Не пиши JSON") != std::string::npos);
+}
+
+TEST(два_протокола_дают_разные_тексты_у_каждого_семейства) {
+    /* Попарно, а не «хотя бы один»: иначе переключатель, который забыл
+     * про одно из трёх семейств, прошёл бы. */
+    const char* ids[] = {"qwen3-coder", "gpt-4o", "deepseek-chat", ""};
+    for (const char* id : ids) {
+        const std::string text = SystemPrompt::provider(id);
+        const std::string native = SystemPrompt::provider(
+            id, SystemPrompt::Protocol::Native);
+        if (text == native) {
+            std::cerr << "  промпт не переключился для модели " << id
+                      << std::endl;
+        }
+        ASSERT_TRUE(text != native);
     }
 }
 
