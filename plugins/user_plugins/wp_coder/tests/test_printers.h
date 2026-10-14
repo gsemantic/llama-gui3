@@ -24,6 +24,14 @@ inline std::ostream& operator<<(std::ostream& os, LlmEventKind kind) {
     return os << llm_event_kind_name(kind);
 }
 
+/* И12.5: печатается ИМЯ (`контекст исчерпан`, `доступ к провайдеру`), а не
+ * число. В выводе проверки `5 != 3` не говорит ничего, а «контекст
+ * исчерпан != доступ к провайдеру» говорит всё, и разбирать падение по
+ * названию вида дешевле, чем по номеру в перечислении. */
+inline std::ostream& operator<<(std::ostream& os, FailureKind kind) {
+    return os << failure_kind_name(kind);
+}
+
 inline std::ostream& operator<<(std::ostream& os, PartKind kind) {
     return os << part_kind_name(kind);
 }

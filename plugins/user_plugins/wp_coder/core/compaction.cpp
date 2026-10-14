@@ -14,6 +14,7 @@
 
 /* text::utf8_prefix — резать по границе символа, а не по границе байта. */
 #include "core/json_utils.h"
+#include "core/llm_error.h"   /* вид сбоя сводщика */
 #include "core/prompts.h"
 #include "core/tool_protocol.h"   /* extract_action/parse_action: чужой вызов */
 
@@ -498,7 +499,11 @@ CompactionResult summarize(const std::vector<Message>& history,
                         compaction_user_prompt(transcript, previous)});
     if (!turn(kCompactionSystemPrompt, messages, text, error)) {
         result.outcome = CompactionOutcome::Stop;
-        result.failure = FailureKind::Provider;
+        /* И12.5: вид сбоя — из ТОГО ЖЕ классификатора, что у хода агента.
+         * Раньше здесь стоял безусловный Provider, то есть ключ
+         * недействителен у сводщика выглядел так же, как сеть моргнула, и
+         * человек пошёл чинить не то. Текст ошибки в `reason` остаётся. */
+        result.failure = classify_provider_failure(error).kind;
         result.reason = "сводщик не ответил: " +
                         (error.empty() ? std::string("без причины") : error);
         return result;

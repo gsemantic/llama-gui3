@@ -2,6 +2,7 @@
 
 #include "llm_event.h"
 #include "json_utils.h"
+#include "llm_error.h"
 
 #include <algorithm>
 
@@ -186,6 +187,9 @@ const char* failure_kind_name(FailureKind kind) {
         case FailureKind::Tool:     return "инструмент";
         case FailureKind::Aborted:  return "прервано";
         case FailureKind::ContextOverflow: return "контекст исчерпан";
+        case FailureKind::Auth:           return "доступ к провайдеру";
+        case FailureKind::OutputLength:   return "лимит токенов ответа";
+        case FailureKind::ContentFilter:  return "фильтр содержимого";
     }
     return "неизвестно";
 }
@@ -288,6 +292,18 @@ LlmEvent LlmEvent::finish(std::string finish_reason, Usage usage) {
 LlmEvent LlmEvent::provider_error(std::string error) {
     LlmEvent e(LlmEventKind::ProviderError);
     e.text_ = std::move(error);
+    /* И12.5: вид и повторяемость ставит ЕДИНЫЙ классификатор, здесь, а не
+     * вызывающий. Иначе вызывающий приносил бы свой разбор текста — и
+     * вид в событии один, а повторяемость в ретраях другая, то есть ровно
+     * D12: одно и то же свойство описано в двух местах, которые разъедутся
+     * при первой правке.
+     *
+     * `aborted()` этот путь не проходит: он собирает событие напрямую и
+     * сохраняет Aborted — «стоп» не классифицируется по тексту, потому что
+     * никакого текста от провайдера при нём нет. */
+    const ProviderFailure f = classify_provider_failure(e.text_);
+    e.failure_ = f.kind;
+    e.retryable_ = f.retryable;
     return e;
 }
 
@@ -591,7 +607,10 @@ void LlmResponse::reduce(LlmResponse& state, const LlmEvent& event) {
             state.commit_pending_calls();
             break;
 
-        case LlmEventKind::Finish:
+        /* Скобки — обязательны: в case с объявлением без них компилятор
+         * считает, что переменная живёт до конца switch, и следующий case
+         * становится недостижимым («jump to case label»). */
+        case LlmEventKind::Finish: {
             state.commit_pending_calls();
             if (!state.text_tail_.empty()) {
                 state.text_ += state.text_tail_;
@@ -603,7 +622,22 @@ void LlmResponse::reduce(LlmResponse& state, const LlmEvent& event) {
             }
             state.finish_reason_ = event.finish_reason();
             state.usage_ = event.usage();
+            /* И12.5: ход, который ОТВЕТИЛ, но ответ не доведён, тоже
+             * классифицируется. `length` и `content_filter` приходят на
+             * успешном ответе, где error пуст, — и до И12.5 «упёрлась в
+             * лимит токенов» было видно только строкой Status в цикле, а
+             * потребитель, читающий сбой, отличить обрезку от успеха не мог.
+             *
+             * ok() при этом остаётся истинным: сбой тут не в том, что ход
+             * не состоялся, — состоялся, просто ответ обрезан. */
+            const FailureKind by_finish =
+                failure_for_finish_reason(state.finish_reason_);
+            if (by_finish != FailureKind::None) {
+                state.failure_ = by_finish;
+                state.retryable_ = false;
+            }
             break;
+        }
 
         case LlmEventKind::ProviderError:
             state.error_ = event.error();
@@ -620,6 +654,10 @@ void LlmResponse::reduce(LlmResponse& state, const LlmEvent& event) {
             state.failure_ = event.failure() != FailureKind::None
                                  ? event.failure()
                                  : FailureKind::Provider;
+            /* И12.5: повторяемость едет с события тем же путём, что и вид:
+             * отдельная ветка «а повторяемость, наверное, другая» означала
+             * бы второе место, где решается этот вопрос. */
+            state.retryable_ = event.retryable();
             break;
 
         case LlmEventKind::kCount:

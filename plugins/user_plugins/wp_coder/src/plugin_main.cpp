@@ -19,6 +19,7 @@
 #include "core/git_tools.h"
 #include "core/module_api.h"
 #include "core/json_utils.h"
+#include "core/llm_error.h"
 #include "ui/coder_window.h"
 #include "host_bridge/llm_stream_probe.h"
 #include "host_bridge/llm_blocking.h"
@@ -201,22 +202,22 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
             /* 2.1: Retry для транзиентных ошибок LLM (429/5xx/timeout).
              * Хост сам ретраит облачные вызовы (OpenRouterClient::complete),
              * этот цикл — страховка для остальных путей (локальный сервер,
-             * сетевые сбои), которые хост возвращает как ok=0/nullptr. */
+             * сетевые сбои), которые хост возвращает как ok=0/nullptr.
+             *
+             * И12.5: «повторяемо ли» решает ОДИН классификатор
+             * (core/llm_error.h), а не свой список подстрок здесь. Свой
+             * список был вторым разбором того же текста, что идёт в
+             * LlmEvent::provider_error, — то есть D12: два места, которые
+             * разъедутся. Они и разъехались бы: старый список считал
+             * «исчерпан» (контекст закончился) повторяемым, потому что
+             * стоял в одной строке с «429», а повтор запроса, который не
+             * помещается в контекст, не поместится и в третий раз.
+             *
+             * Сам цикл ретраев (задержки, попытки, заголовки retry-after,
+             * обратный отсчёт в UI) заменяется в И12.6; здесь он читает
+             * готовый признак, чтобы тот не остался мёртвым полем. */
             const int kMaxAttempts = 3;
             const int kRetryDelaysSec[kMaxAttempts - 1] = {1, 3};
-            static const auto is_retryable_error = [](const std::string& err) {
-                if (err.find("429") != std::string::npos) return true;
-                if (err.find("500") != std::string::npos ||
-                    err.find("502") != std::string::npos ||
-                    err.find("503") != std::string::npos ||
-                    err.find("504") != std::string::npos) return true;
-                if (err.find("5xx") != std::string::npos) return true;
-                if (err.find("таймаут") != std::string::npos ||
-                    err.find("timeout") != std::string::npos ||
-                    err.find("timed out") != std::string::npos) return true;
-                if (err.find("исчерпан") != std::string::npos) return true;
-                return false;
-            };
 
             for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
                 /* И6.6: вызов хоста отменён быть не может (поля
@@ -268,7 +269,8 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
                 error_text = find_str(body, "error");
                 if (error_text.empty()) error_text = "LLM-ошибка (ok=0)";
 
-                if (attempt < kMaxAttempts - 1 && is_retryable_error(error_text)) {
+                if (attempt < kMaxAttempts - 1 &&
+                    coder::classify_provider_failure(error_text).retryable) {
                     std::string msg = "[retry] LLM: " + error_text
                         + " — попытка " + std::to_string(attempt + 2) + "/"
                         + std::to_string(kMaxAttempts) + " через "
