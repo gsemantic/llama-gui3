@@ -643,6 +643,21 @@ static bool apply_request_json(const char* request_json, core::ChatCompletionReq
             error = "request_json is not an object";
             return false;
         }
+        /* И12.7. `grammar` — GBNF-грамматика ограниченной выборки. Поле
+         * существовало в ChatCompletionRequest и уходило в тело запроса
+         * (llama_interface_impl.cpp), то есть нижняя половина пути была
+         * готова, а плагин до неё дотянуться не мог: apply_request_json
+         * разбирал перечисленные поля и молча выбрасывал остальные. И то же
+         * было с `tools` до И12.2 — нативный вызов был полностью разобран со
+         * стороны ответа и полностью недоступен со стороны запроса.
+         *
+         * Пустая строка означает «не ограничивать» и не пишется: поле,
+         * равное пустой строке, сервер истолковал бы как грамматику, которая
+         * не описывает ничего. */
+        if (parsed.contains("grammar") && parsed["grammar"].is_string()) {
+            const std::string g = parsed["grammar"].get<std::string>();
+            if (!g.empty()) req.grammar = g;
+        }
         if (parsed.contains("max_tokens") && parsed["max_tokens"].is_number_integer()) {
             const int v = parsed["max_tokens"].get<int>();
             if (v > 0) req.max_tokens = v;
