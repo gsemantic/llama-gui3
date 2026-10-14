@@ -10,6 +10,7 @@
 #include "llm_source.h"
 #include "llm_client.h"
 #include "snapshot.h"
+#include "tool_repair.h"
 
 #include <sstream>
 #include <vector>
@@ -206,16 +207,43 @@ std::deque<std::string>& scope_loop_calls(EngineState& state) {
 
 } // namespace
 
-ToolOutcome ToolRunner::run(const std::string& tool_name,
+ToolOutcome ToolRunner::run(const std::string& requested_name,
                             const json::JsonValue& args) {
-    const ToolDef* def = ToolsRegistry::instance().find(tool_name);
-    if (!def) {
+    /* И12.3: починка имени ДО исполнения и до отпечатка зацикливания.
+     *
+     * Здесь, а не в адаптере ответа, потому что имя приходит двумя
+     * путями — нативный вызов дельтами и текстовый блок через
+     * extract_action — и починка обязана работать для обоих. Точка одна.
+     */
+    const ToolRepair repair = repair_tool_call(requested_name);
+    if (repair.routed_to_invalid) {
+        /* РЕЗУЛЬТАТ ВЫЗОВА, А НЕ ОТКАЗ. Раньше здесь был ToolError, то
+         * есть протокольная ошибка чужого слоя: у вызова не было
+         * результата, и модель вместо правки имени обычно начинала
+         * рассуждать заново, платя за опечатку всем накопленным
+         * контекстом. Теперь модель читает в своём обычном канале
+         * результатов, какого инструмента нет, и переписывает вызов.
+         *
+         * ok=true — иначе AgentLoop отправил бы ToolError вместо
+         * ToolResult, и весь смысл починки вернулся бы на кругу.
+         *
+         * Событие в ленте — AgentEvent::Tool, а не Error: починка
+         * отработала, ошибки нет. */
         ToolOutcome outcome;
-        outcome.error = "[ошибка] неизвестный инструмент: " + tool_name
-            + "\nДоступные инструменты: " + ToolsRegistry::instance().join_tools();
-        this->push_event_(AgentEvent::Error, (tool_name + " — неизвестный инструмент").c_str());
+        outcome.ok = true;
+        outcome.output = invalid_tool_output(repair);
+        this->push_event_(AgentEvent::Tool,
+            (repair.requested + " -> неизвестный инструмент: "
+             + outcome.output.output).c_str());
         return outcome;
     }
+
+    /* Дальше по всему пути — ПОЧИНЕННОЕ имя. Иначе ключ разрешения,
+     * отпечаток зацикливания и подпись в ленте говорили бы про «Read»,
+     * которого в реестре нет, а политика режимов искала бы инструмент
+     * по имени, которого не существует. */
+    const std::string& tool_name = repair.tool;
+    const ToolDef& def = *repair.def;
 
     /* И1.7: enforcement режимов — ДО fingerprint и ДО вызова.
      * Это единственное место, где решается, допустим ли инструмент.
@@ -223,7 +251,7 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
     std::string refusal;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        refusal = check_tool_mode_policy(tool_name, *def, state_.mode, state_.plan_mode);
+        refusal = check_tool_mode_policy(tool_name, def, state_.mode, state_.plan_mode);
     }
     if (!refusal.empty()) {
         this->push_event_(AgentEvent::Error, refusal);
@@ -244,8 +272,8 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
      * поэтому тот же вопрос задаётся тому же объекту — а правила сессии
      * отдельно спрашивать было бы вторым ответом на один вопрос.
      * Снимок области берётся под локом, а решения — уже без него. */
-    const std::string perm_key = permission_key_of(*def);
-    const std::string perm_pattern = permission_pattern(*def, args);
+    const std::string perm_key = permission_key_of(def);
+    const std::string perm_pattern = permission_pattern(def, args);
     PermissionEngine& perms = engine().permissions();
     const std::shared_ptr<agent::Info> agent_rules = scope_agent(state_);
     const auto evaluate = [&perms, &agent_rules](const std::string& key,
@@ -278,7 +306,7 @@ ToolOutcome ToolRunner::run(const std::string& tool_name,
     if (perm_action == PermissionAction::Ask) {
         std::string metadata = tool_name;
         if (perm_pattern != "*") metadata += " → " + perm_pattern;
-        const std::string suggested = permission_suggested_pattern(*def, perm_pattern);
+        const std::string suggested = permission_suggested_pattern(def, perm_pattern);
         /* ask() блокирует worker-поток до решения пользователя и сам
          * возвращает состояние движка, которое до него перевёл. */
         bool always = false;

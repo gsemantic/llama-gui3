@@ -388,10 +388,49 @@ TEST(agent_loop_gives_the_model_both_the_call_and_its_result) {
 
 TEST(agent_loop_does_not_invent_a_second_copy_of_a_refusal) {
     LoopFixture fx;
-    /* Инструмента нет: отказ — самый частый исход, и именно он раньше
-     * записывался в историю дважды (ToolRunner писал строку сам, цикл
-     * писал вторую). */
-    fx.host.replies = {call_block("no_such_tool", ""), long_answer("Инструмента нет.")};
+    /* Отказ по РЕЖИМУ, а не неизвестный инструмент.
+     *
+     * И12.3 неизвестное имя перестало быть отказом: оно уходит в скрытый
+     * `invalid` и возвращает модели результат вызова. Проверка, оставленная
+     * на неизвестном имени, проверяла бы уже не отказ, а результат, —
+     * то есть имя продолжало бы читаться как «независимо от исхода», а
+     * дубль отказа в истории остался бы непокрытым. Именно поэтому сцена
+     * сменён на тот, где отказ действительно есть: `bash` в режиме
+     * «сначала план» запрещён политикой режимов. */
+    fx.host.replies = {call_block("bash", ", \"command\": \"ls\""),
+                      long_answer("Инструмента нет.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().plan_mode = true;
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    const MessagePart* part = first_tool_part(h[1]);
+    ASSERT_TRUE(part != nullptr);
+    ASSERT_EQ(part->state(), ToolState::Error);
+    ASSERT_TRUE(part->error().find("запрещено режимом") !=
+                std::string::npos);
+    const std::string second = fx.host.transcript(1);
+    ASSERT_EQ(count_occurrences(second, "запрещено режимом"), (size_t)1);
+}
+
+TEST(agent_loop_reports_an_unknown_tool_as_a_result_not_a_refusal) {
+    LoopFixture fx;
+    /* И12.3: неизвестное имя — это РЕЗУЛЬТАТ ВЫЗОВА, а не отказ.
+     *
+     * Уровень цилка, а не только ToolRunner: двойная запись отказа в
+     * историю жила именно здесь (ToolRunner писал строку сам, цикл писал
+     * вторую), и проверка только на ToolRunner её бы не увидела. */
+    fx.host.replies = {call_block("no_such_tool", ""),
+                       long_answer("Инструмента нет.")};
     HostCallbacks cb = fx.callbacks();
     engine().init(cb);
     fx.prepare();
@@ -404,11 +443,14 @@ TEST(agent_loop_does_not_invent_a_second_copy_of_a_refusal) {
     const std::vector<Message> h = fx.history();
     const MessagePart* part = first_tool_part(h[1]);
     ASSERT_TRUE(part != nullptr);
-    ASSERT_EQ(part->state(), ToolState::Error);
-    ASSERT_TRUE(part->error().find("неизвестный инструмент") !=
-                std::string::npos);
+    /* Вызов завершён результатом, а не ошибкой: у модели есть чем
+     * переписать имя. */
+    ASSERT_EQ(part->state(), ToolState::Completed);
+    ASSERT_TRUE(part->error().empty());
+    /* И ровно один раз в транскрипте — дубль результата был бы второй
+     * копией той же правки (та же болезнь, что и с отказом). */
     const std::string second = fx.host.transcript(1);
-    ASSERT_EQ(count_occurrences(second, "неизвестный инструмент"), (size_t)1);
+    ASSERT_EQ(count_occurrences(second, "не существует"), (size_t)1);
 }
 
 TEST(agent_loop_reports_a_provider_failure_without_adding_a_turn) {
