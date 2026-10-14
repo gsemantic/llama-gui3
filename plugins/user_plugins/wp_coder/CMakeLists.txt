@@ -200,6 +200,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_llm_error.cpp
         tests/test_retry.cpp
         tests/test_gbnf.cpp
+        tests/test_iter12.cpp
         tests/test_skills_manager.cpp
         tests/test_engine.cpp
         tests/test_module_api.cpp
