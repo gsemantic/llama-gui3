@@ -575,6 +575,23 @@ std::vector<std::string> Engine::visible_tools() const {
         info = state_.scope.info;
     }
     std::vector<ToolDef> all = ToolsRegistry::instance().defs();
+    /* И12.4: подмена edit+write → apply_patch для семейства gpt-*.
+     *
+     * Именно здесь, а не в каталоге и не в LlmClient: это единственная
+     * функция, результат которой читают ОБА ответа (каталог в промпте и
+     * список tools нативного вызова), и собирать подмену в одном из них
+     * означало бы, что модель читает один набор, а звать может другой —
+     * ровно тот класс расхождения, ради которого этот список вообще
+     * существует (И12.2). */
+    const std::string model = info ? info->model() : std::string();
+    if (SystemPrompt::prefers_patch_editing(model)) {
+        const std::vector<std::string> visible = info
+            ? visible_tool_names(all, [&info](const std::string& key) {
+                  return info->denies_whole_key(key);
+              })
+            : permissions_.visible_tools(all);
+        return substitute_patch_editors(visible);
+    }
     if (info) {
         return visible_tool_names(all, [&info](const std::string& key) {
             return info->denies_whole_key(key);

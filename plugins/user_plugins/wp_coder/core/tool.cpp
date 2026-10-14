@@ -477,6 +477,32 @@ std::vector<std::string> visible_tool_names(
     return out;
 }
 
+std::vector<std::string> substitute_patch_editors(
+        const std::vector<std::string>& visible) {
+    /* И12.4: убираются `edit` и `write` нашего словаря — write_file и
+     * search_replace.
+     *
+     * Почему именно эти два, а не все пишущие. Задача названа «edit+write»,
+     * и это имена порта: `write` — это write_file, `edit` — это поиск и
+     * замена строки, то есть search_replace. `edit_file` (замена диапазона
+     * строк) в порту НЕ имеет соответствия: это наш собственный инструмент,
+     * и подмена выдуманного для него основания означала бы убрать у
+     * gpt-* возможность, которую задача не просила убирать. Отмечено
+     * отклонением 205, а не сделано молча. */
+    static const std::vector<std::string> kReplaced = {"write_file",
+                                                       "search_replace"};
+    std::vector<std::string> out;
+    out.reserve(visible.size());
+    for (const std::string& name : visible) {
+        bool replaced = false;
+        for (const std::string& r : kReplaced) {
+            if (name == r) { replaced = true; break; }
+        }
+        if (!replaced) out.push_back(name);
+    }
+    return out;
+}
+
 std::string canonical_permission_key(const std::string& name, bool* known) {
     if (known) *known = false;
     if (name.empty()) return name;
