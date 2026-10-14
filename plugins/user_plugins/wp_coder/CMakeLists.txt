@@ -38,6 +38,7 @@ set(CORE_SOURCES
     core/agent_components.cpp
     core/llm_event.cpp
     core/llm_error.cpp
+    core/retry.cpp
     core/llm_source.cpp
     core/llm_client.cpp
     core/message.cpp
@@ -196,6 +197,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_tools_registry.cpp
         tests/test_tool_repair.cpp
         tests/test_llm_error.cpp
+        tests/test_retry.cpp
         tests/test_skills_manager.cpp
         tests/test_engine.cpp
         tests/test_module_api.cpp

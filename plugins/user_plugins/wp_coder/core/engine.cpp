@@ -975,6 +975,14 @@ void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
                 chat_line = "! " + text;
                 forward = true;
                 break;
+            /* И12.6: повтор виден и в чате приложения. Раньше он шёл
+             * Status'ом, и до И12.6 уведомление о повторе слалось только
+             * с блокирующего пути — то есть ход агента на стриминге о своём
+             * ожидании не говорил вовсе. */
+            case AgentEvent::Retry:
+                chat_line = text;
+                forward = true;
+                break;
             case AgentEvent::Assistant:
                 chat_line = text;
                 forward = true;

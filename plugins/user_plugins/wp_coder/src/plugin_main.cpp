@@ -20,6 +20,7 @@
 #include "core/module_api.h"
 #include "core/json_utils.h"
 #include "core/llm_error.h"
+#include "core/retry.h"
 #include "ui/coder_window.h"
 #include "host_bridge/llm_stream_probe.h"
 #include "host_bridge/llm_blocking.h"
@@ -216,10 +217,28 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
              * Сам цикл ретраев (задержки, попытки, заголовки retry-after,
              * обратный отсчёт в UI) заменяется в И12.6; здесь он читает
              * готовый признак, чтобы тот не остался мёртвым полем. */
-            const int kMaxAttempts = 3;
-            const int kRetryDelaysSec[kMaxAttempts - 1] = {1, 3};
+            /* И12.6: политика повторов вынесена в core/retry.h и задаётся
+             * числами из плана — initial 2000 мс, фактор 2, джиттер 0.25,
+             * максимум 5 попыток. До этого здесь стояли константы «3
+             * попытки, 1 с / 3 с», то есть политика жила вплотную к месту,
+             * где её нетрудно забыть, а испытать в отрыве от хоста было
+             * нельзя.
+             *
+             * «Повторяемо ли» решает классификатор И12.5 (core/llm_error.h) —
+             * единственный, кто разбирает текст отказа. Свой список подстрок
+             * здесь был бы вторым разбором (D12), и он разошёлся бы: старый
+             * считал «исчерпан» повторяемым, потому что стоял в одной строке
+             * с «429», а повтор запроса, который не помещается в контекст,
+             * не поместится и в третий раз.
+             *
+             * ГЛАВНОЕ ОГРАНИЧЕНИЕ, и оно НЕ про этот цикл. Цикл живёт на
+             * блокирующем пути (cb.llm_chat), а ход агента на стриминге идёт
+             * через LlmClient, где повторов нет вовсе. То есть политика
+             * защищает сводщика и старый хост без стриминга. Записано
+             * отклонением 208, чтобы это не приняли за «повторы работают». */
+            const coder::RetryPolicy kRetryPolicy;
 
-            for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+            for (int attempt = 0; attempt < kRetryPolicy.max_attempts; ++attempt) {
                 /* И6.6: вызов хоста отменён быть не может (поля
                  * llm_chat_messages_cancel в ABI нет) — останавливается только
                  * ожидание. Раньше здесь стоял std::async, чей future в
@@ -269,17 +288,29 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
                 error_text = find_str(body, "error");
                 if (error_text.empty()) error_text = "LLM-ошибка (ok=0)";
 
-                if (attempt < kMaxAttempts - 1 &&
-                    coder::classify_provider_failure(error_text).retryable) {
-                    std::string msg = "[retry] LLM: " + error_text
-                        + " — попытка " + std::to_string(attempt + 2) + "/"
-                        + std::to_string(kMaxAttempts) + " через "
-                        + std::to_string(kRetryDelaysSec[attempt]) + "s";
-                    coder::engine().push_event(coder::AgentEvent::Status, msg);
-                    /* Спим с проверкой abort — Стоп пользователя прерывает ожидание. */
+                /* И12.5: вид и повторяемость — одним классификатором. */
+                const coder::ProviderFailure failure =
+                    coder::classify_provider_failure(error_text);
+                if (coder::should_retry(kRetryPolicy, failure.retryable, attempt)) {
+                    /* И12.6: заголовок `retry-after` через ABI недостижим
+                     * (отдаётся только `{"ok":0,"error":…}`), но поле
+                     * читается: хост, который его отдаст, начнёт управлять
+                     * паузами без правок здесь. -1 — «сервер ничего не
+                     * сказал», и тогда работает расчётная задержка. */
+                    const int server_ms = coder::json::int_(body, "retry_after_ms");
+                    const int delay_ms = coder::retry_delay_ms_random(
+                        kRetryPolicy, attempt, server_ms > 0 ? server_ms : -1);
+                    coder::engine().push_event(
+                        coder::AgentEvent::Retry,
+                        coder::retry_notice(error_text, failure.kind, attempt,
+                                            kRetryPolicy.max_attempts, delay_ms));
+                    /* Спим с проверкой abort — «Стоп» прерывает ожидание.
+                     * Шаг 100 мс оставлен: при задержке до минуты ждать без
+                     * проверки означало бы, что кнопка не работает всё это
+                     * время. */
                     const auto& st = coder::engine().state();
                     for (int waited = 0;
-                         waited < kRetryDelaysSec[attempt] * 1000 && !st.abort_requested.load();
+                         waited < delay_ms && !st.abort_requested.load();
                          waited += 100) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
