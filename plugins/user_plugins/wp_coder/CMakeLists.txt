@@ -206,6 +206,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_module_api.cpp
         tests/test_security.cpp
         tests/test_path_guard.cpp
+        tests/test_pending_apply.cpp
         tests/test_command_policy.cpp
         tests/test_glob.cpp
         tests/test_apply_patch.cpp
