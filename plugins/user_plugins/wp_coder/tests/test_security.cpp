@@ -128,3 +128,54 @@ TEST(security_shell_arg_safe_redirect) {
 TEST(security_shell_arg_safe_ampersand) {
     ASSERT_FALSE(is_shell_arg_safe("sleep 10 &"));
 }
+
+/* И13.4 (D9): перевод строки — такой же разделитель команд, как `;`, и
+ * он проходил. Материал взят с живой оболочки: на manage.py с такими
+ * аргументами вторая команда выполнялась и оставляла файл. */
+TEST(security_shell_arg_safe_newline_is_a_separator_too) {
+    ASSERT_FALSE(is_shell_arg_safe("migrate\ntouch /tmp/pwned"));
+    ASSERT_FALSE(is_shell_arg_safe("migrate\r\ntouch /tmp/pwned"));
+    ASSERT_FALSE(is_shell_arg_safe("\ntouch /tmp/pwned"));
+    ASSERT_TRUE(is_shell_arg_safe("migrate"));
+}
+
+/* Кавычки и $$ пропускаются: manage.py принимает «test "my tests.py"», а
+ * $$ — это PID. Отказ здесь означал бы, что защита запрещает легальный
+ * вызов (и модель будет повторять его). */
+TEST(security_shell_arg_safe_allows_quotes_and_pid) {
+    ASSERT_TRUE(is_shell_arg_safe("test \"my tests.py\""));
+    ASSERT_TRUE(is_shell_arg_safe("test 'my tests.py'"));
+    ASSERT_TRUE(is_shell_arg_safe("crontab: * * * * * /opt/backup.sh $$"));
+    ASSERT_TRUE(is_shell_arg_safe("showmigrations --plan"));
+    ASSERT_TRUE(is_shell_arg_safe("migrate --settings=settings.prod"));
+}
+
+/* Подстановка ЗНАЧЕНИЯ — тоже не «просто строка»: $VAR и ${VAR} разворачиваются
+ * оболочкой, и модель получает не то, что просила. Прежний комментарий
+ * обещал, что $$ разрешён «только в начале или после пробела», а проверки
+ * такой не было никогда: пропускались обе формы. */
+TEST(security_shell_arg_safe_refuses_value_substitution) {
+    ASSERT_FALSE(is_shell_arg_safe("migrate --settings=${HOME}/x"));
+    ASSERT_FALSE(is_shell_arg_safe("test $HOME"));
+    ASSERT_TRUE(shell_arg_refusal("migrate ${HOME}").find('$') !=
+                std::string::npos);
+}
+
+/* Отказ называет СИМВОЛ: иначе модель читает его как поломку
+ * инструмента и повторяет то же самое. Проверяется и сам факт, и то,
+ * что символ в отказе назван. */
+TEST(security_shell_arg_refusal_names_the_character) {
+    ASSERT_EQ(shell_arg_refusal("migrate"), std::string(""));
+    const char* bad[] = {"migrate; touch /tmp/x", "a | b", "a & b",
+                         "migrate\ntouch /tmp/x", "echo `id`", "a > b",
+                         "echo $(id)"};
+    for (const char* s : bad) {
+        const std::string why = shell_arg_refusal(s);
+        if (why.empty()) std::cerr << "  «" << s << "» принят" << std::endl;
+        ASSERT_TRUE(!why.empty());
+    }
+    ASSERT_TRUE(shell_arg_refusal("migrate; touch /tmp/x").find(';') !=
+                std::string::npos);
+    ASSERT_TRUE(shell_arg_refusal("migrate\ntouch /tmp/x").find("строк") !=
+                std::string::npos);
+}

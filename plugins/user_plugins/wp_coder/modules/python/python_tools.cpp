@@ -4,6 +4,7 @@
 #include "../../core/engine.h"
 #include "../../core/project.h"
 #include "../../core/shell.h"
+#include "../../core/security.h"
 #include "../../core/limits.h"
 
 #include <cstdio>
@@ -56,6 +57,27 @@ std::string pip_install(const std::string& pkg,
 std::string django_manage(const std::string& args, const std::string& project_dir) {
     std::string manage = project_dir + "/manage.py";
     if (!fs::exists(manage)) return "[ошибка] manage.py не найден в " + project_dir;
+    /* И13.4 (D9): args — текст от модели, и раньше он уходил в строку
+     * команды как есть. Это не «аргументы без кавычек» (так D9 был
+     * записан), а выполнение произвольной команды: «migrate; touch …»
+     * разбирается оболочкой на две команды, и вторая выполняется.
+     * Проверено на живой оболочке с настоящим manage.py.
+     *
+     * Экранирование здесь не помогло бы: manage.py получает АРГУМЕНТЫ, а
+     * не строку shell, и кавычки в аргументах оболочка разбирает сама
+     * («test "my tests.py"» доходит тремя словами). Второй слой
+     * экранирования только испортил бы разбор. Поэтому запрещён ровно
+     * разделитель — перевод строки им тоже является, — а всё остальное
+     * доходит до manage.py как есть.
+     *
+     * Отказ называет символ: модель должна знать, что именно не так, иначе
+     * отказ читается как поломка инструмента и повторяется. */
+    const std::string why = security::shell_arg_refusal(args);
+    if (!why.empty())
+        return std::string("[запрещено] в аргументах manage.py: ") + why +
+               ". Один вызов — одна manage-команда: «migrate»,"
+               " «test tests/test_x.py», «--settings=…». "
+               "Если нужна цепочка — это отдельный вызов инструмента.";
     std::string cmd = "python3 " + shell::shell_quote(manage) + " " + args;
     std::string result = shell::run_capture(cmd, 60);
     return result.empty() ? "[django: нет вывода]" : shell::cap(result, kModuleMaxOutput);
