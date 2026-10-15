@@ -249,7 +249,10 @@ TEST(command_policy_walks_command_substitutions) {
     expect("echo $(whoami)", true);
     expect("git commit -m \"$(cat /tmp/msg)\"", true);
     /* Подстановка внутри двойных кавычек для bash тоже подстановка:
-     * именно этим wp_create_site ломал SQL (D8). */
+     * именно такой формой wp_create_site ломал SQL (D8). И13.3 убрал
+     * саму форму — SQL больше не едет в аргументе, — но правило остаётся:
+     * любая другая сборка с такой командой отвергается, и проверка ниже
+     * не даст правилу выцвести вместе с ней. */
     expect("mariadb -e \"CREATE DATABASE `wp_x`\"", false);
     /* А экранированная кавычка — нет. */
     CommandPolicy p = fresh_policy();
@@ -398,9 +401,10 @@ TEST(assembled_commands_of_own_tools_pass_the_policy) {
         "php -m",
         /* wp_create_site: sudo mkdir/chown/mariadb и wp под www-data */
         "sudo mkdir -p '/var/www/site' && sudo chown -R www-data:www-data '/var/www/site'",
-        "sudo mariadb -e \"CREATE DATABASE IF NOT EXISTS \\`wp_site\\`; CREATE USER "
-        "IF NOT EXISTS 'wp_site'@'localhost' IDENTIFIED BY 'pass_wp_site'; "
-        "GRANT ALL ON \\`wp_site\\`.* TO 'wp_site'@'localhost'; FLUSH PRIVILEGES;\"",
+        /* И13.3: SQL уходит на stdin (D8) — в команде остаётся только
+         * путь. Строка, где SQL в аргументе и кавычки сняты substr'ом,
+         * больше не собирается: проверка ниже поймала бы её по возврату. */
+        "sudo mariadb < '/tmp/wp_coder_sql_4242_0.sql'",
         "sudo -u www-data wp core download --path='/var/www/site' --locale=ru_RU --allow-root",
         "sudo -u www-data wp config create --path='/var/www/site' --dbname=wp_site "
         "--dbuser=wp_site --dbpass='pass' --allow-root 2>&1",
