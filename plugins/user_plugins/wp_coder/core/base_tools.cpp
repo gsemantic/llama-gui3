@@ -119,12 +119,12 @@ std::string first_external_path(const std::string& cmd) {
             else continue;
         }
         if (tok.size() < 2 || tok[0] != '/') continue;
-        if (!is_path_outside(tok, proj)) continue;
+        if (!security::is_path_outside(tok, proj)) continue;
 
         /* Не разбудить пользователя на системных путях, которые почти
          * всегда есть в аргументах и которые и так защищены политикой
          * команд (--path, --allow-root и т.п.). */
-        if (is_path_allowed(tok, proj, engine_state().allowed_external_paths))
+        if (security::is_path_allowed(tok, proj, engine_state().allowed_external_paths))
             continue;
         return tok;
     }

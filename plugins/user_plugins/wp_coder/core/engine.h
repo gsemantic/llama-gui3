@@ -629,42 +629,11 @@ void record_turn_usage(EngineState& state, const Usage& usage);
 void apply_task_speed(EngineState& state, const std::string& response,
                       double llm_seconds);
 
-/* Проверка, находится ли путь за пределами project_dir. */
-inline bool is_path_outside(const std::string& abs_path, const std::string& project_dir) {
-    if (project_dir.empty()) return false;
-    auto normalize = [](const std::string& s) -> std::string {
-        std::string r;
-        for (size_t i = 0; i < s.size(); ++i) {
-            if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '/') continue;
-            if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '.') {
-                if (i + 2 >= s.size() || s[i + 2] == '/') { i += 1; continue; }
-            }
-            r += s[i];
-        }
-        return r;
-    };
-    std::string norm_path = normalize(abs_path);
-    std::string norm_root = normalize(project_dir);
-    if (!norm_root.empty() && norm_root.back() != '/') norm_root += '/';
-    if (norm_path.find(norm_root) == 0) return false;
-    if (norm_path == normalize(project_dir)) return false;
-    return true;
-}
-
-/* Проверка, разрешён ли путь через список allowed. */
-inline bool is_path_allowed(const std::string& abs_path,
-                            const std::string& project_dir,
-                            const std::vector<std::string>& allowed) {
-    if (!is_path_outside(abs_path, project_dir)) return true;
-    for (const auto& pattern : allowed) {
-        if (!pattern.empty() && pattern.back() == '*') {
-            if (abs_path.find(pattern.substr(0, pattern.size() - 1)) == 0) return true;
-        } else {
-            if (abs_path == pattern) return true;
-        }
-    }
-    return false;
-}
+/* Проверка «путь вне проекта» и список разрешённых снаружи живут в
+ * core/security.h (И13.1, D6). Здесь они были inline-строками, и это стоило
+ * двух вещей: `<filesystem>` втягивался в шапку, которую включает всё ядро, и
+ * проверка оставалась строковым сравнением префиксов — симлинк внутри
+ * проекта проходил мимо (см. объявление в security.h). */
 
 /* Callback-типы для взаимодействия с хостом (LLM, пути, настройки). */
 struct HostCallbacks {

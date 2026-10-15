@@ -3,6 +3,7 @@
 
 #include "agent_components.h"
 #include "prompts.h"
+#include "security.h"
 #include "shell.h"
 #include "engine.h"
 #include "limits.h"
@@ -48,10 +49,10 @@ std::string PermissionGate::check(const std::string& abs_path) {
         std::lock_guard<std::mutex> lk(state_.mtx);
         proj = state_.project_dir;
     }
-    if (!is_path_outside(abs_path, proj)) return "";
+    if (!security::is_path_outside(abs_path, proj)) return "";
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        if (is_path_allowed(abs_path, proj, state_.allowed_external_paths)) return "";
+        if (security::is_path_allowed(abs_path, proj, state_.allowed_external_paths)) return "";
     }
 
     /* И2.4/2.7: поверх списка «разрешённых навсегда» путей — правила
@@ -167,7 +168,7 @@ PermissionOutcome permission_outcome(EngineState& state, const std::string& path
     {
         std::lock_guard<std::mutex> lk(state.mtx);
         project = state.project_dir;
-        allowed = is_path_allowed(path, project, state.allowed_external_paths);
+        allowed = security::is_path_allowed(path, project, state.allowed_external_paths);
     }
     return allowed ? PermissionOutcome::Granted : PermissionOutcome::Rejected;
 }
