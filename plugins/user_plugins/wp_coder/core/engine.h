@@ -688,6 +688,23 @@ struct HostCallbacks {
      */
     std::function<void(void* handle)> llm_chat_cancel;
 
+    /*
+     * И13.5: символы одного файла через AST хоста (поле llm_ast_symbols,
+     * И6.3). path — абсолютный путь, language — пустая строка, и тогда
+     * ход определяет сам (у него единственная таблица расширений).
+     *
+     * Возвращает СЫРОЙ JSON ответа хоста, а не разобранные символы: три
+     * состояния ответа (ok:0 / ok:1 ast:false / ok:1 ast:true) решаются в
+     * core/ast_symbols.cpp, и решать их здесь — значит разбирать JSON
+     * дважды, в мосту и в ядре.
+     *
+     * Слот пуст на старом хосте (поля в ABI нет) — и это НЕ ошибка: обзор
+     * проекта уходит на строковый скан, и ast_symbols::file_symbols()
+     * называет причину вслух, чтобы деградация не выглядела полным обзором.
+     */
+    std::function<std::string(const std::string& path,
+                              const std::string& language)> ast_symbols;
+
     /* Проверка подключения LLM. */
     std::function<bool()> llm_is_connected;
 

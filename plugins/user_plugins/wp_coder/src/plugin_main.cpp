@@ -25,6 +25,7 @@
 #include "host_bridge/llm_stream_probe.h"
 #include "host_bridge/llm_blocking.h"
 #include "host_bridge/llm_stream_shim.h"
+#include "host_bridge/ast_symbols.h"
 
 /* Модули. */
 #include "modules/wordpress/wp_module.h"
@@ -172,6 +173,21 @@ cb.llm_complete = [](const std::string& sys, const std::string& user,
                 coder::host::cancel_llm_chat_stream(api_snapshot, handle);
             };
         }
+    }
+
+    /* И13.5: символы файла через AST хоста. Слот заполняется ТОЛЬКО если у
+     * хоста есть поле llm_ast_symbols; на старом хосте он остаётся пустым, и
+     * обзор проекта уходит на строковый скан — core/ast_symbols.cpp называет
+     * это вслух в самом обзоре, чтобы деградация не выглядела полным
+     * обзором. Проба один раз при инициализации, как у стриминга. */
+    if (coder::host::has_llm_ast_symbols(g_api)) {
+        const LlamaHostApi* api_snapshot = g_api;
+        LlamaPluginHost* host_snapshot = g_host;
+        cb.ast_symbols = [api_snapshot, host_snapshot](const std::string& path,
+                                                       const std::string& language) {
+            return coder::host::call_ast_symbols(api_snapshot, host_snapshot,
+                                                  path, language);
+        };
     }
 
     /* Multi-turn: парсим JSON от llm_chat_messages (ok/content/usage).

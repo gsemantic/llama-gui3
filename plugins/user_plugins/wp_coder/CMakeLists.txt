@@ -60,6 +60,8 @@ set(CORE_SOURCES
     core/token_panel.cpp
     core/cancel.cpp
     core/hotkeys.cpp
+    # И13.5: символы файла — AST хоста, иначе строковый скан.
+    core/ast_symbols.cpp
 )
 
 add_library(wp_coder_core STATIC ${CORE_SOURCES})
@@ -96,6 +98,7 @@ set(HOST_BRIDGE_SOURCES
     host_bridge/llm_stream_probe.cpp
     host_bridge/llm_stream_shim.cpp
     host_bridge/llm_blocking.cpp
+    host_bridge/ast_symbols.cpp
 )
 
 # --- Плагин (.so) ---
@@ -244,6 +247,11 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp
+        # И13.5: символы файла — решение AST/скан (core/ast_symbols.cpp),
+        # мост к полю хоста и поведение repo_map на живом обзоре. Файл
+        # поднимает движок с колбэками (test_base_tools.cpp), поэтому
+        # стоит после него.
+        tests/test_ast_symbols.cpp
         tests/test_wp_tools.cpp
         # ПОРЯДОК ФАЙЛОВ ЗНАЧИТ, И ЭТО НЕ КОСМЕТИКА (И8.15).
         # test_iteration_iv_invariants.cpp проверяет, что КАЖДЫЙ пишущий

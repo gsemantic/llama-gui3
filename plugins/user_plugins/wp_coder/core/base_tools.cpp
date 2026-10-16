@@ -16,9 +16,11 @@
 #include "json_utils.h"
 #include "snapshot.h"
 #include "subagent.h"
+#include "ast_symbols.h"
 
 #include <fstream>
 #include <sstream>
+#include <map>
 #include <filesystem>
 #include <regex>
 #include <algorithm>
@@ -238,9 +240,18 @@ std::string base_grep(const std::string& root, const std::string& pattern,
  * И11.10: обход спрашивает should_stop. Прерванный обход НЕ кэшируется:
  * кэш задачи отдаётся следующему repo_map с пометкой «из кэша задачи», то
  * есть выглядел бы полным, а неполон — ровно то, чего кэш не должен делать
- * (шапка cancel.h, п. «атомарные инструменты»). */
+ * (шапка cancel.h, п. «атомарные инструменты»).
+ *
+ * И13.5: символы файла берутся из ast_symbols::file_symbols — AST хоста,
+ * а если хост не разобрал файл, строковый скан. Скан живёт в том файле, и
+ * здесь осталось только правило печати и честность про деградацию:
+ * файлы, собранные сканом, считаются, и причина называется один раз в
+ * конце, а не в каждой строке (на живом проекте WordPress это были бы
+ * сотни одинаковых строк).
+ */
 std::string base_repo_map(const std::string& root,
                          const std::string& project_dir,
+                         const HostCallbacks& cb,
                          const std::function<bool()>& should_stop = {}) {
     std::string base = root.empty() ? project_dir : root;
     if (base.empty()) return "[ошибка] не задан ROOT и не задан project_dir";
@@ -268,6 +279,11 @@ std::string base_repo_map(const std::string& root,
      * то, и на другое: кэшировать и помечать неполным можно только по
      * нему, а не по одному лишь walk_done. */
     bool complete = walk_done;
+    /* И13.5: сколько файлов собрано сканом и почему. Одна карта на весь
+     * обзор, потому что одинаковая причина на каждой строке съела бы
+     * вывод (а вывод обрезается по kMaxToolOutput). */
+    std::map<std::string, size_t> degraded;
+    size_t scanned_files = 0;
     for (const auto& fp : files) {
         if (out.str().size() >= kMaxToolOutput) {
             out << "...\n[repo_map: вывод обрезан]";
@@ -283,44 +299,27 @@ std::string base_repo_map(const std::string& root,
         std::string rel = fp;
         if (!base.empty() && rel.rfind(base, 0) == 0)
             rel = rel.substr(base.size() + 1);
-        std::ifstream f(fp);
-        if (!f) continue;
-        std::string line;
+        const ast_symbols::FileSymbols fs = ast_symbols::file_symbols(cb, fp);
+        if (!fs.degrade.empty()) {
+            ++scanned_files;
+            ++degraded[fs.degrade];
+        }
+        /* И13.5: определения из AST (или из скана), хуки — всегда сканом.
+         * Порядок прежний: сначала определения, потом хуки. */
         std::vector<std::string> syms;
-        while (std::getline(f, line) && syms.size() < kMaxSymFile) {
-            size_t kw = std::string::npos;
-            if ((kw = line.find("function ")) != std::string::npos) {
-                size_t start = kw + 9;
-                size_t end = start;
-                while (end < line.size() && (std::isalnum(line[end]) || line[end] == '_'))
-                    ++end;
-                if (end > start)
-                    syms.push_back("f:" + line.substr(start, end - start));
-            } else if ((kw = line.find("class ")) != std::string::npos) {
-                size_t start = kw + 6;
-                size_t end = start;
-                while (end < line.size() && (std::isalnum(line[end]) || line[end] == '_'))
-                    ++end;
-                if (end > start)
-                    syms.push_back("c:" + line.substr(start, end - start));
-            }
-            if (syms.size() < kMaxSymFile) {
-                const char* hooks[] = {"add_action", "add_filter", "add_shortcode"};
-                for (const char* hook : hooks) {
-                    size_t hk = line.find(hook);
-                    if (hk == std::string::npos) continue;
-                    size_t lp = line.find('(', hk);
-                    if (lp == std::string::npos) continue;
-                    size_t q1 = line.find('\'', lp + 1);
-                    if (q1 == std::string::npos) q1 = line.find('"', lp + 1);
-                    if (q1 == std::string::npos) continue;
-                    char q = line[q1];
-                    size_t q2 = line.find(q, q1 + 1);
-                    if (q2 == std::string::npos) continue;
-                    syms.push_back("h:" + line.substr(q1 + 1, q2 - q1 - 1));
-                    break;
-                }
-            }
+        for (const auto& s : fs.symbols) {
+            if (syms.size() >= kMaxSymFile) break;
+            syms.push_back(ast_symbols::symbol_text(s));
+        }
+        for (const auto& s : fs.hooks) {
+            if (syms.size() >= kMaxSymFile) break;
+            syms.push_back(ast_symbols::symbol_text(s));
+        }
+        /* Предел на файл не молчит: без «ещё N» список выглядит полным, и
+         * модель сделает вывод, что в файле ровно столько символов. */
+        const size_t total = fs.symbols.size() + fs.hooks.size();
+        if (total > syms.size()) {
+            syms.push_back("ещё " + std::to_string(total - syms.size()));
         }
         out << "  " << rel;
         if (!syms.empty()) {
@@ -334,6 +333,34 @@ std::string base_repo_map(const std::string& root,
         out << "\n";
     }
     std::string result = out.str();
+    /* И13.5: деградация названа один раз и словами. Молчаливый откат на
+     * скан выглядел бы как полный обзор проекта, а скан на живом материале
+     * и находит меньше, и выдумывает лишнее (имена из комментариев и
+     * строк) — оба расхождения видны только в этом списке.
+     *
+     * Порядок — по числу файлов, а не по алфавиту причины: обзор показывает
+     * три причины из, скажем, пяти, и первая по алфавиту может оказаться
+     * не той, которая объясняет почти весь проект. */
+    if (scanned_files > 0) {
+        std::vector<std::pair<std::string, size_t>> reasons(degraded.begin(),
+                                                            degraded.end());
+        std::sort(reasons.begin(), reasons.end(),
+                  [](const std::pair<std::string, size_t>& a,
+                     const std::pair<std::string, size_t>& b) {
+                      if (a.second != b.second) return a.second > b.second;
+                      return a.first < b.first;
+                  });
+        result += "\n[repo_map: символы " + std::to_string(scanned_files) +
+                  " файлов собраны строковым сканом, не разбором: ";
+        for (size_t i = 0; i < reasons.size() && i < 3; ++i) {
+            if (i) result += "; ";
+            result += reasons[i].first + " (" + std::to_string(reasons[i].second) +
+                      " файлов)";
+        }
+        if (reasons.size() > 3)
+            result += "; прочих причин: " + std::to_string(reasons.size() - 3);
+        result += "]";
+    }
     /* И11.10: прерванный обход не кэшируется (см. шапку base_repo_map). */
     if (!complete) {
         result += "\n" + std::string(kWalkCancelledNote) +
@@ -941,6 +968,7 @@ void register_base_tools() {
             std::string root = arg_str(a, "root");
             /* И11.10: «стоп» обрывает обход, а не ждёт его конца. */
             return out("repo_map", base_repo_map(root, ctx.project_dir(),
+                                                ctx.callbacks(),
                                                 [&ctx]() { return ctx.cancelled(); }));
         };
         reg.register_def(std::move(def));
