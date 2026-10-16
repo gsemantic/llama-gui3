@@ -111,9 +111,25 @@ struct TestRegistrar {
     } \
 } while(0)
 
+/* И13.7: бюджет прогона — машинная проверка, а не пожелание.
+ *
+ * Критерий готовности: «если что-то занимает больше 5 минут на тестовой
+ * машине — это дефект». До И13.7 он нигде не был записан и проверялся
+ * только глазами по времени в терминале: год прогона мог стоять сорок
+ * минут, и это видел только тот, кто заметил.
+ *
+ * Пять минут против нынешних ~60 с — запас в пять раз: гейт ловит РЕЗКУЮ
+ * деградацию (появился инструмент, который ходит по дереву дважды;
+ * отвалился кэш и каждый вызов считает заново), а не дрожание на
+ * загруженной машине. Время печатается ВСЕГДА — и когда гейт не
+ * сработал, и когда сработал: молчаливый запас однажды кончился бы
+ * незамеченным. */
 #define RUN_ALL_TESTS() \
     int main() { \
         constexpr int kWatchdogSeconds = 30; \
+        /* И13.7: предел на ВЕСЬ прогон (см. комментарий выше). */ \
+        constexpr long long kSuiteBudgetSeconds = 300; \
+        const auto suite_started = std::chrono::steady_clock::now(); \
         std::atomic<int> token{0}; \
         std::atomic<bool> current_name_set{false}; \
         std::string current_name; \
@@ -173,5 +189,21 @@ struct TestRegistrar {
         std::cout << "\n=== " << passed << " passed, " << failed \
                   << " failed ===" << std::endl; \
         cleanup_tmp_trees(); \
+        const long long elapsed_ms = \
+            std::chrono::duration_cast<std::chrono::milliseconds>( \
+                std::chrono::steady_clock::now() - suite_started) \
+                .count(); \
+        std::cout << "=== время прогона: " << elapsed_ms / 1000.0 \
+                  << " с (бюджет " << kSuiteBudgetSeconds << " с) ===" \
+                  << std::endl; \
+        if (elapsed_ms > kSuiteBudgetSeconds * 1000) { \
+            std::cerr << "  ПРОГОН ДОЛЬШЕ " << kSuiteBudgetSeconds \
+                      << " с (" << elapsed_ms / 1000.0 \
+                      << " с) — по критерию готовности это дефект." \
+                      << std::endl; \
+            failed++; \
+        } \
+        std::cout << "\n=== " << passed << " passed, " << failed \
+                  << " failed ===" << std::endl; \
         return failed > 0 ? 1 : 0; \
     }

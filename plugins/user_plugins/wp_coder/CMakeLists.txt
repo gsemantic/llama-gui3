@@ -218,6 +218,11 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_todo.cpp
         tests/test_read_tool.cpp
         tests/test_bash_tool.cpp
+        # И13.7: нагрузочные проверки — 200 вызовов инструментов,
+        # 10-сессийная история, компапшн под нагрузкой, отмена на
+        # каждом шаге. Стоит после test_base_tools.cpp: он поднимает
+        # движок и реестр, а нагрузка ходит по ним.
+        tests/test_load.cpp
         tests/test_output_truncation.cpp
         tests/test_llm_events.cpp
         tests/test_llm_source.cpp
