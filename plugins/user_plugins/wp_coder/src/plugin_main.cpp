@@ -19,13 +19,8 @@
 #include "core/git_tools.h"
 #include "core/module_api.h"
 #include "core/json_utils.h"
-#include "core/llm_error.h"
-#include "core/retry.h"
 #include "ui/coder_window.h"
-#include "host_bridge/llm_stream_probe.h"
-#include "host_bridge/llm_blocking.h"
-#include "host_bridge/llm_stream_shim.h"
-#include "host_bridge/ast_symbols.h"
+#include "host_bridge/llm_slots.h"
 
 /* Модули. */
 #include "modules/wordpress/wp_module.h"
@@ -40,9 +35,6 @@
 #include <cstring>
 #include <cstddef>
 #include <iostream>
-#include <chrono>
-#include <thread>
-#include <future>
 
 /* Глобальные хендлы хоста. */
 LlamaPluginHost* g_host = nullptr;
@@ -126,239 +118,18 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     coder::python::register_module();
     coder::devops::register_module();
 
-    /* 2. Инициализируем движок. */
-    coder::HostCallbacks cb;
-    cb.llm_is_connected = []() -> bool {
-        return g_api && g_api->llm_is_connected(g_host) == 1;
-    };
-cb.llm_complete = [](const std::string& sys, const std::string& user,
-                          std::string& resp) -> bool {
-        if (!g_api || !g_host) return false;
-        char* r = nullptr;
-        int rc = g_api->llm_complete_ex(g_host, sys.c_str(), user.c_str(), &r);
-        if (rc != 1 || !r) return false;
-        resp = r;
-        g_api->free_string(g_host, r);
-        return true;
-    };
-    /* И6.4: потоковый путь. Слот заполняется ТОЛЬКО если у хоста есть поле
-     * llm_chat_stream; на старом хосте он остаётся пустым, и это не ошибка —
-     * вызывающий обязан уйти на блокирующий llm_chat. Проверка один раз при
-     * инициализации: она читает структуру хоста, а тот живёт всё время работы
-     * плагина и не меняет version.
+    /* 2. Инициализируем движок.
      *
-     * ВАЖНО: колбэки живут дольше вызова, поэтому вызывающий обязан дождаться
-     * on_done до возврата из ll_plugin_shutdown — хост делает dlclose сразу
-     * после вызова, и колбэк в выгруженный код читает освобождённую память. */
-    if (coder::host::has_llm_chat_stream(g_api)) {
-        const LlamaHostApi* api_snapshot = g_api;
-        LlamaPluginHost* host_snapshot = g_host;
-        cb.llm_chat_stream = [api_snapshot, host_snapshot](
-                                 const std::string& sys_prompt,
-                                 const std::vector<coder::ModelMessage>& messages,
-                                 const std::string& request_json,
-                                 std::function<void(void*)> on_started,
-                                 std::function<void(const char*, int)> on_delta,
-                                 std::function<void(const char*, const char*, const char*)> on_tool_delta,
-                                 std::function<void(const std::string&)> on_done) -> bool {
-            return coder::host::call_llm_chat_stream(
-                api_snapshot, host_snapshot, sys_prompt, messages,
-                request_json, on_started, on_delta, on_tool_delta, on_done);
-        };
-        /* И6.6: отмена настоящая только если хост умеет. На старом хосте
-         * слот пустой, и LlmClient называет это ограничение вслух. */
-        if (coder::host::has_llm_chat_cancel(g_api)) {
-            const LlamaHostApi* api_snapshot = g_api;
-            cb.llm_chat_cancel = [api_snapshot](void* handle) {
-                coder::host::cancel_llm_chat_stream(api_snapshot, handle);
-            };
-        }
-    }
-
-    /* И13.5: символы файла через AST хоста. Слот заполняется ТОЛЬКО если у
-     * хоста есть поле llm_ast_symbols; на старом хосте он остаётся пустым, и
-     * обзор проекта уходит на строковый скан — core/ast_symbols.cpp называет
-     * это вслух в самом обзоре, чтобы деградация не выглядела полным
-     * обзором. Проба один раз при инициализации, как у стриминга. */
-    if (coder::host::has_llm_ast_symbols(g_api)) {
-        const LlamaHostApi* api_snapshot = g_api;
-        LlamaPluginHost* host_snapshot = g_host;
-        cb.ast_symbols = [api_snapshot, host_snapshot](const std::string& path,
-                                                       const std::string& language) {
-            return coder::host::call_ast_symbols(api_snapshot, host_snapshot,
-                                                  path, language);
-        };
-    }
-
-    /* Multi-turn: парсим JSON от llm_chat_messages (ok/content/usage).
-     * Fallback на llm_complete_ex при старом хосте без llm_chat_messages. */
-    cb.llm_chat = [](const std::string& sys_prompt,
-                     const std::vector<coder::ModelMessage>& messages,
-                     coder::LlmReply& out) -> bool {
-        if (!g_api || !g_host) return false;
-
-        /* Проверяем, поддерживает ли хост llm_chat_messages (по size). */
-        const bool has_chat =
-            coder::host::has_llm_chat_messages(g_api);
-
-        if (has_chat) {
-            /* JSON-массив сообщений собирает единственная реализация
-             * (src/llm_stream_shim.cpp): стриминговый путь пользуется ею же,
-             * и две копии разошлись бы при первом же новом поле реплики. */
-            const std::string json = coder::host::messages_to_json(messages);
-
-            /* Парсим {"ok":1,"content":"...","finish_reason":"...","prompt_tokens":N,"completion_tokens":N}
-             * или {"ok":0,"error":"..."}. Общий парсер — core/json_utils.h (4.6). */
-            auto find_str = [](const std::string& s, const char* key) -> std::string {
-                return coder::json::str(s, key);
-            };
-            auto find_int = [](const std::string& s, const char* key) -> int {
-                return coder::json::int_(s, key);
-            };
-
-            /* 2.1: Retry для транзиентных ошибок LLM (429/5xx/timeout).
-             * Хост сам ретраит облачные вызовы (OpenRouterClient::complete),
-             * этот цикл — страховка для остальных путей (локальный сервер,
-             * сетевые сбои), которые хост возвращает как ok=0/nullptr.
-             *
-             * И12.5: «повторяемо ли» решает ОДИН классификатор
-             * (core/llm_error.h), а не свой список подстрок здесь. Свой
-             * список был вторым разбором того же текста, что идёт в
-             * LlmEvent::provider_error, — то есть D12: два места, которые
-             * разъедутся. Они и разъехались бы: старый список считал
-             * «исчерпан» (контекст закончился) повторяемым, потому что
-             * стоял в одной строке с «429», а повтор запроса, который не
-             * помещается в контекст, не поместится и в третий раз.
-             *
-             * Сам цикл ретраев (задержки, попытки, заголовки retry-after,
-             * обратный отсчёт в UI) заменяется в И12.6; здесь он читает
-             * готовый признак, чтобы тот не остался мёртвым полем. */
-            /* И12.6: политика повторов вынесена в core/retry.h и задаётся
-             * числами из плана — initial 2000 мс, фактор 2, джиттер 0.25,
-             * максимум 5 попыток. До этого здесь стояли константы «3
-             * попытки, 1 с / 3 с», то есть политика жила вплотную к месту,
-             * где её нетрудно забыть, а испытать в отрыве от хоста было
-             * нельзя.
-             *
-             * «Повторяемо ли» решает классификатор И12.5 (core/llm_error.h) —
-             * единственный, кто разбирает текст отказа. Свой список подстрок
-             * здесь был бы вторым разбором (D12), и он разошёлся бы: старый
-             * считал «исчерпан» повторяемым, потому что стоял в одной строке
-             * с «429», а повтор запроса, который не помещается в контекст,
-             * не поместится и в третий раз.
-             *
-             * ГЛАВНОЕ ОГРАНИЧЕНИЕ, и оно НЕ про этот цикл. Цикл живёт на
-             * блокирующем пути (cb.llm_chat), а ход агента на стриминге идёт
-             * через LlmClient, где повторов нет вовсе. То есть политика
-             * защищает сводщика и старый хост без стриминга. Записано
-             * отклонением 208, чтобы это не приняли за «повторы работают». */
-            const coder::RetryPolicy kRetryPolicy;
-
-            for (int attempt = 0; attempt < kRetryPolicy.max_attempts; ++attempt) {
-                /* И6.6: вызов хоста отменён быть не может (поля
-                 * llm_chat_messages_cancel в ABI нет) — останавливается только
-                 * ожидание. Раньше здесь стоял std::async, чей future в
-                 * деструкторе БЛОКИРУЕТ до конца задачи, то есть «Стоп» и
-                 * «таймаут» ждали провайдера целиком; и ответ никогда не
-                 * освобождался. Оба дефекта закрыты в host_bridge/llm_blocking
-                 * и проверяются тестом — дефект, который не видно, обязан
-                 * быть вынесен туда, где его можно проверить. */
-                const int timeout_ms = coder::engine().state().llm_timeout_ms;
-                std::string resp;
-                const coder::host::BlockingOutcome outcome =
-                    coder::host::call_llm_chat_messages(
-                        g_api, g_host,
-                        coder::text::sanitize_utf8(sys_prompt), json,
-                        []() { return coder::engine().state().abort_requested.load(); },
-                        timeout_ms, resp);
-
-                if (outcome == coder::host::BlockingOutcome::Aborted) {
-                    out.error = "Прервано пользователем";
-                    return false;
-                }
-                if (outcome == coder::host::BlockingOutcome::TimedOut) {
-                    if (!coder::host::has_llm_chat_messages(g_api)) {
-                        /* Хост старый: блокирующего вызова у него нет. Не
-                         * «таймаут» — это правда о хосте, и притворяться
-                         * иначе означало бы искать причину не там. */
-                        out.error = "Хост не поддерживает блокирующий вызов LLM";
-                        return false;
-                    }
-                    out.error = "Таймаут LLM-вызова ("
-                              + std::to_string(timeout_ms / 1000) + " с)";
-                    return false;
-                }
-                /* Строка хоста уже освобождена в call_llm_chat_messages и
-                 * вернулась копией: ни strdup, ни free_string здесь больше
-                 * не нужны, и двойного освобождения быть не может. */
-                const std::string& body = resp;
-                std::string error_text;
-                if (find_int(body, "ok") == 1) {
-                        out.content = find_str(body, "content");
-                        out.finish_reason = find_str(body, "finish_reason");
-                        if (out.finish_reason.empty()) out.finish_reason = "stop";
-                        out.prompt_tokens = find_int(body, "prompt_tokens");
-                    out.completion_tokens = find_int(body, "completion_tokens");
-                    return true;
-                }
-                error_text = find_str(body, "error");
-                if (error_text.empty()) error_text = "LLM-ошибка (ok=0)";
-
-                /* И12.5: вид и повторяемость — одним классификатором. */
-                const coder::ProviderFailure failure =
-                    coder::classify_provider_failure(error_text);
-                if (coder::should_retry(kRetryPolicy, failure.retryable, attempt)) {
-                    /* И12.6: заголовок `retry-after` через ABI недостижим
-                     * (отдаётся только `{"ok":0,"error":…}`), но поле
-                     * читается: хост, который его отдаст, начнёт управлять
-                     * паузами без правок здесь. -1 — «сервер ничего не
-                     * сказал», и тогда работает расчётная задержка. */
-                    const int server_ms = coder::json::int_(body, "retry_after_ms");
-                    const int delay_ms = coder::retry_delay_ms_random(
-                        kRetryPolicy, attempt, server_ms > 0 ? server_ms : -1);
-                    coder::engine().push_event(
-                        coder::AgentEvent::Retry,
-                        coder::retry_notice(error_text, failure.kind, attempt,
-                                            kRetryPolicy.max_attempts, delay_ms));
-                    /* Спим с проверкой abort — «Стоп» прерывает ожидание.
-                     * Шаг 100 мс оставлен: при задержке до минуты ждать без
-                     * проверки означало бы, что кнопка не работает всё это
-                     * время. */
-                    const auto& st = coder::engine().state();
-                    for (int waited = 0;
-                         waited < delay_ms && !st.abort_requested.load();
-                         waited += 100) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    }
-                    if (st.abort_requested.load()) {
-                        out.error = "Прервано пользователем";
-                        return false;
-                    }
-                    continue;
-                }
-                out.error = error_text;
-                return false;
-            }
-            out.error = "LLM: все попытки исчерпаны";
-            return false;
-        }
-
-        /* Fallback: одногилый (старый хост без llm_chat_messages). */
-        std::string last_user;
-        for (const auto& m : messages)
-            if (m.role == "user") last_user = m.content;
-        std::string resp;
-        char* r = nullptr;
-        int rc = g_api->llm_complete_ex(g_host, sys_prompt.c_str(), last_user.c_str(), &r);
-        if (rc != 1 || !r) return false;
-        resp = r;
-        g_api->free_string(g_host, r);
-        out.content = resp;
-        out.finish_reason = "stop";
-        out.prompt_tokens = 0;
-        out.completion_tokens = 0;
-        return true;
-    };
+     * И13.8: слоты LLM и AST ставит мост (host_bridge/llm_slots.cpp) — там
+     * же, где живёт проба полей хоста. Здесь осталось только то, что к
+     * возможностям хоста не относится: пути, настройки, rag, рассылка
+     * событий в чат. Слот, у которого у хоста нет поля, остаётся пустым,
+     * и это НЕ недоделка, а ответ: запасной путь выбирает ядро (LlmClient,
+     * llm_source, ast_symbols). До И13.8 слоты ставились здесь, а src/ в
+     * сборку тестов не входит — то есть весь слой деградации не был
+     * проверен ничем. */
+    coder::HostCallbacks cb;
+    coder::host::install_llm_slots(cb, g_api, g_host);
 
     /* Прогресс в чат приложения (agent_mode_push_event). */
     cb.chat_event = [](const std::string& event) {

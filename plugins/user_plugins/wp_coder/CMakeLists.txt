@@ -99,6 +99,7 @@ set(HOST_BRIDGE_SOURCES
     host_bridge/llm_stream_shim.cpp
     host_bridge/llm_blocking.cpp
     host_bridge/ast_symbols.cpp
+    host_bridge/llm_slots.cpp
 )
 
 # --- Плагин (.so) ---
@@ -232,6 +233,12 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_shell_cancel.cpp
         tests/test_terminal_outcomes.cpp
         tests/test_paths_parity.cpp
+        # И13.8: деградация на старом хосте — слоты LLM/AST ставятся по
+        # пробе полей, поэтому проверки строят НАСТОЯЩИЙ LlamaHostApi с
+        # усечённой структурой (хоста без того или иного поля) и смотрят
+        # на поведение, а не на исходник. Стоит после test_paths_parity.cpp:
+        # оба файла проверяют откат при отсутствии поля в ABI.
+        tests/test_degradation.cpp
         ${HOST_BRIDGE_SOURCES}
         tests/test_message.cpp
         tests/test_session_store.cpp
