@@ -21,7 +21,11 @@
 #include "../core/security.h"
 
 #include <filesystem>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
 #include <string>
+#include <unistd.h>
 
 using namespace coder;
 namespace fs = std::filesystem;
@@ -255,4 +259,78 @@ TEST(project_resolve_without_project_root_is_passthrough) {
     /* Корень не задан — привязать не к чему, путь уходит как есть. */
     ASSERT_EQ(project_resolve("a.php"), std::string("a.php"));
     set_project_root("/var/www/site");
+}
+
+/*
+ * Петля симлинков не должна ронять обход дерева.
+ *
+ * Дефект найден на живом материале: чужой мусор в /tmp дал
+ * «ИСКЛЮЧЕНИЕ: filesystem error: status: Too many levels of symbolic links».
+ * `directory_entry::is_directory()` без error_code идёт в status(), а status()
+ * РАЗЫМЫКАЕТ симлинк и на петле возвращает ELOOP — исключение уходит из
+ * обработчика инструмента насквозь, потому что ToolsRegistry::run_output зовёт
+ * def.handler без try/catch, и поток агента падает вместе с приложением.
+ * Задевало repo_map, grep_search, list и обход php-файлов модуля WordPress,
+ * а repo_map агент зовёт ПЕРВЫМ действием в каждой задаче.
+ *
+ * Материал настоящий: обе ссылки ведут друг на друга, ничего снаружи
+ * каталога фикстуры не создаётся, и под петлой лежит РЕАЛЬНЫЙ файл — иначе
+ * проверка была бы зелёной на обходе, который ничего не находит вовсе.
+ *
+ * Исключение ловится внутри проверки, а не оставляется на волю: тест, на
+ * котором вылетел весь процесс, не печатает своё имя в строке падения, и
+ * разбор вывода не дал бы вердикта.
+ */
+TEST(a_symlink_loop_does_not_throw_out_of_the_tree_walk) {
+    init_engine_and_base();
+    /* Имя — с тегом, pid И rand, как в make_tmp_tree у соседних фикстур.
+     * Одного pid мало: /tmp переживает прогоны, pid переиспользуется, а под
+     * этим же именем от прошлой сессии лежит каталог с данными живой сессии
+     * (wp_coder/<session_id>.json) — и remove_all на входе снёс бы чужое.
+     * Требование каталога проверки: всё внутри фикстуры, ничего снаружи. */
+    const fs::path t = fs::temp_directory_path()
+        / ("wp_coder_loopfix_" + std::to_string(::getpid()) + "_"
+           + std::to_string(std::rand()));
+    fs::remove_all(t);
+    fs::create_directories(t / "real");
+    register_tmp_tree(t.string());
+    {
+        std::ofstream f(t / "real" / "настоящий.php", std::ios::binary);
+        f << "<?php\nfunction boot() {}\n";
+    }
+    /* Цели АБСОЛЮТНЫЕ и лежат внутри t: петля должна быть настоящей, а
+     * относительные цели часть реализаций не размыкают вовсе — тогда
+     * проверка была бы зелёной на сломанном коде. */
+    fs::create_symlink((t / "петляA").string(), t / "петляA");
+    fs::create_symlink((t / "петляB").string(), t / "петляB");
+
+    json::JsonValue args = json::JsonValue::object();
+    args.set("root", t.string());
+    /* СВЕЖИЙ токен отмены: состояние движка живёт между проверками, а
+     * repo_map спрашивает токен на каждом шаге обхода — со стухшим токеном
+     * обход мгновенно сочтётся прерванным и не дойдёт до файла. Проверка
+     * падала бы на своём втором утверждении и читалась бы как «файл не
+     * найден», то есть как дефект обхода, а это не он. */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().repo_map_cache_root.clear();
+        engine_state().repo_map_cache_result.clear();
+        engine_state().turn_abort = std::make_shared<AbortToken>();
+    }
+    std::string out;
+    try {
+        out = ToolsRegistry::instance().run_output("repo_map", args).output;
+    } catch (const std::exception& e) {
+        std::cerr << "  обход упал исключением: " << e.what() << std::endl;
+        ASSERT_TRUE(false);
+        return;
+    }
+    /* Обход пережил петлю — и не перестал из-за неё работать: файл под
+     * петлёй обязан попасть в обзор. Проверка «не упало» сама по себе была
+     * бы зелёной на обходе, который молча ничего не находит. */
+    if (out.find("настоящий.php") == std::string::npos) {
+        std::cerr << "  обзор без файла из-под петли: [" << out.substr(0, 300)
+                  << "]" << std::endl;
+    }
+    ASSERT_TRUE(out.find("настоящий.php") != std::string::npos);
 }

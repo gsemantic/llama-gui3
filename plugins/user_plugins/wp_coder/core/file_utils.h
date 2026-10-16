@@ -38,14 +38,38 @@ inline bool walk_files(const std::filesystem::path& root,
         if (ec) break;
         if (should_stop && should_stop()) return false;
         const auto& p = it->path();
-        if (it->is_directory()) {
+        /* Тип записи спрашивается ЧЕРЕЗ error_code, а не бросающей
+         * перегрузкой — и это не аккуратность, а граница живости.
+         *
+         * Бросающая `it->is_directory()` идёт в status(), то есть РАЗЫМЫКАЕТ
+         * симлинк. На петле (a -> b, b -> a) status() возвращает ELOOP, и
+         * бросается filesystem_error. Исключение уходит из обработчика
+         * инструмента насквозь: ToolsRegistry::run_output зовёт def.handler без
+         * try/catch, дальше его некому ловить, и поток агента падает в
+         * std::terminate вместе с приложением. Проверено на живом материале:
+         * петля симлинков в дереве роняла весь обзор проекта.
+         *
+         * Перегрузка с error_code на той же записи вернёт false и поставит
+         * код, то есть запись просто не попадёт в выдачу.
+         *
+         * ГРАНИЦА, которую знать при расширении: запись, тип которой не
+         * определился (петля, висячая ссылка, нет прав), ПРОПУСКАЕТСЯ молча,
+         * и обход продолжается. Возвращаемое значение при этом остаётся
+         * «дошёл до конца»: висячая ссылка — обычное дело в настоящем
+         * проекте (остатки node_modules, worktree-ссылки .git), и объявлять
+         * обзор неполным из-за каждой ссылки значило бы кричать о проблеме
+         * там, где её нет. Настоящий обрыв обхода — это предел или отмена,
+         * и оба объявляются. */
+        std::error_code type_ec;
+        if (it->is_directory(type_ec)) {
             std::string name = p.filename().string();
             if (std::find(skip_dirs.begin(), skip_dirs.end(), name) != skip_dirs.end()) {
                 it.disable_recursion_pending();
                 continue;
             }
         }
-        if (it->is_regular_file() &&
+        std::error_code file_ec;
+        if (it->is_regular_file(file_ec) &&
             (extension.empty() || p.extension() == extension)) {
             out.push_back(p.string());
             if (out.size() >= limit) return true;
