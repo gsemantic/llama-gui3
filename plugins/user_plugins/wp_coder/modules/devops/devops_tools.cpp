@@ -184,7 +184,8 @@ void register_devops_tools() {
         ToolDef def;
         def.name = "systemd_restart";
         def.description = "Перезапуск systemd-сервиса (через sudo)";
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        /* И13.6: обязательное подтверждение — перезапуск идёт через sudo. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "systemd";
         SchemaBuilder b;
         b.str("query", "имя сервиса, например nginx.service").required("query");
@@ -295,7 +296,8 @@ void register_devops_tools() {
         ToolDef def;
         def.name = "ssh_exec";
         def.description = "Выполнение команды по SSH на удалённом хосте";
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW;
+        /* И13.6: обязательное подтверждение — команда на чужом хосте. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "ssh";
         SchemaBuilder b;
         b.str("query", "хост или user@host")

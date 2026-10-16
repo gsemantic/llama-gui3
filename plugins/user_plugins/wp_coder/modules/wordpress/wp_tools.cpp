@@ -542,7 +542,10 @@ void register_wp_tools() {
         ToolDef def;
         def.name = "deploy";
         def.description = "Деплой проекта на удалённый хостер";
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW;
+        /* И13.6: обязательное подтверждение. У деплоя нет параметров вовсе,
+         * поэтому паттерн вопроса всегда «*»: без этого флага одно
+         * нажатие «Всегда» разрешало бы деплой навсегда. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_NETWORK | TF_SLOW | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "deploy";
         def.parameters = SchemaBuilder().build();
         def.handler = [](const json::JsonValue&, ToolContext& ctx) -> ToolOutput {

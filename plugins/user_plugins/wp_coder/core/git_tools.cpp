@@ -151,7 +151,10 @@ void register_git_tools() {
         def.name = "git_commit";
         def.description = "Создание коммита (path — частичный коммит)";
         /* Коммит меняет историю и не откатывается этим инструментом. */
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        /* И13.6: обязательное подтверждение. Паттерн вопроса — это ТЕКСТ
+         * СООБЩЕНИЯ, который выбрала модель, и он записывался бы в правила
+         * разрешений буквально. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "git";
         SchemaBuilder b;
         b.str("query", "сообщение коммита")
@@ -171,7 +174,10 @@ void register_git_tools() {
         def.description = "Индексация изменений (path — частичная)";
         /* Индексация меняет состояние репозитория, и отменить её этим
          * инструментом нельзя (нужен git reset). */
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        /* И13.6: обязательное подтверждение. Без пути паттерн вопроса
+         * равен «*», и «Всегда» писала бы `git: * → allow`, то есть
+         * молчалила бы ВСЕ операции git. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "git";
         SchemaBuilder b;
         b.str("path", "файл или каталог; пусто = все изменения (-A)");
@@ -188,7 +194,9 @@ void register_git_tools() {
         def.description = "Список веток (query пуст) или создание новой";
         /* Создание ветки — изменение репозитория, откатить его
          * инструмент не умеет. */
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        /* И13.6: обязательное подтверждение. Пустой query — тот же
+         * случай, что у git_add без пути. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "git";
         SchemaBuilder b;
         b.str("query", "имя новой ветки; пусто = показать список");
@@ -205,7 +213,8 @@ void register_git_tools() {
         def.description = "Переключение ветки";
         /* Переключение ветки способно выбросить незакоммиченные
          * изменения — откатить это автоматически нельзя. */
-        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        /* И13.6: обязательное подтверждение. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_CONFIRM_EVERY_CALL;
         def.permission_key = "git";
         SchemaBuilder b;
         b.str("query", "имя ветки").required("query");

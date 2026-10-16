@@ -46,6 +46,7 @@ const char* tool_flag_names(unsigned flags) {
         {TF_DESTRUCTIVE,  "destructive"},
         {TF_SLOW,         "slow"},
         {TF_UNCLASSIFIED, "unclassified"},
+        {TF_CONFIRM_EVERY_CALL, "confirm_every_call"},
     };
     for (const auto& it : items) {
         if (tf_has(flags, static_cast<ToolFlag>(it.bit))) {
@@ -572,7 +573,22 @@ std::string permission_pattern(const ToolDef& def, const json::JsonValue& args) 
 }
 
 std::string permission_suggested_pattern(const ToolDef& def,
-                                         const std::string& pattern) {
+                                        const std::string& pattern) {
+    /* И13.6: обязательное подтверждение — кнопки «Всегда» нет вовсе.
+     *
+     * Здесь, а не в панели и не в движке: suggested — единственное
+     * значение, из которого берётся и кнопка (`can_always = !suggested
+     * .empty()` в permission_panel.cpp), и правило (`PermissionEngine::
+     * reply` пишет его только при непустом suggested). Пустой suggested
+     * убирает оба следствия разом, и правило не появится даже если
+     * кнопку отрисовать где-то ещё.
+     *
+     * Проверено на живом материале, чем это опасно было: у `git_add` без
+     * пути паттерн вопроса — «*», и одно нажатие «Всегда» писало правило
+     * `git: * → allow`, после чего `git_commit` и `git_checkout` шли
+     * молча. У `git_commit` паттерн — сообщение коммита, то есть строка,
+     * которую выбрала модель; правило разрешений писалось ею. */
+    if (tf_has(def.flags, TF_CONFIRM_EVERY_CALL)) return std::string();
     if (pattern.empty() || pattern == "*") return "*";
     /* И3.5: когда значение — это команда, «всегда» = безопасный префикс.
      * «Всегда разрешить git status --porcelain» не должно разрешить

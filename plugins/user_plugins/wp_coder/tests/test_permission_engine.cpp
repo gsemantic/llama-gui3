@@ -17,6 +17,7 @@
 #include "../core/engine.h"
 #include "../core/permission_engine.h"
 #include "../core/agent_components.h"
+#include "../core/permission_panel.h"
 #include "../core/tools_registry.h"
 #include "../core/base_tools.h"
 #include "../core/git_tools.h"
@@ -1283,4 +1284,146 @@ TEST(doom_loop_window_is_three_calls_not_eight) {
     for (const auto& t : fx.texts) {
         ASSERT_TRUE(t.find("Зацикливание") == std::string::npos);
     }
+}
+
+/* ======================================================================
+ * И13.6: обязательное подтверждение (кнопки «Всегда» нет вовсе)
+ * ====================================================================== */
+
+/*
+ * ГЛАВНАЯ проверка задачи. «Всегда» пишет правило навсегда, и у этих
+ * инструментов паттерн такого правила был НЕ тем решением, которое человек
+ * подтвердил:
+ *
+ *   - `git_add` без пути → паттерн вопроса «*» → правило `git: * → allow`,
+ *     после чего `git_commit` и `git_checkout` шли молча (проверено на живой
+ *     библиотеке: evaluate("git", …) переходил из Ask в Allow);
+ *   - `git_commit` → паттерн это ТЕКСТ СООБЩЕНИЯ, то есть строка, которую
+ *     выбрала модель, и она записывалась в правила разрешений буквально;
+ *   - `deploy` → параметров нет вовсе, паттерн всегда «*»;
+ *   - `systemd_restart`/`ssh_exec` → правило по одному значению, но и оно
+ *     переживало все последующие вызовы молча.
+ *
+ * Проверка идёт по ЖИВЫМ инструментам (register_every_tool), а не по
+ * выдуманным правилам: новый инструмент без флага обязан её уронить.
+ */
+TEST(the_final_security_tools_have_no_always_button_at_all) {
+    register_every_tool();
+    /* Ключ инструмента — из его же permission_key, а паттерн берётся из
+     * аргументов, которые агент передал бы на самом деле. */
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"git_add", "*"},        /* без пути: «все изменения» */
+        {"git_branch", "*"},     /* пустой query: список веток */
+        {"git_commit", "Исправить парсер"},
+        {"git_checkout", "main"},
+        {"deploy", "*"},         /* параметров у деплоя нет вовсе */
+        {"systemd_restart", "nginx.service"},
+        {"ssh_exec", "systemctl restart nginx"},
+    };
+    for (const auto& c : cases) {
+        const ToolDef* d = ToolsRegistry::instance().find(c.first);
+        if (d == nullptr) {
+            std::cerr << "  инструмент " << c.first << " не зарегистрирован"
+                      << std::endl;
+            ASSERT_TRUE(false);
+            continue;
+        }
+        const std::string got = permission_suggested_pattern(*d, c.second);
+        if (!got.empty()) {
+            std::cerr << "  у " << c.first << " паттерн вопроса [" << c.second
+                      << "] всё ещё предлагает «всегда» как [" << got << "]"
+                      << std::endl;
+        }
+        ASSERT_EQ(got, std::string());
+    }
+}
+
+/*
+ * ОБРАТНАЯ сторона: флаг не должен тихо уехать на всё подряд. Без этой
+ * проверки можно было бы закрыть «Всегда» у каждого инструмента, и всё
+ * было бы зелёным — а человек потерял бы возможность один раз разрешить
+ * `git status --porcelain`. И3.5 для этого и сужает шаблон.
+ */
+TEST(the_always_button_survives_for_the_tools_that_may_be_remembered) {
+    register_every_tool();
+    const ToolDef* bash = ToolsRegistry::instance().find("bash");
+    const ToolDef* read = ToolsRegistry::instance().find("read_file");
+    const ToolDef* lst = ToolsRegistry::instance().find("list_skills");
+    ASSERT_TRUE(bash != nullptr && read != nullptr && lst != nullptr);
+    ASSERT_EQ(permission_suggested_pattern(*bash, "git status --porcelain"),
+              std::string("git status *"));
+    ASSERT_EQ(permission_suggested_pattern(*read, "config/.env"),
+              std::string("config/.env"));
+    /* «Предъявлять нечего» — решение по факту вызова: закрывать его нечем
+     * и незачем, иначе read_file без аргументов потерял бы «Всегда». */
+    ASSERT_EQ(permission_suggested_pattern(*lst, "*"), std::string("*"));
+}
+
+/*
+ * Список закрыт, и это ровно тот случай, который ловит забытый флаг:
+ * новый `git_*` без TF_CONFIRM_EVERY_CALL работал бы молча после одного
+ * «Всегда» — и проверка выше на него не смотрела бы, потому что список
+ * перечисляет конкретные имена.
+ *
+ * Обратная сторона: инструмент вне итоговой безопасности не должен получить
+ * флаг «по инерции», то есть список зафиксирован с обеих сторон.
+ */
+TEST(the_flag_is_exactly_on_the_final_security_tools) {
+    register_every_tool();
+    std::vector<std::string> marked;
+    for (const auto& d : ToolsRegistry::instance().defs()) {
+        if (tf_has(d.flags, TF_CONFIRM_EVERY_CALL)) marked.push_back(d.name);
+    }
+    std::sort(marked.begin(), marked.end());
+    const std::vector<std::string> expected = {
+        "deploy", "git_add", "git_branch", "git_checkout", "git_commit",
+        "ssh_exec", "systemd_restart",
+    };
+    if (marked != expected) {
+        std::cerr << "  флаг обязательного подтверждения стоит не там: [";
+        for (const auto& n : marked) std::cerr << n << " ";
+        std::cerr << "], ожидался [" << expected.size() << " имён]" << std::endl;
+    }
+    ASSERT_EQ(marked.size(), expected.size());
+    ASSERT_TRUE(marked == expected);
+}
+
+/*
+ * То, что человек видит. Пустой suggested убирает кнопку «Всегда» и
+ * правило одновременно — обе стороны читают одно и то же значение, и
+ * проверка строит вопрос ровно так же, как это делает ToolRunner::run.
+ */
+TEST(the_permission_panel_shows_no_always_button_for_them) {
+    register_every_tool();
+    std::vector<PermissionRequest> pending;
+    PermissionRequest git_add;
+    git_add.permission = "git";
+    git_add.patterns = {"*"};
+    git_add.metadata = "git_add";
+    const ToolDef* d = ToolsRegistry::instance().find("git_add");
+    ASSERT_TRUE(d != nullptr);
+    git_add.suggested = permission_suggested_pattern(*d, "*");
+    pending.push_back(git_add);
+
+    PermissionRequest bash;
+    bash.permission = "bash";
+    bash.patterns = {"git status --porcelain"};
+    bash.metadata = "bash";
+    const ToolDef* bd = ToolsRegistry::instance().find("bash");
+    ASSERT_TRUE(bd != nullptr);
+    bash.suggested = permission_suggested_pattern(*bd, "git status --porcelain");
+    pending.push_back(bash);
+
+    /* Одна очередь, один вопрос: панель показывает первый. Сначала git_add. */
+    const permission_panel::Panel p = permission_panel::build(pending);
+    ASSERT_TRUE(p.visible);
+    ASSERT_FALSE(p.ask.can_always);
+
+    /* Тот же вопрос для bash — с кнопкой. */
+    std::vector<PermissionRequest> only_bash;
+    only_bash.push_back(bash);
+    const permission_panel::Panel p2 = permission_panel::build(only_bash);
+    ASSERT_TRUE(p2.visible);
+    ASSERT_TRUE(p2.ask.can_always);
+    ASSERT_EQ(p2.ask.suggest_line, std::string("«Всегда» разрешит: git status *"));
 }
