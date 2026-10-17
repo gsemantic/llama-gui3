@@ -1574,3 +1574,108 @@ TEST(agent_settings_defaults_on_missing) {
         ASSERT_EQ(eng.state().session_budget, (size_t)60000);
     }
 }
+
+/* ======================================================================
+ * И13.9: живые места, до которых не доходил ни один тест
+ * ====================================================================== */
+
+/* git_diff — единственный инструмент git, обработчик которого не
+ * исполнялся: он был в каталоге модели и в счётчиках, но `git_status`
+ * проверяли, а `git_diff` — нет. Разница между ними не косметическая:
+ * у diff свой разбор вывода ( hunks, файлы) и свой фильтр, то есть своя
+ * логика, которая может сломаться, не тронув ни одну соседнюю проверку.
+ *
+ * Материал — НАСТОЯЩИЙ репозиторий с одним закоммиченным и одним
+ * изменённым файлом: выдуманный вывод git проверял бы автора теста. */
+TEST(git_diff_показывает_изменения_а_не_только_считает_файлы) {
+    fs::path tmp = make_tmp_project();
+    std::string out;
+    int rc = -1;
+    shell::run_capture_status("git -C " + tmp.string() + " init", out, rc, 30);
+    shell::run_capture_status("git -C " + tmp.string() + " config user.email t@e.com", out, rc, 10);
+    shell::run_capture_status("git -C " + tmp.string() + " config user.name t", out, rc, 10);
+    {
+        std::ofstream f(tmp / "file.txt");
+        f << "строка до\n";
+    }
+    shell::run_capture_status(
+        "git -C " + tmp.string() + " add file.txt", out, rc, 10);
+    shell::run_capture_status(
+        "git -C " + tmp.string() + " commit -m основа", out, rc, 30);
+    {
+        std::ofstream f(tmp / "file.txt");
+        f << "строка после\n";
+    }
+    init_tools_for_phase3(tmp);
+
+    ToolArgs a;
+    const std::string diff = ToolsRegistry::instance().run("git_diff", a);
+    if (diff.find("строка после") == std::string::npos) {
+        std::cerr << "  git_diff не показал правку: " << diff.substr(0, 300)
+                  << std::endl;
+    }
+    ASSERT_TRUE(diff.find("file.txt") != std::string::npos);
+    ASSERT_TRUE(diff.find("строка после") != std::string::npos);
+    /* И снятая строка видна: diff без «-» был бы пересказом файла, а не
+     * изменением. */
+    ASSERT_TRUE(diff.find("строка до") != std::string::npos);
+    ASSERT_TRUE(diff.find("-строка до") != std::string::npos);
+    ASSERT_TRUE(diff.find("+строка после") != std::string::npos);
+
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+}
+
+/* Каталог профилей приходит из двух мест: настройка человека, а если она
+ * пуста — каталог, который плагин поставил себе сам при загрузке
+ * (src/plugin_main.cpp:214). Второй источник жил в src/, то есть ни один
+ * тест его не ставил, а выбор между источниками — И9.7 — проверялся только
+ * для явной настройки.
+ *
+ * Проверяется правило выбора, а не «поле записалось»: пустая настройка
+ * означает «взять каталог плагина», непустая — «взять настройку». Порядок
+ * здесь и есть контракт. */
+TEST(каталог_профилей_берётся_из_плагина_когда_настройка_пуста) {
+    /* Правила разрешений — в синглтоне, а init() их перечитывает: без
+     * сброса по входу и выходу проверка оставила бы чужие правила следующей. */
+    engine().permissions().reset();
+    const fs::path bundled = make_tmp_project() / "bundled";
+    fs::create_directories(bundled);
+    const fs::path own = make_tmp_project() / "own";
+    fs::create_directories(own);
+
+    HostCallbacks cb;
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    cb.settings_get = [&](const std::string& key, const std::string& def) {
+        if (key == "wp_coder.profiles_dir") return std::string("") + own.string();
+        return def;
+    };
+    engine().init(cb);
+    engine().set_profiles_bundled_dir(bundled.string());
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().profiles_dir = bundled.string();
+    }
+    /* Каталог из настройки — приоритет: человек указал свой, и подмена его
+     * каталогом плагина тихо вернула бы чужие профили. */
+    engine().load_settings();
+    ASSERT_EQ(engine_state().profiles_dir, own.string());
+
+    /* Пустая настройка — каталог плагина (тот же приём, что у навыков). */
+    cb.settings_get = [](const std::string&, const std::string& def) { return def; };
+    engine().init(cb);
+    engine().set_profiles_bundled_dir(bundled.string());
+    engine().load_settings();
+    ASSERT_EQ(engine_state().profiles_dir, bundled.string());
+
+    engine().permissions().reset();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().profiles_bundled_dir.clear();
+        engine_state().profiles_dir.clear();
+    }
+    std::error_code ec;
+    fs::remove_all(own.parent_path(), ec);
+    fs::remove_all(bundled.parent_path(), ec);
+}

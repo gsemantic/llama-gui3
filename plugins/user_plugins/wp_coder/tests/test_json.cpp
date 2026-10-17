@@ -204,3 +204,41 @@ TEST(json_value_copies_are_deep) {
     ASSERT_EQ(moved.get_int("a"), 2LL);
     ASSERT_TRUE(moved.has("b"));
 }
+
+/* И13.9: as_string() на НЕ-строке.
+ *
+ * Функция возвращает ссылку на общую пустую строку, а не на локальную: если
+ * бы она отдавала `""` по значению из временного объекта, ссылка висела бы
+ * после выхода. Проверяется не «функция существует», а оба её исхода —
+ * строка и не-строка, — потому что вызывающий полагается на «пусто», а не на
+ * «как получится»: не-строка в поле «путь» обязана читаться как отсутствие
+ * значения, иначе инструмент получает мусор вместо пустого пути. */
+TEST(as_string_on_a_non_string_is_empty_and_does_not_lie_about_the_type) {
+    /* null — значение по умолчанию: самый частый «не-строка». */
+    json::JsonValue nothing;
+    ASSERT_EQ(nothing.as_string(), std::string(""));
+
+    json::JsonValue number(42);
+    ASSERT_EQ(number.as_string(), std::string(""));
+    /* И тип при этом остаётся своим: пустая строка не делает число строкой.
+     * Имена типов различают целое и вещественное («integer»/«number»), и
+     * проверка названия здесь заодно сторожит эту разницу. */
+    ASSERT_EQ(std::string(number.type_name()), std::string("integer"));
+    json::JsonValue real(1.5);
+    ASSERT_EQ(std::string(real.type_name()), std::string("number"));
+
+    json::JsonValue flag = json::JsonValue::object();
+    flag.set("on", true);
+    ASSERT_EQ(flag.get("on").as_string(), std::string(""));
+    ASSERT_EQ(flag.get("нет-ключа").as_string(), std::string(""));
+
+    /* Строка возвращается как есть, и это тот же самый вызов. */
+    json::JsonValue text = json::JsonValue::object();
+    text.set("path", "wp-config.php");
+    ASSERT_EQ(text.get("path").as_string(), std::string("wp-config.php"));
+    /* as_string_or — другая ручка: подставляет запасное, а не пустую. */
+    ASSERT_EQ(text.get("path").as_string_or("запасное"),
+              std::string("wp-config.php"));
+    ASSERT_EQ(text.get("нет-ключа").as_string_or("запасное"),
+              std::string("запасное"));
+}

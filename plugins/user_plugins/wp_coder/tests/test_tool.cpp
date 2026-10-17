@@ -492,3 +492,101 @@ TEST(plan_mode_refuses_revert_before_it_touches_a_file) {
         st.project_dir.clear();
     }
 }
+
+/* ======================================================================
+ * И13.9: rag_index и rag_query — ИСПОЛНЯЮТСЯ, а не только значатся
+ * ====================================================================== */
+
+/* Инструменты RAG живут в каталоге модели, но их обработчики не вызывал ни
+ * один тест: `register_rag_tools` только регистрировала, а до первого вызова
+ * не доходил никто. Проверка «инструмент есть в каталоге» на обаих проходила
+ * бы и на обработчике, который падает или ничего не делает, — а это ровно тот
+ * класс «механизм есть ≠ работает», что уже стоил двух задач.
+ *
+ * Слоты RAG живут в HostCallbacks, то есть приходят от ХОСТА, и подменить их
+ * можно только одним способом — положив в Engine::init. Отдельная имитация
+ * обхода не годится: обход и есть file_utils::walk_files, он и должен
+ * исполняться. */
+TEST(rag_инструменты_исполняются_на_хосте_без_сети_и_без_индекса) {
+    register_all_tools();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_rag_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t / "sub");
+    {
+        std::ofstream f(t / "index.php");
+        f << "<?php // раз";
+    }
+    {
+        std::ofstream f(t / "sub" / "second.php");
+        f << "<?php // два";
+    }
+    {
+        /* Не php: обход фильтрует по расширению, и «проиндексировано 2/3»
+         * означало бы, что фильтр не работает. */
+        std::ofstream f(t / "notes.txt");
+        f << "не php";
+    }
+
+    std::vector<std::string> indexed;
+    HostCallbacks cb = Engine::instance().callbacks();
+    cb.rag_process_document = [&indexed](const std::string& path) {
+        indexed.push_back(path);
+        return true;
+    };
+    cb.rag_build_prompt = [](const std::string& query, int, const std::string&) {
+        return "контекст по запросу: " + query;
+    };
+    Engine::instance().init(cb);
+    test_support::approve_all_permissions();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+        engine_state().turn_abort = std::make_shared<AbortToken>();
+    }
+
+    const ToolOutput out =
+        ToolsRegistry::instance().run_output("rag_index", args_with("rag_index", "root", t.string()));
+    /* Число php-файлов в ответе и реально проиндексированный список должны
+     * совпасть: иначе «проиндексировано N» — это отчёт о намерении. */
+    if (out.output.find("проиндексировано 2/2") == std::string::npos) {
+        std::cerr << "  rag_index ответил: " << out.output.substr(0, 200)
+                  << std::endl;
+    }
+    ASSERT_TRUE(out.output.find("проиндексировано 2/2") != std::string::npos);
+    ASSERT_EQ(indexed.size(), (size_t)2);
+
+    const ToolOutput q = ToolsRegistry::instance().run_output(
+        "rag_query", args_with("rag_query", "query", "где раз"));
+    if (q.output.find("контекст по запросу: где раз") == std::string::npos) {
+        std::cerr << "  rag_query ответил: " << q.output.substr(0, 200)
+                  << std::endl;
+    }
+    ASSERT_TRUE(q.output.find("контекст по запросу: где раз") != std::string::npos);
+
+    /* Без слота RAG инструмент обязан сказать об этом, а не вернуть пустую
+     * выдачу: пустой ответ модель читала бы как «индекс пуст». */
+    HostCallbacks plain = Engine::instance().callbacks();
+    plain.rag_build_prompt = nullptr;
+    Engine::instance().init(plain);
+    const ToolOutput no_rag = ToolsRegistry::instance().run_output(
+        "rag_query", args_with("rag_query", "query", "где раз"));
+    ASSERT_TRUE(no_rag.output.find("RAG не доступен") != std::string::npos);
+
+    /* И без корня индексации — внятная ошибка вместо обхода всего диска. */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+    const ToolOutput no_root = ToolsRegistry::instance().run_output(
+        "rag_index", args_with("rag_index", "root", ""));
+    ASSERT_TRUE(no_root.output.find("не задан корень индексации") !=
+                std::string::npos);
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}

@@ -207,6 +207,14 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_iter12.cpp
         tests/test_skills_manager.cpp
         tests/test_engine.cpp
+        # И13.9: настоящий путь входа — submit → worker_main → run_task →
+        # cleanup. Раньше он не был выполнен ни одним тестом: единственный
+        # вход Engine::start() живёт в src/, а src/ в сборку тестов не
+        # входит. Стоит сразу после test_engine.cpp и ДО проверок, которым
+        # нужен чистый цикл: поднимает настоящий поток движка и оставляет
+        # следы в синглтоне (очередь, флаг остановки, счётчики задачи),
+        # которые сам и убирает. Инструментов не регистрирует сверх базовых.
+        tests/test_engine_entry.cpp
         tests/test_module_api.cpp
         tests/test_security.cpp
         tests/test_path_guard.cpp

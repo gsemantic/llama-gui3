@@ -19,6 +19,7 @@
 #include "../core/prompts.h"
 #include "../core/project.h"
 #include "../core/security.h"
+#include "../core/shell.h"
 
 #include <filesystem>
 #include <cstdlib>
@@ -333,4 +334,46 @@ TEST(a_symlink_loop_does_not_throw_out_of_the_tree_walk) {
                   << "]" << std::endl;
     }
     ASSERT_TRUE(out.find("настоящий.php") != std::string::npos);
+}
+
+/* Определение PHP. Функция живёт в core/, а зовётся только из окна
+ * (ui/coder_window.cpp:147), то есть в сборку тестов не попадала ни разу.
+ *
+ * Проверяются ОБЕ её стороны, и обе по-разному:
+ *   1. Уже заданный php_bin НЕ переопределяется. Иначе настройка человека
+ *      («/usr/local/bin/php8.2») молча заменялась бы на «php» — то есть
+ *      командой из PATH, которой может не быть.
+ *   2. Пустой php_bin определяется, и результат обязан совпасть с тем, что
+ *      есть на машине. Утверждение «php_bin непуст» было бы врёт на любой
+ *      машине без PHP, а проверка «если php -v работает, то и у нас» —
+ *      ровно то сравнение, которое здесь и нужно. */
+TEST(определение_php_не_затирает_заданный_путь_и_честно_смотрит_на_машину) {
+    const std::string saved = engine_state().php_bin;
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().php_bin = "/opt/php/bin/php";
+    }
+    project_detect_php();
+    ASSERT_EQ(engine_state().php_bin, std::string("/opt/php/bin/php"));
+
+    /* Пусто → определяем. Что ответит `php -v` на этой машине, решает
+     * сравнение с тем же вызовом, а не ожидание «непусто». */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().php_bin.clear();
+    }
+    std::string probe;
+    int rc = -1;
+    const bool php_runs =
+        shell::run_capture_status("php -v", probe, rc, 30) && !probe.empty();
+    project_detect_php();
+    ASSERT_EQ(engine_state().php_bin,
+              std::string(php_runs ? "php" : ""));
+
+    /* Возврат состояния: синглтон переживает проверку, и оставленный здесь
+     * путь изменил бы следующую. */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().php_bin = saved;
+    }
 }

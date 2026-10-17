@@ -86,6 +86,12 @@ struct FakeHost {
     std::string seen_single;     /* llm_complete_ex: одна реплика */
     std::string seen_ast_path;
 
+    /* Ответы по попыткам: пусто — хост отдаёт один и тот же chat_json.
+     * Нужен для проверки повтора, где первая попытка обязана ПРОВАЛИТЬСЯ,
+     * а вторая — пройти; один и тот же ответ проверил бы только успех. */
+    std::vector<std::string> chat_json_sequence;
+    int chat_seq_next = 0;
+
     int chat_calls = 0;
     int single_calls = 0;
     int ast_calls = 0;
@@ -124,6 +130,13 @@ char* fake_llm_chat_messages(LlamaPluginHost*, const char* sys,
     ++g_fake->chat_calls;
     g_fake->seen_sys = sys ? sys : "";
     g_fake->seen_messages = messages_json ? messages_json : "";
+    if (!g_fake->chat_json_sequence.empty()) {
+        const size_t i = static_cast<size_t>(g_fake->chat_seq_next++);
+        const std::string& body = g_fake->chat_json_sequence[
+            i < g_fake->chat_json_sequence.size() ? i
+                                                  : g_fake->chat_json_sequence.size() - 1];
+        return host_string(body);
+    }
     return host_string(g_fake->chat_json);
 }
 
@@ -572,4 +585,73 @@ TEST(деградация_хоста_не_меняет_ответ_агента) 
     ASSERT_EQ(no_stream_usage.input, modern_usage.input);
     ASSERT_EQ(no_stream_usage.output, modern_usage.output);
     ASSERT_EQ(no_stream_usage.total, modern_usage.total);
+}
+/* ======================================================================
+ * И13.9: пауза перед повтором считается на НАСТОЯЩЕМ мосте
+ * ====================================================================== */
+
+/*
+ * Задержка повтора (`retry_delay_ms_random`) живёт в host_bridge/llm_slots.cpp
+ * и была написана в И12.6 вместе с циклом повторов — но до сих пор ни разу не
+ * исполнилась: до неё доходит только ветка «провайдер ответил ok=0», а все
+ * прежние проверки этого файла отдавали успех с первой попытки, а проверки
+ * повторов в test_retry.cpp зовут саму функцию напрямую.
+ *
+ * Проверяется ПУТЬ целиком: ошибка хоста → классификация → пауза → вторая
+ * попытка → ответ. Проверка только «ответ получен» прошла бы и на коде без
+ * повторов вообще (первая попытка дала бы успех), поэтому отдельно
+ * утверждается, что попыток было ДВЕ, и отдельно — что человек увидел паузу.
+ *
+ * Про паузу: она реальная (2 с для первой попытки), и проверка не может
+ * ждать её «настоящую» — иначе она проверяла бы часы. Утверждается
+ * СОДЕРЖАНИЕ объявления: вид сбоя, номер попытки и названное время. Именно
+ * это читает человек, у которого ход висит, и именно это отличает повтор от
+ * молчаливого зависания (И12.6).
+ */
+TEST(повтор_после_ошибки_провайдера_объявляет_паузу_и_доводит_ход_до_ответа) {
+    FakeHost fake;
+    fake.chat_json_sequence = {
+        /* 503 — транзиентная ошибка: повтор имеет смысл (И12.5). */
+        "{\"ok\":0,\"error\":\"503 Service Unavailable\"}",
+        "{\"ok\":1,\"content\":\"Ответ после повтора.\","
+        "\"finish_reason\":\"stop\",\"prompt_tokens\":11,"
+        "\"completion_tokens\":6}"};
+    /* Указатель на подделку живёт до конца ЗОВА: мост зовёт функции хоста
+     * по указателям из структуры, а состояние у них одно — глобальное. Снять
+     * его до вызова значило бы «хоста нет», и проверка измеряла бы не
+     * повтор, а отказ по отсутствию хоста. */
+    g_fake = &fake;
+    const LlamaHostApi api = modern_host();
+    HostCallbacks cb;
+    host::install_llm_slots(cb, &api, fake_host());
+
+    forget_previous_abort();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().events.clear();
+    }
+
+    LlmReply out;
+    const bool ok = cb.llm_chat("системный промпт", three_turns(), out);
+    g_fake = nullptr;
+
+    if (!ok) std::cerr << "  ход не ответил: " << out.error << std::endl;
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(out.content, std::string("Ответ после повтора."));
+    /* Две попытки, а не одна: иначе «ответ получен» ничего не говорит о
+     * повторе — тот же ответ дала бы и машина без цикла повторов. */
+    ASSERT_EQ(fake.chat_calls, 2);
+    /* Метрики ответа пришли из УСПЕШНОЙ попытки, а не из первой. */
+    ASSERT_EQ(out.completion_tokens, 6);
+
+    /* Человек увидел объявление паузы: вид сбоя, «попытка 2/5» и время. */
+    std::string notice;
+    for (const AgentEvent& e : engine().events()) {
+        if (e.kind == AgentEvent::Retry) notice = e.text;
+    }
+    if (notice.empty()) std::cerr << "  объявления повтора не было" << std::endl;
+    ASSERT_TRUE(!notice.empty());
+    ASSERT_TRUE(has(notice, "503"));
+    ASSERT_TRUE(has(notice, "2/5"));
+    ASSERT_TRUE(has(notice, "через "));
 }
