@@ -9,6 +9,12 @@ compile_commands.json
 # Runtime data and backups (never commit)
 _backups/
 backups/
+/wp_coder/
+
+# Tree-sitter grammars: build inputs, not source code
+# Versions are pinned in deps/grammars.lock, fetch manually with `make fetch-grammars`
+# 172 MB of clones, only src/*.c needed at build time
+deps/tree-sitter-*-src/
 .cache/
 .config/
 kv_cache/
