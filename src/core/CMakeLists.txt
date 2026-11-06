@@ -14,15 +14,34 @@ endif()
 if(USE_FAISS)
     find_package(OpenMP)
     find_package(BLAS)
-    if(OpenMP_CXX_FOUND AND BLAS_FOUND)
-        target_link_libraries(core PRIVATE ${FAISS_LIBRARY} OpenMP::OpenMP_CXX ${BLAS_LIBRARIES})
-    elseif(OpenMP_CXX_FOUND)
-        target_link_libraries(core PRIVATE ${FAISS_LIBRARY} OpenMP::OpenMP_CXX openblas)
+    find_package(LAPACK)
+
+    # Static libfaiss references BLAS *and* LAPACK symbols. The dependencies
+    # must be PUBLIC: consumers of the static `core` library (tests, the GUI)
+    # also need them on the link line.
+    set(FAISS_LINK_LIBS ${FAISS_LIBRARY})
+
+    if(OpenMP_CXX_FOUND)
+        list(APPEND FAISS_LINK_LIBS OpenMP::OpenMP_CXX)
     else()
-        target_link_libraries(core PRIVATE ${FAISS_LIBRARY} gomp openblas)
+        list(APPEND FAISS_LINK_LIBS gomp)
     endif()
+
+    if(BLAS_FOUND)
+        list(APPEND FAISS_LINK_LIBS ${BLAS_LIBRARIES})
+    else()
+        list(APPEND FAISS_LINK_LIBS openblas)
+    endif()
+
+    if(LAPACK_FOUND)
+        list(APPEND FAISS_LINK_LIBS ${LAPACK_LIBRARIES})
+    else()
+        list(APPEND FAISS_LINK_LIBS lapack)
+    endif()
+
+    target_link_libraries(core PUBLIC ${FAISS_LINK_LIBS})
     target_include_directories(core PRIVATE ${FAISS_INCLUDE_DIR})
-    target_compile_definitions(core PRIVATE USE_FAISS)
+    target_compile_definitions(core PUBLIC USE_FAISS)
     message(STATUS "FAISS enabled for RAG indexing")
 endif()
 
