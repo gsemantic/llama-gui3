@@ -146,8 +146,81 @@ bool RagManager::save_index(const std::string& index_path) {
         return false;
     }
 #else
-    std::cerr << "[RAG PERSISTENCE] Error: FAISS not available" << std::endl;
-    return false;
+    // Brute-force fallback: persist chunks + embeddings as JSON.
+    if (external_chunks_.empty()) {
+        std::cerr << "[RAG PERSISTENCE] Error: No chunks to save" << std::endl;
+        return false;
+    }
+
+    try {
+        // Ensure parent directory exists
+        std::filesystem::path p(path);
+        if (p.has_parent_path()) {
+            std::filesystem::create_directories(p.parent_path());
+        }
+
+        // Touch a marker file at `path` so has_persistent_index() succeeds
+        {
+            std::ofstream marker(path, std::ios::binary | std::ios::trunc);
+            if (!marker.is_open()) {
+                std::cerr << "[RAG PERSISTENCE] Error: Cannot create index marker file" << std::endl;
+                return false;
+            }
+            marker << "brute-force";
+        }
+
+        // Build metadata JSON
+        nlohmann::json metadata;
+        metadata["version"] = 4;  // brute-force persistence
+        metadata["chunk_count"] = external_chunks_.size();
+        metadata["embedding_dimension"] = external_chunks_[0].embedding.size();
+        metadata["embedding_model"] = embedding_model_path_.empty()
+            ? "unknown"
+            : std::filesystem::path(embedding_model_path_).filename().string();
+
+        nlohmann::json chunks_json = nlohmann::json::array();
+        for (const auto& chunk : external_chunks_) {
+            nlohmann::json chunk_meta;
+            chunk_meta["content"] = chunk.content;
+            chunk_meta["document_id"] = chunk.document_id;
+            chunk_meta["chunk_index"] = chunk.chunk_index;
+            chunk_meta["content_type"] = static_cast<int>(chunk.content_type);
+            if (!chunk.language.empty()) chunk_meta["language"] = chunk.language;
+            if (!chunk.file_path.empty()) chunk_meta["file_path"] = chunk.file_path;
+            if (!chunk.symbol_name.empty()) chunk_meta["symbol_name"] = chunk.symbol_name;
+            if (!chunk.parent_symbol.empty()) chunk_meta["parent_symbol"] = chunk.parent_symbol;
+            if (chunk.start_line > 0) chunk_meta["start_line"] = chunk.start_line;
+            if (chunk.end_line > 0) chunk_meta["end_line"] = chunk.end_line;
+            // Persist embedding vector
+            chunk_meta["embedding"] = chunk.embedding;
+            chunks_json.push_back(chunk_meta);
+        }
+        metadata["chunks"] = chunks_json;
+
+        std::string metadata_str;
+        try {
+            metadata_str = metadata.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+        } catch (const std::exception& e) {
+            std::cerr << "[RAG PERSISTENCE] Error: Failed to serialize metadata: " << e.what() << std::endl;
+            return false;
+        }
+
+        std::ofstream meta_file(metadata_path);
+        if (!meta_file.is_open()) {
+            std::cerr << "[RAG PERSISTENCE] Error: Cannot open metadata file" << std::endl;
+            return false;
+        }
+        meta_file << metadata_str;
+        meta_file.close();
+
+        profile_manager_.update_current_profile_chunk_count(static_cast<int>(external_chunks_.size()));
+        std::cout << "[RAG PERSISTENCE] Brute-force index saved ("
+                  << external_chunks_.size() << " chunks)" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[RAG PERSISTENCE] Error: Failed to save brute-force index: " << e.what() << std::endl;
+        return false;
+    }
 #endif
 }
 
@@ -291,8 +364,82 @@ bool RagManager::load_index(const std::string& index_path) {
         return false;
     }
 #else
-    std::cerr << "[RAG PERSISTENCE] Error: FAISS not available" << std::endl;
-    return false;
+    // Brute-force fallback: load chunks + embeddings from JSON.
+    try {
+        std::ifstream meta_file(metadata_path);
+        if (!meta_file.is_open()) {
+            std::cerr << "[RAG PERSISTENCE] Error: Cannot open metadata file" << std::endl;
+            return false;
+        }
+
+        nlohmann::json metadata = nlohmann::json::parse(meta_file);
+        meta_file.close();
+
+        int chunk_count = metadata.value("chunk_count", 0);
+        int embedding_dim = metadata.value("embedding_dimension", EMBEDDING_DIMENSION);
+        std::string index_model = metadata.value("embedding_model", "");
+        int metadata_version = metadata.value("version", 0);
+
+        if (metadata_version < 4) {
+            std::cerr << "[RAG PERSISTENCE] Error: Incompatible index version " << metadata_version << std::endl;
+            return false;
+        }
+
+        external_chunks_.clear();
+        external_chunks_.reserve(chunk_count);
+
+        const auto& chunks_json = metadata["chunks"];
+        for (const auto& chunk_meta : chunks_json) {
+            RagChunk chunk;
+            chunk.content = chunk_meta["content"].get<std::string>();
+            chunk.document_id = chunk_meta["document_id"].get<std::string>();
+            chunk.chunk_index = chunk_meta["chunk_index"].get<int>();
+            if (chunk_meta.contains("content_type")) {
+                chunk.content_type = static_cast<RagChunk::ContentType>(chunk_meta["content_type"].get<int>());
+            }
+            if (chunk_meta.contains("language")) chunk.language = chunk_meta["language"].get<std::string>();
+            if (chunk_meta.contains("file_path")) chunk.file_path = chunk_meta["file_path"].get<std::string>();
+            if (chunk_meta.contains("symbol_name")) chunk.symbol_name = chunk_meta["symbol_name"].get<std::string>();
+            if (chunk_meta.contains("parent_symbol")) chunk.parent_symbol = chunk_meta["parent_symbol"].get<std::string>();
+            if (chunk_meta.contains("start_line")) chunk.start_line = chunk_meta["start_line"].get<int>();
+            if (chunk_meta.contains("end_line")) chunk.end_line = chunk_meta["end_line"].get<int>();
+            if (chunk_meta.contains("embedding")) {
+                chunk.embedding = chunk_meta["embedding"].get<std::vector<float>>();
+            }
+
+            external_chunks_.push_back(std::move(chunk));
+        }
+
+        if (embedding_generator_) {
+            embedding_generator_->set_embedding_dimension(embedding_dim);
+        }
+
+        // Compatibility checks
+        index_needs_reindex_ = false;
+        reindex_reason_.clear();
+        index_embedding_model_ = index_model;
+
+        std::string active_model = embedding_model_path_.empty()
+            ? "" : std::filesystem::path(embedding_model_path_).filename().string();
+
+        if (!active_model.empty() && !index_model.empty() && active_model != index_model) {
+            index_needs_reindex_ = true;
+            reindex_reason_ = "Index built by model '" + index_model + "', active '" + active_model + "'";
+            std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
+        } else if (embedding_generator_ &&
+                   !external_chunks_.empty() &&
+                   static_cast<int>(external_chunks_[0].embedding.size()) != embedding_generator_->get_embedding_dimension()) {
+            index_needs_reindex_ = true;
+            reindex_reason_ = "Dimension mismatch";
+            std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
+        }
+
+        std::cout << "[RAG PERSISTENCE] Brute-force index loaded (" << external_chunks_.size() << " chunks)" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[RAG PERSISTENCE] Error: Failed to load brute-force index: " << e.what() << std::endl;
+        return false;
+    }
 #endif
 }
 

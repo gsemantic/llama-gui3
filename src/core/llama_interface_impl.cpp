@@ -5,6 +5,7 @@
 #include <thread>
 #include <fstream>
 #include <filesystem>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
@@ -428,7 +429,7 @@ impl::SlotOperationResult impl::LlamaInterfaceImpl::save_slot_kv_cache_detailed(
         }
         
         result.success = true;
-        result.n_bytes = std::filesystem::file_size(filename);
+        result.n_bytes = std::filesystem::file_size(get_kv_cache_dir() + "/" + filename);
         result.processing_ms = 0.0; // TODO: Measure actual time
         return result;
     } catch (const std::exception& e) {
@@ -453,7 +454,7 @@ impl::SlotOperationResult impl::LlamaInterfaceImpl::restore_slot_kv_cache_detail
         }
         
         result.success = true;
-        result.n_bytes = std::filesystem::file_size(filename);
+        result.n_bytes = std::filesystem::file_size(get_kv_cache_dir() + "/" + filename);
         result.processing_ms = 0.0; // TODO: Measure actual time
         return result;
     } catch (const std::exception& e) {
@@ -648,8 +649,10 @@ bool impl::LlamaInterfaceImpl::load_kv_cache_file(int slot_id, const std::string
 
 std::string llama_gui::core::impl::LlamaInterfaceImpl::get_kv_cache_dir() const
 {
-    // TODO: Make this configurable
-    return "./kv_cache";
+    const char* home = std::getenv("HOME");
+    if (!home) home = ".";
+    std::string dir = std::string(home) + "/.llama-gui/kv_cache/";
+    return dir;
 }
 
 bool impl::LlamaInterfaceImpl::reset_slot_impl(int slot_id)
