@@ -1,0 +1,869 @@
+/*
+ * test_manifest_consistency.cpp — И0.8: версия и манифесты.
+ *
+ * Версия плагина была продублирована в четырёх файлах (plugin.json,
+ * plugins/wp_coder.json, ll_plugin_info(), CHANGELOG.md) и разошлась:
+ * 0.3.0 / 0.1.0 / 0.3.0 / 0.4.0. Теперь источник истины — plugin.json,
+ * а CMake извлекает из него WP_CODER_VERSION. Тест ловит возврат к
+ * копированию версии в коде.
+ *
+ * Здесь же проверка, что удалённые мёртвые файлы действительно удалены
+ * и не вернулись в дерево (см. src/README.md).
+ */
+
+#include "test_framework.h"
+#include "../core/limits.h"
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
+using namespace coder;
+
+namespace {
+
+/* Корень исходников плагина: tests/ -> ../ */
+fs::path plugin_root() {
+    return fs::path(__FILE__).parent_path().parent_path();
+}
+
+std::string read_file(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return "";
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+/* Грубое, но достаточное извлечение значения JSON-поля. */
+std::string json_field(const std::string& text, const std::string& key) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = text.find(pat);
+    if (p == std::string::npos) return "";
+    size_t colon = text.find(':', p + pat.size());
+    if (colon == std::string::npos) return "";
+    size_t q1 = text.find('"', colon + 1);
+    if (q1 == std::string::npos) return "";
+    size_t q2 = text.find('"', q1 + 1);
+    if (q2 == std::string::npos) return "";
+    return text.substr(q1 + 1, q2 - q1 - 1);
+}
+
+/* Оставить только код: вырезать комментарии и строковые литералы.
+ *
+ * Нужно, чтобы guard-тесты ловили ВЫЗОВ, а не упоминание. Без этого
+ * политика команд попадает сама в свой же тест: в command_policy.cpp
+ * есть строковый литерал "system(" (поиск подстроки в аргументах awk) и
+ * комментарий про system() — и ни то, ни другое вызовом не является.
+ *
+ * Известная погрешность: одинарные кавычки не разбираются, поэтому
+ * код вида char q = '"' может «съесть» остаток строки. Для этих двух
+ * проверок это означает лишь риск НЕ заметить вызов в той же строке,
+ * но не ложную тревогу. */
+std::string code_only(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    bool in_block = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (in_block) {
+            if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '/') {
+                in_block = false;
+                ++i;
+            } else {
+                r += (s[i] == '\n' ? '\n' : ' ');
+            }
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            in_block = true;
+            ++i;
+            r += "  ";
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') { r += ' '; ++i; }
+            r += '\n';
+            continue;
+        }
+        if (s[i] == '"') {
+            ++i;
+            while (i < s.size() && s[i] != '"' && s[i] != '\n') {
+                if (s[i] == '\\') { r += ' '; ++i; }
+                if (i < s.size()) r += (s[i] == '\n' ? '\n' : ' ');
+                ++i;
+            }
+            r += ' ';
+            continue;
+        }
+        r += s[i];
+    }
+    return r;
+}
+
+}  // namespace
+
+TEST(manifest_plugin_json_has_version) {
+    std::string j = read_file(plugin_root() / "plugin.json");
+    ASSERT_TRUE(!j.empty());
+    std::string v = json_field(j, "version");
+    ASSERT_TRUE(!v.empty());
+    /* Здесь НЕТ прибитого числа. Версия меняется каждую итерацию, и
+     * проверка «равно 0.9.0» протухает сама собой: на следующем релизе
+     * она падает, её правят — и через год никто не помнит, что она
+     * вообще проверяла. Тот же класс, что у протухшего `HEAD` в
+     * напоминалке (отклонение №19). Согласие манифеста с той версией,
+     * из которой собран бинарник, проверяет отдельный тест
+     * manifest_code_version_matches_manifest, а с CHANGELOG —
+     * plan_readme_and_changelog_agree_on_the_version. Здесь остаётся
+     * форма: пустая или непохожая на версию строка ломает разбор. */
+    ASSERT_TRUE(v.find('.') != std::string::npos);
+    ASSERT_TRUE(v.find_first_of("abcdefghijklmnopqrstuvwxyz ") ==
+                std::string::npos);
+}
+
+TEST(manifest_repo_copy_matches_plugin_json) {
+    /* plugins/wp_coder.json обязан совпадать с plugin.json: хост ищет
+     * манифест рядом с .so, а в дереве репозитория лежит копия.
+     *
+     * Путь указывал на корень РЕПОЗИТОРИЯ, где копии нет, — и проверка
+     * молча возвращалась, то есть не могла упасть. Ровно то, чего она
+     * должна была ловить: копия отстала до 0.6.0, пока plugin.json был
+     * 0.9.0 (болезнь D12 в третий раз, уже после D20/D21). */
+    fs::path a = plugin_root() / "plugin.json";
+    fs::path b = plugin_root().parent_path().parent_path() / "wp_coder.json";
+    if (!fs::exists(b)) return;  /* сборка плагина отдельно от репозитория */
+    if (read_file(a) != read_file(b)) {
+        std::cerr << "  манифесты разошлись: " << a.string() << " и "
+                  << b.string() << " (второй отстал до "
+                  << json_field(read_file(b), "version") << ")" << std::endl;
+    }
+    ASSERT_TRUE(read_file(a) == read_file(b));
+}
+
+TEST(manifest_capabilities_include_all_modules) {
+    std::string j = read_file(plugin_root() / "plugin.json");
+    /* Раньше корневая копия была на 0.1.0 и не знала про python/devops. */
+    for (const char* cap : {"code_generation", "wordpress", "python", "devops",
+                            "rag", "ui_window", "agent", "modules"}) {
+        ASSERT_TRUE(j.find(cap) != std::string::npos);
+    }
+}
+
+TEST(manifest_api_version_matches_sdk) {
+    std::string j = read_file(plugin_root() / "plugin.json");
+    /* plugin_api.h: LLAMA_PLUGIN_API_VERSION_MAJOR/MINOR/PATCH = 1/0/0.
+     * PluginManager отвергает плагин при несовпадении строки. */
+    ASSERT_TRUE(json_field(j, "api_version") == "1.0.0");
+}
+
+/* Версия в коде берётся из CMake-макроса. Если макрос не пришёл —
+ * используется запасное значение; и то и другое должно совпадать с
+ * plugin.json, иначе хост покажет в UI другую версию, чем в манифесте. */
+TEST(manifest_code_version_matches_manifest) {
+#ifdef WP_CODER_VERSION
+    const char* code_version = WP_CODER_VERSION;
+#else
+    /* Макрос не пришёл только при сборке вне CMake. Значение тогда
+     * неизвестно, и сравнивать не с чем: проверять тут нечего, и
+     * выдумывать «ожидаемую» версию значило бы проверять вхолостую. */
+    const char* code_version = nullptr;
+#endif
+    if (!code_version) return;
+    std::string j = read_file(plugin_root() / "plugin.json");
+    ASSERT_TRUE(json_field(j, "version") == std::string(code_version));
+}
+
+TEST(manifest_changelog_documents_current_version) {
+    std::string c = read_file(plugin_root() / "CHANGELOG.md");
+    ASSERT_TRUE(!c.empty());
+    ASSERT_TRUE(c.find("## [0.9.0]") != std::string::npos);
+    ASSERT_TRUE(c.find("## [0.10.0]") != std::string::npos);
+    ASSERT_TRUE(c.find("## [0.8.0]") != std::string::npos);
+    ASSERT_TRUE(c.find("## [0.7.0]") != std::string::npos);
+    ASSERT_TRUE(c.find("## [0.5.0]") != std::string::npos);
+    /* Старая версия 0.4.0 осталась в истории — это нормально. */
+    ASSERT_TRUE(c.find("## [0.4.0]") != std::string::npos);
+}
+
+/* --- Мёртвый код не должен вернуться (И0.6) --- */
+
+TEST(dead_agent_files_are_gone) {
+    const char* gone[] = {
+        "src/wp_coder_orchestrator.h", "src/wp_coder_orchestrator.cpp",
+        "src/wp_coder_plugin.cpp",
+        "src/wp_theme_agent.h",  "src/wp_theme_agent.cpp",
+        "src/wp_plugin_agent.h", "src/wp_plugin_agent.cpp",
+        "src/wp_hook_agent.h",   "src/wp_hook_agent.cpp",
+        "src/wp_deploy_agent.h", "src/wp_deploy_agent.cpp",
+        "src/wp_rag_agent.h",    "src/wp_rag_agent.cpp",
+        "src/wp_terminal_agent.h", "src/wp_terminal_agent.cpp",
+        "src/wp_file_agent.h",   "src/wp_file_agent.cpp",
+        "tests/test_wp_theme_agent.cpp", "tests/test_wp_deploy_agent.cpp",
+    };
+    for (const char* rel : gone) {
+        ASSERT_TRUE(!fs::exists(plugin_root() / rel));
+    }
+}
+
+TEST(src_dir_contains_only_entry_point_and_readme) {
+    /* В src/ должен быть только plugin_main.cpp (и README.md, который
+     * объясняет, почему больше ничего быть не должно). */
+    int cpp_count = 0;
+    for (const auto& e : fs::directory_iterator(plugin_root() / "src")) {
+        if (e.is_regular_file() && e.path().extension() == ".cpp") ++cpp_count;
+    }
+    ASSERT_EQ(cpp_count, 1);
+}
+
+TEST(core_does_not_depend_on_the_host_abi) {
+    /* D-7: wp_coder_core от хоста не зависит, только колбэки. Проза не
+     * работает — работает проверка: она ищет include host-заголовка в core/.
+     *
+     * Исключение ОДНО и названное: host_bridge/ — мост к ABI, которому
+     * законно знать про LlamaHostApi (проба полей, проброс колбэков).
+     * Именно поэтому он вынесен в отдельный каталог, а не положен в core/:
+     * исключение с именем можно обсудить, а размытое «ну почти» — нет.
+     * Если в core/ начнёт проникать plugin_api.h, это перестанет быть
+     * Проверяются core/ и modules/ — те группы, что собираются в
+     * wp_coder_core и не должны знать про ABI. ui/ исключён не по
+     * недосмотру: окна плагина обязаны обращаться к хосту (видимость
+     * окна — g_api->window_set_visible), и это их прямая работа. D-7 и
+     * говорила про wp_coder_core, а не про весь плагин.
+     * мостом и станет зависимостью ядра от хоста. */
+    for (const char* sub : {"core", "modules"}) {
+        const fs::path dir = plugin_root() / sub;
+        if (!fs::exists(dir)) continue;
+        for (const auto& e : fs::recursive_directory_iterator(dir)) {
+            if (!e.is_regular_file()) continue;
+            const std::string ext = e.path().extension().string();
+            if (ext != ".cpp" && ext != ".h") continue;
+            const std::string body = read_file(e.path());
+            if (body.find("plugins/plugin_api.h") == std::string::npos) continue;
+            std::cerr << "  " << sub << "/ знает про ABI хоста: "
+                      << e.path().filename().string()
+                      << " (мост обязан жить в host_bridge/)" << std::endl;
+            ASSERT_TRUE(false);
+        }
+    }
+}
+
+TEST(host_bridge_is_the_only_place_that_knows_the_host_abi) {
+    /* Обратная сторона предыдущей проверки: мост существует и компилируется.
+     * Без неё проверка «в core/ чисто» прошла бы и при полном отсутствии
+     * моста — то есть была бы зелёной вхолостую. */
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_probe.h"));
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_probe.cpp"));
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_shim.h"));
+    ASSERT_TRUE(fs::exists(plugin_root() / "host_bridge" / "llm_stream_shim.cpp"));
+
+    /* И мост обязан знать: иначе это просто пустой каталог с красивым
+     * именем, а знание об ABI осталось бы в plugin_main.cpp. */
+    const std::string probe =
+        read_file(plugin_root() / "host_bridge" / "llm_stream_probe.cpp");
+    ASSERT_TRUE(probe.find("LlamaHostApi") != std::string::npos);
+}
+
+TEST(no_removed_symbols_in_sources) {
+    /* Удалённый код ссылался на несуществующий ABI. Эти имена не должны
+     * появляться снова: их нет ни в одном заголовке проекта. */
+    const char* banned[] = {
+        "AGENT_PLUGIN_API_VERSION", "PluginExports",
+        "plugin_create_agent", "AgentContextMock",
+    };
+    /* Сам тест эти строки содержит по необходимости — себя не сканируем
+     * (сравниваем по имени файла: __FILE__ может быть относительным). */
+    const std::string self_name = "test_manifest_consistency.cpp";
+    for (const auto& e : fs::recursive_directory_iterator(plugin_root())) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().filename().string() == self_name) continue;
+        auto ext = e.path().extension().string();
+        if (ext != ".cpp" && ext != ".h") continue;
+        std::string s = read_file(e.path());
+        for (const char* b : banned) {
+            if (s.find(b) != std::string::npos) {
+                std::cerr << "  найдено запрещённое имя '" << b
+                          << "' в " << e.path().string() << std::endl;
+                ASSERT_TRUE(false);
+            }
+        }
+    }
+}
+
+/* ======================================================================
+ * И1.10 — манифест в build/plugins обязан называться по имени плагина.
+ *
+ * PluginManager::find_manifest_path() (src/plugins/plugin_manager.cpp)
+ * пробует кандидатов по порядку: lib<name>.json, <name>.json,
+ * <name>.plugin.json, и только потом общий plugin.json. Отсюда две
+ * беды, обе были в дереве:
+ *
+ *   D20 — wp_coder копировал plugin.json, но его перехватывал
+ *         кандидат №2: хост читал бросившийся wp_coder.json версии
+ *         0.1.0 без capabilities python/devops. Правка «скопировать
+ *         plugin.json» не работала.
+ *   D21 — общий plugin.json в каталоге с несколькими плагинами
+ *         принадлежит сразу всем: hello_plugin (писал туда же с
+ *         08-06) и wp_coder перетирали друг друга, и кто последний
+ *         записал — тот и «владелец». В 08-26 это давало wp_coder
+ *         версию 0.1.0, в 09-25 — hello_plugin capabilities wp_coder.
+ *
+ * Имя файла манифеста = имя плагина. Общее имя недопустимо.
+ * ====================================================================== */
+
+TEST(build_manifest_is_named_after_plugin) {
+#ifndef WP_CODER_BUILD_PLUGIN_DIR
+    /* Тесты собраны вне основного CMake — проверять нечего. */
+    return;
+#else
+    fs::path dir(WP_CODER_BUILD_PLUGIN_DIR);
+    fs::path own = dir / "wp_coder.json";
+    if (!fs::exists(own)) {
+        std::cerr << "  нет манифеста " << own.string() << std::endl;
+        ASSERT_TRUE(false);
+    }
+    /* Содержимое совпадает с единственным источником истины. */
+    ASSERT_TRUE(read_file(own) == read_file(plugin_root() / "plugin.json"));
+    /* Имя плагина внутри совпадает с именем, из которого выведен файл:
+     * иначе PluginManager отбросит манифест как чужой. */
+    ASSERT_EQ(json_field(read_file(own), "name"), std::string("wp_coder"));
+#endif
+}
+
+TEST(build_dir_has_no_shared_plugin_json) {
+#ifndef WP_CODER_BUILD_PLUGIN_DIR
+    return;
+#else
+    /* Общий plugin.json в каталоге с несколькими плагинами — источник
+     * перекрёстных прав и версий. Его здесь быть не должно. */
+    fs::path shared = fs::path(WP_CODER_BUILD_PLUGIN_DIR) / "plugin.json";
+    if (fs::exists(shared)) {
+        std::cerr << "  найден общий манифест " << shared.string() << std::endl;
+        ASSERT_TRUE(false);
+    }
+#endif
+}
+
+TEST(cmake_does_not_copy_manifest_under_shared_name) {
+    /* Проверяем намерение в CMakeLists: destination обязан быть
+     * wp_coder.json, а не plugin.json.
+     *
+     * Путь и команда стоят в разных строках блока POST_BUILD, поэтому
+     * «rm -f» ищем не в той же строке, а в тексте от предыдущего
+     * COMMAND до самого вхождения: иначе проверка пропустила бы и
+     * копирование, и очистку. */
+    std::string cml = read_file(plugin_root() / "CMakeLists.txt");
+    size_t pos = 0;
+    while ((pos = cml.find("/plugins/plugin.json", pos)) != std::string::npos) {
+        size_t cmd = cml.rfind("COMMAND", pos);
+        std::string block = (cmd == std::string::npos)
+            ? std::string()
+            : cml.substr(cmd, pos - cmd);
+        if (block.find("rm -f") == std::string::npos) {
+            std::cerr << "  CMakeLists копирует манифест в общий plugin.json: "
+                      << block << std::endl;
+            ASSERT_TRUE(false);
+        }
+        pos += 8;
+    }
+    /* Собственный манифест копируется обязательно. */
+    ASSERT_TRUE(cml.find("/plugins/wp_coder.json") != std::string::npos);
+}
+
+TEST(host_rejects_manifest_of_another_plugin) {
+    /* Сторона хоста: манифест с чужим именем должен ОТБРАСЫВАТЬСЯ, а не
+     * применяться с предупреждением. Иначе И2 (система разрешений)
+     * построит права на чужом манифесте. */
+    std::string pm = read_file(plugin_root().parent_path().parent_path()
+                              / "src" / "plugins" / "plugin_manager.cpp");
+    if (pm.empty()) return;   /* плагин собирается отдельно от репозитория */
+    size_t at = pm.find("does not belong to plugin");
+    ASSERT_TRUE(at != std::string::npos);
+    /* Рядом обязателен сброс манифеста, а не только сообщение. */
+    size_t reset = pm.find("manifest = PluginManifest{}", at);
+    ASSERT_TRUE(reset != std::string::npos);
+}
+
+TEST(root_cmake_guards_against_stale_test_artifacts) {
+    /* D22: CMake не удаляет сгенерированные файлы подкаталога, который
+     * перестал конфигурироваться. При BUILD_TESTS=OFF старые бинарники
+     * остаются, и ctest отвечает за них «Passed» — зелёный свет в пустоту.
+     * Конфигурация обязана падать, а не молчать. */
+    fs::path root = plugin_root().parent_path().parent_path().parent_path();
+    std::string cml = read_file(root / "CMakeLists.txt");
+    if (cml.empty()) return;
+    ASSERT_TRUE(cml.find("BUILD_TESTS=OFF") != std::string::npos);
+    ASSERT_TRUE(cml.find("tests/CTestTestfile.cmake") != std::string::npos);
+    ASSERT_TRUE(cml.find("FATAL_ERROR") != std::string::npos);
+}
+
+/* --- И3.7: исполнение LLM-строки только через popen с политикой --- */
+
+TEST(no_std_system_in_sources) {
+    /* Мёртвый код src/wp_deploy_agent.cpp (удалён в И0.6) исполнял строку,
+     * собранную моделью, через std::system — без таймаута, без разбора
+     * команды, без политики. С тех пор весь исполняемый код плагина идёт
+     * через shell::run_capture*, где стоит проверка политики команд
+     * (И3.6) и timeout(1). Возвращать std::system нельзя: это обход
+     * обоих.
+     *
+     * Проверяется всё дерево, кроме тестов: сами тесты обязаны
+     * называть запрещённую строку, чтобы проверять политику. */
+    const std::string self_dir = "tests";
+    for (const auto& e : fs::recursive_directory_iterator(plugin_root())) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().parent_path().filename() == self_dir) continue;
+        auto ext = e.path().extension().string();
+        if (ext != ".cpp" && ext != ".h") continue;
+        const std::string s = code_only(read_file(e.path()));
+        /* «system(» с границей идентификатора: run_capture_status( и
+         * filesystem::path не должны срабатывать, а system( — должен. */
+        size_t at = 0;
+        while ((at = s.find("system(", at)) != std::string::npos) {
+            const bool boundary =
+                at == 0 || !(std::isalnum(static_cast<unsigned char>(s[at - 1])) ||
+                              s[at - 1] == '_');
+            if (boundary) {
+                std::cerr << "  найден вызов system( в " << e.path().string()
+                          << std::endl;
+                ASSERT_TRUE(false);
+            }
+            at += 7;
+        }
+    }
+}
+
+TEST(all_shell_execution_goes_through_the_guarded_wrapper) {
+    /* popen — единственная точка исполнения. Обёртка shell::run_capture
+     * стоит перед ней и проверяет политику команд; если где-то появится
+     * свой popen/system, проверка перестанет работать для этого места
+     * молча. */
+    for (const char* dir : {"core", "modules", "src", "ui"}) {
+        for (const auto& e :
+             fs::recursive_directory_iterator(plugin_root() / dir)) {
+            if (!e.is_regular_file()) continue;
+            auto ext = e.path().extension().string();
+            if (ext != ".cpp") continue;
+            const std::string s = code_only(read_file(e.path()));
+            const std::string name = e.path().filename().string();
+            if (name == "shell.h") continue;   /* сама обёртка */
+            for (const char* call : {"popen(", "::system(", "execvp(", "execv("}) {
+                if (s.find(call) != std::string::npos) {
+                    std::cerr << "  " << e.path().string() << ": прямой вызов "
+                              << call << " в обход shell-обёртки" << std::endl;
+                    ASSERT_TRUE(false);
+                }
+            }
+        }
+    }
+}
+
+/* --- Напоминалка для новой сессии (правило передачи сессии, §4) --- */
+
+TEST(session_start_file_exists_and_points_at_the_plan) {
+    /* Напоминалка переживает окно чата, поэтому обязана лежать в
+     * репозитории, а не в переписке. */
+    fs::path f = plugin_root() / "SESSION_START.md";
+    std::string s = read_file(f);
+    ASSERT_TRUE(!s.empty());
+    /* И ссылается на единственный источник правды. Иначе получился бы
+     * второй план — ровно та болезнь, которую лечит И1. */
+    ASSERT_TRUE(s.find("AGENT_PARITY_PLAN.md") != std::string::npos);
+    ASSERT_TRUE(s.find("§4") != std::string::npos);
+}
+
+TEST(session_start_file_has_no_volatile_data) {
+    /* Номера коммита, числа тестов и номера итерации в напоминалке
+     * протухают раньше, чем её прочтут, а следующая сессия поверит им.
+     * Всё изменяемое живёт в §4 плана и достаётся из git. */
+    const std::string s = read_file(plugin_root() / "SESSION_START.md");
+    ASSERT_TRUE(!s.empty());
+
+    /* Токен из 7+ символов, состоящих только из 0-9a-f, на границе
+     * слова — это номер коммита (или хеш). Граница обязательна: иначе
+     * под правило попали бы слова вроде «defaced». */
+    size_t i = 0;
+    while (i < s.size()) {
+        const bool left_ok =
+            i == 0 || !(std::isalnum(static_cast<unsigned char>(s[i - 1])) ||
+                        s[i - 1] == '_');
+        if (!left_ok) { ++i; continue; }
+        size_t j = i;
+        while (j < s.size() && (std::isxdigit(static_cast<unsigned char>(s[j])) ||
+                                s[j] == 'x'))
+            ++j;
+        const bool right_ok =
+            j >= s.size() || !(std::isalnum(static_cast<unsigned char>(s[j])) ||
+                               s[j] == '_');
+        if (j - i >= 7 && right_ok) {
+            std::cerr << "  в напоминалке изменяемое данное: «"
+                      << s.substr(i, j - i) << "» (строка "
+                      << (s.substr(0, i).find('\n') == std::string::npos
+                              ? 0
+                              : std::count(s.begin(), s.begin() + i, '\n') + 1)
+                      << "). Такое протухает раньше, чем файл прочтут: "
+                         "положение — в §4 плана, состояние — в git log"
+                      << std::endl;
+            ASSERT_TRUE(false);
+        }
+        i = (j > i) ? j : i + 1;
+    }
+}
+
+/* --- И11.5: временный каталог фикстуры обязан быть убираемым --- */
+
+TEST(every_tmp_fixture_registers_its_dir_or_cleans_it_itself) {
+    /* Уборка мусора из /tmp держится на ДВУХ независимых механизмах, и
+     * ни один из них не проверялся: `register_tmp_tree()` (уборка в
+     * конце прогона, test_framework.h) и RAII-деструктор фикстуры,
+     * который сносит свой каталог сам. Проверки green говорили «каталоги
+     * убираются» — и не говорили, потому что НИ ОДНА проверка не смотрит
+     * на /tmp вообще. Настоящий дефект это вскрыл: `test_tool_display`
+     * создавал каталог и не регистрировал его, и прогон оставлял 16
+     * каталогов, тогда как журнал плана уже отчитался «0 каталогов
+     * после прогона».
+     *
+     * Проверка идёт по СОСТАВУ, а не по факту прогона: содержимое /tmp
+     * после тестов — это состояние машины, а не свойство дерева, и его
+     * сравнение сработало бы один раз и молчало дальше.
+     *
+     * Самообъявляющийся список ИСКЛЮЧЕНИЙ обязателен: девять файлов
+     * убирают каталог деструктором, и это не дефект, а другой
+     * механизм. Список назван файлами, а не «все остальные» — иначе
+     * новая фикстура попала бы в исключение автоматически, и ровно
+     * тот дефект, который проверка ловит, прошёл бы мимо неё. */
+    static const char* kSelfCleaning[] = {
+        "test_agent_loop.cpp",    /* ~LoopFixture */
+        "test_diff.cpp",          /* ~RepoBox */
+        "test_diff_view.cpp",     /* remove_all в теле проверки */
+        "test_harness_profile.cpp",  /* ~TempDir */
+        "test_instruction.cpp",   /* ~TempDir */
+        "test_snapshot.cpp",      /* ~SandBox */
+        "test_task_tool.cpp",     /* ~TaskFixture */
+        "test_tool.cpp"};         /* remove_all в теле проверки */
+
+    const fs::path tdir = plugin_root() / "tests";
+    std::vector<std::string> exempt(kSelfCleaning,
+                                    kSelfCleaning + sizeof(kSelfCleaning) / sizeof(*kSelfCleaning));
+    int seen = 0;
+    for (const auto& e : fs::directory_iterator(tdir)) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() != ".cpp") continue;
+        const std::string name = e.path().filename().string();
+        const std::string code = code_only(read_file(e.path()));
+        /* Только код: имя каталога может встретиться в комментарии как
+         * объяснение, и комментарий фикстурой не является. */
+        if (code.find("temp_directory_path") == std::string::npos) continue;
+        ++seen;
+        if (code.find("register_tmp_tree") != std::string::npos) continue;
+        auto it = std::find(exempt.begin(), exempt.end(), name);
+        if (it != exempt.end()) {
+            exempt.erase(it);
+            continue;
+        }
+        std::cerr << "  " << name << " создаёт временный каталог, но не"
+                  << " регистрирует его (register_tmp_tree) и не значится"
+                  << " в списке самоубирающихся фикстур проверки"
+                  << " every_tmp_fixture_registers_its_dir_or_cleans_it_itself"
+                  << std::endl;
+        ASSERT_TRUE(false);
+    }
+    /* Каталог создаёт кто-то — иначе проверка зелена на пустом дереве. */
+    ASSERT_TRUE(seen > 0);
+    /* Исключение, которого больше нет, — протухшая запись: она молча
+     * разрешает новому дефекту в файле, который когда-то убирал себя. */
+    for (const std::string& n : exempt) {
+        std::cerr << "  исключение проверки уборки /tmp устарело: " << n
+                  << " — файла нет либо он уже регистрирует каталог"
+                  << std::endl;
+        ASSERT_TRUE(false);
+    }
+}
+
+/* --- Проектные строки-инварианты, которые легко сломать --- */
+
+TEST(limits_file_is_single_source_of_truth) {
+    /* Лимиты объявлены в core/limits.h и НЕ должны дублироваться
+     * числами в коде инструментов. */
+    std::string lim = read_file(plugin_root() / "core" / "limits.h");
+    ASSERT_TRUE(!lim.empty());
+    ASSERT_TRUE(lim.find("kMaxToolOutput") != std::string::npos);
+    ASSERT_TRUE(lim.find("kResultBudget") != std::string::npos);
+    /* Символические константы равны ожидаемым значениям. */
+    ASSERT_EQ((int)limits::kMaxToolOutput, 12000);
+    ASSERT_EQ((int)limits::kResultBudget, 1500);
+    ASSERT_EQ((int)limits::kMaxGrepMatches, 200);
+    ASSERT_EQ((int)limits::kMaxSteps, 12);
+    ASSERT_EQ((int)limits::kSessionBudget, 60000);
+    /* Буфер компакшна живёт в limits.h с И7.1, а не в compaction.h:
+     * константа, объявленная в двух местах, — это расхождение,
+     * которого не будет ровно до того дня, когда одно из них
+     * забудут обновить. Значение закреплено, потому что 20 000 —
+     * число из порта (COMPACTION_BUFFER), и его правка означает
+     * отклонение от него, а не «подстройку под нагрузку». */
+    ASSERT_EQ((int)limits::kCompactionBuffer, 20000);
+    /* И8.8: константа стала ДЕФОЛТОМ настройки `wp_coder.subagent_depth`
+     * (её читает Engine::load_settings), то есть числом, которое
+     * получают все, кто настройку не трогал. Поэтому оно и закреплено
+     * здесь: смена дефолта меняет поведение у всех, и делать это надо
+     * вместе с записью в плане, а не молча. */
+    ASSERT_EQ((int)limits::kSubagentDepthLimit, 1);
+    /* И8.14: сколько ходов движок вправе начать сам, чтобы модель прочитала
+     * результаты фоновых задач. Число закреплено по той же причине, что и
+     * предел глубины: это граница, за которой работа идёт за деньги
+     * пользователя без его запроса, и её правка меняет поведение у всех. */
+    ASSERT_EQ((int)limits::kBackgroundTurnLimit, 3);
+}
+
+/* --- И11.14: ход агента ходит через LlmClient (D23) --- */
+
+TEST(agent_turns_do_not_bypass_the_llm_client) {
+    /* D23: Planner, AgentLoop, хвостовой ход и ход субагента звали
+     * `llm_source::fetch` — блокирующий путь. Следствия были все молчаливые:
+     * дельты не доходили до UI (рисовать было нечего, И11.6), «стоп» не
+     * прерывал ожидание ответа (отмена живёт в LlmClient, а цикл проверял
+     * флаг только МЕЖДУ шагами), а И6.9 сверял две ветки LlmClient между
+     * собой — обе совпадали, и цикл не шёл ни по одной.
+     *
+     * Проверка по СОСТАВУ дерева, потому что «LlmClient покрывает ход»
+     * иначе проверяется только чтением: пять мест зова выглядят
+     * одинаково, и возврат одного к блокирующему пути не изменил бы ни
+     * одного числа в сборке.
+     *
+     * Единственные исключения названы файлами, а не «всё остальное»:
+     * иначе новая фоновая задача попала бы в исключение автоматически.
+     *
+     *  - agent_components.cpp — сводка (compaction): не ход агента, у неё
+     *    нет EngineState, откуда берётся токен хода;
+     *  - llm_client.cpp — САМ единый вход: блокирующий путь у него не
+     *    обход, а fallback на старом хосте без llm_chat_stream (И6.5) и
+     *    откат, когда хост отказался запускать поток. Запретить их здесь
+     *    означало бы запретить сам LlmClient. */
+    static const char* kBlockingAllowed[] = {
+        "agent_components.cpp",  /* summarizer_turn — сводка, не ход агента */
+        "llm_client.cpp"        /* fallback блокирующего пути — он и есть
+                                 * единый вход, обхода тут быть не может */
+    };
+
+    const fs::path core = plugin_root() / "core";
+    int seen = 0;
+    for (const auto& e : fs::recursive_directory_iterator(core)) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() != ".cpp") continue;
+        const std::string name = e.path().filename().string();
+        const std::string code = code_only(read_file(e.path()));
+        size_t at = 0;
+        while ((at = code.find("llm_source::fetch", at)) != std::string::npos) {
+            ++seen;
+            bool exempt = false;
+            for (const char* n : kBlockingAllowed) exempt = exempt || name == n;
+            if (!exempt) {
+                std::cerr << "  " << name << " зовёт llm_source::fetch в обход"
+                          << " LlmClient: дельты не доедут до UI, а «стоп»"
+                          << " не прервёт запрос (D23). Ход агента обязан"
+                          << " идти через LlmClient::fetch с токеном хода"
+                          << std::endl;
+                ASSERT_TRUE(false);
+            }
+            at += 17;
+        }
+    }
+    /* Ни одного зова не нашлось — проверка зелена на пустом дереве, то
+     * есть переименование llm_source выключило бы её молча. */
+    ASSERT_TRUE(seen > 0);
+}
+
+TEST(every_agent_turn_passes_the_abort_token) {
+    /* Отмена, которую никто не передаёт, не существует. Проверяется не
+     * «есть ли токен вообще», а то, что у каждого зова LlmClient в файле
+     * ходов свой токен: без него компилятор ничего не скажет, потому
+     * что параметр имеет значение по умолчанию и пропуск не виден.
+     *
+     * Счётчики, а не «≥»: возврат одного хода на блокирующий путь
+     * уменьшил бы их, и это должно быть падением. */
+    const std::string code =
+        code_only(read_file(plugin_root() / "core" / "agent_components.cpp"));
+
+    int calls = 0;
+    size_t at = 0;
+    while ((at = code.find("LlmClient::fetch", at)) != std::string::npos) {
+        ++calls;
+        at += 16;
+    }
+    /* Четыре хода: planner, основной цикл, хвостовой ход, субагент. */
+    ASSERT_EQ(calls, 4);
+
+    int tokens = 0;
+    at = 0;
+    while ((at = code.find("turn_abort.get()", at)) != std::string::npos) {
+        ++tokens;
+        at += 15;
+    }
+    /* Столько же: каждый зов хода обязан взять свой токен под локом. */
+    ASSERT_EQ(tokens, calls);
+}
+
+/* ======================================================================
+ * И12.9 — in-source сборка не оставляет следов в дереве исходников
+ * ======================================================================
+ *
+ * Тот же дефект, что ловился в И8.16, и он ВЕРНУЛСЯ. Причина не в
+ * дисциплине, а в устройстве `.gitignore`:
+ *
+ *   - правила артефактов сборки (`CMakeFiles/`, `Makefile`,
+ *     `cmake_install.cmake`) объявлены в начале файла;
+ *   - правило Executables содержит отрицания для каталогов tests (чтобы
+ *     исходники тестов не глушились вместе с бинарниками). Сами шаблоны
+ *     здесь не приводятся дословно по конкретной причине: в блочном
+ *     комментарии любой шаблон с двумя звёздочками подряд и косой
+ *     чертой содержит закрывающую последовательность, которая оборвёт
+ *     комментарий досрочно — и весь хвост файла не скомпилируется.
+ *     Написано словом после первой неудачной попытки.
+ *   - для файла внутри tests/ последним совпавшим шаблоном является
+ *     отрицание, а оно означает «НЕ игнорировать».
+ *
+ * Итог был неочевиден и оттого особенно скрытен: в дереве исходников
+ * оказывалось ДВА сорта одного и того же мусора — тот, что .gitignore
+ * прикрывал (молчаливый), и тот, что отрицание реинклюдило (видимый).
+ * `git status` показывал половину и ни разу не сказал, что половина
+ * спрятана. Чистый статус не означал чистое дерево, а это и есть
+ * определение дефекта.
+ *
+ * Проверка идёт по ПРИЗНАКУ, а не по списку мест: любой каталог с
+ * исходниками в любой глубине. Три имени однозначны и ни в каком исходнике
+ * не встречаются — их наличие в дереве может означать только in-source
+ * сборку.
+ */
+
+namespace {
+
+/* Корень репозитория: tests/ -> плагин -> user_plugins -> plugins -> ~ */
+fs::path repo_root() {
+    return fs::path(__FILE__).parent_path().parent_path().parent_path()
+        .parent_path().parent_path();
+}
+
+/* Имена, которые cmake генерирует в дереве исходников. `Makefile` сюда
+ * НЕ входит намеренно: в репозитории есть каталоги, где Makefile может
+ * оказаться законно, и ложное срабатывание страшнее пропуска. */
+const char* const kInSourceArtifacts[] = {
+    "CMakeCache.txt",
+    "CTestTestfile.cmake",
+    "cmake_install.cmake",
+};
+
+/* Каталоги, которые обход не трогает.
+ *
+ * `build` — там in-source законна, и там сотни мегабайт.
+ * `.git` — данные VCS, а не дерево проекта.
+ * `deps` — вендорённые исходники tree-sitter (172 МБ, см. .gitignore).
+ *   Первая версия обхода туда лезла: cmake там никто не запускает, а
+ *   обход стоил единицы секунд на каждом прогоне. Проверка, которая
+ *   медленная, начинает выглядеть как «тесты подтормаживают», а виноват
+ *   оказывается тот, кто её последним трогал. */
+bool is_allowed_dir(const fs::path& p) {
+    const std::string n = p.filename().string();
+    return n == "build" || n == ".git" || n == "deps";
+}
+
+} // anonymous namespace
+
+TEST(в_дереве_исходников_нет_следов_in_source_сборки) {
+    const fs::path root = repo_root();
+    std::vector<std::string> found;
+
+    /* Обход СТЕКОМ, а не recursive_directory_iterator.
+     *
+     * Первая версия звала `disable_recursion_pending()`, чтобы не спускаться
+     * в каталоги сборки: их там сотни мегабайт, и обход в них занял бы
+     * минуты. Этот метод есть не во всех сборках libstdc++, и он здесь не
+     * скомпилировался. Стек делает то же самое переносимо и без него, а
+     * объём проверки остаётся прежним — минуты на прогон не уходят. */
+    std::vector<fs::path> todo{root};
+    std::error_code ec;
+    while (!todo.empty()) {
+        const fs::path dir = todo.back();
+        todo.pop_back();
+        for (const auto& e : fs::directory_iterator(dir, ec)) {
+            if (ec) break;
+            const fs::path p = e.path();
+            if (e.is_directory(ec)) {
+                if (!is_allowed_dir(p)) todo.push_back(p);
+                continue;
+            }
+            const std::string name = p.filename().string();
+            for (const char* a : kInSourceArtifacts) {
+                if (name == a) {
+                    found.push_back(fs::relative(p, root, ec).string());
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!found.empty()) {
+        std::cerr << "  Следы in-source сборки в дереве исходников (cmake "
+                     "запускался не из каталога сборки):";
+        for (const std::string& f : found) std::cerr << " " << f;
+        std::cerr << std::endl;
+    }
+    ASSERT_EQ(found.size(), (size_t)0);
+    /* Проверка обязана что-то находить, иначе она зелена на обходе, который
+     * сломался: неверный корень даст ноль находок так же надёжно, как и
+     * чистое дерево. Дешёвое доказательство, что обход идёт по тому
+     * дереву, а не мимо. */
+    ASSERT_TRUE(read_file(root / "CMakeLists.txt").size() > 0);
+}
+
+/* ======================================================================
+ * И13.9: гейт покрытия нельзя тихо выключить правкой числа
+ * ====================================================================== */
+
+/*
+ * Задача 13.9 требовала «≥ 80 %» и не сказала, кто это проверяет. Гейт
+ * (`scripts/coverage.sh` → `scripts/measure_coverage.py --threshold`) закрыл
+ * критерий со стороны прогона, но осталась ровно та же дыра, что и у всех
+ * предыдущих «механизм есть»: гейт можно выключить ОДНОЙ правкой —
+ * поставить `--threshold 0`, и всё, что он проверял, перестаёт проверяться
+ * молча, потому что скрипт по-прежнему завершается нулём.
+ *
+ * Проверка по ИСХОДНИКУ скрипта, а не по запуску: запуск требует сборки с
+ * --coverage (десятки минут), а правило «порог назван числом и не нулём»
+ * видно из текста и проверяется за миллисекунды. Как и остальные проверки
+ * этого файла (обход in-source артефактов, обёртка shell), это сторож по
+ * исходнику — и он проверен мутацией.
+ */
+TEST(гейт_покрытия_назван_числом_и_не_выключается_нулём) {
+    const fs::path root = plugin_root();
+    const std::string sh = read_file(root / "scripts/coverage.sh");
+    const std::string py = read_file(root / "scripts/measure_coverage.py");
+
+    /* Скрипты существуют и читаются: пустой файл прошёл бы любую проверку
+     * подстроки, и «проверка на пустом файле» — это зелёная проверка. */
+    if (sh.empty() || py.empty()) {
+        std::cerr << "  не прочитаны scripts/coverage.sh или "
+                     "scripts/measure_coverage.py" << std::endl;
+    }
+    ASSERT_TRUE(sh.size() > 0);
+    ASSERT_TRUE(py.size() > 0);
+
+    /* Порог передаётся разбору явно и по умолчанию равен 80. */
+    ASSERT_TRUE(sh.find("--threshold \"${THRESHOLD}\"") != std::string::npos);
+    ASSERT_TRUE(sh.find("THRESHOLD=\"${1:-80}\"") != std::string::npos);
+    /* Порог НЕ ноль и в разборе: ноль означал бы «гейта нет», и прошёл бы
+     * при любом покрытии, включая нулевое. */
+    ASSERT_TRUE(sh.find("THRESHOLD=\"${1:-0}\"") == std::string::npos);
+    /* Ненулевой код выхода при незелёном прогоне — отдельный от «покрыто
+     * мало»: иначе «сборка не прошла» читалось бы как «порог взят». */
+    ASSERT_TRUE(sh.find("FAIL: тесты не зелёные") != std::string::npos);
+    /* Разбор сам отказывается молчать при пустом отчёте: «нет строк» и
+     * «покрыто на 100 %» не должны выглядеть одинаково. */
+    ASSERT_TRUE(py.find("в отчёте нет строк ни по одному файлу") !=
+                std::string::npos);
+    /* И называет то, что НЕ считается: пустое исключение по умолчанию. */
+    ASSERT_TRUE(py.find("default=\"\"") != std::string::npos);
+}

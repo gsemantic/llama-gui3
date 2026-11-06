@@ -162,6 +162,9 @@ public:
     void on_server_state_changed();
     void on_settings_changed();
     void on_state_changed(const std::string& key);
+
+    /* Переключить режим агента (имя плагинного агента или пусто = Normal). */
+    void set_agent_mode(const std::string& name);
     
     // File operations
     void open_file(const std::string& file_path);

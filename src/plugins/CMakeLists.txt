@@ -1,6 +1,8 @@
 # Plugin system host — управление загрузкой/выгрузкой плагинов
 add_library(plugin_core STATIC
     plugin_manager.cpp
+    llm_stream_bridge.cpp
+    ast_symbols.cpp
 )
 
 target_include_directories(plugin_core PUBLIC

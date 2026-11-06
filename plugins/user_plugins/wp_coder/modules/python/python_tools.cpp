@@ -1,10 +1,16 @@
 #include "python_tools.h"
+#include "../../core/tool.h"
 #include "../../core/tools_registry.h"
 #include "../../core/engine.h"
+#include "../../core/project.h"
+#include "../../core/shell.h"
+#include "../../core/security.h"
+#include "../../core/limits.h"
 
 #include <cstdio>
 #include <sstream>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 
 namespace fs = std::filesystem;
@@ -13,58 +19,97 @@ namespace python {
 
 namespace {
 
-std::string run_capture(const std::string& cmd) {
-    std::string full = cmd + " 2>&1";
-    FILE* f = popen(full.c_str(), "r");
-    if (!f) return "[ошибка] не удалось запустить: " + cmd;
-    char buf[4096];
-    std::string out;
-    while (fgets(buf, sizeof(buf), f)) out += buf;
-    pclose(f);
-    if (out.size() > 8000) { out.resize(8000); out += "\n...[обрезано]"; }
-    return out;
+using limits::kModuleMaxOutput;
+
+/* И1.3: чтение типизированных аргументов. */
+std::string arg_str(const json::JsonValue& a, const char* key) {
+    return a.get_string(key);
 }
 
-std::string resolve_path(const std::string& rel) {
-    const auto& st = engine_state();
-    if (st.project_dir.empty()) return rel;
-    if (rel.empty()) return st.project_dir;
-    if (rel[0] == '/') return rel;
-    return st.project_dir + "/" + rel;
+ToolOutput out(std::string title, std::string text) {
+    ToolOutput o;
+    o.title = std::move(title);
+    o.output = std::move(text);
+    return o;
 }
 
 std::string python_run(const std::string& path) {
-    std::string abs = resolve_path(path);
-    return run_capture("python3 \"" + abs + "\"");
+    std::string abs = project_resolve(path);
+    std::string cmd = "python3 " + shell::shell_quote(abs);
+    std::string result = shell::run_capture(cmd, 60);
+    return result.empty() ? "[python_run: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
-std::string pip_install(const std::string& pkg) {
-    return run_capture("pip install " + pkg);
+std::string pip_install(const std::string& pkg,
+                        const std::function<bool()>& should_cancel) {
+    if (pkg.empty()) return "[ошибка] укажи имя пакета (query)";
+    std::string cmd = "pip install " + shell::shell_quote(pkg);
+    /* И11.10: установка пакета идёт долго и обрывается на полпути, если её
+     * не остановить; без отметки об отмене модель сочтёт установку
+     * успешной. */
+    shell::RunStats stats;
+    std::string result =
+        shell::run_capture_cancel(cmd, 120, should_cancel, stats);
+    if (stats.cancelled) result += shell::cancelled_note();
+    return result.empty() ? "[pip install: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
-std::string django_manage(const std::string& args) {
-    const auto& st = engine_state();
-    std::string manage = st.project_dir + "/manage.py";
-    if (!fs::exists(manage)) return "[ошибка] manage.py не найден в " + st.project_dir;
-    return run_capture("python3 \"" + manage + "\" " + args);
+std::string django_manage(const std::string& args, const std::string& project_dir) {
+    std::string manage = project_dir + "/manage.py";
+    if (!fs::exists(manage)) return "[ошибка] manage.py не найден в " + project_dir;
+    /* И13.4 (D9): args — текст от модели, и раньше он уходил в строку
+     * команды как есть. Это не «аргументы без кавычек» (так D9 был
+     * записан), а выполнение произвольной команды: «migrate; touch …»
+     * разбирается оболочкой на две команды, и вторая выполняется.
+     * Проверено на живой оболочке с настоящим manage.py.
+     *
+     * Экранирование здесь не помогло бы: manage.py получает АРГУМЕНТЫ, а
+     * не строку shell, и кавычки в аргументах оболочка разбирает сама
+     * («test "my tests.py"» доходит тремя словами). Второй слой
+     * экранирования только испортил бы разбор. Поэтому запрещён ровно
+     * разделитель — перевод строки им тоже является, — а всё остальное
+     * доходит до manage.py как есть.
+     *
+     * Отказ называет символ: модель должна знать, что именно не так, иначе
+     * отказ читается как поломка инструмента и повторяется. */
+    const std::string why = security::shell_arg_refusal(args);
+    if (!why.empty())
+        return std::string("[запрещено] в аргументах manage.py: ") + why +
+               ". Один вызов — одна manage-команда: «migrate»,"
+               " «test tests/test_x.py», «--settings=…». "
+               "Если нужна цепочка — это отдельный вызов инструмента.";
+    std::string cmd = "python3 " + shell::shell_quote(manage) + " " + args;
+    std::string result = shell::run_capture(cmd, 60);
+    return result.empty() ? "[django: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
-std::string pytest_run(const std::string& path, const std::string& marker) {
+std::string pytest_run(const std::string& path, const std::string& marker,
+                       const std::function<bool()>& should_cancel) {
     std::string cmd = "python3 -m pytest";
-    if (!path.empty()) cmd += " " + resolve_path(path);
-    if (!marker.empty()) cmd += " -m " + marker;
+    if (!path.empty()) cmd += " " + shell::shell_quote(project_resolve(path));
+    if (!marker.empty()) cmd += " -m " + shell::shell_quote(marker);
     cmd += " -v";
-    return run_capture(cmd);
+    /* И11.10: прогон тестов — самый частый долгий вызов, и самый частый
+     * повод нажать «стоп». */
+    shell::RunStats stats;
+    std::string result =
+        shell::run_capture_cancel(cmd, 120, should_cancel, stats);
+    if (stats.cancelled) result += shell::cancelled_note();
+    return result.empty() ? "[pytest: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
 std::string venv_create(const std::string& path) {
-    std::string abs = resolve_path(path);
-    return run_capture("python3 -m venv \"" + abs + "\"");
+    std::string abs = project_resolve(path);
+    std::string cmd = "python3 -m venv " + shell::shell_quote(abs);
+    std::string result = shell::run_capture(cmd, 60);
+    return result.empty() ? "[venv: создано]" : shell::cap(result, kModuleMaxOutput);
 }
 
 std::string python_lint(const std::string& path) {
-    std::string abs = resolve_path(path);
-    return run_capture("python3 -m py_compile \"" + abs + "\"");
+    std::string abs = project_resolve(path);
+    std::string cmd = "python3 -m py_compile " + shell::shell_quote(abs);
+    std::string result = shell::run_capture(cmd, 30);
+    return result.empty() ? "[py_compile: нет ошибок]" : shell::cap(result, kModuleMaxOutput);
 }
 
 } // anonymous namespace
@@ -72,29 +117,104 @@ std::string python_lint(const std::string& path) {
 void register_python_tools() {
     auto& reg = ToolsRegistry::instance();
 
-    reg.register_tool("python_run", [](const ToolArgs& a) -> std::string {
-        return python_run(a.path);
-    }, "Запуск Python-скрипта");
+    {
+        ToolDef def;
+        def.name = "python_run";
+        def.description = "Запуск Python-скрипта";
+        /* Скрипт проекта может писать файлы и ходить в сеть — эффект
+         * заранее неизвестен, поэтому считаем изменением. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE;
+        def.permission_key = "bash";
+        SchemaBuilder b;
+        b.str("path", "путь к скрипту").required("path");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            return out("python", python_run(arg_str(a, "path")));
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("pip_install", [](const ToolArgs& a) -> std::string {
-        return pip_install(a.query);
-    }, "Установка пакета");
+    {
+        ToolDef def;
+        def.name = "pip_install";
+        def.description = "Установка Python-пакета";
+        /* Меняет окружение, а не файлы проекта: откатить нечем. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW | TF_NETWORK;
+        def.permission_key = "package";
+        SchemaBuilder b;
+        b.str("query", "имя пакета (например requests)").required("query");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            return out("pip", pip_install(arg_str(a, "query"),
+                                          [&ctx]() { return ctx.cancelled(); }));
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("django_manage", [](const ToolArgs& a) -> std::string {
-        return django_manage(a.cli);
-    }, "Django management команда");
+    {
+        ToolDef def;
+        def.name = "django_manage";
+        def.description = "Django management-команда (manage.py)";
+        /* «migrate», «flush», «createsuperuser» меняют БД. */
+        def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "bash";
+        SchemaBuilder b;
+        b.str("cli", "аргументы manage.py, например «migrate» или «test»")
+         .required("cli");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            return out("django", django_manage(arg_str(a, "cli"), ctx.project_dir()));
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("pytest_run", [](const ToolArgs& a) -> std::string {
-        return pytest_run(a.path, a.query);
-    }, "Запуск тестов");
+    {
+        ToolDef def;
+        def.name = "pytest_run";
+        def.description = "Запуск тестов pytest";
+        /* Фикстуры и сами тесты пишут файлы и кэш. */
+        def.flags = TF_EXECUTES | TF_WRITES_FILES | TF_SLOW;
+        def.permission_key = "test";
+        SchemaBuilder b;
+        b.str("path", "файл или каталог с тестами; пусто = весь проект")
+         .str("query", "маркер pytest, например «unit»");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            return out("pytest", pytest_run(arg_str(a, "path"), arg_str(a, "query"),
+                                            [&ctx]() { return ctx.cancelled(); }));
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("venv_create", [](const ToolArgs& a) -> std::string {
-        return venv_create(a.path);
-    }, "Создание виртуального окружения");
+    {
+        ToolDef def;
+        def.name = "venv_create";
+        def.description = "Создание виртуального окружения";
+        def.flags = TF_EXECUTES | TF_WRITES_FILES | TF_SLOW;
+        def.permission_key = "package";
+        SchemaBuilder b;
+        b.str("path", "каталог окружения, например venv").required("path");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            return out("venv", venv_create(arg_str(a, "path")));
+        };
+        reg.register_def(std::move(def));
+    }
 
-    reg.register_tool("python_lint", [](const ToolArgs& a) -> std::string {
-        return python_lint(a.path);
-    }, "Проверка синтаксиса Python");
+    {
+        ToolDef def;
+        def.name = "python_lint";
+        def.description = "Проверка синтаксиса Python (py_compile)";
+        def.flags = TF_READ_ONLY | TF_EXECUTES;
+        def.permission_key = "read";
+        SchemaBuilder b;
+        b.str("path", "путь к файлу .py").required("path");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext&) -> ToolOutput {
+            return out("py_compile", python_lint(arg_str(a, "path")));
+        };
+        reg.register_def(std::move(def));
+    }
 }
 
 static const char* kDjangoSkill =
@@ -130,7 +250,7 @@ static const char* kFastapiSkill =
     "- Зависимости: Depends(get_db).\n"
     "- Async: async def endpoint().\n"
     "- Docs: /docs (Swagger), /redoc (ReDoc).";
-        
+
 static const char* kPythonProjectSkill =
     "# python_project\n"
     "Описание: структура Python-проекта\n"
@@ -143,10 +263,10 @@ static const char* kPythonProjectSkill =
 
 std::vector<Skill> get_python_skills() {
     return {
-        {"python_django", "Django best practices", kDjangoSkill},
-        {"python_flask", "Flask best practices", kFlaskSkill},
-        {"python_fastapi", "FastAPI best practices", kFastapiSkill},
-        {"python_project", "Структура Python-проекта", kPythonProjectSkill}
+        {"python_django", "Django best practices", kDjangoSkill, "python"},
+        {"python_flask", "Flask best practices", kFlaskSkill, "python"},
+        {"python_fastapi", "FastAPI best practices", kFastapiSkill, "python"},
+        {"python_project", "Структура Python-проекта", kPythonProjectSkill, "python"}
     };
 }
 

@@ -321,6 +321,22 @@ void ChatInterface::render_agent_mode_selector() {
     }
 }
 
+void ChatInterface::set_active_agent_mode(const std::string& name) {
+    if (!plugin_manager_) return;
+    auto modes = plugin_manager_->get_agent_modes();
+    for (size_t i = 0; i < modes.size(); ++i) {
+        const auto& m = modes[i];
+        std::string nm = m.mode->display_name ? m.mode->display_name : m.mode->name;
+        if (nm == name || m.mode->name == name) {
+            active_agent_mode_index_ = static_cast<int>(i);
+            std::cerr << "[Chat] set_active_agent_mode -> " << nm << " (idx=" << i << ")" << std::endl;
+            return;
+        }
+    }
+    active_agent_mode_index_ = -1;
+    std::cerr << "[Chat] set_active_agent_mode: mode '" << name << "' not found" << std::endl;
+}
+
 void ChatInterface::send_message_to_agent(const std::string& message) {
     std::cerr << "[Chat] send_message_to_agent called, agent_mode=" << active_agent_mode_index_ << std::endl;
     if (!plugin_manager_ || active_agent_mode_index_ < 0) return;

@@ -173,6 +173,9 @@ public:
     // Settings access
     const Settings& get_settings() const { return settings_; }
 
+    /* Установить режим агента по имени (для команд/CLI без GUI). */
+    void set_active_agent_mode(const std::string& name);
+
 private:
     void render_message_list();
     void render_input_area();
@@ -187,6 +190,14 @@ private:
     void clear_input();
     void scroll_to_bottom();
     void process_pending_responses();
+
+public:
+    /** Потокобезопасная очередь события агента для доставки в UI.
+     *  Вызывается из фонового потока агента (host_agent_mode_push_event).
+     *  Событие будет обработано на следующем кадре через process_pending_responses(). */
+    void enqueue_pending_response(const std::string& content);
+
+private:
 
     // Callback for streaming responses
     void on_stream_chunk(const std::string& chunk, bool is_final);

@@ -74,6 +74,14 @@ make -j$(nproc)
 
 echo ""
 echo "✅ Сборка завершена успешно!"
+
+# Копируем плагины из build/plugins/ в plugins/ для запуска
+if [ -d "$BUILD_DIR/plugins" ]; then
+    mkdir -p "$PROJECT_DIR/plugins"
+    cp -u "$BUILD_DIR/plugins/"*.so "$PROJECT_DIR/plugins/" 2>/dev/null || true
+    echo "📦 Плагины скопированы в plugins/"
+fi
+
 echo ""
 echo "Использование:"
 echo "  ./llama-gui                    # Запуск с localhost:8081"

@@ -9,9 +9,13 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include "../../include/core/settings.h"
 
 namespace llama_gui {
 namespace ui {
+namespace core {
+using Settings = llama_gui::core::Settings;
+} // namespace core
 
 /**
  * @brief Результат выполнения команды агента
@@ -45,9 +49,10 @@ public:
      * @brief Инициализация менеджера команд
      * @param registry Реестр агентов
      * @param context Контекст агентов
+     * @param settings Настройки приложения
      * @return true если успешно
      */
-    bool initialize(agents::AgentRegistry* registry, agents::AgentContext* context);
+    bool initialize(agents::AgentRegistry* registry, agents::AgentContext* context, core::Settings* settings);
 
     /**
      * @brief Обработка команды
@@ -115,6 +120,8 @@ public:
 
     AgentCommandResult handle_agents_command(const std::vector<std::string>& args);
 
+    AgentCommandResult handle_connect_command(const std::vector<std::string>& args);
+
     /**
      * @brief Разбор строки команды на аргументы
      */
@@ -143,6 +150,7 @@ private:
 
     agents::AgentRegistry* registry_ = nullptr;
     agents::AgentContext* context_ = nullptr;
+    core::Settings* settings_ = nullptr;
     
     std::function<void(const AgentCommandResult&)> on_result_;
 };

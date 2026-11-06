@@ -18,7 +18,9 @@
 #include "core/base_tools.h"
 #include "core/git_tools.h"
 #include "core/module_api.h"
+#include "core/json_utils.h"
 #include "ui/coder_window.h"
+#include "host_bridge/llm_slots.h"
 
 /* Модули. */
 #include "modules/wordpress/wp_module.h"
@@ -29,7 +31,9 @@
 #include "plugins/plugin_api.h"
 
 #include <cstdio>
+#include <cctype>
 #include <cstring>
+#include <cstddef>
 #include <iostream>
 
 /* Глобальные хендлы хоста. */
@@ -40,12 +44,17 @@ const LlamaHostApi* g_api = nullptr;
 
 static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_message, void* user_data) {
     if (!user_message || !user_message[0]) return nullptr;
+    std::string message = coder::text::sanitize_utf8(user_message);
+    std::cerr << "[wp_coder] agent_mode_on_message: " << message << std::endl;
 
     auto& eng = coder::engine();
-    eng.submit(user_message);
+    eng.submit(message);
 
-    /* Агент работает в worker-потоке. Ждём результат (бесконечно). */
-    std::string response = eng.wait_response(0);
+    /* Агент работает в worker-потоке. Ждём результат (таймаут 5 минут). */
+    std::cerr << "[wp_coder] agent_mode_on_message: waiting for response..." << std::endl;
+    std::string response = eng.wait_response(300000);
+    std::cerr << "[wp_coder] agent_mode_on_message response_len=" << response.size()
+              << " head=" << coder::text::utf8_prefix(response, 120) << std::endl;
 
     char* out = (char*)malloc(response.size() + 1);
     if (out) memcpy(out, response.c_str(), response.size() + 1);
@@ -65,10 +74,29 @@ LLAMA_PLUGIN_EXPORT const char* ll_plugin_api_version(void) {
     return LLAMA_PLUGIN_API_VERSION;
 }
 
+namespace {
+
+/* Версия плагина в ОДНОМ месте.
+ *
+ * Раньше она была продублирована в четырёх файлах (plugin.json,
+ * plugins/wp_coder.json, ll_plugin_info(), CHANGELOG.md) и разошлась:
+ * 0.3.0 / 0.1.0 / 0.3.0 / 0.4.0. При изменении нужно править все четыре.
+ *
+ * CMake генерирует WP_CODER_VERSION из plugin.json, чтобы JSON остался
+ * единственным источником истины; если макрос не определён (сборка вне
+ * CMake) — падаем на значение из манифеста. */
+#ifdef WP_CODER_VERSION
+const char* kPluginVersion = WP_CODER_VERSION;
+#else
+const char* kPluginVersion = "0.5.0";
+#endif
+
+}  // namespace
+
 LLAMA_PLUGIN_EXPORT const LlamaPluginInfo* ll_plugin_info(void) {
     static const LlamaPluginInfo info = {
         "wp_coder",
-        "0.2.0",
+        kPluginVersion,
         "AI-кодер: модульная архитектура (WordPress, Python, ...)",
         "llama-gui"
     };
@@ -76,6 +104,11 @@ LLAMA_PLUGIN_EXPORT const LlamaPluginInfo* ll_plugin_info(void) {
 }
 
 LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi* api) {
+    std::cerr << "[wp_coder] ll_plugin_init: host=" << (void*)host
+              << " api=" << (void*)api
+              << " agent_mode_register=" << (void*)(api ? api->agent_mode_register : nullptr)
+              << " llm_chat_messages=" << (void*)(api ? api->llm_chat_messages : nullptr)
+              << std::endl;
     if (!host || !api) return 1;
     g_host = host;
     g_api = api;
@@ -85,20 +118,23 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     coder::python::register_module();
     coder::devops::register_module();
 
-    /* 2. Инициализируем движок. */
+    /* 2. Инициализируем движок.
+     *
+     * И13.8: слоты LLM и AST ставит мост (host_bridge/llm_slots.cpp) — там
+     * же, где живёт проба полей хоста. Здесь осталось только то, что к
+     * возможностям хоста не относится: пути, настройки, rag, рассылка
+     * событий в чат. Слот, у которого у хоста нет поля, остаётся пустым,
+     * и это НЕ недоделка, а ответ: запасной путь выбирает ядро (LlmClient,
+     * llm_source, ast_symbols). До И13.8 слоты ставились здесь, а src/ в
+     * сборку тестов не входит — то есть весь слой деградации не был
+     * проверен ничем. */
     coder::HostCallbacks cb;
-    cb.llm_is_connected = []() -> bool {
-        return g_api && g_api->llm_is_connected(g_host) == 1;
-    };
-    cb.llm_complete = [](const std::string& sys, const std::string& user,
-                         std::string& resp) -> bool {
-        if (!g_api || !g_host) return false;
-        char* r = nullptr;
-        int rc = g_api->llm_complete_ex(g_host, sys.c_str(), user.c_str(), &r);
-        if (rc != 1 || !r) return false;
-        resp = r;
-        g_api->free_string(g_host, r);
-        return true;
+    coder::host::install_llm_slots(cb, g_api, g_host);
+
+    /* Прогресс в чат приложения (agent_mode_push_event). */
+    cb.chat_event = [](const std::string& event) {
+        if (!g_api || !g_host) return;
+        g_api->agent_mode_push_event(g_host, event.c_str());
     };
     cb.path_data_dir = []() -> std::string {
         if (!g_api || !g_host) return "";
@@ -156,7 +192,7 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
 
     /* 5. Загружаем навыки (из модулей + .md файлов). */
     coder::SkillsManager::instance().load();
-    /* Загружаем .md файлы из каталога плагина. */
+    /* Загружаем .md файлы из каталога плагина (внешние — без привязки к модулю). */
     {
         const char* d = api->path_data_dir(host);
         if (d) {
@@ -164,9 +200,39 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
             coder::SkillsManager::instance().load_from_directory(skills_dir);
         }
     }
-    /* Каталог плагина (рядом с .so). */
+    /* Каталог плагина (рядом с .so) — WP-навыки. */
     coder::SkillsManager::instance().load_from_directory(
-        std::string(WP_CODER_SKILLS_DIR));
+        std::string(WP_CODER_SKILLS_DIR), "wordpress");
+
+    /* И9.7: каталог профилей harness, поставленных с плагином. Строка
+     * приходит из CMake (WP_CODER_PROFILES_DIR) — ровно тем же путём, что
+     * каталог навыков: путь к дереву плагина известен здесь и больше
+     * нигде, а ядро о своём расположении не знает (D-7). Порядок важен
+     * только в одном: пусть ДО Engine::init ниже, иначе первый
+     * load_settings прочитал бы пустой каталог, и профиль «не нашёлся
+     * бы» до первой перезагрузки настроек. */
+    coder::engine().set_profiles_bundled_dir(std::string(WP_CODER_PROFILES_DIR));
+
+    /* Активируем навыки выбранного модуля.
+     *
+     * Раньше здесь стояла проверка «если active_module непустой». На
+     * чистой установке настройка пуста, вызов пропускался, и агент
+     * оставался вообще без навыков (и без намёка, что skill_detail
+     * существует). Теперь set_module/set_active вызывается всегда —
+     * refresh_active() сам выберет разумный дефолт. */
+    {
+        const auto& st = coder::engine().state();
+        coder::SkillsManager& sm = coder::SkillsManager::instance();
+        if (!st.active_module.empty()) {
+            sm.set_module(st.active_module);
+        } else {
+            /* Модуль не выбран — оставляем active_module_ пустым, чтобы
+             * были видны навыки всех модулей. */
+            sm.refresh_active();
+        }
+        std::cerr << "[wp_coder] skills: загружено " << sm.all_skills().size()
+                  << ", активно " << sm.active_skills().size() << std::endl;
+    }
 
     /* 6. Регистрируем UI. */
     coder::ui::init_windows();
@@ -178,7 +244,14 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     agent_mode.on_message = agent_mode_on_message;
     agent_mode.render_extras = agent_mode_render_extras;
     agent_mode.user_data = nullptr;
+    std::cerr << "[wp_coder] registering agent_mode: api=" << (void*)api
+              << " agent_mode_register=" << (void*)(api ? api->agent_mode_register : nullptr)
+              << " host=" << (void*)host << std::endl;
     api->agent_mode_register(host, &agent_mode);
+    std::cerr << "[wp_coder] agent_mode registered: " << agent_mode.name << std::endl;
+
+    /* Resume сессии (5.2): подхватываем сохранённый диалог до старта worker. */
+    coder::engine().load_session();
 
     /* 8. Запускаем worker-поток движка. */
     coder::engine().start();

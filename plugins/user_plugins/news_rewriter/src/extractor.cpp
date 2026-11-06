@@ -159,12 +159,33 @@ std::size_t find_close_tag(const std::string& html, std::size_t from,
 
 // Декодирует сущность (без '&' и ';'); возвращает пустую строку, если незнакома.
 std::string decode_entity(const std::string& ent) {
-    if (ent == "amp")  return "&";
-    if (ent == "lt")   return "<";
-    if (ent == "gt")   return ">";
-    if (ent == "quot") return "\"";
-    if (ent == "apos") return "'";
-    if (ent == "nbsp") return " ";
+    static const struct { const char* name; const char* utf8; } kNamed[] = {
+        {"amp", "\x26"},          // &
+        {"lt", "\x3C"},           // <
+        {"gt", "\x3E"},           // >
+        {"quot", "\x22"},         // "
+        {"apos", "\x27"},         // '
+        {"nbsp", " "},            // неразрывный пробел
+        {"mdash", "\xE2\x80\x94"}, // —
+        {"ndash", "\xE2\x80\x93"}, // –
+        {"hellip", "\xE2\x80\xA6"},// …
+        {"laquo", "\xC2\xAB"},    // «
+        {"raquo", "\xC2\xBB"},    // »
+        {"ldquo", "\xE2\x80\x9C"},// “
+        {"rdquo", "\xE2\x80\x9D"},// ”
+        {"lsquo", "\xE2\x80\x98"},// ‘
+        {"rsquo", "\xE2\x80\x99"},// ’
+        {"middot", "\xC2\xB7"},   // ·
+        {"sect", "\xC2\xA7"},     // §
+        {"aelig", "\xC3\xA6"},    // æ
+        {"times", "\xC3\x97"},    // ×
+        {"copy", "\xC2\xA9"},     // ©
+        {"reg", "\xC2\xAE"},      // ®
+        {"deg", "\xC2\xB0"},      // °
+    };
+    for (const auto& e : kNamed) {
+        if (ent == e.name) return e.utf8;
+    }
     if (ent.size() > 1 && ent[0] == '#') {
         const bool hex = ent.size() > 2 && (ent[1] == 'x' || ent[1] == 'X');
         const char* p = ent.c_str() + (hex ? 2 : 1);
@@ -818,10 +839,18 @@ std::vector<ExtractedArticle> detect_anchor_items(const std::string& html,
 }
 
 // Подстроки в class/id/role, по которым контейнер считается «не статьёй»
-// (сайдбар, виджет, реклама, промо, «постоянная правая информация» и т.п.).
+// (сайдбар, реклама, промо, «постоянная правая информация» и т.п.).
+//
+// ВАЖНО: сюда НЕ входят универсальные классы-«обёртки» вёрстки (widget, card,
+// col, panel и т.п.) — на многих сайтах (в т.ч. библиотечные порталы на CMS)
+// основной текст статьи лежит именно ВНУТРИ такого контейнера, и жёсткое
+// исключение по имени класса вырезало бы саму статью (регрессия libkolch.ru:
+// <div class="widget widget-text"> + браузерный баннер как единственный
+// выживший текст). «Меню» таких обёрток отсеиваются ниже по плотности ссылок
+// (link density) в extract_body — это общий признак, не зависящий от имён.
 bool has_noise_class(const std::string& tag) {
     static const char* kBad[] = {
-        "sidebar", "side-bar", "side_bar", "widget", "banner", "promo",
+        "sidebar", "side-bar", "side_bar", "banner", "promo",
         "advert", "ad-", "-ad", "sponsor", "rightcol", "right-col",
         "rightcolumn", "rail", "popular", "most-read",
         "recommended", "related", "teaser",
@@ -1663,10 +1692,35 @@ std::string extract_title(const std::string& html, std::size_t region_start,
 // Тело страницы: эвристика по плотности текста. HTML разбивается на блоки по
 // блочным тегам; блоки внутри nav/header/footer/aside/form и заголовки h1..h6
 // исключаются как заведомо не-статья. Среди оставшихся блоков «прозой»
-// считаются те, что содержат достаточно слов/букв и высокую плотность текста;
-// берётся самый длинный связный набор таких блоков — это и есть текст статьи.
-// Возвращает также диапазон [start, end) в исходном HTML для выбранного региона,
-// чтобы заголовок можно было взять из того же места (см. extract_title).
+// считаются те, что содержат достаточно слов/букв, высокую плотность текста
+// и НЕПЛОТНУЮ долю ссылок (link density): меню/ленты/«похожие материалы» — это
+// почти всегда списки ссылок, и они отсеиваются по объёму «прокликиваемого»
+// текста независимо от имён классов (так извлекается статья из обёрток
+// «widget/card» на библиотечных CMS, регрессия libkolch.ru). Берётся самый
+// длинный связный набор таких блоков — это и есть текст статьи. Возвращает
+// также диапазон [start, end) в исходном HTML для выбранного региона, чтобы
+// заголовок можно было взять из того же места (см. extract_title).
+
+// Порог доли текста, находящегося внутри ссылок: блок с большей долей
+// считается меню/лентой и не может быть частью статьи.
+constexpr double kMaxLinkDensity = 0.55;
+
+// Число «букв» текста, заключённого в <a>...</a> в данном фрагменте HTML.
+// Используется для расчёта link density блока (меню/ленты ссылок не статья).
+std::size_t link_letters_in(const std::string& html) {
+    std::size_t total = 0;
+    std::size_t p = 0;
+    while ((p = find_tag_open(html, p, "a")) != std::string::npos) {
+        const std::size_t gt = html.find('>', p);
+        if (gt == std::string::npos) break;
+        const std::size_t close = html.find("</a", gt);
+        if (close == std::string::npos) break;
+        total += letter_count(html_to_text(html.substr(gt + 1, close - gt - 1)));
+        p = close;
+    }
+    return total;
+}
+
 BodyResult extract_body(const std::string& html) {
     enum class BlockKind { kEmpty, kCandidate, kOther };
 
@@ -1755,8 +1809,10 @@ BodyResult extract_body(const std::string& html) {
     struct Scored {
         std::string text;
         std::size_t letters = 0;
+        std::size_t link_letters = 0;
         std::size_t words = 0;
         double density = 0.0;
+        double link_density = 0.0;
         BlockKind kind = BlockKind::kOther;
     };
     std::vector<Scored> scored(blocks.size());
@@ -1765,19 +1821,33 @@ BodyResult extract_body(const std::string& html) {
         Scored& s = scored[b];
         s.text = html_to_text(blk.html);
         s.letters = letter_count(s.text);
+        // Блоки покрывают НЕПРЕРЫВНЫЕ регионы исходного HTML ([block_start[b],
+        // block_start[b+1])): теги из блока распарсером не сохраняются (в blk.html
+        // только текст), поэтому долю ссылок считаем по сырому фрагменту.
+        const std::size_t rstart = block_start[b];
+        const std::size_t rend =
+            (b + 1 < block_start.size()) ? block_start[b + 1] : html.size();
+        s.link_letters = link_letters_in(html.substr(rstart, rend - rstart));
         s.words = word_count(s.text);
         s.density = text_density(s.text);
+        s.link_density =
+            s.letters ? static_cast<double>(s.link_letters) /
+                            static_cast<double>(s.letters)
+                      : 0.0;
         if (blk.noise || blk.heading) {
             s.kind = BlockKind::kOther;      // заведомо не-статья
         } else if (s.text.empty()) {
             s.kind = BlockKind::kEmpty;      // пустышка не рвёт связку абзацев
         } else if (s.letters >= 15 && s.density >= 0.5 &&
-                   (s.words >= 2 || has_nospace_script(s.text))) {
+                   (s.words >= 2 || has_nospace_script(s.text)) &&
+                   s.link_density <= kMaxLinkDensity) {
             s.kind = BlockKind::kCandidate;  // «проза» — кандидат в статью
             // Для языков без пробелов (китайский/японский/корейский/тайский)
             // word_count всегда равен 1, поэтому требование «несколько слов»
             // отключаем — иначе китайские абзацы отбрасывались бы как «шум»,
             // и в теле вместо статьи оказывался список похожих материалов.
+            // link_density отсекает меню и ленты «ещё/похожие» — они почти
+            // всегда состоят из ссылок, независимо от имён классов-обёрток.
         } else {
             s.kind = BlockKind::kOther;      // навигация/мусор — рвёт связку
         }

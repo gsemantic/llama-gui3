@@ -258,6 +258,54 @@ REGISTER_TEST(test_extract_body_excludes_cookie_banner);
 REGISTER_TEST(test_extract_body_excludes_title);
 REGISTER_TEST(test_extract_title_matches_body_region);
 
+// Статья, обёрнутая в «виджетные» блоки (портал на CMS: <div class="widget
+// widget-text">), должна извлекаться, а «меню» из ссылок внутри другого
+// виджета — отсеиваться по плотности ссылок (link density), а НЕ по имени
+// класса. Регрессия: класс «widget» исключался как «шум», и телом оставался
+// браузерный баннер; убрали — стал выигрывать список-меню из ссылок.
+static void test_extract_page_widget_wrapped_body_vs_link_menu() {
+    const std::string html =
+        "<html><head><title>Тер-Ованесян Игорь Арамович</title></head><body>"
+        "<div class=\"unsupported\">Ваш браузер устарел. Рекомендуем обновить его до последней версии.</div>"
+        "<div class=\"widget widget-navigation\">"
+        "<ul>"
+        "<li><a href=\"/a\"><span class=\"navigation-item-text\">Карта библиотек города и района</span></a></li>"
+        "<li><a href=\"/b\"><span class=\"navigation-item-text\">Городская детская библиотека</span></a></li>"
+        "<li><a href=\"/c\"><span class=\"navigation-item-text\">Бавленская сельская библиотека</span></a></li>"
+        "<li><a href=\"/d\"><span class=\"navigation-item-text\">Новобусинская сельская библиотека</span></a></li>"
+        "</ul>"
+        "</div>"
+        "<div class=\"widget widget-text\">"
+        "<p>Игорь Арамович Тер-Ованесян (род. в 1938 году) — легкоатлет, неоднократный рекордсмен мира "
+        "в прыжках в длину, пятикратный участник Олимпийских игр, двукратный бронзовый призёр "
+        "Олимпиад 1960 и 1964 годов.</p>"
+        "<p>Родился 19 мая 1938 года в Киеве, в дальнейшем семья перебралась в Москву. Уже в 17 лет "
+        "Игорь вошёл в сборную СССР и был в её составе в течение 17 лет.</p>"
+        "<p>По окончании карьеры спортсмена перешёл на тренерскую работу и подготовил ряд известных "
+        "атлетов. Был главным тренером сборной СССР по лёгкой атлетике.</p>"
+        "</div>"
+        "</body></html>";
+    const ExtractedArticle ex = extract_page(html, "", SourceExtract{});
+    TEST_ASSERT_EQUAL(ex.title, "Тер-Ованесян Игорь Арамович");
+    TEST_ASSERT(ex.body.find("легкоатлет, неоднократный рекордсмен мира") != std::string::npos);
+    TEST_ASSERT(ex.body.find("главным тренером сборной СССР") != std::string::npos);
+    TEST_ASSERT(ex.body.find("Карта библиотек города и района") == std::string::npos);
+    TEST_ASSERT(ex.body.find("Новобусинская сельская библиотека") == std::string::npos);
+    TEST_ASSERT(ex.body.find("Ваш браузер устарел") == std::string::npos);
+}
+REGISTER_TEST(test_extract_page_widget_wrapped_body_vs_link_menu);
+
+// Именованные сущности (—, «», …) декодируются в UTF-8, а не остаются в тексте.
+static void test_html_to_text_decodes_common_named_entities() {
+    const std::string html =
+        "<p>Игорь Тер-Ованесян &mdash; легкоатлет, орден &laquo;Знак почёта&raquo;.</p>";
+    const std::string text = html_to_text(html);
+    TEST_ASSERT(text.find("&mdash;") == std::string::npos);
+    TEST_ASSERT(text.find("—") != std::string::npos);
+    TEST_ASSERT(text.find("«Знак почёта»") != std::string::npos);
+}
+REGISTER_TEST(test_html_to_text_decodes_common_named_entities);
+
 // Блок-каталог новостей (news-catalog) внутри страницы статьи не должен
 // попадать в тело как дайджест: extract_page вырезает ленты и берёт только
 // саму статью. Регрессия: раньше плотный список новостей «побеждал» статью.

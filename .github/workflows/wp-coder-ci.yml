@@ -1,0 +1,59 @@
+name: wp-coder CI
+
+on:
+  push:
+    branches: [ main, feat/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake git
+        
+    - name: Configure CMake
+      run: |
+        cd plugins/user_plugins/wp_coder
+        mkdir -p build
+        cd build
+        cmake ..
+        
+    - name: Build
+      run: |
+        cd plugins/user_plugins/wp_coder/build
+        make -j$(nproc)
+        
+    - name: Run tests
+      run: |
+        cd plugins/user_plugins/wp_coder/build
+        ctest --output-on-failure
+        
+    - name: Check code formatting
+      run: |
+        sudo apt-get install -y clang-format
+        find plugins/user_plugins/wp_coder/src -name "*.h" -o -name "*.cpp" | xargs clang-format --dry-run --Werror
+        
+    - name: Security scan
+      uses: aquasecurity/trivy-action@0.12.0
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
+        
+    - name: Upload test results
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: plugins/user_plugins/wp_coder/build/Testing/**/*.xml

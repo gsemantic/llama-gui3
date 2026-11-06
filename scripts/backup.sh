@@ -17,6 +17,7 @@ PROJECT_NAME="llama-gui"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR="$PROJECT_ROOT/_backups"
 CLOUD_DIR="$HOME/Yandex.Disk/Backups/$PROJECT_NAME"  # Путь к Яндекс.Диску
+SECRETS_DIR="$PROJECT_ROOT/_secrets"                  # Локальное хранилище .env (вне архива!)
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -228,6 +229,45 @@ get_build_id() {
     echo "$(hostname | cut -c1-4)$(date +%H%M)"
 }
 
+# Сохранить .env файлы в локальное хранилище _secrets/
+# Структура _secrets/ зеркально повторяет проект: _secrets/profiles/.env и т.д.
+save_secrets() {
+    local env_count=0
+
+    # Очищаем старую копию
+    rm -rf "$SECRETS_DIR"
+
+    # Ищем все .env файлы (исключая .env.example — они в архиве)
+    while IFS= read -r -d '' env_file; do
+        # Пропускаем шаблоны
+        case "$env_file" in
+            *.env.example) continue ;;
+        esac
+
+        # Вычисляем относительный путь от корня проекта
+        local rel_path="${env_file#$PROJECT_ROOT/}"
+        local target_dir="$SECRETS_DIR/$(dirname "$rel_path")"
+
+        mkdir -p "$target_dir"
+        cp "$env_file" "$SECRETS_DIR/$rel_path"
+        env_count=$((env_count + 1))
+    done < <(find "$PROJECT_ROOT" \
+        -not -path "$PROJECT_ROOT/.git/*" \
+        -not -path "$PROJECT_ROOT/build/*" \
+        -not -path "$PROJECT_ROOT/_backups/*" \
+        -not -path "$PROJECT_ROOT/_secrets/*" \
+        -not -path "$PROJECT_ROOT/.mimocode/*" \
+        -not -path "$PROJECT_ROOT/.cache/*" \
+        -not -path "$PROJECT_ROOT/.config/*" \
+        -type f \( -name '.env' -o -name '*.env' \) -print0)
+
+    if [ "$env_count" -gt 0 ]; then
+        log_success "Секреты сохранены локально: $env_count файлов в $SECRETS_DIR/"
+    else
+        log_info "Секреты не найдены — _secrets/ не создан"
+    fi
+}
+
 # Основная функция бэкапа
 create_backup() {
     local comment="$1"
@@ -268,6 +308,9 @@ create_backup() {
     # Получаем размер проекта
     local project_size=$(du -sh "$PROJECT_ROOT" --exclude="_backups" --exclude="build" 2>/dev/null | cut -f1)
     log_info "Размер проекта: $project_size"
+
+    # === Сохраняем секреты локально (вне архива) ===
+    save_secrets
     
     # Создаём временную директорию для бэкапа
     local temp_dir=$(mktemp -d)
@@ -275,13 +318,12 @@ create_backup() {
     
     log_info "Копирование файлов..."
 
-    # Копируем файлы проекта (исключая ненужное/пересоздаваемое)
-    # ВАЖНО: сначала исключаем каталоги, затем --include='*/' разрешает обход
-    # оставшихся каталогов, а --include='*.cpp'/'*.h' защищают исходники тестов
-    # от исключения test_* (которое должно ловить только скомпилированные бинарники).
+    # Копируем файлы проекта: blacklist — берём ВСЁ, кроме мусора.
+    # Цель: архив должен быть достаточен для полного восстановления и сборки.
     rsync -a \
         --exclude=".git" \
         --exclude="_backups" \
+        --exclude="_secrets" \
         --exclude="build" \
         --exclude="llama-gui-core" \
         --exclude=".mimocode" \
@@ -290,14 +332,10 @@ create_backup() {
         --exclude="kv_cache" \
         --exclude="backups" \
         --exclude="bench_results" \
-        --include="*/" \
-        --include="*.cpp" \
-        --include="*.h" \
-        --include="*.json" \
-        --include="*.md" \
-        --include="*.txt" \
-        --exclude="test_*" \
         --exclude=".env" \
+        --exclude="*.env" \
+        --include="*.env.example" \
+        --exclude="*.env.*" \
         --exclude="*.log" \
         --exclude="*.swp" \
         --exclude=".DS_Store" \
@@ -306,6 +344,8 @@ create_backup() {
         --exclude="*.a" \
         --exclude="*.so" \
         --exclude="*.o" \
+        --exclude="*.bak" \
+        --exclude="*.bak2" \
         "$PROJECT_ROOT/" "$backup_temp/"
     
     # Добавляем файл с информацией о бэкапе
@@ -391,6 +431,11 @@ EOF
     if [ "$local_only" != "true" ] && [ -d "$CLOUD_DIR" ]; then
         echo "  Облако:     $CLOUD_DIR/$backup_filename"
     fi
+    if [ -d "$SECRETS_DIR" ]; then
+        echo "  Секреты:    $SECRETS_DIR/ (локально, вне архива)"
+    fi
+    echo ""
+    echo "  Восстановление: scripts/restore.sh $BACKUP_DIR/$backup_filename"
     echo ""
 }
 

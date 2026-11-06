@@ -25,6 +25,9 @@ namespace impl {
     using ChatCompletionResponse = llama_gui::core::ChatCompletionResponse;
     using EmbeddingRequest = llama_gui::core::EmbeddingRequest;
     using EmbeddingResponse = llama_gui::core::EmbeddingResponse;
+    /* И6.6: отмена одного потока приходит снаружи (плагин), а живёт в core —
+     * потому что ею пользуется сам curl-поток хоста. */
+    using StreamCancel = llama_gui::core::StreamCancel;
 }
 
 /**
@@ -103,7 +106,9 @@ public:
     json get_slots_status() const;
 
     // Chat completion
-    void create_chat_completion_streaming(const ChatCompletionRequest& request, StreamCallback callback);
+    void create_chat_completion_streaming(const ChatCompletionRequest& request,
+                                          StreamCallback callback,
+                                          StreamCancel* cancel = nullptr);
     std::future<ChatCompletionResponse> create_chat_completion_async(const ChatCompletionRequest& request);
 
     // Embedding
@@ -149,6 +154,13 @@ public:
     void set_ssl_verify(bool verify) { ssl_verify_ = verify; }
     bool get_ssl_verify() const { return ssl_verify_; }
 
+    // И12.2: что сервер умеет — наружу. Значение относится к последнему
+    // завершённому запросу с tools; Unknown означает «не проверяли или не
+    // смогли проверить», и НЕ выключает нативный вызов (сетевой сбой).
+    ToolsSupport tools_support() const {
+        return static_cast<ToolsSupport>(tools_support_.load());
+    }
+
 private:
     // Применить настройки SSL к curl-хендлу (VERIFYPEER/VERIFYHOST)
     void apply_ssl_options(CURL* curl) const;
@@ -179,11 +191,29 @@ private:
     
     // Slot management
     std::atomic<int> next_slot_id_{0};
+
+    /*
+     * И6.2: что умеет сервер. Хранится как int, потому что atomic не
+     * работает с перечислением без перегрузки. Unknown означает «проверяем
+     * ещё» и НЕ кэшируется: см. classify_tools_response — сетевой сбой не
+     * должен выключать нативный вызов навсегда.
+     */
+    std::atomic<int> tools_support_{static_cast<int>(ToolsSupport::Unknown)};
+
+    // Метод-перечислитель снят в public (И12.2): поле остаётся здесь, под
+    // локом доступа, потому что пишет его только remember_tools_support.
     
     // Internal methods
     void initialize_curl();
     void cleanup_curl();
-    
+
+    /*
+     * Запомнить вывод о поддержке tools. Unknown НЕ запоминается: иначе
+     * один сетевой сбой навсегда переводил бы сервер в «не умеет», и агент
+     * молча ушёл бы на текстовый протокол вызова инструмента.
+     */
+    void remember_tools_support(ToolsSupport support);
+
     // Slot operations
     bool save_slot_kv_cache_impl(int slot_id, const std::string& filename);
     bool restore_slot_kv_cache_impl(int slot_id, const std::string& filename);

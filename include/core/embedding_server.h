@@ -6,6 +6,7 @@
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <sys/types.h>
 
 namespace llama_gui {
 namespace core {
@@ -14,8 +15,12 @@ namespace core {
  * Менеджер выделенного сервера эмбеддингов.
  *
  * Запускает отдельный процесс llama-server с флагом --embeddings
- * (например, с моделью bge-m3-Q5_K_M.gguf, 1024-dim), чтобы RAG получал
+ * (например, с модельой bge-m3-Q5_K_M.gguf, 1024-dim), чтобы RAG получал
  * качественные эмбеддинги независимо от основной чат-модели.
+ *
+ * Дочерний процесс запускается через fork/exec (не popen), что позволяет
+ * отслеживать PID и гарантированно убивать процесс при завершении приложения,
+ * включая аварийные сценарии (через atexit-обработчик).
  */
 class EmbeddingServer {
 public:
@@ -43,11 +48,14 @@ public:
     std::string get_server_output() const;
     int get_port() const { return server_port_; }
 
+    /// PID дочернего процесса (0 = не запущен). Используется atexit-обработчиком.
+    pid_t child_pid() const { return child_pid_.load(); }
+
 private:
     void server_thread_function();
     std::string build_server_command() const;
 
-    // Убивает ТОЛЬКО процесс, слушающий server_port_ (не трогает основной сервер)
+    /// Убивает дочерний процесс по PID (SIGTERM → SIGKILL), затем fuser как fallback
     bool kill_server_process(bool blocking = false);
     std::string check_http_status(const std::string& url) const;
 
@@ -58,6 +66,8 @@ private:
 
     std::atomic<bool> server_running_{false};
     std::atomic<bool> shutting_down_{false};
+    std::atomic<pid_t> child_pid_{0};
+    int child_stdout_fd_ = -1;  // pipe fd для чтения stdout дочернего процесса
     std::unique_ptr<std::thread> server_thread_;
     std::string server_output_;
     std::string server_status_;

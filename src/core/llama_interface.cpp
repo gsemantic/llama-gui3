@@ -20,8 +20,9 @@ bool LlamaInterface::initialize(const std::string& server_url) {
 
 void LlamaInterface::create_chat_completion_streaming(
     const ChatCompletionRequest& request,
-    StreamCallback callback) {
-    pImpl->create_chat_completion_streaming(request, callback);
+    StreamCallback callback,
+    StreamCancel* cancel) {
+    pImpl->create_chat_completion_streaming(request, callback, cancel);
 }
 
 std::future<ChatCompletionResponse> LlamaInterface::create_chat_completion_async(
@@ -140,6 +141,13 @@ llama_gui::core::json LlamaInterface::extract_json_from_response(const std::stri
 
 void LlamaInterface::process_async_requests() {
     pImpl->process_async_requests();
+}
+
+/* И12.2: вызывающий (мост плагинов) решает по этому выводу, слать ли tools
+ * дальше. Без него отказ сервера был бы виден только внутри реализации,
+ * которая молча повторяет запрос без инструментов. */
+llama_gui::core::ToolsSupport llama_gui::core::LlamaInterface::tools_support() const {
+    return pImpl->tools_support();
 }
 
 } // namespace core

@@ -1,0 +1,27 @@
+{
+  "model": "local",
+  "temperature": 0.2,
+  "max_tokens": 2048,
+  "tools_policy": "restricted",
+  "timeout_ms": 30000,
+  "allowed_commands": [
+    "ls",
+    "cat",
+    "mkdir",
+    "cp",
+    "mv",
+    "rm",
+    "php",
+    "wp"
+  ],
+  "allowed_extensions": [
+    ".php",
+    ".js",
+    ".css",
+    ".json",
+    ".md",
+    ".txt"
+  ],
+  "rag_enabled": false,
+  "description": "Локальная модель, короткие промпты, без RAG. Для быстрой генерации и итераций."
+}

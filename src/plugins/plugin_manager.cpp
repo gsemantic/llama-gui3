@@ -1,5 +1,7 @@
 #include "plugins/plugin_manager.h"
 #include "plugins/plugin_api.h"
+#include "ast_symbols.h"
+#include "llm_stream_bridge.h"
 
 #include "ui/command_manager.h"
 #include "ui/window_manager.h"
@@ -20,10 +22,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
 #ifdef __linux__
@@ -458,6 +464,261 @@ int host_llm_is_connected(LlamaPluginHost* host) {
 
 namespace {
 
+/* Разбор messages_json в сообщения для провайдера.
+ *
+ * Один разбор на оба вызова хоста (llm_chat_messages и llm_chat_stream):
+ * раскладка JSON-массива роли одна, и две копии разбора разошлись бы при
+ * первом же новом поле — то есть один и тот же ход агента ушёл бы в
+ * модель с разной историей в зависимости от того, блокирующий путь или
+ * стриминговый. */
+bool parse_messages_json(const char* messages_json,
+                         std::vector<core::ChatMessage>& out,
+                         std::string& error) {
+    using nlohmann::json;
+    if (!messages_json) {
+        error = "messages_json is null";
+        return false;
+    }
+    try {
+        const json parsed = json::parse(messages_json);
+        if (!parsed.is_array()) {
+            error = "messages_json is not an array";
+            return false;
+        }
+        for (const auto& m : parsed) {
+            if (!m.is_object()) continue;
+            const std::string role = m.value("role", "");
+            const std::string content = m.value("content", "");
+            core::MessageRole mr;
+            if (role == "assistant")      mr = core::MessageRole::Assistant;
+            else if (role == "system")    mr = core::MessageRole::System;
+            else                          mr = core::MessageRole::User;
+            out.push_back(core::ChatMessage(mr, content));
+        }
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    } catch (...) {
+        error = "unknown exception";
+        return false;
+    }
+    if (out.empty()) {
+        error = "messages_json is empty";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Реестр живых потоков стриминга: user_data плагина → флаг отмены (И6.6).
+ *
+ * Ключ — тот самый user_data, который плагин передал в llm_chat_stream.
+ * Отдельный идентификатор заводить нельзя: второй источник ключей разошёлся
+ * бы с первым, и отмена отменяла бы не тот поток — молча и необратимо.
+ *
+ * Запись снимается на закрытии потока, а не по таймауту: иначе реестр рос бы
+ * на каждом ходе, и «отмена» спустя время ругалась бы на живой-живой поток,
+ * которого уже нет. Мусор в реестре безвреден (отмена чужого handle — не
+ * ошибка, а гонка), но растущий реестр — это уже утечка.
+ */
+std::mutex g_streams_mutex;
+std::map<void*, std::shared_ptr<core::StreamCancel>> g_streams;
+
+void register_stream(void* handle, std::shared_ptr<core::StreamCancel> cancel)
+{
+    if (!handle || !cancel) return;
+    std::lock_guard<std::mutex> lk(g_streams_mutex);
+    g_streams[handle] = std::move(cancel);
+}
+
+void unregister_stream(void* handle)
+{
+    if (!handle) return;
+    std::lock_guard<std::mutex> lk(g_streams_mutex);
+    g_streams.erase(handle);
+}
+
+core::StreamCancel* find_stream(void* handle)
+{
+    if (!handle) return nullptr;
+    std::lock_guard<std::mutex> lk(g_streams_mutex);
+    const auto it = g_streams.find(handle);
+    return it == g_streams.end() ? nullptr : it->second.get();
+}
+
+/* Настроен ли облачный провайдер — тогда локальный сервер не трогаем.
+ * Правило одно на оба вызова: блокирующий и стриминговый пути обязаны
+ * выбирать провайдера одинаково, иначе один и тот же ход агента то уходил
+ * бы в облако, то на локальную модель. */
+bool cloud_is_configured(core::Settings* settings) {
+    if (!settings) return false;
+    const auto& cp = settings->cloud_provider();
+    return cp.enabled && !cp.model_id.empty();
+}
+
+/* Ключ облачного провайдера из окружения/профилей. Пусто — запрос в
+ * облако уйдёт без авторизации и упадёт. */
+std::string cloud_api_key(core::Settings* settings) {
+    if (!cloud_is_configured(settings)) return std::string();
+    const auto& cp = settings->cloud_provider();
+    const std::string key_name =
+        core::EnvManager::cloud_provider_api_key_name(cp.provider_name, cp.endpoint_url);
+    return core::EnvManager::read_key(key_name, settings->get_profiles_directory());
+}
+
+/* Один инструмент из request_json → ToolSpec.
+ *
+ * Форма — ровно та, что build_chat_body уводит в тело запроса
+ * (llama_interface_impl.cpp:123), то есть OpenAI-совместимая:
+ * {"type":"function","function":{name, description, parameters}}.
+ * Строгая, как остальной разбор: неизвестный `type`, не-объект
+ * `function` или отсутствие `name` — ошибка плагина, а не повод
+ * отправить серверу инструмент без имени.
+ *
+ * Короткая форма {"name":…} принимается: провайдеры её принимают тоже,
+ * и принимать её бесплатно — не вводить у плагина второй формат, который
+ * придётся поддерживать вечно. */
+static bool parse_tool_spec(const nlohmann::json& entry, core::ToolSpec& out,
+                            std::string& error) {
+    using nlohmann::json;
+    if (!entry.is_object()) {
+        error = "tools: элемент не объект";
+        return false;
+    }
+    const json& fn = entry.contains("function") ? entry["function"] : entry;
+    if (!fn.is_object()) {
+        error = "tools: function не объект";
+        return false;
+    }
+    if (!fn.contains("name") || !fn["name"].is_string() ||
+        fn["name"].get<std::string>().empty()) {
+        error = "tools: нет имени инструмента";
+        return false;
+    }
+    if (entry.contains("type") && entry["type"].is_string()) {
+        out.type = entry["type"].get<std::string>();
+    }
+    out.name = fn["name"].get<std::string>();
+    if (fn.contains("description") && fn["description"].is_string()) {
+        out.description = fn["description"].get<std::string>();
+    }
+    if (fn.contains("parameters")) {
+        /* parameters — СХЕМА, а не значение: любой JSON здесь допустим,
+         * и проверять его нечем. Отсутствующее поле оставляет null, а
+         * build_chat_body подставит пустой объект сам. */
+        out.parameters = fn["parameters"];
+    }
+    return true;
+}
+
+/* Параметры генерации из request_json.
+ *
+ * Отсутствующее поле — «как у llm_chat_messages», а не значение по
+ * умолчанию отсюда: иначе блокирующий и стриминговый пути считались бы
+ * по-разному, и сравнение их событий (И6.9) теряло бы смысл.
+ * max_tokens <= 0 не пишется вовсе — локальный сервер истолковал бы ноль
+ * как «не сгенерировать ничего», и ход вышел бы пустым.
+ *
+ * Мусор в request_json — ошибка плагина, и она возвращается вызывающему,
+ * а не заменяется молча значениями по умолчанию: иначе модель получила
+ * бы чужую температуру, и никто бы об этом не узнал.
+ *
+ * И12.2. Кроме генерации разбираются `tools`, `tool_choice` и
+ * `response_format`. До этой задачи apply_request_json их молча
+ * выбрасывал, а сериализация в тело запроса и разбор ответа в
+ * llm_stream_bridge уже были — то есть нативный вызов был полностью
+ * разобран со стороны ответа и полностью недоступен со стороны запроса,
+ * и ничто об этом не говорило.
+ *
+ * `tool_choice` без `tools` ИГНОРИРУЕТСЯ, а не отвергается: сервер без
+ * tools отверг бы такой запрос (400), то есть целиком отключил бы
+ * генерацию из-за поля, которое плагин послал вместе с пустым списком. */
+static bool apply_request_json(const char* request_json, core::ChatCompletionRequest& req,
+                               std::string& error) {
+    if (!request_json || !*request_json) return true;
+    using nlohmann::json;
+    try {
+        const json parsed = json::parse(request_json);
+        if (!parsed.is_object()) {
+            error = "request_json is not an object";
+            return false;
+        }
+        /* И12.7. `grammar` — GBNF-грамматика ограниченной выборки. Поле
+         * существовало в ChatCompletionRequest и уходило в тело запроса
+         * (llama_interface_impl.cpp), то есть нижняя половина пути была
+         * готова, а плагин до неё дотянуться не мог: apply_request_json
+         * разбирал перечисленные поля и молча выбрасывал остальные. И то же
+         * было с `tools` до И12.2 — нативный вызов был полностью разобран со
+         * стороны ответа и полностью недоступен со стороны запроса.
+         *
+         * Пустая строка означает «не ограничивать» и не пишется: поле,
+         * равное пустой строке, сервер истолковал бы как грамматику, которая
+         * не описывает ничего. */
+        if (parsed.contains("grammar") && parsed["grammar"].is_string()) {
+            const std::string g = parsed["grammar"].get<std::string>();
+            if (!g.empty()) req.grammar = g;
+        }
+        if (parsed.contains("max_tokens") && parsed["max_tokens"].is_number_integer()) {
+            const int v = parsed["max_tokens"].get<int>();
+            if (v > 0) req.max_tokens = v;
+        }
+        if (parsed.contains("temperature") && parsed["temperature"].is_number()) {
+            req.temperature = parsed["temperature"].get<float>();
+        }
+        if (parsed.contains("top_p") && parsed["top_p"].is_number()) {
+            req.top_p = parsed["top_p"].get<float>();
+        }
+        if (parsed.contains("top_k") && parsed["top_k"].is_number_integer()) {
+            req.top_k = parsed["top_k"].get<int>();
+        }
+        if (parsed.contains("stop") && parsed["stop"].is_array()) {
+            req.stop.clear();
+            for (const auto& s : parsed["stop"]) {
+                if (s.is_string()) req.stop.push_back(s.get<std::string>());
+            }
+        }
+        if (parsed.contains("tools")) {
+            if (!parsed["tools"].is_array()) {
+                error = "tools is not an array";
+                return false;
+            }
+            req.tools.clear();
+            for (const auto& entry : parsed["tools"]) {
+                core::ToolSpec spec;
+                if (!parse_tool_spec(entry, spec, error)) return false;
+                req.tools.push_back(std::move(spec));
+            }
+        }
+        /* Мусор в tool_choice без tools не трогаем: см. шапку. С мусором
+         * при непустых tools — отказ, потому что серверу это уйдёт. */
+        if (!req.tools.empty() && parsed.contains("tool_choice")) {
+            if (!parsed["tool_choice"].is_string()) {
+                error = "tool_choice is not a string";
+                return false;
+            }
+            req.tool_choice = parsed["tool_choice"].get<std::string>();
+        }
+        if (parsed.contains("response_format")) {
+            const json& rf = parsed["response_format"];
+            if (!rf.is_object() || !rf.contains("type") || !rf["type"].is_string()) {
+                error = "response_format has no type";
+                return false;
+            }
+            req.response_format.type = rf["type"].get<std::string>();
+            if (rf.contains("json_schema")) {
+                req.response_format.schema = rf["json_schema"];
+            }
+        }
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    } catch (...) {
+        error = "unknown exception";
+        return false;
+    }
+    return true;
+}
+
 // Если локальный сервер недоступен — пробуем облачного провайдера.
 // system_prompt — явная роль/инструкции (промпт-роль). Передаётся как системное
 // сообщение РОВНО ОДИН раз; плагин шлёт его один раз на обход, а не дублирует в
@@ -493,12 +754,7 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
     auto* settings = pd->manager->subsystems.settings;
     if (!settings) return 0;
     const auto& cp = settings->cloud_provider();
-    if (!cp.enabled || cp.model_id.empty()) return 0;
-
-    const std::string key_name =
-        core::EnvManager::cloud_provider_api_key_name(cp.provider_name, cp.endpoint_url);
-    const std::string api_key =
-        core::EnvManager::read_key(key_name, settings->get_profiles_directory());
+    const std::string api_key = cloud_api_key(settings);
     if (api_key.empty()) {
         host_log(host, LLAMA_LOG_WARNING,
                  "cloud fallback: API key not set for cloud provider");
@@ -511,7 +767,7 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
 
     core::OpenRouterRequestParams params;
     params.model = cp.model_id;
-    params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (см. build_completion_body)
+    params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (из профиля UI)
     params.temperature = settings->chat().temperature;
     params.top_p = settings->chat().top_p;
     params.stream = false;
@@ -563,14 +819,8 @@ int host_llm_complete(LlamaPluginHost* host, const char* prompt, char** out_resp
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !prompt || !out_response) return 0;
 
-    bool force_cloud = false;
     auto* settings = pd->manager->subsystems.settings;
-    if (settings) {
-        const auto& cp = settings->cloud_provider();
-        if (cp.enabled && !cp.model_id.empty()) {
-            force_cloud = true;
-        }
-    }
+    const bool force_cloud = cloud_is_configured(settings);
 
     return host_llm_complete_local_or_cloud(host, pd, std::string(), prompt, out_response, force_cloud);
 }
@@ -583,18 +833,402 @@ int host_llm_complete_ex(LlamaPluginHost* host, const char* system_prompt,
     // Если облачный провайдер настроен — отправляем запрос напрямую в облако,
     // чтобы модель получила system_prompt с описанием инструментов агента,
     // а не шла через локальный сервер (который может не поддерживать протокол).
-    bool force_cloud = false;
     auto* settings = pd->manager->subsystems.settings;
-    if (settings) {
-        const auto& cp = settings->cloud_provider();
-        if (cp.enabled && !cp.model_id.empty()) {
-            force_cloud = true;
-        }
-    }
+    const bool force_cloud = cloud_is_configured(settings);
 
     return host_llm_complete_local_or_cloud(
         host, pd, system_prompt ? std::string(system_prompt) : std::string(),
         user_prompt, out_response, force_cloud);
+}
+
+
+/*
+ * host_llm_chat_messages — multi-turn chat completion.
+ *
+ * messages_json: JSON-массив [{"role":"system"|"user"|"assistant","content":"..."}].
+ * Возвращает malloc'd JSON:
+ *   {"ok":1,"content":"...","finish_reason":"stop","prompt_tokens":N,"completion_tokens":N}
+ * или nullptr при ошибке.
+ *
+ * Локальный путь: parse → ChatCompletionRequest → create_chat_completion_async
+ *   → response.usage (usage поле уже парсится в llama_interface_impl.cpp).
+ * Облачный путь: parse → OpenRouterRequestParams.messages → complete()
+ *   → resp.prompt_tokens/completion_tokens.
+ *
+ * Разбор messages, выбор провайдера и ключ облака — общие функции с
+ * host_llm_chat_stream. Блокирующий и стриминговый пути обязаны вести себя
+ * одинаково: иначе один и тот же ход агента ушёл бы то в облако, то на
+ * локальную модель, а сравнение их событий (И6.9) проверяло бы разные вещи.
+ */
+char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
+                             const char* messages_json) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !messages_json) return nullptr;
+
+    std::vector<core::ChatMessage> msgs;
+    std::string parse_error;
+    if (!parse_messages_json(messages_json, msgs, parse_error)) {
+        std::cerr << "[llm_chat_messages] JSON parse error: " << parse_error << std::endl;
+        return nullptr;
+    }
+
+    auto* li = pd->manager->subsystems.llama_interface;
+    auto* settings = pd->manager->subsystems.settings;
+
+    const bool force_cloud = cloud_is_configured(settings);
+
+    int prompt_tokens = 0;
+    int completion_tokens = 0;
+    std::string content;
+    std::string finish_reason = "stop";
+    bool ok = false;
+
+    /* --- Локальный сервер --- */
+    if (!force_cloud && li && li->is_server_healthy()) {
+        try {
+            core::ChatCompletionRequest req;
+            req.model = "local";
+            req.stream = false;
+            if (system_prompt && system_prompt[0])
+                req.messages.emplace_back(core::MessageRole::System, system_prompt);
+            for (const auto& m : msgs) req.messages.push_back(m);
+            auto future = li->create_chat_completion_async(req);
+            auto response = future.get();
+            std::cerr << "[llm_chat_messages] LOCAL model=" << response.model
+                      << " choices=" << response.choices.size()
+                      << " finish=" << (response.choices.empty() ? "" : response.choices[0].finish_reason)
+                      << " content_len=" << (response.choices.empty() ? 0 : (int)response.choices[0].message.content.size())
+                      << " usage=" << (response.usage.is_object() ? response.usage.dump() : "none")
+                      << std::endl;
+            if (!response.choices.empty()) {
+                content = response.choices[0].message.content;
+                finish_reason = response.choices[0].finish_reason.empty()
+                    ? "stop" : response.choices[0].finish_reason;
+                ok = !content.empty() || finish_reason == "stop";
+                if (response.usage.is_object()) {
+                    prompt_tokens = response.usage.value("prompt_tokens", 0);
+                    completion_tokens = response.usage.value("completion_tokens", 0);
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[llm_chat_messages] LOCAL exception: " << e.what() << std::endl;
+            ok = false;
+        }
+    }
+    if (!ok && settings) {
+        const auto& cp = settings->cloud_provider();
+        const std::string api_key = cloud_api_key(settings);
+        if (!api_key.empty()) {
+                core::OpenRouterClient client(api_key);
+                client.set_timeout(cp.timeout_ms);
+                if (!cp.endpoint_url.empty()) client.set_base_url(cp.endpoint_url);
+
+                core::OpenRouterRequestParams params;
+                params.model = cp.model_id;
+                params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (из профиля UI)
+                params.temperature = settings->chat().temperature;
+                params.top_p = settings->chat().top_p;
+                params.stream = false;
+
+                if (system_prompt && system_prompt[0]) {
+                    core::OpenRouterRequestParams::Message sys;
+                    sys.role = "system";
+                    sys.content = system_prompt;
+                    params.messages.push_back(std::move(sys));
+                }
+                for (const auto& m : msgs) {
+                    core::OpenRouterRequestParams::Message out;
+                    switch (m.role) {
+                        case core::MessageRole::Assistant: out.role = "assistant"; break;
+                        case core::MessageRole::System:   out.role = "system";   break;
+                        default:                          out.role = "user";     break;
+                    }
+                    out.content = m.content;
+                    params.messages.push_back(std::move(out));
+                }
+
+                try {
+                    auto response = client.complete(params);
+                    std::cerr << "[llm_chat_messages] CLOUD success=" << response.success
+                              << " model=" << response.model
+                              << " content_len=" << response.content.size()
+                              << " finish=" << response.finish_reason
+                              << " error=" << response.error
+                              << std::endl;
+                    if (response.success && !response.content.empty()) {
+                        content = response.content;
+                        finish_reason = response.finish_reason.empty()
+                            ? "stop" : response.finish_reason;
+                        prompt_tokens = response.prompt_tokens;
+                        completion_tokens = response.completion_tokens;
+                        ok = true;
+                    } else if (!response.error.empty()) {
+                        content = response.error;
+                        finish_reason = "error";
+                    }
+                } catch (...) {}
+            }
+    }
+
+    if (!ok) {
+        /* Ошибка: возвращаем JSON с текстом ошибки вместо nullptr, чтобы
+         * плагин (wp_coder) мог определить тип (429/5xx/timeout) и ретраить. */
+        nlohmann::json err;
+        err["ok"] = 0;
+        err["error"] = content.empty() ? "LLM-вызов не удался" : content;
+        std::string e = err.dump();
+        return strdup(e.c_str());
+    }
+
+    nlohmann::json out;
+    out["ok"] = 1;
+    out["content"] = content;
+    out["finish_reason"] = finish_reason;
+    out["prompt_tokens"] = prompt_tokens;
+    out["completion_tokens"] = completion_tokens;
+    std::string s = out.dump();
+    return strdup(s.c_str());
+}
+
+/*
+ * host_llm_chat_stream — то же, что host_llm_chat_messages, но дельты
+ * приходят по мере поступления.
+ *
+ * Локальный путь: create_chat_completion_streaming отдаёт сырой JSON чанка,
+ * раскладку делает StreamBridge. Облачный путь: OpenRouterClient сам вытащил
+ * токен из delta.content и отдаёт готовые куски, поэтому там bridge только
+ * копит и закрывает поток.
+ *
+ * Что bridge не умеет и почему это не порча: облачный клиент отдаёт только
+ * delta.content — «размышление» и нативные вызовы инструментов через него
+ * не проходят. Для сегодняшнего протокола плагина (блок вызова пишется
+ * текстом) этого хватает, а нативный вызов — это И6.2/И12.2.
+ *
+ * on_done вызывается ровно один раз: локальный путь зовёт колбэк потока
+ * всегда, облачный зовёт его и при успехе, и при ошибке, но при отказе
+ * запустить поток мы возвращаем 0 и on_done не зовём вовсе — иначе плагин
+ * получил бы два закрытия на один вызов.
+ */
+int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
+                         const char* messages_json, const char* request_json,
+                         void* user_data,
+                         void (*on_delta)(void*, const char*, int),
+                         void (*on_tool_delta)(void*, const char*, const char*, const char*),
+                         void (*on_done)(void*, const char*)) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !messages_json) return 0;
+    if (!on_delta || !on_done) return 0;
+
+    std::vector<core::ChatMessage> msgs;
+    std::string error;
+    if (!parse_messages_json(messages_json, msgs, error)) {
+        std::cerr << "[llm_chat_stream] JSON parse error: " << error << std::endl;
+        return 0;
+    }
+
+    auto* li = pd->manager->subsystems.llama_interface;
+    auto* settings = pd->manager->subsystems.settings;
+    const bool force_cloud = cloud_is_configured(settings);
+
+    /* Ошибки конфигурации (нечитаемый request_json) — до запуска потока:
+     * на них on_done не зовётся, и плагин узнаёт о них по return 0. */
+    core::ChatCompletionRequest local_req;
+    local_req.model = "local";
+    local_req.stream = true;
+    if (!apply_request_json(request_json, local_req, error)) {
+        std::cerr << "[llm_chat_stream] request_json error: " << error << std::endl;
+        return 0;
+    }
+    if (system_prompt && system_prompt[0]) {
+        local_req.messages.emplace_back(core::MessageRole::System, system_prompt);
+    }
+    for (const auto& m : msgs) local_req.messages.push_back(m);
+
+    /* И12.2: инструменты для ОБЛАЧНОГО пути. Берутся из того же
+     * local_req, который наполнил apply_request_json: второй разбор
+     * request_json здесь означал бы два места, читающих один формат, а они
+     * разошлись бы при первой правке схемы инструмента.
+     *
+     * Собираются ДО потока, потому что поток здесь чужой, и тащить в его
+     * захват ещё и структуру запроса — значит продлить её жизнь на всю
+     * генерацию ради копии, которая не меняется. */
+    std::vector<core::OpenRouterRequestParams::Tool> cloud_tools;
+    cloud_tools.reserve(local_req.tools.size());
+    for (const auto& t : local_req.tools) {
+        core::OpenRouterRequestParams::Tool out;
+        out.name = t.name;
+        out.description = t.description;
+        if (!t.parameters.is_null()) out.parameters = t.parameters.dump();
+        cloud_tools.push_back(std::move(out));
+    }
+    const std::string cloud_tool_choice = local_req.tool_choice;
+
+    const std::string api_key = cloud_api_key(settings);
+    const bool local_ok = !force_cloud && li && li->is_server_healthy();
+    if (!local_ok && api_key.empty()) {
+        std::cerr << "[llm_chat_stream] no provider: local server down and no cloud key"
+                  << std::endl;
+        return 0;
+    }
+
+    /* bridge переживает и поток чанков, и on_done, поэтому хоста держит
+     * общий указатель, а в колбэки отдаёт сырой. */
+    /* И6.6: флаг отмены живёт в реестре хоста, пока идёт поток. handle —
+     * это user_data плагина, и отмена придёт ровно с ним. */
+    auto cancel = std::make_shared<core::StreamCancel>();
+
+    auto bridge = std::make_shared<StreamBridge>(user_data, on_delta, on_tool_delta);
+    /* Флаг «on_done уже отправлен» — общий указателем, а не значением:
+     * лямбда finish копируется в колбэк провайдера, и её собственная копия
+     * сделала бы защиту фиктивной. Второе закрытие на один вызов дало бы
+     * плагину два события Finish и два хвоста в истории. */
+    auto done_sent = std::make_shared<std::atomic<bool>>(false);
+    auto finish = [bridge, done_sent, user_data, on_done](const std::string& err) {
+        bool expected = false;
+        if (!done_sent->compare_exchange_strong(expected, true)) return;
+        unregister_stream(user_data);
+        const std::string json = bridge->done_json(err);
+        on_done(user_data, json.c_str());
+    };
+
+    if (local_ok) {
+        /* И12.2: tools слались? Сервер принял их или отказал?
+         *
+         * Отказ виден плагину только здесь: реализация интерфейса молча
+         * повторяет запрос без инструментов, и без этой пары флагов плагин
+         * увидел бы нормальный ответ и решил бы, что модель просто не
+         * вызвала инструмент. Значение читается в финальном колбэке,
+         * то есть ПОСЛЕ remember_tools_support (строка 500 в
+         * llama_interface_impl.cpp) и потому уже актуальное.
+         *
+         * Unknown (не проверяли / сетевой сбой) отказом НЕ считается:
+         * один сбой связи выключил бы нативный вызов навсегда. */
+        const bool tools_sent = !local_req.tools.empty();
+        register_stream(user_data, cancel);
+        li->create_chat_completion_streaming(
+            local_req,
+            [bridge, finish, li, tools_sent](const std::string& chunk, bool is_final) {
+                if (is_final) {
+                    bridge->note_tools(tools_sent,
+                                       tools_sent && li->tools_support() ==
+                                                        core::ToolsSupport::Rejected);
+                    finish(std::string());
+                    return;
+                }
+                if (!chunk.empty()) bridge->feed(chunk.c_str());
+            },
+            cancel.get());
+        return 1;
+    }
+
+    /* Облако. complete_streaming_async работает синхронно (клиент обязан
+     * дожить конца запроса), поэтому поток хоста — наш. */
+    std::thread([bridge, finish, msgs, api_key, settings, system_prompt,
+                 cloud_tools, cloud_tool_choice, user_data]() {
+        auto client = std::make_shared<core::OpenRouterClient>(api_key);
+        const auto& cp = settings->cloud_provider();
+        client->set_timeout(cp.timeout_ms);
+        if (!cp.endpoint_url.empty()) client->set_base_url(cp.endpoint_url);
+
+        core::OpenRouterRequestParams params;
+        params.model = cp.model_id;
+        params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено
+        params.temperature = settings->chat().temperature;
+        params.top_p = settings->chat().top_p;
+        params.stream = true;
+
+        if (system_prompt && system_prompt[0]) {
+            core::OpenRouterRequestParams::Message sys;
+            sys.role = "system";
+            sys.content = system_prompt;
+            params.messages.push_back(std::move(sys));
+        }
+        for (const auto& m : msgs) {
+            core::OpenRouterRequestParams::Message out;
+            switch (m.role) {
+                case core::MessageRole::Assistant: out.role = "assistant"; break;
+                case core::MessageRole::System:   out.role = "system";   break;
+                default:                          out.role = "user";     break;
+            }
+            out.content = m.content;
+            params.messages.push_back(std::move(out));
+        }
+        params.tools = cloud_tools;
+        params.tool_choice = cloud_tool_choice;
+
+        core::OpenRouterCompletionResponse usage;
+        /* Облако отмены не знает (его клиент синхронный), но handle из
+         * реестра убрать надо всё равно: иначе запись жила бы до конца
+         * сессии. */
+        const bool ok = client->complete_streaming_async(
+            params,
+            [bridge](const std::string& token, bool is_done) {
+                /* Непустой токен вместе с флагом завершения — ошибка
+                 * облака, а не последний кусок ответа: так договорились с
+                 * этим клиентом чат приложения. Считать его текстом
+                 * означало бы показать пользователю «HTTP 429» как ответ
+                 * модели. */
+                if (is_done) {
+                    bridge->set_error(token);
+                    return;
+                }
+                bridge->push_text(token);
+            },
+            &usage,
+            /* И12.2: куски нативного вызова. Отказ облака от tools молча
+             * не отличить от «модель не вызвала инструмент»: облачный
+             * клиент не повторяет запрос без них и вердикта не отдаёт, так
+             * что плагину здесь сообщается «инструменты были отданы, отказа
+             * не было», и он решает по фактическим вызовам. */
+            [bridge](int index, const std::string& name,
+                     const std::string& arguments) {
+                bridge->push_tool_fragment(index, name, arguments);
+            });
+
+        if (!ok) {
+            finish("облачный провайдер не ответил");
+            return;
+        }
+        unregister_stream(user_data);
+        bridge->set_usage(usage.prompt_tokens, usage.completion_tokens);
+        /* Клиент не отдаёт finish_reason, а сам факт завершения им для нас
+         * достовернее поля: без него bridge счёл бы поток оборванным. */
+        bridge->set_finish_reason(usage.finish_reason.empty() ? "stop"
+                                                              : usage.finish_reason);
+        bridge->note_tools(!params.tools.empty(), false);
+        finish(std::string());
+    }).detach();
+
+    return 1;
+}
+
+/*
+ * host_llm_chat_cancel — прервать один поток стриминга (И6.6).
+ *
+ * handle не найден — это НЕ ошибка: гонка «отмена пришла после закрытия
+ * потока» совершенно нормальна, и ругаться на неё значило бы заставить
+ * вызывающего различать «отменил» и «не успел», что ему не нужно.
+ */
+void host_llm_chat_cancel(LlamaPluginHost* host, void* handle)
+{
+    if (core::StreamCancel* cancel = find_stream(handle)) cancel->request();
+}
+
+/*
+ * host_llm_ast_symbols — символы одного файла (И6.3).
+ *
+ * Тонкая обёртка: разбор и формат живут в ast_symbols.{h,cpp}, где они
+ * проверяются тестом без диска и без грамматик. Здесь только проверка
+ * аргументов и strdup по правилам ABI.
+ */
+char* host_llm_ast_symbols(LlamaPluginHost* host, const char* path,
+                           const char* language)
+{
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager || !path) return nullptr;
+    const std::string json = ast_symbols_for_file(
+        path, language ? std::string(language) : std::string()).dump();
+    return strdup(json.c_str());
 }
 
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
@@ -722,7 +1356,12 @@ void host_agent_mode_push_event(LlamaPluginHost* host, const char* event_text) {
     if (!pd || !pd->manager || !event_text) return;
     auto* ci = pd->manager->subsystems.chat_interface;
     if (!ci) return;
-    ci->add_assistant_message(event_text);
+    /* НЕ вызываем add_assistant_message напрямую — мы в фоновом потоке
+     * агента, а add_assistant_message модифицирует UI-состояние (conversations,
+     * messages, cache). Прямой вызов вызывает гонку с UI-потоком → deadlock/freeze.
+     * Вместо этого ставим в pending_responses_, который обрабатывается
+     * на следующем кадре UI-потоком через process_pending_responses(). */
+    ci->enqueue_pending_response(std::string(event_text));
 }
 
 const char* host_app_version() {
@@ -765,6 +1404,10 @@ const LlamaHostApi& host_api_table() {
         a.llm_is_connected = host_llm_is_connected;
         a.llm_complete = host_llm_complete;
         a.llm_complete_ex = host_llm_complete_ex;
+        a.llm_chat_messages = host_llm_chat_messages;
+        a.llm_chat_stream = host_llm_chat_stream;
+        a.llm_ast_symbols = host_llm_ast_symbols;
+        a.llm_chat_cancel = host_llm_chat_cancel;
 
         a.rag_search = host_rag_search;
         a.rag_process_document = host_rag_process_document;
@@ -955,17 +1598,23 @@ bool PluginManager::initialize(const PluginSubsystems& subsystems) {
 }
 
 bool PluginManager::load_plugin_file(const std::string& path) {
+    std::cerr << "[PluginManager] Loading " << path << " ..." << std::endl;
     DL_HANDLE handle = DL_LOAD(path.c_str());
     if (!handle) {
         std::cerr << "[PluginManager] Failed to load " << path << ": " << DL_ERR() << std::endl;
         return false;
     }
+    std::cerr << "[PluginManager] dlopen OK: " << path << std::endl;
 
     auto api_version_fn = reinterpret_cast<const char* (*)()>(DL_SYM(handle, "ll_plugin_api_version"));
     auto info_fn = reinterpret_cast<const LlamaPluginInfo* (*)()>(DL_SYM(handle, "ll_plugin_info"));
     auto init_fn = reinterpret_cast<int (*)(LlamaPluginHost*, const LlamaHostApi*)>(DL_SYM(handle, "ll_plugin_init"));
     auto render_fn = reinterpret_cast<void (*)()>(DL_SYM(handle, "ll_plugin_render"));
     auto shutdown_fn = reinterpret_cast<void (*)()>(DL_SYM(handle, "ll_plugin_shutdown"));
+
+    std::cerr << "[PluginManager] exports: api=" << (void*)api_version_fn
+              << " info=" << (void*)info_fn
+              << " init=" << (void*)init_fn << std::endl;
 
     if (!api_version_fn || !info_fn || !init_fn) {
         std::cerr << "[PluginManager] Missing required exports in " << path << std::endl;
@@ -974,6 +1623,8 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     }
 
     const char* plugin_api_version = api_version_fn();
+    std::cerr << "[PluginManager] plugin api_version='" << (plugin_api_version ? plugin_api_version : "null")
+              << "' host='" << LLAMA_PLUGIN_API_VERSION << "'" << std::endl;
     if (!plugin_api_version || std::string(plugin_api_version) != LLAMA_PLUGIN_API_VERSION) {
         std::cerr << "[PluginManager] API version mismatch for " << path
                   << " (plugin: " << (plugin_api_version ? plugin_api_version : "?")
@@ -983,6 +1634,8 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     }
 
     const LlamaPluginInfo* info = info_fn();
+    std::cerr << "[PluginManager] info: name='" << (info ? info->name : "null")
+              << "' version='" << (info ? info->version : "null") << "'" << std::endl;
     if (!info || !info->name || !*info->name) {
         std::cerr << "[PluginManager] Invalid plugin info from " << path << std::endl;
         DL_CLOSE(handle);
@@ -1006,19 +1659,36 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     // Манифест plugin.json рядом с библиотекой (информационный; пермиссии не применяются)
     const std::string manifest_path = find_manifest_path(path);
     if (!manifest_path.empty()) {
-        plugin->info.manifest = parse_manifest(manifest_path);
+        PluginManifest manifest = parse_manifest(manifest_path);
+        /* Манифест ЧУЖОГО плагина не применяется.
+         *
+         * find_manifest_path() заканчивает поиск общим кандидатом
+         * `<dir>/plugin.json`. В каталоге, где лежат .so нескольких
+         * плагинов, этот файл принадлежит ровно одному из них, а
+         * подхватывается всеми остальными, у которых нет манифеста
+         * с собственным именем: hello_plugin получал capabilities и
+         * версию wp_coder. Пока манифест информационный, это была ложь
+         * в диагностике; как только разрешения начнут применяться
+         * (итерация И2), это уже дыра в правах.
+         *
+         * Поэтому несоответствие имени — не предупреждение, а отказ:
+         * манифест считается отсутствующим. */
+        if (manifest.present && !manifest.name.empty() &&
+            manifest.name != plugin->info.name) {
+            std::cerr << "[PluginManager] Manifest '" << manifest.name
+                      << "' does not belong to plugin '" << plugin->info.name
+                      << "' (" << manifest_path << ") — IGNORED"
+                      << ". Expected a manifest named after the plugin"
+                      << " (" << plugin->info.name << ".json)." << std::endl;
+            manifest = PluginManifest{};
+        }
+        plugin->info.manifest = manifest;
         if (plugin->info.manifest.present) {
             if (!plugin->info.manifest.api_version.empty() &&
                 plugin->info.manifest.api_version != LLAMA_PLUGIN_API_VERSION) {
                 std::cerr << "[PluginManager] Manifest API version mismatch for " << path
                           << " (manifest: " << plugin->info.manifest.api_version
                           << ", host: " << LLAMA_PLUGIN_API_VERSION << ")" << std::endl;
-            }
-            if (!plugin->info.manifest.name.empty() &&
-                plugin->info.manifest.name != plugin->info.name) {
-                std::cerr << "[PluginManager] Manifest name '" << plugin->info.manifest.name
-                          << "' differs from ll_plugin_info name '" << plugin->info.name
-                          << "' for " << path << std::endl;
             }
             std::cout << "[PluginManager] Manifest: " << plugin->info.manifest.name
                       << " v" << plugin->info.manifest.version
@@ -1031,6 +1701,7 @@ bool PluginManager::load_plugin_file(const std::string& path) {
 
     const int rc = plugin->init_fn(
         reinterpret_cast<LlamaPluginHost*>(plugin->host_data), &host_api_table());
+    std::cerr << "[PluginManager] init_fn returned " << rc << " for " << plugin->info.name << std::endl;
     if (rc != 0) {
         std::cerr << "[PluginManager] Plugin " << plugin->info.name
                   << " failed to initialize (code " << rc << ")" << std::endl;

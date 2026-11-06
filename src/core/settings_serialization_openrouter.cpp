@@ -66,6 +66,20 @@ void Settings::serializeOpenRouterSettings(json& j) const {
         });
     }
     j["cloud_provider"]["recent_models"] = recent;
+
+    json saved = json::array();
+    for (const auto& s : openrouter_settings_.saved_providers) {
+        saved.push_back({
+            {"name", s.name},
+            {"endpoint_url", s.endpoint_url},
+            {"model_id", s.model_id},
+            {"timeout_ms", s.timeout_ms},
+            {"max_output_tokens", s.max_output_tokens},
+            {"use_tor", s.use_tor},
+            {"socks5_proxy_host", s.socks5_proxy_host}
+        });
+    }
+    j["cloud_provider"]["saved_providers"] = saved;
 }
 
 void Settings::deserializeOpenRouterSettings(const json& j) {
@@ -89,6 +103,24 @@ void Settings::deserializeOpenRouterSettings(const json& j) {
         openrouter_settings_.use_tor = o.value("use_tor", false);
         openrouter_settings_.socks5_proxy_host = o.value("socks5_proxy_host", "127.0.0.1:9050");
         load_recent_models(o, openrouter_settings_.recent_models);
+
+        openrouter_settings_.saved_providers.clear();
+        if (o.contains("saved_providers") && o["saved_providers"].is_array()) {
+            for (const auto& item : o["saved_providers"]) {
+                if (!item.is_object()) continue;
+                CloudSavedProvider s;
+                s.name = item.value("name", "");
+                s.endpoint_url = item.value("endpoint_url", "");
+                s.model_id = item.value("model_id", "");
+                s.timeout_ms = item.value("timeout_ms", 60000);
+                s.max_output_tokens = item.value("max_output_tokens", 0);
+                s.use_tor = item.value("use_tor", false);
+                s.socks5_proxy_host = item.value("socks5_proxy_host", "127.0.0.1:9050");
+                if (!s.name.empty()) {
+                    openrouter_settings_.saved_providers.push_back(std::move(s));
+                }
+            }
+        }
         return;
     }
 

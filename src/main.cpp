@@ -96,6 +96,7 @@ struct HeadlessOptions {
     std::string profile;
     std::string endpoint_url; // cloud: переопределить endpoint провайдера
     std::string api_key;      // cloud: переопределить API-ключ
+    std::string agent_mode;   // GUI: переключить режим агента (имя плагинного агента)
 };
 
 static std::atomic<bool> g_stop_requested{false};
@@ -260,6 +261,8 @@ int main(int argc, char* argv[]) {
             headless.endpoint_url = arg.substr(11);
         } else if (arg.find("--api-key=") == 0) {
             headless.api_key = arg.substr(10);
+        } else if (arg.find("--agent=") == 0) {
+            headless.agent_mode = arg.substr(8);
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else if (arg.find("--url=") == 0) {
@@ -339,6 +342,21 @@ int main(int argc, char* argv[]) {
         // SIGTERM/SIGINT: корректное завершение GUI с сохранением сессии
         std::signal(SIGTERM, [](int) { MainWindow::requestExternalStop(); });
         std::signal(SIGINT, [](int) { MainWindow::requestExternalStop(); });
+
+        // atexit: гарантированное убийство осиротевших llama-server процессов.
+        // EmbeddingServer регистрирует свой atexit-обработчик при создании,
+        // но на случай если GUI упадёт до создания EmbeddingServer — ставим
+        // общий обработчик, который убьёт все llama-server на порту 8083
+        // (embedding) и 8081 (основной). Это защитная сеть, а не основной
+        // механизм остановки — нормальная остановка идёт через деструкторы.
+        std::atexit([]() {
+            // fuser -k отправляет SIGKILL только процессу, слушающему порт.
+            // Безопасно: не трогает чужие процессы.
+            for (int port : {8083, 8081}) {
+                std::string cmd = "fuser -k " + std::to_string(port) + "/tcp 2>/dev/null";
+                (void)system(cmd.c_str());
+            }
+        });
     }
 
     try {
@@ -403,6 +421,11 @@ int main(int argc, char* argv[]) {
             }
             if (main_window.initialize(0, 0)) { // 0,0 означает автоопределение размера
                 LOG_INFO("MainWindow инициализирован");
+
+                // Переключаем плагинный режим агента (если задан --agent=NAME).
+                if (!headless.agent_mode.empty()) {
+                    main_window.set_agent_mode(headless.agent_mode);
+                }
 
                 // Режим аудита: отчёт и выход без входа в рендер-цикл.
                 // Код выхода: 0 - чисто, 2 - найдены ошибки (для CI).

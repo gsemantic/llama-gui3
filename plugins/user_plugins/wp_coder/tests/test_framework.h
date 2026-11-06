@@ -4,12 +4,61 @@
  * test_framework.h — Минимальный тестовый фреймворк для AI-кодера.
  *
  * Использует attr(used) для предотвращения удаления статических регистраторов.
+ *
+ * Сторож на каждый тест (kWatchdogSeconds). Зависание теста в CI — это
+ * загадка без номера: прогон просто стоит, и непонятно, где. Особенно
+ * неприятно here, где половина кода работает с мьютексами и ожиданием
+ * разрешения пользователя, то есть висеть там умеет. Сторож печатает имя
+ * текущего теста и завершает процесс с особым кодом, после чего падение
+ * становится диагнозом, а не наблюдением.
  */
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <vector>
 #include <functional>
+#include <mutex>
+
+/* --- Уборка временных каталогов, созданных тестами ---
+ *
+ * Хелперы вида `make_tmp_tree()` снимают мусор ПЕРЕД созданием и не снимают
+ * ПОСЛЕ: имя каталога включает pid, а pid у каждого прогона свой, то есть
+ * снимать нечего, и каждый прогон оставлял свой набор каталогов. За сессию
+ * это набегало сотнями каталогов на десятки мегабайт — в /tmp, где их и
+ * видно только потому, что они никуда не делись.
+ *
+ * Уборка идёт ОДИН раз на прогон, в конце, по списку зарегистрированных
+ * путей. Перебирать каталоги по префиксу имени нельзя: под теми же
+ * именами работает живой плагин (сессии субагентов, каталоги снимков), и
+ * `remove_all` по маске снёс бы чужое. Регистрация добровольная: фикстуры,
+ * которые убирают каталог сами (RAII-деструктор), ничего регистрировать не
+ * должны — иначе уборка удаляла бы уже удалённое. */
+inline std::vector<std::string>& tmp_trees() {
+    static std::vector<std::string> paths;
+    return paths;
+}
+
+inline void register_tmp_tree(const std::string& path) {
+    tmp_trees().push_back(path);
+}
+
+inline void cleanup_tmp_trees() {
+    for (const std::string& p : tmp_trees()) {
+        std::error_code ec;
+        std::filesystem::remove_all(p, ec);
+        /* Ошибка уборки МОЛЧИТ: это не проверка, а уборка мусора, и падать
+         * из-за неё после зелёного прогона значило бы превратить её в
+         * проверку, которой она не является. Мусор, который не удалился,
+         * виден в /tmp сам. */
+    }
+    tmp_trees().clear();
+}
 
 struct TestCase {
     std::string name;
@@ -62,20 +111,99 @@ struct TestRegistrar {
     } \
 } while(0)
 
+/* И13.7: бюджет прогона — машинная проверка, а не пожелание.
+ *
+ * Критерий готовности: «если что-то занимает больше 5 минут на тестовой
+ * машине — это дефект». До И13.7 он нигде не был записан и проверялся
+ * только глазами по времени в терминале: год прогона мог стоять сорок
+ * минут, и это видел только тот, кто заметил.
+ *
+ * Пять минут против нынешних ~60 с — запас в пять раз: гейт ловит РЕЗКУЮ
+ * деградацию (появился инструмент, который ходит по дереву дважды;
+ * отвалился кэш и каждый вызов считает заново), а не дрожание на
+ * загруженной машине. Время печатается ВСЕГДА — и когда гейт не
+ * сработал, и когда сработал: молчаливый запас однажды кончился бы
+ * незамеченным. */
 #define RUN_ALL_TESTS() \
     int main() { \
+        constexpr int kWatchdogSeconds = 30; \
+        /* И13.7: предел на ВЕСЬ прогон (см. комментарий выше). */ \
+        constexpr long long kSuiteBudgetSeconds = 300; \
+        const auto suite_started = std::chrono::steady_clock::now(); \
+        std::atomic<int> token{0}; \
+        std::atomic<bool> current_name_set{false}; \
+        std::string current_name; \
+        std::mutex current_name_mutex; \
+        std::thread watchdog([&] { \
+            int last = 0; \
+            auto last_change = std::chrono::steady_clock::now(); \
+            while (true) { \
+                std::this_thread::sleep_for(std::chrono::milliseconds(250)); \
+                const int now = token.load(); \
+                if (now != last) { \
+                    last = now; \
+                    last_change = std::chrono::steady_clock::now(); \
+                    continue; \
+                } \
+                const auto waited = std::chrono::duration_cast<std::chrono::seconds>( \
+                    std::chrono::steady_clock::now() - last_change).count(); \
+                if (waited >= kWatchdogSeconds) { \
+                    std::cerr << "\nСТОРОЖ: тест " \
+                              << (current_name_set.load() ? current_name \
+                                                          : std::string("?")) \
+                              << " идёт дольше " << kWatchdogSeconds \
+                              << " с. Это дедлок или ожидание, которое никто" \
+                                 " не снимет." << std::endl; \
+                    std::_Exit(3); \
+                } \
+            } \
+        }); \
+        watchdog.detach(); \
         int passed = 0, failed = 0; \
         for (const auto& t : get_tests()) { \
-            std::cout << "[TEST] " << t.name << "... "; \
+            { \
+                std::lock_guard<std::mutex> lk(current_name_mutex); \
+                current_name = t.name; \
+                current_name_set = true; \
+            } \
+            std::cout << "[TEST] " << t.name << "... " << std::flush; \
+            token.fetch_add(1); \
             try { \
                 t.func(); \
                 std::cout << "OK" << std::endl; \
                 passed++; \
             } catch (const std::exception& e) { \
+                /* Текст исключения печатается ВСЕГДА, даже если его не \
+                 * было в ASSERT: падение из std::map::at или из разбора \
+                 * JSON не печатает ничего само, и такой прогон выглядит \
+                 * как «тест упал молча» — а это ровно тот случай, где \
+                 * неверят красному и ищут причину вслепую. Исключение \
+                 * поймано в любом случае, печать — не причина его \
+                 * пропустить. */ \
+                std::cerr << "  ИСКЛЮЧЕНИЕ: " << e.what() << std::endl; \
                 std::cout << "FAILED" << std::endl; \
                 failed++; \
             } \
+            token.fetch_add(1); \
         } \
-        std::cout << "\n=== " << passed << " passed, " << failed << " failed ===" << std::endl; \
+        std::cout << "\n=== " << passed << " passed, " << failed \
+                  << " failed ===" << std::endl; \
+        cleanup_tmp_trees(); \
+        const long long elapsed_ms = \
+            std::chrono::duration_cast<std::chrono::milliseconds>( \
+                std::chrono::steady_clock::now() - suite_started) \
+                .count(); \
+        std::cout << "=== время прогона: " << elapsed_ms / 1000.0 \
+                  << " с (бюджет " << kSuiteBudgetSeconds << " с) ===" \
+                  << std::endl; \
+        if (elapsed_ms > kSuiteBudgetSeconds * 1000) { \
+            std::cerr << "  ПРОГОН ДОЛЬШЕ " << kSuiteBudgetSeconds \
+                      << " с (" << elapsed_ms / 1000.0 \
+                      << " с) — по критерию готовности это дефект." \
+                      << std::endl; \
+            failed++; \
+        } \
+        std::cout << "\n=== " << passed << " passed, " << failed \
+                  << " failed ===" << std::endl; \
         return failed > 0 ? 1 : 0; \
     }
