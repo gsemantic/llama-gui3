@@ -121,15 +121,6 @@ public:
     /* Найти модуль по имени. */
     const CoderModule* find(const std::string& name) const;
 
-    /* Собрать все инструменты из всех модулей. */
-    std::vector<ToolInfo> all_tools() const;
-
-    /* Собрать все навыки из всех модулей. */
-    std::vector<Skill> all_skills() const;
-
-    /* Собрать промпты всех модулей. */
-    std::string combined_system_prompt() const;
-
     /* Инициализировать все модули. */
     void init_all();
 

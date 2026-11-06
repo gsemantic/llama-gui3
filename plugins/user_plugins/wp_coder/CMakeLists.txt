@@ -215,7 +215,6 @@ if(WP_CODER_BUILD_TESTS)
         # следы в синглтоне (очередь, флаг остановки, счётчики задачи),
         # которые сам и убирает. Инструментов не регистрирует сверх базовых.
         tests/test_engine_entry.cpp
-        tests/test_module_api.cpp
         tests/test_security.cpp
         tests/test_path_guard.cpp
         tests/test_pending_apply.cpp
