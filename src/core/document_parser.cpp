@@ -321,14 +321,80 @@ std::vector<std::string> DocumentParser::parse_txt(const std::string& file_path)
 
 std::vector<std::string> DocumentParser::parse_pdf(const std::string& file_path) {
     std::vector<std::string> paragraphs;
-    
-    // Заглушка для парсинга PDF
-    // В реальной реализации здесь будет интеграция с библиотекой для работы с PDF
-    std::cerr << "Warning: PDF parsing not implemented yet. Using placeholder for " << file_path << std::endl;
-    
-    // Возвращаем фиктивный контент для демонстрации
-    paragraphs.push_back("PDF content would be extracted here. This is a placeholder for " + file_path);
-    
+
+    if (file_path.empty()) {
+        std::cerr << "Error: Empty file path provided for PDF parsing" << std::endl;
+        return paragraphs;
+    }
+
+    if (!file_exists(file_path)) {
+        std::cerr << "Error: PDF file does not exist: " << file_path << std::endl;
+        return paragraphs;
+    }
+
+    // pdftotext (poppler-utils) is the least invasive way to get text out of PDF
+    // without adding a heavyweight C++ dependency. Use single-quote escaping so
+    // paths with spaces or quotes are passed safely to the shell.
+    std::string escaped_path;
+    escaped_path.reserve(file_path.size() + 8);
+    for (char c : file_path) {
+        if (c == '\'') {
+            escaped_path += "'\\''";
+        } else {
+            escaped_path += c;
+        }
+    }
+
+    std::string cmd = "pdftotext -layout -enc UTF-8 '" + escaped_path + "' - 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        std::cerr << "Error: Failed to run pdftotext for: " << file_path << std::endl;
+        return paragraphs;
+    }
+
+    std::string text;
+    char buffer[4096];
+    while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        text += buffer;
+    }
+    int status = pclose(pipe);
+
+    if (status != 0 || text.empty()) {
+        std::cerr << "Warning: pdftotext could not extract text from: " << file_path
+                  << " (install poppler-utils)" << std::endl;
+        return paragraphs;
+    }
+
+    // A form feed separates PDF pages; treat it as a paragraph boundary too.
+    std::replace(text.begin(), text.end(), '\f', '\n');
+
+    std::string line;
+    std::string paragraph;
+    std::istringstream iss(text);
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (line.empty()) {
+            if (!paragraph.empty()) {
+                paragraphs.push_back(paragraph);
+                paragraph.clear();
+            }
+        } else {
+            if (!paragraph.empty()) {
+                paragraph += "\n";
+            }
+            paragraph += line;
+        }
+    }
+
+    if (!paragraph.empty()) {
+        paragraphs.push_back(paragraph);
+    }
+
+    std::cout << "Parsed " << paragraphs.size() << " paragraph(s) from PDF: "
+              << file_path << std::endl;
     return paragraphs;
 }
 
@@ -694,7 +760,6 @@ std::vector<std::string> DocumentParser::parse_document(const std::string& file_
     } else if (ext == ".md") {
         return parse_md(file_path);
     } else if (ext == ".pdf") {
-        std::cerr << "Warning: PDF parsing not implemented yet. Using placeholder for " << file_path << std::endl;
         return parse_pdf(file_path);
     } else if (ext == ".docx") {
         std::cerr << "Warning: DOCX parsing not implemented yet. Using placeholder for " << file_path << std::endl;
