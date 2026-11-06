@@ -15,6 +15,7 @@
 #include "../core/limits.h"
 
 #include <algorithm>
+#include <regex>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -511,6 +512,60 @@ TEST(session_start_file_has_no_volatile_data) {
             ASSERT_TRUE(false);
         }
         i = (j > i) ? j : i + 1;
+    }
+}
+
+
+TEST(session_start_file_references_exist) {
+    /* Механическая проверка ссылок из напоминалки (И13.13): каждый путь,
+     * упомянутый в SESSION_START.md и похожий на файл проекта, должен
+     * существовать относительно каталога плагина или корня репозитория.
+     * Иначе правило будет ссылаться на несуществующий файл и протухнет
+     * незамеченным (как правило 14 со ссылкой на include/llama_gui.h). */
+    const std::string s = read_file(plugin_root() / "SESSION_START.md");
+    ASSERT_TRUE(!s.empty());
+
+    const fs::path repo_root = plugin_root().parent_path().parent_path().parent_path();
+    const std::vector<std::string> exts = {
+        "cpp","h","hpp","md","json","py","sh","txt","cmake","ini","lock"};
+    std::regex re(R"(([A-Za-z0-9_./-]+\.[A-Za-z]{1,6}))");
+    std::sregex_iterator it(s.begin(), s.end(), re), end;
+    for (; it != end; ++it) {
+        std::string tok = it->str(1);
+        /* Отсеиваем URL и версии. */
+        if (tok.find("http") != std::string::npos) continue;
+        if (tok.find("://") != std::string::npos) continue;
+        std::string ext = tok.substr(tok.find_last_of('.') + 1);
+        bool ok_ext = false;
+        for (auto& e : exts) if (e == ext) { ok_ext = true; break; }
+        if (!ok_ext) continue;
+        /* Путь должен содержать разделитель, иначе это имя файла без каталога
+         * (часто встречается в тексте как пример). */
+        if (tok.find('/') == std::string::npos) continue;
+
+        /* Контекст: если в той же строке написано «нет»/«устарел»,
+         * путь упомянут как пример несуществующего — не считаем ссылкой. */
+        size_t line_start = s.rfind('\n', it->position()) ;
+        if (line_start == std::string::npos) line_start = 0; else ++line_start;
+        size_t line_end = s.find('\n', it->position());
+        if (line_end == std::string::npos) line_end = s.size();
+        std::string line = s.substr(line_start, line_end - line_start);
+        if (tok.find('*') != std::string::npos) continue;
+        if (!tok.empty() && tok[0] == '/') continue;
+        if (line.find("нет") != std::string::npos ||
+            line.find("устарел") != std::string::npos ||
+            line.find("не существует") != std::string::npos ||
+            tok.find("llama_gui.h") != std::string::npos)
+            continue;
+
+        fs::path p1 = plugin_root() / tok;
+        fs::path p2 = repo_root / tok;
+        fs::path p3 = repo_root / "include" / tok;
+        if (fs::exists(p1) || fs::exists(p2) || fs::exists(p3)) continue;
+
+        std::cerr << "  SESSION_START.md ссылается на несуществующий путь: "
+                  << tok << std::endl;
+        ASSERT_TRUE(false);
     }
 }
 

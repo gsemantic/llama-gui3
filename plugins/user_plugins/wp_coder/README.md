@@ -3,7 +3,7 @@
 Плагин `wp_coder` для llama-gui — универсальный ReAct-агент с доменными модулями.
 WordPress — один из модулей; Python и DevOps подключаются аналогично.
 
-- **Версия:** 0.5.0 (см. `plugin.json` — единственный источник версии)
+- **Версия:** 0.18.0 (см. `plugin.json` — единственный источник версии)
 - **Agent mode:** `ai_coder` (отображается как «AI Coder» в чате приложения)
 
 ## Архитектура
@@ -76,6 +76,15 @@ wp_coder/
 > `shell::shell_quote()`/`sanitize_ident()`/валидацию метасимволов во всех модулях
 > (python, devops, wordpress). `exec_command` проверяется политикой
 > `is_command_allowed()`.
+
+> **Примечание (И13.12).** Плагин использует **собственную** политику
+> безопасности (`core/security.{h,cpp}`, `core/command_policy.{h,cpp}`,
+> `core/permission.{h,cpp}`, `core/shell.h`), более строгую, чем хостовые
+> `agents::SecurityManager`/`Sandbox` — хостовые компоненты плагином не
+> используются. Инструменты с `TF_CONFIRM_EVERY_CALL` (`git_commit`,
+> `git_add`, `git_branch`, `git_checkout`, `deploy`, `systemd_restart`,
+> `ssh_exec`) спрашивают подтверждение при каждом вызове (кнопки «Всегда»
+> у них нет).
 
 ## Сборка и деплой
 
