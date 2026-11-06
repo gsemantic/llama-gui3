@@ -4,9 +4,12 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <map>
+#include <unordered_set>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -115,6 +118,346 @@ static std::string read_file_binary(const std::string& file_path) {
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+}
+
+// ============================================================================
+// Извлечение текста из XML-подобной разметки (Mallard .page, DocBook, HTML)
+// ============================================================================
+
+static std::string ascii_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+// Теги, которые начинают/заканчивают смысловой блок. Инлайновые теги
+// (emphasis, code, link и т.п.) просто отбрасываются без разрыва абзаца.
+static bool is_markup_block_tag(const std::string& tag) {
+    static const std::unordered_set<std::string> block_tags = {
+        "abstract", "address", "answer", "appendix", "article", "articleinfo",
+        "aside", "blockquote", "book", "bookinfo", "caption", "caution", "chapter",
+        "colophon", "copyright", "dd", "definition", "desc", "div", "dl", "dt",
+        "entry", "example", "figure", "footer", "formalpara", "glossary", "glossdef",
+        "glossentry", "glossterm", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+        "important", "index", "info", "informalfigure", "informaltable", "item",
+        "itemizedlist", "legalnotice", "li", "listitem", "literallayout", "main",
+        "nav", "note", "ol", "orderedlist", "p", "page", "para", "part", "pre",
+        "preface", "procedure", "programlisting", "qandaentry", "qandaset",
+        "question", "refentry", "refsection", "refsect1", "refsect2", "refsect3",
+        "row", "screen", "sect1", "sect2", "sect3", "sect4", "sect5", "section",
+        "seg", "seglistitem", "segmentedlist", "simpara", "simplelist", "step",
+        "substeps", "subtitle", "synopsis", "table", "tbody", "td", "term",
+        "tfoot", "th", "thead", "tip", "title", "tr", "ul", "variablelist",
+        "varlistentry", "warning"};
+    return block_tags.find(tag) != block_tags.end();
+}
+
+// Простые объявления <!ENTITY name "value"> из внутреннего DTD (DocBook).
+// Они часто используются для названий программ (&appname; и т.п.).
+static std::map<std::string, std::string> extract_simple_xml_entities(const std::string& raw) {
+    std::map<std::string, std::string> entities;
+    size_t pos = 0;
+    while ((pos = raw.find("<!ENTITY", pos)) != std::string::npos) {
+        size_t p = pos + 8; // длина "<!ENTITY"
+        while (p < raw.size() && std::isspace(static_cast<unsigned char>(raw[p]))) ++p;
+
+        size_t name_start = p;
+        while (p < raw.size()) {
+            unsigned char c = static_cast<unsigned char>(raw[p]);
+            if (std::isalnum(c) || c == '_' || c == '-' || c == '.' || c == ':') {
+                ++p;
+            } else {
+                break;
+            }
+        }
+        std::string name = raw.substr(name_start, p - name_start);
+
+        while (p < raw.size() && std::isspace(static_cast<unsigned char>(raw[p]))) ++p;
+
+        if (!name.empty() && p < raw.size() && (raw[p] == '"' || raw[p] == '\'')) {
+            char quote = raw[p++];
+            size_t value_start = p;
+            while (p < raw.size() && raw[p] != quote) ++p;
+            if (p < raw.size()) {
+                entities[name] = raw.substr(value_start, p - value_start);
+                ++p;
+            }
+        }
+
+        pos = (p > pos) ? p : pos + 1;
+    }
+    return entities;
+}
+
+static bool append_named_entity(const std::string& name, std::string& out) {
+    if (name == "amp") { out.push_back('&'); return true; }
+    if (name == "lt") { out.push_back('<'); return true; }
+    if (name == "gt") { out.push_back('>'); return true; }
+    if (name == "quot") { out.push_back('"'); return true; }
+    if (name == "apos") { out.push_back('\''); return true; }
+
+    // Неразрывные пробелы для поиска полезнее как обычные пробелы.
+    if (name == "nbsp" || name == "ensp" || name == "emsp" || name == "thinsp") {
+        out.push_back(' ');
+        return true;
+    }
+
+    uint32_t cp = 0;
+    if (name == "ndash") cp = 0x2013;
+    else if (name == "mdash") cp = 0x2014;
+    else if (name == "hellip") cp = 0x2026;
+    else if (name == "laquo") cp = 0x00AB;
+    else if (name == "raquo") cp = 0x00BB;
+    else if (name == "lsquo") cp = 0x2018;
+    else if (name == "rsquo") cp = 0x2019;
+    else if (name == "ldquo") cp = 0x201C;
+    else if (name == "rdquo") cp = 0x201D;
+    else if (name == "copy") cp = 0x00A9;
+    else if (name == "reg") cp = 0x00AE;
+    else if (name == "trade") cp = 0x2122;
+    else if (name == "times") cp = 0x00D7;
+    else if (name == "deg") cp = 0x00B0;
+    else if (name == "plusmn") cp = 0x00B1;
+    else if (name == "middot") cp = 0x00B7;
+    else if (name == "bull") cp = 0x2022;
+    else if (name == "euro") cp = 0x20AC;
+    else if (name == "pound") cp = 0x00A3;
+    else if (name == "yen") cp = 0x00A5;
+    else if (name == "sect") cp = 0x00A7;
+    else if (name == "para") cp = 0x00B6;
+    else if (name == "dagger") cp = 0x2020;
+    else if (name == "permil") cp = 0x2030;
+
+    if (cp != 0) {
+        utf8_append(cp, out);
+        return true;
+    }
+    return false;
+}
+
+static std::string decode_markup_entities(
+    const std::string& input,
+    const std::map<std::string, std::string>& custom_entities) {
+    std::string out;
+    out.reserve(input.size());
+
+    for (size_t i = 0; i < input.size();) {
+        if (input[i] != '&') {
+            out.push_back(input[i++]);
+            continue;
+        }
+
+        size_t semi = input.find(';', i + 1);
+        if (semi == std::string::npos || semi - i > 32) {
+            out.push_back(input[i++]);
+            continue;
+        }
+
+        std::string body = input.substr(i + 1, semi - i - 1);
+
+        if (!body.empty() && body[0] == '#') {
+            size_t p = 1;
+            int base = 10;
+            if (p < body.size() && (body[p] == 'x' || body[p] == 'X')) {
+                base = 16;
+                ++p;
+            }
+
+            uint32_t cp = 0;
+            bool valid = p < body.size();
+            for (; valid && p < body.size(); ++p) {
+                char c = body[p];
+                int digit = -1;
+                if (c >= '0' && c <= '9') digit = c - '0';
+                else if (base == 16 && c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+                else if (base == 16 && c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+                if (digit < 0) { valid = false; break; }
+                cp = cp * static_cast<uint32_t>(base) + static_cast<uint32_t>(digit);
+                if (cp > 0x10FFFF) { valid = false; break; }
+            }
+
+            // Пропускаем NUL и суррогаты: они недопустимы в UTF-8/JSON.
+            if (valid && cp != 0 && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+                utf8_append(cp, out);
+                i = semi + 1;
+                continue;
+            }
+        } else {
+            auto it = custom_entities.find(body);
+            if (it != custom_entities.end()) {
+                out += it->second;
+                i = semi + 1;
+                continue;
+            }
+            if (append_named_entity(body, out)) {
+                i = semi + 1;
+                continue;
+            }
+        }
+
+        // Неизвестная сущность: оставляем как есть.
+        out.append(input, i, semi - i + 1);
+        i = semi + 1;
+    }
+
+    return out;
+}
+
+static std::string extract_markup_text(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+
+    size_t i = 0;
+    const size_t n = raw.size();
+    std::string skip_until_close; // содержимое script/style не индексируем
+
+    while (i < n) {
+        if (raw[i] != '<') {
+            if (skip_until_close.empty()) out.push_back(raw[i]);
+            ++i;
+            continue;
+        }
+
+        // Комментарии
+        if (i + 3 < n && raw.compare(i, 4, "<!--") == 0) {
+            size_t end = raw.find("-->", i + 4);
+            i = (end == std::string::npos) ? n : end + 3;
+            continue;
+        }
+
+        // CDATA
+        if (i + 8 < n && raw.compare(i, 9, "<![CDATA[") == 0) {
+            size_t end = raw.find("]]>", i + 9);
+            size_t stop = (end == std::string::npos) ? n : end;
+            if (skip_until_close.empty()) {
+                out.append(raw, i + 9, stop - (i + 9));
+            }
+            i = (end == std::string::npos) ? n : end + 3;
+            continue;
+        }
+
+        // Processing instructions (<?xml ...?>, <?db.chunk...?>)
+        if (i + 1 < n && raw[i + 1] == '?') {
+            size_t end = raw.find("?>", i + 2);
+            i = (end == std::string::npos) ? n : end + 2;
+            continue;
+        }
+
+        // Прочие декларации: DOCTYPE (с внутренним DTD) и <!ELEMENT ...>
+        if (i + 1 < n && raw[i + 1] == '!') {
+            size_t gt = raw.find('>', i + 2);
+            size_t bracket = raw.find('[', i + 2);
+            if (bracket != std::string::npos &&
+                (gt == std::string::npos || bracket < gt)) {
+                size_t subset_end = raw.find("]>", bracket + 1);
+                if (subset_end != std::string::npos) {
+                    i = subset_end + 2;
+                    continue;
+                }
+            }
+            i = (gt == std::string::npos) ? n : gt + 1;
+            continue;
+        }
+
+        // Обычный открывающий или закрывающий тег
+        size_t p = i + 1;
+        bool closing = false;
+        if (p < n && raw[p] == '/') {
+            closing = true;
+            ++p;
+        }
+
+        size_t name_start = p;
+        while (p < n) {
+            unsigned char c = static_cast<unsigned char>(raw[p]);
+            if (std::isalnum(c) || c == '_' || c == '-' || c == ':' || c == '.') {
+                ++p;
+            } else {
+                break;
+            }
+        }
+        std::string name = ascii_lower(raw.substr(name_start, p - name_start));
+
+        // Ищем конец тега, не натыкаясь на '>' внутри кавычек.
+        bool self_closing = false;
+        while (p < n) {
+            char c = raw[p];
+            if (c == '"' || c == '\'') {
+                char quote = c;
+                ++p;
+                while (p < n && raw[p] != quote) ++p;
+                if (p < n) ++p;
+                continue;
+            }
+            if (c == '>') {
+                self_closing = (p > i && raw[p - 1] == '/');
+                ++p;
+                break;
+            }
+            ++p;
+        }
+
+        if (!skip_until_close.empty()) {
+            if (closing && name == skip_until_close) skip_until_close.clear();
+        } else if (!closing && (name == "script" || name == "style") && !self_closing) {
+            skip_until_close = name;
+        } else if (!closing && name == "br") {
+            out.push_back('\n');
+        } else if (is_markup_block_tag(name)) {
+            out += "\n\n";
+        }
+
+        i = p;
+    }
+
+    return out;
+}
+
+static std::string normalize_markup_line(const std::string& line) {
+    std::string out;
+    out.reserve(line.size());
+    bool pending_space = false;
+
+    for (unsigned char c : line) {
+        if (c == '\0') continue;
+        if (std::isspace(c)) {
+            pending_space = !out.empty();
+        } else {
+            if (pending_space) {
+                out.push_back(' ');
+                pending_space = false;
+            }
+            out.push_back(static_cast<char>(c));
+        }
+    }
+
+    return out;
+}
+
+static std::vector<std::string> markup_text_to_paragraphs(const std::string& text) {
+    std::vector<std::string> paragraphs;
+    std::string paragraph;
+    std::string line;
+    std::istringstream iss(text);
+
+    while (std::getline(iss, line)) {
+        std::string normalized = normalize_markup_line(line);
+        if (normalized.empty()) {
+            if (!paragraph.empty()) {
+                paragraphs.push_back(paragraph);
+                paragraph.clear();
+            }
+        } else {
+            if (!paragraph.empty()) paragraph += " ";
+            paragraph += normalized;
+        }
+    }
+
+    if (!paragraph.empty()) {
+        paragraphs.push_back(paragraph);
+    }
+
+    return paragraphs;
 }
 
 // Вспомогательная функция для извлечения текста из DOCX через unzip
@@ -394,6 +737,57 @@ std::vector<std::string> DocumentParser::parse_pdf(const std::string& file_path)
     }
 
     std::cout << "Parsed " << paragraphs.size() << " paragraph(s) from PDF: "
+              << file_path << std::endl;
+    return paragraphs;
+}
+
+std::vector<std::string> DocumentParser::parse_xml(const std::string& file_path) {
+    std::vector<std::string> paragraphs;
+
+    if (file_path.empty()) {
+        std::cerr << "Error: Empty file path provided for XML parsing" << std::endl;
+        return paragraphs;
+    }
+
+    if (!file_exists(file_path)) {
+        std::cerr << "Error: XML file does not exist: " << file_path << std::endl;
+        return paragraphs;
+    }
+
+    std::string content = read_file_binary(file_path);
+    if (content.empty()) {
+        std::cerr << "Warning: File is empty or could not be read: " << file_path << std::endl;
+        return paragraphs;
+    }
+
+    // Удаляем UTF-8 BOM, если есть
+    if (content.size() >= 3 &&
+        static_cast<unsigned char>(content[0]) == 0xEF &&
+        static_cast<unsigned char>(content[1]) == 0xBB &&
+        static_cast<unsigned char>(content[2]) == 0xBF) {
+        content.erase(0, 3);
+    }
+
+    // Справка обычно в UTF-8, но на всякий случай поддерживаем Windows-1251.
+    if (!is_valid_utf8(content)) {
+        content = convert_cp1251_to_utf8(content);
+    }
+
+    // DocBook часто объявляет &appname; и подобные сущности во внутреннем DTD.
+    const auto custom_entities = extract_simple_xml_entities(content);
+
+    std::string text = extract_markup_text(content);
+    text = decode_markup_entities(text, custom_entities);
+
+    paragraphs = markup_text_to_paragraphs(text);
+
+    if (paragraphs.empty()) {
+        std::cerr << "Warning: No text could be extracted from XML file: "
+                  << file_path << std::endl;
+        return paragraphs;
+    }
+
+    std::cout << "Parsed " << paragraphs.size() << " paragraph(s) from XML: "
               << file_path << std::endl;
     return paragraphs;
 }
@@ -762,8 +1156,10 @@ std::vector<std::string> DocumentParser::parse_document(const std::string& file_
     } else if (ext == ".pdf") {
         return parse_pdf(file_path);
     } else if (ext == ".docx") {
-        std::cerr << "Warning: DOCX parsing not implemented yet. Using placeholder for " << file_path << std::endl;
         return parse_docx(file_path);
+    } else if (ext == ".xml" || ext == ".page" || ext == ".docbook" ||
+               ext == ".html" || ext == ".htm") {
+        return parse_xml(file_path);
     } else {
         std::cerr << "Error: Unsupported file format: " << ext << " for file: " << file_path << std::endl;
         return std::vector<std::string>();
@@ -790,7 +1186,8 @@ DocumentParser::ContentType DocumentParser::detect_content_type(const std::strin
     // Text formats
     if (ext == ".txt" || ext == ".md" || ext == ".pdf" || ext == ".docx" ||
         ext == ".html" || ext == ".htm" || ext == ".csv" || ext == ".json" ||
-        ext == ".xml" || ext == ".log" || ext == ".rst" || ext == ".adoc") {
+        ext == ".xml" || ext == ".page" || ext == ".docbook" ||
+        ext == ".log" || ext == ".rst" || ext == ".adoc") {
         return ContentType::Text;
     }
 

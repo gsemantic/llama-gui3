@@ -104,9 +104,10 @@ void FileDialogFilters::initialize() {
     // JSON files: .json
     filters_[JSON_FILES] = FileFilter{"JSON files", {".json"}};
 
-    // Document files: .pdf, .doc, .docx, .odt
+    // Document files: PDF/DOCX/ODT plus XML-based help (Mallard, DocBook, HTML)
     filters_[DOCUMENT_FILES] =
-        FileFilter{"Documents", {".pdf", ".doc", ".docx", ".odt"}};
+        FileFilter{"Documents", {".pdf", ".doc", ".docx", ".odt", ".xml",
+                                 ".page", ".docbook", ".html", ".htm"}};
 
     initialized_ = true;
 }

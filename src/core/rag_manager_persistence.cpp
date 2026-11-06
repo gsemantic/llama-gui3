@@ -2,11 +2,14 @@
 #include "../include/core/embedding_generator.h"
 #include <fstream>
 #include <iostream>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
 #include <filesystem>
+#include <unordered_set>
 
 #ifdef USE_FAISS
 #include <faiss/IndexFlat.h>
@@ -15,6 +18,26 @@
 
 namespace llama_gui {
 namespace core {
+
+namespace {
+
+// Форматы, которые DocumentParser умеет разбирать при обходе директории.
+bool is_indexable_document_file(const std::filesystem::path& path) {
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    static const std::unordered_set<std::string> supported = {
+        // Документы и справка
+        ".txt", ".md", ".pdf", ".docx", ".xml", ".page", ".docbook",
+        ".html", ".htm", ".rst", ".adoc", ".json", ".csv", ".log",
+        // Код
+        ".py", ".js", ".cpp", ".h", ".java", ".rs", ".go"};
+
+    return supported.find(ext) != supported.end();
+}
+
+} // namespace
 
 std::string RagManager::get_default_index_path() const {
     // Сохраняем индекс в домашней директории пользователя
@@ -496,11 +519,7 @@ bool RagManager::create_index_profile(const std::string& profile_name, const std
         for (const auto& entry : fs::recursive_directory_iterator(source_directory)) {
             if (!entry.is_regular_file()) continue;
 
-            std::string ext = entry.path().extension().string();
-            // Support common document formats
-            if (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv" ||
-                ext == ".log" || ext == ".py" || ext == ".js" || ext == ".cpp" ||
-                ext == ".h" || ext == ".java" || ext == ".rs" || ext == ".go") {
+            if (is_indexable_document_file(entry.path())) {
                 std::cout << "[RAG PROFILE] Indexing: " << entry.path().string() << std::endl;
                 if (process_document(entry.path().string(), false)) {
                     indexed_count++;
@@ -609,10 +628,7 @@ bool RagManager::reindex_current_profile() {
         for (const auto& entry : fs::recursive_directory_iterator(source_dir)) {
             if (!entry.is_regular_file()) continue;
 
-            std::string ext = entry.path().extension().string();
-            if (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv" ||
-                ext == ".log" || ext == ".py" || ext == ".js" || ext == ".cpp" ||
-                ext == ".h" || ext == ".java" || ext == ".rs" || ext == ".go") {
+            if (is_indexable_document_file(entry.path())) {
                 std::cout << "[RAG PROFILE] Indexing: " << entry.path().string() << std::endl;
                 if (process_document(entry.path().string(), false)) {
                     indexed_count++;

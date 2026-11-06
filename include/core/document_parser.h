@@ -12,6 +12,7 @@ public:
     static std::vector<std::string> parse_pdf(const std::string& file_path);
     static std::vector<std::string> parse_docx(const std::string& file_path);
     static std::vector<std::string> parse_md(const std::string& file_path);
+    static std::vector<std::string> parse_xml(const std::string& file_path);
 
     // Универсальный метод для определения типа файла и его парсинга
     static std::vector<std::string> parse_document(const std::string& file_path);

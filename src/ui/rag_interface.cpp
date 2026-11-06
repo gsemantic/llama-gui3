@@ -652,8 +652,9 @@ std::string RagInterface::get_filename_from_path(const std::string& path) {
 }
 
 std::vector<std::string> RagInterface::get_supported_extensions() {
-    return {".txt"}; // Пока поддерживаем только текстовые файлы
-    // В будущем можно добавить: {".txt", ".pdf", ".docx"}
+    // Должно совпадать с форматами, которые разбирает DocumentParser.
+    return {".txt", ".md", ".pdf", ".docx", ".xml", ".page", ".docbook",
+            ".html", ".htm"};
 }
 
 void RagInterface::set_rag_manager(llama_gui::core::RagManager* rag_manager) {

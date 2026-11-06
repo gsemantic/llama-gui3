@@ -26,6 +26,12 @@ target_link_libraries(test_rag_chunking PRIVATE core)
 target_include_directories(test_rag_chunking PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagChunking COMMAND test_rag_chunking)
 
+# Document Parser tests (XML/Mallard/DocBook/HTML text extraction)
+add_executable(test_document_parser core/test_document_parser.cpp)
+target_link_libraries(test_document_parser PRIVATE core)
+target_include_directories(test_document_parser PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME DocumentParser COMMAND test_document_parser)
+
 # Context Monitor tests
 add_executable(test_context_monitor test_context_monitor.cpp)
 target_link_libraries(test_context_monitor PRIVATE core)
@@ -117,6 +123,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_plugin_loader test_menu_restore test_ui_auditor
+    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_document_parser test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_plugin_loader test_menu_restore test_ui_auditor
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
