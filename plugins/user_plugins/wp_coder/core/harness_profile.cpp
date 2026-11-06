@@ -223,7 +223,18 @@ bool parse_profile(const std::string& text, Profile* out, std::string* why) {
         if (!read_positive_int("shell_timeout_sec", &p.has_shell_timeout_sec, &p.shell_timeout_sec)) return false;
     }
     if (root.has("min_final_answer_len")) {
-        if (!read_positive_int("min_final_answer_len", &p.has_min_final_answer_len, &p.min_final_answer_len)) return false;
+        const json::JsonValue& v = root.get("min_final_answer_len");
+        if (!v.is_int()) {
+            if (why) *why = std::string("min_final_answer_len: ожидалось целое число, а пришло ") + v.type_name();
+            return false;
+        }
+        const long long n = v.as_int();
+        if (n < 0 || n > static_cast<long long>(std::numeric_limits<int>::max())) {
+            if (why) *why = std::string("min_final_answer_len: значение вне диапазона 0..2^31-1");
+            return false;
+        }
+        p.has_min_final_answer_len = true;
+        p.min_final_answer_len = static_cast<int>(n);
     }
     if (root.has("compaction_buffer_tokens")) {
         if (!read_positive_int("compaction_buffer_tokens", &p.has_compaction_buffer_tokens, &p.compaction_buffer_tokens)) return false;
