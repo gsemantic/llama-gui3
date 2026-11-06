@@ -185,11 +185,34 @@ void Engine::submit(const std::string& prompt) {
         if (resume) {
             /* Возобновление после паузы на разрешение: не модифицируем сессию. */
         } else if (state_.continue_conversation && !state_.session.empty()) {
-            /* Продолжение сессии: добавляем сообщение к существующему контексту.
-             * План и предыдущие результаты сохраняются — модель знает историю. */
-            state_.session.push_back(Message::user(prompt));
-            std::cerr << "[wp_coder] submit: continue session, msgs="
-                      << state_.session.size() << std::endl;
+            /* Эвристика «новая задача»: если сессия уже длинная и новое
+             * сообщение не похоже на продолжение (нет слов «продолжи»,
+             * «исправь», «добавь», «уточни», «ещё»), начинаем заново —
+             * иначе старый план/WP-контекст тянет модель в чужую задачу
+             * (как в кейсе «калькулятор на Питон» поверх WP-сессии). */
+            bool looks_like_continuation = false;
+            std::string low = prompt;
+            for (char& c : low) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            const char* cont_words[] = {"продолж", "исправ", "добав", "уточн", "ещё", "еще",
+                                       "continue", "fix", "add", "more", "еще"};
+            for (const char* w : cont_words) {
+                if (low.find(w) != std::string::npos) { looks_like_continuation = true; break; }
+            }
+            const bool new_task = (state_.session.size() > 4 && !looks_like_continuation);
+            if (new_task) {
+                state_.session.clear();
+                state_.session.push_back(Message::user(prompt));
+                state_.todos.clear();
+                state_.prompt_dirty = true;
+                std::cerr << "[wp_coder] submit: new task (heuristic), msgs="
+                          << state_.session.size() << std::endl;
+            } else {
+                /* Продолжение сессии: добавляем сообщение к существующему контексту.
+                 * План и предыдущие результаты сохраняются — модель знает историю. */
+                state_.session.push_back(Message::user(prompt));
+                std::cerr << "[wp_coder] submit: continue session, msgs="
+                          << state_.session.size() << std::endl;
+            }
         } else {
             /* Новая задача: очищаем сессию и начинаем заново. */
             state_.session.clear();
@@ -1154,7 +1177,25 @@ void Engine::load_settings() {
      * проекта остались бы в промпте. Само значение читается здесь, а
      * разбирается при первой сборке промпта — там известен корень. */
     reload_instructions();
-    state_.active_module    = setting_get(cb_, "wp_coder.active_module", "");
+    {
+        std::string m = setting_get(cb_, "wp_coder.active_module", "");
+        if (m.empty() && !state_.project_dir.empty()) {
+            namespace fs = std::filesystem;
+            fs::path root(state_.project_dir);
+            std::error_code ec;
+            if (fs::exists(root / "wp-config.php", ec) ||
+                fs::exists(root / "wp-content", ec)) {
+                m = "wordpress";
+            } else if (fs::exists(root / "requirements.txt", ec) ||
+                       fs::exists(root / "pyproject.toml", ec) ||
+                       fs::exists(root / "setup.py", ec)) {
+                m = "python";
+            } else {
+                m = "generic";
+            }
+        }
+        state_.active_module = m;
+    }
     state_.continue_conversation = setting_get(cb_, "wp_coder.continue_conversation", "true") != "false";
     {
         /* Таймаут: сначала настройка, потом профиль (И9.7).

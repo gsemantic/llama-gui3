@@ -48,10 +48,16 @@ void SkillsManager::load() {
 }
 
 void SkillsManager::refresh_active() {
-    if (active_module_.empty()) {
-        /* Модуль не выбран — активны навыки всех модулей: лучше показать
-         * лишний навык в каталоге, чем не показать ни одного. */
-        set_active(all_skill_names());
+    if (active_module_.empty() || active_module_ == "generic") {
+        /* Модуль не выбран или проект generic — активны только базовые
+         * навыки (без module_name), чтобы WP/Python/DevOps-навыки не
+         * засоряли промпт для чужого проекта. */
+        std::vector<std::string> base;
+        for (const auto& sk : skills_) {
+            if (sk.module_name.empty()) base.push_back(sk.name);
+        }
+        if (base.empty()) set_active(all_skill_names());
+        else set_active(base);
     } else {
         std::vector<std::string> only;
         for (const auto& sk : skills_) {
