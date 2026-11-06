@@ -1198,6 +1198,23 @@ void Engine::load_settings() {
         for (char& c : name) {
             if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
         }
+        /* Автовыбор профиля (И13+): если человек не задал профиль явно,
+         * пробуем accurate_cloud (большие лимиты, RAG), а при отсутствии
+         * файла — fast_local. Это не «по провайдеру» (плагин его не знает),
+         * а разумный дефолт для современного железа; явная настройка
+         * wp_coder.profile всегда важнее. */
+        if (name.empty()) {
+            const std::string dir = state_.profiles_dir.empty()
+                ? state_.profiles_bundled_dir : state_.profiles_dir;
+            if (!dir.empty()) {
+                std::ifstream f(dir + "/accurate_cloud.json");
+                if (f.good()) name = "accurate_cloud";
+                else {
+                    std::ifstream f2(dir + "/fast_local.json");
+                    if (f2.good()) name = "fast_local";
+                }
+            }
+        }
         state_.profile_name = name;
     }
     {
@@ -1417,6 +1434,18 @@ void Engine::apply_session_profile() {
         state_.profile_error.clear();
         /* Таймаут: настройки не было, профиля нет — дефолт плагина. */
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
+        /* Лимиты: без профиля — дефолты из limits.h. */
+        state_.limit_max_steps = 12;
+        state_.limit_session_budget_chars = 60000;
+        state_.limit_max_tool_output_bytes = 12000;
+        state_.limit_shell_timeout_sec = 120;
+        state_.limit_min_final_answer_len = 300;
+        state_.limit_compaction_buffer_tokens = 20000;
+        state_.limit_prune_protect_tokens = 40000;
+        state_.limit_prune_minimum_tokens = 20000;
+        state_.limit_max_preserve_recent_tokens = 15000;
+        state_.limit_max_output_bytes = 50 * 1024;
+        state_.limit_max_output_lines = 2000;
         return;
     }
 
@@ -1432,6 +1461,17 @@ void Engine::apply_session_profile() {
         state_.profile = harness::Profile();
         state_.profile_error = why;
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
+        state_.limit_max_steps = 12;
+        state_.limit_session_budget_chars = 60000;
+        state_.limit_max_tool_output_bytes = 12000;
+        state_.limit_shell_timeout_sec = 120;
+        state_.limit_min_final_answer_len = 300;
+        state_.limit_compaction_buffer_tokens = 20000;
+        state_.limit_prune_protect_tokens = 40000;
+        state_.limit_prune_minimum_tokens = 20000;
+        state_.limit_max_preserve_recent_tokens = 15000;
+        state_.limit_max_output_bytes = 50 * 1024;
+        state_.limit_max_output_lines = 2000;
         std::cout << "[wp_coder] профиль harness: " << why << std::endl;
         return;
     }
@@ -1468,6 +1508,17 @@ void Engine::apply_session_profile() {
         if (profile.has_timeout_ms && state_.llm_timeout_setting.empty()) {
             state_.llm_timeout_ms = profile.timeout_ms;
         }
+        if (profile.has_max_steps) state_.limit_max_steps = profile.max_steps;
+        if (profile.has_session_budget_chars) state_.limit_session_budget_chars = profile.session_budget_chars;
+        if (profile.has_max_tool_output_bytes) state_.limit_max_tool_output_bytes = profile.max_tool_output_bytes;
+        if (profile.has_shell_timeout_sec) state_.limit_shell_timeout_sec = profile.shell_timeout_sec;
+        if (profile.has_min_final_answer_len) state_.limit_min_final_answer_len = profile.min_final_answer_len;
+        if (profile.has_compaction_buffer_tokens) state_.limit_compaction_buffer_tokens = profile.compaction_buffer_tokens;
+        if (profile.has_prune_protect_tokens) state_.limit_prune_protect_tokens = profile.prune_protect_tokens;
+        if (profile.has_prune_minimum_tokens) state_.limit_prune_minimum_tokens = profile.prune_minimum_tokens;
+        if (profile.has_max_preserve_recent_tokens) state_.limit_max_preserve_recent_tokens = profile.max_preserve_recent_tokens;
+        if (profile.has_max_output_bytes) state_.limit_max_output_bytes = profile.max_output_bytes;
+        if (profile.has_max_output_lines) state_.limit_max_output_lines = profile.max_output_lines;
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
     }
 

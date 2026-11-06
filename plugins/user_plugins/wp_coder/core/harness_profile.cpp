@@ -37,7 +37,11 @@ const std::set<std::string>& known_keys() {
     static const std::set<std::string> keys = {
         "model", "temperature", "max_tokens", "tools_policy", "timeout_ms",
         "allowed_commands", "allowed_extensions", "rag_enabled",
-        "description"};
+        "description",
+        "max_steps", "session_budget_chars", "max_tool_output_bytes",
+        "shell_timeout_sec", "min_final_answer_len", "compaction_buffer_tokens",
+        "prune_protect_tokens", "prune_minimum_tokens",
+        "max_preserve_recent_tokens", "max_output_bytes", "max_output_lines"};
     return keys;
 }
 
@@ -204,6 +208,40 @@ bool parse_profile(const std::string& text, Profile* out, std::string* why) {
         if (!read_positive_int("timeout_ms", &p.has_timeout_ms, &p.timeout_ms)) {
             return false;
         }
+    }
+
+    if (root.has("max_steps")) {
+        if (!read_positive_int("max_steps", &p.has_max_steps, &p.max_steps)) return false;
+    }
+    if (root.has("session_budget_chars")) {
+        if (!read_positive_int("session_budget_chars", &p.has_session_budget_chars, &p.session_budget_chars)) return false;
+    }
+    if (root.has("max_tool_output_bytes")) {
+        if (!read_positive_int("max_tool_output_bytes", &p.has_max_tool_output_bytes, &p.max_tool_output_bytes)) return false;
+    }
+    if (root.has("shell_timeout_sec")) {
+        if (!read_positive_int("shell_timeout_sec", &p.has_shell_timeout_sec, &p.shell_timeout_sec)) return false;
+    }
+    if (root.has("min_final_answer_len")) {
+        if (!read_positive_int("min_final_answer_len", &p.has_min_final_answer_len, &p.min_final_answer_len)) return false;
+    }
+    if (root.has("compaction_buffer_tokens")) {
+        if (!read_positive_int("compaction_buffer_tokens", &p.has_compaction_buffer_tokens, &p.compaction_buffer_tokens)) return false;
+    }
+    if (root.has("prune_protect_tokens")) {
+        if (!read_positive_int("prune_protect_tokens", &p.has_prune_protect_tokens, &p.prune_protect_tokens)) return false;
+    }
+    if (root.has("prune_minimum_tokens")) {
+        if (!read_positive_int("prune_minimum_tokens", &p.has_prune_minimum_tokens, &p.prune_minimum_tokens)) return false;
+    }
+    if (root.has("max_preserve_recent_tokens")) {
+        if (!read_positive_int("max_preserve_recent_tokens", &p.has_max_preserve_recent_tokens, &p.max_preserve_recent_tokens)) return false;
+    }
+    if (root.has("max_output_bytes")) {
+        if (!read_positive_int("max_output_bytes", &p.has_max_output_bytes, &p.max_output_bytes)) return false;
+    }
+    if (root.has("max_output_lines")) {
+        if (!read_positive_int("max_output_lines", &p.has_max_output_lines, &p.max_output_lines)) return false;
     }
 
     if (root.has("tools_policy")) {

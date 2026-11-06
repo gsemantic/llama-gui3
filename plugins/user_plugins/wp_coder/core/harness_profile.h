@@ -99,6 +99,31 @@ struct Profile {
     std::vector<std::string> allowed_extensions;
     bool rag_enabled = false;
 
+    /* Ключевые лимиты (вынесены из core/limits.h). Значение 0 = «не задан,
+     * используй дефолт из limits.h». */
+    bool has_max_steps = false;
+    int max_steps = 0;
+    bool has_session_budget_chars = false;
+    int session_budget_chars = 0;
+    bool has_max_tool_output_bytes = false;
+    int max_tool_output_bytes = 0;
+    bool has_shell_timeout_sec = false;
+    int shell_timeout_sec = 0;
+    bool has_min_final_answer_len = false;
+    int min_final_answer_len = 0;
+    bool has_compaction_buffer_tokens = false;
+    int compaction_buffer_tokens = 0;
+    bool has_prune_protect_tokens = false;
+    int prune_protect_tokens = 0;
+    bool has_prune_minimum_tokens = false;
+    int prune_minimum_tokens = 0;
+    bool has_max_preserve_recent_tokens = false;
+    int max_preserve_recent_tokens = 0;
+    bool has_max_output_bytes = false;
+    int max_output_bytes = 0;
+    bool has_max_output_lines = false;
+    int max_output_lines = 0;
+
     /* Ключи, которые в файле есть, а плагин не знает. Не ошибка:
      * профили писались под harness, часть полей — его. Печатаются
      * один раз при загрузке, чтобы видна была опечатка. */

@@ -383,7 +383,21 @@ struct EngineState {
      * Показывается в логе и в панели: молча неприменённый профиль
      * выглядел бы как «настройка не работает». */
     std::string profile_error;
-    mutable std::string cached_system_prompt;  // кэш собранного промпта
+
+    /* Ключевые лимиты, переопределяемые профилем harness. Дефолты — из
+     * core/limits.h (см. limits::). Профиль задаёт их только если поле
+     * has_* = true; иначе остаётся дефолт. */
+    int limit_max_steps = 12;
+    int limit_session_budget_chars = 60000;
+    int limit_max_tool_output_bytes = 12000;
+    int limit_shell_timeout_sec = 120;
+    int limit_min_final_answer_len = 300;
+    int limit_compaction_buffer_tokens = 20000;
+    int limit_prune_protect_tokens = 40000;
+    int limit_prune_minimum_tokens = 20000;
+    int limit_max_preserve_recent_tokens = 15000;
+    int limit_max_output_bytes = 50 * 1024;
+    int limit_max_output_lines = 2000;    mutable std::string cached_system_prompt;  // кэш собранного промпта
     /* И11.7: АТОМНЫЙ, потому что писать его стали ДВА потока. До этой
      * задачи и писатель, и читатель были потоком агента (инструмент
      * `todowrite` сбрасывает кэш, `build_system_prompt` его читает), и
