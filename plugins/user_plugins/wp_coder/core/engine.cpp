@@ -205,7 +205,7 @@ void Engine::submit(const std::string& prompt) {
                 state_.todos.clear();
                 state_.prompt_dirty = true;
                 std::cerr << "[wp_coder] submit: new task (heuristic), msgs="
-                          << state_.session.size() << std::endl;
+                          << state_.session.size() << " active_module=" << state_.active_module << std::endl;
             } else {
                 /* Продолжение сессии: добавляем сообщение к существующему контексту.
                  * План и предыдущие результаты сохраняются — модель знает историю. */
