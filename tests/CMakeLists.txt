@@ -134,10 +134,23 @@ add_test(NAME LlmStreamBridge COMMAND test_llm_stream_bridge)
 
 # Plugin loader tests (loads build/plugins/libhello_plugin.so via PluginManager)
 if(BUILD_PLUGINS)
+    # Тестовый бинарник — «мини-хост» для плагинов: часть плагинов (wp_coder)
+    # не линкует ImGui, а рассчитывает на символы хоста. Хост отдаёт их через
+    # -rdynamic, поэтому тест должен собрать тот же контракт: ImGui целиком
+    # (в тесте нет ни одного статического вызова ImGui, и без whole-archive
+    # линкер не тянет imgui.cpp из архива) + экспорт символов в .dynsym.
+    # SDL2/OpenGL нужны бэкендам (imgui_impl_sdl2/opengl3), попадающим в архив.
     add_executable(test_plugin_loader core/test_plugin_loader.cpp)
-    target_link_libraries(test_plugin_loader PRIVATE plugin_core ui core managers imgui_lib)
+    target_link_libraries(test_plugin_loader PRIVATE
+        plugin_core ui core managers
+        "-Wl,--whole-archive" imgui_lib "-Wl,--no-whole-archive")
+    target_link_options(test_plugin_loader PRIVATE "-rdynamic")
     target_include_directories(test_plugin_loader PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_definitions(test_plugin_loader PRIVATE PLUGIN_TEST_DIR="${CMAKE_BINARY_DIR}/plugins")
+    if(SDL2_FOUND)
+        target_link_libraries(test_plugin_loader PRIVATE ${SDL2_LIBRARIES})
+    endif()
+    target_link_libraries(test_plugin_loader PRIVATE GLEW::GLEW OpenGL::GL)
     if(UNIX AND NOT APPLE)
         target_link_libraries(test_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
     endif()
@@ -145,9 +158,16 @@ if(BUILD_PLUGINS)
 
     # Восстановление пунктов меню плагинов после перестройки меню приложением
     add_executable(test_menu_restore core/test_menu_restore.cpp)
-    target_link_libraries(test_menu_restore PRIVATE plugin_core ui core managers imgui_lib)
+    target_link_libraries(test_menu_restore PRIVATE
+        plugin_core ui core managers
+        "-Wl,--whole-archive" imgui_lib "-Wl,--no-whole-archive")
+    target_link_options(test_menu_restore PRIVATE "-rdynamic")
     target_include_directories(test_menu_restore PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_definitions(test_menu_restore PRIVATE PLUGIN_TEST_DIR="${CMAKE_BINARY_DIR}/plugins")
+    if(SDL2_FOUND)
+        target_link_libraries(test_menu_restore PRIVATE ${SDL2_LIBRARIES})
+    endif()
+    target_link_libraries(test_menu_restore PRIVATE GLEW::GLEW OpenGL::GL)
     if(UNIX AND NOT APPLE)
         target_link_libraries(test_menu_restore PRIVATE ${CMAKE_DL_LIBS})
     endif()
@@ -160,10 +180,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-<<<<<<< HEAD
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_document_parser test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_plugin_loader test_menu_restore test_ui_auditor
-=======
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_llm_stream_bridge test_plugin_loader test_menu_restore test_ui_auditor
->>>>>>> origin/feat/wp-coder-d1-fix-docs
+    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_document_parser test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_llm_stream_bridge test_plugin_loader test_menu_restore test_ui_auditor
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

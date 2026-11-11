@@ -419,6 +419,51 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
         if (data.contains("choices") && data["choices"].is_array() && !data["choices"].empty() &&
             data["choices"][0].is_object()) {
             const auto& choice = data["choices"][0];
+
+            /* Нативные вызовы в НЕстриминговом ответе (message.tool_calls).
+             *
+             * Разбор ДО фолбэка на reasoning: у ход-вызова content пустой
+             * BY DESIGN (finish_reason: "tool_calls"), и подставлять туда
+             * reasoning_content значило бы выдачу рассуждений за ответ там,
+             * где ответ — вызов инструмента. */
+            auto absorb_tool_calls = [&response](const json& node) {
+                if (!node.contains("tool_calls") || !node["tool_calls"].is_array())
+                    return;
+                for (const auto& call : node["tool_calls"]) {
+                    if (!call.is_object()) continue;
+                    NativeToolCall tc;
+                    /* index может отсутствовать у провайдера, который
+                     * нумерует вызовы "id"-строкой или отдаёт по одному:
+                     * каждое значение — от локального счётчика размера. */
+                    tc.index = call.value("index", static_cast<int>(response.tool_calls.size()));
+                    if (call.contains("id") && call["id"].is_string()) {
+                        tc.id = call["id"].get<std::string>();
+                    }
+                    if (call.contains("function") && call["function"].is_object()) {
+                        tc.name = call["function"].value("name", "");
+                        /* arguments приходит строкой JSON (OpenAI-совместимо),
+                         * но отдельные провайдеры отдают объектом — оба вида
+                         * выравниваются в строку: вызывающий разбирает один
+                         * формат, а не два. */
+                        const auto& args = call["function"].value("arguments", json());
+                        if (args.is_string()) {
+                            tc.arguments = args.get<std::string>();
+                        } else if (args.is_object()) {
+                            tc.arguments = args.dump();
+                        }
+                    }
+                    if (tc.name.empty() && tc.arguments.empty()) continue;
+                    response.tool_calls.push_back(std::move(tc));
+                }
+            };
+            if (choice.contains("message") && choice["message"].is_object())
+                absorb_tool_calls(choice["message"]);
+            /* "delta" — на случай провайдера, вернувшего стриминговый формат
+             * даже для нестримингового запроса (общая причина ниже). */
+            if (choice.contains("delta") && choice["delta"].is_object())
+                absorb_tool_calls(choice["delta"]);
+            const bool native_calls = !response.tool_calls.empty();
+
             // Контент может быть строкой, массивом частей (Zhipu/GLM:
             // [{"type":"text","text":"..."}]) либо лежать в delta, если
             // провайдер вернул стриминг-формат даже для нестримингового
@@ -432,11 +477,15 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
             // GLM/OpenCode-Zen и пр. reasoning-модели кладут ответ в
             // reasoning_content, оставляя content пустым. Используем его как
             // запасной вариант, иначе ответ кажется пустым.
-            if (text.empty()) {
+            if (text.empty() && !native_calls) {
                 auto try_reasoning = [&](const json& msg) -> std::string {
                     if (msg.contains("reasoning_content") &&
                         msg["reasoning_content"].is_string()) {
                         return msg["reasoning_content"].get<std::string>();
+                    }
+                    if (msg.contains("reasoning") &&
+                        msg["reasoning"].is_string()) {
+                        return msg["reasoning"].get<std::string>();
                     }
                     return "";
                 };
@@ -453,11 +502,15 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
             // finish_reason="length" content пуст из-за нехватки токенов, а
             // reasoning_content в этом случае — обрезанные рассуждения, а не
             // ответ (подставлять их нельзя).
-            if (text.empty() && response.finish_reason != "length") {
+            if (text.empty() && !native_calls && response.finish_reason != "length") {
                 auto try_reasoning = [&](const json& msg) -> std::string {
                     if (msg.contains("reasoning_content") &&
                         msg["reasoning_content"].is_string()) {
                         return msg["reasoning_content"].get<std::string>();
+                    }
+                    if (msg.contains("reasoning") &&
+                        msg["reasoning"].is_string()) {
+                        return msg["reasoning"].get<std::string>();
                     }
                     return "";
                 };
@@ -470,7 +523,7 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
             response.content = sanitize_response_text(text);
         }
 
-        if (response.content.empty() && !data.contains("error")) {
+        if (response.content.empty() && response.tool_calls.empty() && !data.contains("error")) {
             // Нестандартный/неожиданный ответ: нет контента и нет поля error
             // в обычном формате. Например, OpenCode Zen при HTTP 403 Forbidden
             // возвращает просто {"model":"<id>"}. Формируем понятное сообщение

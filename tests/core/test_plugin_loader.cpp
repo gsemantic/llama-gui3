@@ -7,6 +7,7 @@
 //   - PluginManager корректно выгружает плагин (ll_plugin_shutdown + dlclose).
 
 #include "plugins/plugin_manager.h"
+#include "imgui.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +18,11 @@
 #endif
 
 int main() {
+    /* Плагины рисуют UI через ImGui; как и в приложении, мини-хост обязан
+     * создать контекст до render_plugins(), иначе GImGui == NULL и любой
+     * ImGui-вызов плагина (wp_coder, calculator) сегфолтит. */
+    ImGui::CreateContext();
+
     llama_gui::plugin::PluginSubsystems subsystems;
     subsystems.config_dir = ".";
     subsystems.data_dir = ".";
@@ -96,6 +102,8 @@ int main() {
         std::fprintf(stderr, "FAIL: плагин всё ещё загружен после shutdown()\n");
         return 1;
     }
+
+    ImGui::DestroyContext();
 
     std::printf("PLUGIN LOADER TEST OK\n");
     return 0;

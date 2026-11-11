@@ -11,6 +11,27 @@ using namespace llama_gui::core;
 namespace llama_gui {
 namespace core {
 
+/* Ход «состоится» только если в нём есть ЗНАЧИМОЕ содержимое: текст с
+ * хотя бы одним непробельным символом или вызов инструмента. Дельта из
+ * одних пробелов значимым не считается, но доставляется дальше как есть:
+ * вырезать её нельзя — пробельная дельта посреди текста разделяет слова,
+ * и её потеря склеила бы «hello» и «world» в «helloworld».
+ *
+ * Наблюдение (qwen-flash, DashScope, 2026-11): провайдер иногда шлёт
+ * дельту "\n\n" (или « ») и закрывает поток с finish_reason="stop".
+ * Считать такой ход успешным значило бы отдать плагину пустоту: цикл
+ * агента тратил бы шаг на «пустой ход», пользователь видел бы чужое
+ * служебное сообщение, а чинил бы это повторный запрос. Теперь ход
+ * без значимого содержимого — ретраебельный сбой («Empty response»),
+ * и тот же цикл попыток (и фолбэк на не-стриминг), что для сетевых
+ * сбоев, повторяет запрос до появления настоящего ответа. */
+static bool has_non_space(const std::string& s) {
+    for (char c : s) {
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') return true;
+    }
+    return false;
+}
+
 static bool is_valid_utf8(const std::string& s) {
     size_t i = 0;
     while (i < s.size()) {
@@ -428,14 +449,23 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
     // Стратегия ретраев:
     //  - до 3 попыток суммарно;
     //  - каждая попытка с бо́льшим таймаутом соединения (fail fast, затем терпеливее);
+    //  - период тишины тоже растёт (20/30/45 с): модель может паузить
+    //    размышления, но вечно молчащее соединение — это не пауза, а зависание,
+    //    которое раньше обрывалось только таймаутом звонящего (у плагина — 120 с);
     //  - экспоненциальный backoff с джиттером между попытками (1s -> 2s);
     //  - ретраим только транзиентные ошибки (таймаут/сеть, 408/429/5xx, пустой ответ);
     //  - не ретраим, если контент уже начал приходить (задублируется).
     const int kMaxAttempts = 3;
     const int kConnectTimeoutsMs[kMaxAttempts] = {10000, 20000, 30000};
+    const int kIdleTimeoutsS[kMaxAttempts] = {20, 30, 45};
     const int kBaseBackoffMs = 1000;
 
-    bool any_content_delivered = false;
+    /* «Доставлено» здесь значит «доставлено ЗНАЧИМОЕ»: текст с
+     * непробельным символом или вызов инструмента. Пробельная дельта
+     * доставляется, но значимой не считается (has_non_space выше) — ход
+     * из одних пробелов с finish=stop это вырожденный ответ провайдера,
+     * и по нему запрос повторяется, как по сетевому сбою. */
+    bool any_meaningful_delivered = false;
     bool gave_up = false;
     std::string last_error_message;
 
@@ -445,13 +475,13 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
             return false;
         }
 
-        bool delivered_content = false;
+        bool delivered_meaningful = false;
         bool failed = false;
         bool retryable = false;
         std::string error_message;
 
         http_client_.make_streaming_request("chat/completions", body,
-            [this, &callback, on_tool, &delivered_content, &any_content_delivered, &failed, &retryable, &error_message, &acc_usage](
+            [this, &callback, on_tool, &delivered_meaningful, &any_meaningful_delivered, &failed, &retryable, &error_message, &acc_usage, attempt](
                 const std::string& data, bool is_error, bool is_done, bool is_retryable) {
                 if (is_done) {
                     if (is_error) {
@@ -463,11 +493,19 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                         } else {
                             error_message = "Network error or timeout";
                         }
-                    } else if (!delivered_content) {
-                        // Сервер ответил, но контента нет - считаем временным сбоем
+                    } else if (!delivered_meaningful) {
+                        // Сервер ответил, но значимого содержимого нет:
+                        // ни текста с непробельными символами, ни вызова
+                        // инструмента. Пустой ход (qwen: дельта "\n\n" и
+                        // finish=stop) здесь неотличим от сбоя сети — и
+                        // повторяется тем же механизмом.
                         failed = true;
                         retryable = true;
                         error_message = "Empty response from server";
+                        std::cout << "[CloudClient] ход без значимого содержимого"
+                                     " (пусто/пробелы) — попытка "
+                                  << (attempt + 1) << "/" << kMaxAttempts
+                                  << std::endl;
                     } else {
                         callback("", true);
                     }
@@ -487,8 +525,13 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                             choice["delta"]["content"].is_string()) {
                             std::string token = choice["delta"]["content"].get<std::string>();
                             if (!token.empty()) {
-                                delivered_content = true;
-                                any_content_delivered = true;
+                                /* Пробельная дельта уходит модели как есть
+                                 * (посреди текста она разделяет слова), но
+                                 * значимой не считается. */
+                                if (has_non_space(token)) {
+                                    delivered_meaningful = true;
+                                    any_meaningful_delivered = true;
+                                }
                                 callback(token, false);
                             }
                         }
@@ -515,8 +558,10 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                                     }
                                 }
                                 if (name.empty() && arguments.empty()) continue;
-                                delivered_content = true;
-                                any_content_delivered = true;
+                                if (!name.empty() || has_non_space(arguments)) {
+                                    delivered_meaningful = true;
+                                    any_meaningful_delivered = true;
+                                }
                                 on_tool(index, name, arguments);
                             }
                         }
@@ -532,7 +577,8 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                     // Пропускаем повреждённый чанк
                 }
             },
-            kConnectTimeoutsMs[attempt]);
+            kConnectTimeoutsMs[attempt],
+            kIdleTimeoutsS[attempt]);
 
         if (!failed) {
             if (out_response) *out_response = acc_usage;
@@ -562,18 +608,38 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
 
     // Фолбэк: некоторые провайдеры (например, OVH AI Endpoints для тяжёлых
     // моделей) отклоняют анонимные streaming-запросы сразу с 429, хотя обычный
-    // запрос проходит. Если стриминг так и не дал контента — пробуем один раз
-    // без stream и отдаём ответ одним куском.
-    if (!any_content_delivered && !aborted_.load()) {
+    // запрос проходит. Если стриминг так и не дал ЗНАЧИМОГО содержимого
+    // (в том числе — дал одни пробелы) — пробуем один раз без stream и
+    // отдаём ответ одним куском.
+    if (!any_meaningful_delivered && !aborted_.load()) {
+        std::cout << "[CloudClient] any_meaningful_delivered=false, fallback to non-streaming" << std::endl;
         std::cout << "[CloudClient] Streaming failed - retrying as non-streaming request" << std::endl;
         OpenRouterRequestParams fb = params;
         fb.stream = false;
         OpenRouterCompletionResponse fallback = complete(fb);
-        if (fallback.success && !fallback.content.empty()) {
+        /* Нативный вызов в фолбэке. Ход, состоящий только из вызова, имеет
+         * пустой content, и по условию «не пустой content» такой ход раньше
+         * выбрасывался ЦЕЛИКОМ: модель вызывала инструмент, а вызывающий
+         * получал ошибку (либо вечное молчание). Вызовы уходят тем же
+         * колбэком on_tool с index/имя/кусок аргументов, что и в стриминге —
+         * не заводить второй канал доставки: два накопителя разошлись бы
+         * при первом же провайдере. Без on_tool (обычный чат) вызовы не
+         * доставляются: чат инструментов не просил, и ответа с tool_calls там
+         * быть не должно. finish_reason фолбэка («tool_calls» у ход-вызова)
+         * доезжает наружу, иначе снаружи ход выглядел бы завершённым текстом. */
+        const bool has_native_calls = !fallback.tool_calls.empty() && on_tool != nullptr;
+        if (fallback.success &&
+            (!fallback.content.empty() || has_native_calls)) {
             acc_usage.prompt_tokens = fallback.prompt_tokens;
             acc_usage.completion_tokens = fallback.completion_tokens;
             acc_usage.total_tokens = fallback.total_tokens;
-            callback(fallback.content, false);
+            acc_usage.finish_reason = fallback.finish_reason;
+            if (has_native_calls) {
+                for (const auto& call : fallback.tool_calls) {
+                    on_tool(call.index, call.name, call.arguments);
+                }
+            }
+            if (!fallback.content.empty()) callback(fallback.content, false);
             callback("", true);
             if (out_response) *out_response = acc_usage;
             return true;

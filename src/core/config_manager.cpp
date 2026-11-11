@@ -61,6 +61,9 @@ bool ConfigManager::initialize() {
     current_profile_ = profile_manager_.getCurrentProfileName();
     if (!current_profile_.empty()) {
         std::cout << "ConfigManager: Текущий профиль установлен: " << current_profile_ << std::endl;
+        if (settings_ptr_) {
+            settings_ptr_->set_current_profile_name(current_profile_);
+        }
     }
 
     // Шаг 6: Валидируем настройки
@@ -120,6 +123,9 @@ bool ConfigManager::loadProfile(const std::string& profile_name) {
     std::cout << "ConfigManager: Загрузка профиля: " << profile_name << std::endl;
     if (profile_manager_.loadProfile(profile_name)) {
         current_profile_ = profile_name;
+        if (settings_ptr_) {
+            settings_ptr_->set_current_profile_name(profile_name);
+        }
         std::cout << "✓ ConfigManager: Профиль загружен" << std::endl;
         return true;
     }
@@ -145,6 +151,9 @@ bool ConfigManager::saveProfile(const std::string& profile_name) {
     std::cout << "ConfigManager: Сохранение профиля: " << name << std::endl;
     if (profile_manager_.saveProfile(name)) {
         current_profile_ = name;
+        if (settings_ptr_) {
+            settings_ptr_->set_current_profile_name(name);
+        }
         std::cout << "✓ ConfigManager: Профиль сохранён" << std::endl;
         return true;
     }

@@ -117,7 +117,7 @@ int OpenRouterHttpClient::xferinfo_callback(void* clientp, curl_off_t, curl_off_
     return 0;
 }
 
-bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, const std::string& body, const StreamCallback& callback, int connect_timeout_ms) {
+bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, const std::string& body, const StreamCallback& callback, int connect_timeout_ms, int idle_timeout_s) {
     if (!callback) return false;
 
     aborted_.store(false);
@@ -148,6 +148,14 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
     // Стриминг: без общего таймаута - соединение живёт до [DONE] или закрытия сервером
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
+    /* Контроль тишины: LOW_SPEED считается пойманным, когда скорость ниже
+     * LIMIT (1 Б/с) в течение TIME (idle_timeout_s) секунд. Общий
+     * CURLOPT_TIMEOUT для SSE невозможен (длинный ответ — норма), а попытка
+     * без него, которую сервер принял и молчит, оборвалась бы только вместе
+     * с вызывающим, чей собственный таймаут больше всей цепочки попыток. */
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,
+                     idle_timeout_s > 0 ? static_cast<long>(idle_timeout_s) : 0L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 

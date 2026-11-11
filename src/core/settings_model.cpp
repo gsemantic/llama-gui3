@@ -15,7 +15,7 @@ std::string Settings::get_model_path() const {
         return get_custom_setting("model_path");
     }
     
-    return "/home/Alex/projects/gguf/"; // Default path to actual models directory
+    return "/home/alex/projects/gguf/"; // Default path to actual models directory
 }
 
 void Settings::set_model_path(const std::string& model_path) {

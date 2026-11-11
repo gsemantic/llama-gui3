@@ -1,4 +1,5 @@
 #include "../include/ui/grid_snapping_system.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <fstream>

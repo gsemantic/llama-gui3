@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bench_tab_base.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 

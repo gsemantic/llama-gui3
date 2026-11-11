@@ -57,9 +57,17 @@ public:
      * Завершается на маркере [DONE] или при закрытии соединения сервером.
      *
      * @param connect_timeout_ms таймаут установки соединения для этой попытки
+     * @param idle_timeout_s     прервать, если от сервера ни байта дольше
+     *                           этого времени; 0 — контроль выключен. Общего
+     *                           таймаута для SSE быть не может (ответ живёт
+     *                           до [DONE]), но без контроля тишины соединение,
+     *                           которое сервер принял и молчит, висит вечность:
+     *                           вызывающий обрывает ход своим таймаутом,
+     *                           и ответ теряется целиком
      */
     bool make_streaming_request(const std::string& endpoint, const std::string& body,
-                                const StreamCallback& callback, int connect_timeout_ms = 30000);
+                                const StreamCallback& callback, int connect_timeout_ms = 30000,
+                                int idle_timeout_s = 0);
 
 private:
     struct StreamContext {

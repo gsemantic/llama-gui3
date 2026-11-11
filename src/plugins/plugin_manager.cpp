@@ -767,7 +767,7 @@ int host_llm_complete_local_or_cloud(LlamaPluginHost* host, PluginHostData* pd,
 
     core::OpenRouterRequestParams params;
     params.model = cp.model_id;
-    params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (из профиля UI)
+    params.max_tokens = cp.max_output_tokens > 0 ? cp.max_output_tokens : std::max(settings->chat().max_tokens, 8192);
     params.temperature = settings->chat().temperature;
     params.top_p = settings->chat().top_p;
     params.stream = false;
@@ -925,7 +925,7 @@ char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
 
                 core::OpenRouterRequestParams params;
                 params.model = cp.model_id;
-                params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено (из профиля UI)
+                params.max_tokens = cp.max_output_tokens > 0 ? cp.max_output_tokens : std::max(settings->chat().max_tokens, 8192);
                 params.temperature = settings->chat().temperature;
                 params.top_p = settings->chat().top_p;
                 params.stream = false;
@@ -1132,7 +1132,7 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
 
         core::OpenRouterRequestParams params;
         params.model = cp.model_id;
-        params.max_tokens = cp.max_output_tokens;  // 0 = не ограничено
+        params.max_tokens = cp.max_output_tokens > 0 ? cp.max_output_tokens : std::max(settings->chat().max_tokens, 8192);
         params.temperature = settings->chat().temperature;
         params.top_p = settings->chat().top_p;
         params.stream = true;
@@ -1157,18 +1157,19 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
         params.tool_choice = cloud_tool_choice;
 
         core::OpenRouterCompletionResponse usage;
+        /* Текст ошибки клиента (429/500) сохраняется отдельно: finish()
+         * перекрыл бы его общей фразой, а плагин классифицирует ретраи по
+         * СТРОКЕ («429 Too Many Requests» → повторяемо), и общая фраза
+         * превращает ретраяемую ошибку в неретраяемую. */
+        const auto client_error = std::make_shared<std::string>();
         /* Облако отмены не знает (его клиент синхронный), но handle из
          * реестра убрать надо всё равно: иначе запись жила бы до конца
          * сессии. */
         const bool ok = client->complete_streaming_async(
             params,
-            [bridge](const std::string& token, bool is_done) {
-                /* Непустой токен вместе с флагом завершения — ошибка
-                 * облака, а не последний кусок ответа: так договорились с
-                 * этим клиентом чат приложения. Считать его текстом
-                 * означало бы показать пользователю «HTTP 429» как ответ
-                 * модели. */
+            [bridge, client_error](const std::string& token, bool is_done) {
                 if (is_done) {
+                    if (!token.empty()) *client_error = token;
                     bridge->set_error(token);
                     return;
                 }
@@ -1186,13 +1187,15 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
             });
 
         if (!ok) {
-            finish("облачный провайдер не ответил");
+            /* Есть конкретный текст от клиента — он и доходит в done_json
+             * (bridge уже держит его в error_); общего текста хватает только
+             * когда клиент вообще не успел закрыть поток. */
+            finish(client_error->empty() ? std::string("облачный провайдер не ответил")
+                                         : *client_error);
             return;
         }
         unregister_stream(user_data);
         bridge->set_usage(usage.prompt_tokens, usage.completion_tokens);
-        /* Клиент не отдаёт finish_reason, а сам факт завершения им для нас
-         * достовернее поля: без него bridge счёл бы поток оборванным. */
         bridge->set_finish_reason(usage.finish_reason.empty() ? "stop"
                                                               : usage.finish_reason);
         bridge->note_tools(!params.tools.empty(), false);

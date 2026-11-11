@@ -124,6 +124,21 @@ struct OpenRouterRequestParams {
 };
 
 /**
+ * @brief Нативный вызов инструмента из НЕстримингового ответа.
+ *
+ * Ход, состоящий только из вызова, имеет пустой content
+ * (finish_reason: "tool_calls") — без отдельного поля такой ход
+ * доходил бы как «успех с пустым текстом», и вызывающий не отличил бы
+ * его от ошибки провайдера.
+ */
+struct NativeToolCall {
+    int index = 0;
+    std::string id;         // идентификатор провайдера ("call_1"...), может быть пустым
+    std::string name;       // имя инструмента
+    std::string arguments;  // аргументы вызова — JSON-строка
+};
+
+/**
  * @brief Ответ от OpenRouter на запрос генерации
  */
 struct OpenRouterCompletionResponse {
@@ -131,6 +146,12 @@ struct OpenRouterCompletionResponse {
     std::string model;
     std::string content;
     std::string finish_reason;
+
+    /* message.tool_calls нестримингового ответа. В стриминге куски вызова
+     * идут дельтами и там своё накопление; здесь вызов приходит целиком.
+     * Раньше поле не разобиралось вовсе — и любой ход-вызов через
+     * не-стриминговый запрос (в т.ч. фолбэк) терялся целиком. */
+    std::vector<NativeToolCall> tool_calls;
     
     // Статистика использования
     int prompt_tokens = 0;

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <dirent.h>
 #include <cstdio>
 #include <unistd.h>
@@ -16,6 +17,12 @@ namespace ui {
 bool WorkspaceLayoutManager::save(const std::string& name) {
     if (!window_manager_) return false;
 
+    // Создаём все родительские каталоги (mkdir -p), иначе файл не создастся
+    // при первом запуске, когда .config/llama-gui/workspaces ещё не существует.
+    size_t pos = 0;
+    while ((pos = workspaces_dir_.find('/', pos + 1)) != std::string::npos) {
+        mkdir(workspaces_dir_.substr(0, pos).c_str(), 0755);
+    }
     mkdir(workspaces_dir_.c_str(), 0755);
 
     // Обновляем позиции/размеры из реальных ImGui окон перед сохранением
@@ -99,6 +106,10 @@ bool WorkspaceLayoutManager::save(const std::string& name) {
 
         std::string filepath = workspaces_dir_ + "/" + name + ".json";
         std::ofstream file(filepath);
+        if (!file.is_open()) {
+            std::cerr << "Failed to open workspace file for writing: " << filepath << std::endl;
+            return false;
+        }
         file << config_json.dump(2);
         file.close();
 

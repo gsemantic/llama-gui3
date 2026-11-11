@@ -74,6 +74,12 @@ bool ProfileManager::loadProfile(const std::string& profile_name) {
 
     if (settings_->deserialize_from_json(normalized)) {
         current_profile_name_ = profile_name;
+        // Синхронизируем имя текущего профиля в Settings, иначе диалоги,
+        // опирающиеся на settings_.get_current_profile_name(), не будут знать
+        // активный профиль и не смогут сохранить введённые ключи/пути.
+        if (settings_) {
+            settings_->set_current_profile_name(profile_name);
+        }
 
         // Применяем workspace конфигурацию из профиля
         applyWorkspaceFromJson(normalized);
@@ -128,6 +134,9 @@ bool ProfileManager::saveProfile(const std::string& profile_name) {
 
     file << final_json;
     current_profile_name_ = name;
+    if (settings_) {
+        settings_->set_current_profile_name(name);
+    }
 
     std::cout << "[ProfileManager] Профиль сохранён: " << name << std::endl;
     return true;

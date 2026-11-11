@@ -357,12 +357,15 @@ bool MainWindow::initialize(int width, int height) {
     // === Инициализация ConfigManager ===
     // Привязываем внешний Settings (тот же объект что и в main.cpp)
     config_manager_.bindExternalSettings(&settings_);
+    // Привязываем WorkspaceManager ДО initialize(), иначе применение workspace из профиля
+    // при загрузке последнего профиля будет пропущено (workspace_manager_ == nullptr).
+    config_manager_.getProfileManager().bindWorkspaceManager(&workspace_manager_);
+    // WorkspaceLayoutManager должен знать WindowManager ещё до загрузки __last_session__,
+    // иначе load() вернётся раньше из-за нулевого указателя и состояние не восстановится.
+    workspace_layout_manager_.setWindowManager(&window_manager_);
     if (!config_manager_.initialize()) {
         std::cerr << "⚠ Не удалось инициализировать ConfigManager" << std::endl;
     }
-
-    // Привязываем WorkspaceManager к ProfileManager для интеграции workspace в профили
-    config_manager_.getProfileManager().bindWorkspaceManager(&workspace_manager_);
 
     // Загружаем последнее рабочее пространство (если есть)
     load_workspace("__last_session__");

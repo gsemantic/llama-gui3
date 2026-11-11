@@ -16,6 +16,7 @@
 #include "ui/command_manager.h"
 #include "ui/window_manager.h"
 #include "ui/workspace_manager.h"
+#include "imgui.h"
 
 #include <cstdio>
 #include <set>
@@ -65,6 +66,11 @@ static int count_items(const ui::AdvancedMenu* menu) {
 }
 
 int main() {
+    /* Плагины рисуют UI через ImGui; как и в приложении, мини-хост обязан
+     * создать контекст до render_plugins(), иначе GImGui == NULL и любой
+     * ImGui-вызов плагина (wp_coder) сегфолтит. */
+    ImGui::CreateContext();
+
     ui::CommandManager command_manager;
     ui::WindowManager window_manager;
     ui::WorkspaceManager workspace_manager;
@@ -130,6 +136,7 @@ int main() {
     check(no_dup_pairs, "в меню нет дубликатов пунктов (имя, команда)");
 
     manager.shutdown();
+    ImGui::DestroyContext();
 
     if (failures == 0) {
         std::printf("MENU RESTORE TEST OK (app_items=%d, total=%d)\n", app_items, restored);

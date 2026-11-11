@@ -20,7 +20,7 @@ namespace llama_gui {
 namespace core {
 
 ModelManager::ModelManager()
-    : models_directory_("/home/Alex/projects/gguf/")
+    : models_directory_("/home/alex/projects/gguf/")
     , model_loaded_(false)
     , load_progress_(0.0f)
     , load_status_("")
