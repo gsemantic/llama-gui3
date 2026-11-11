@@ -648,6 +648,43 @@ TEST(agent_loop_asks_again_when_the_answer_is_too_short) {
                 std::string::npos);
 }
 
+TEST(agent_loop_names_the_empty_turn_separately) {
+    /* ПУСТОЙ ход (ни текста, ни вызова, finish=stop) — не «короткий
+     * ответ», а вырожденный ответ провайдера (наблюдение qwen-flash,
+     * DashScope). Цикл ведёт себя как для короткого: напоминание и
+     * продолжение, но статус называет пустоту пустотой — иначе человек
+     * видит в чате «модель не вызвала инструмент», хотя модель не
+     * отвечала вовсе, и ищет несуществующую вину протокола. */
+    LoopFixture fx;
+    fx.host.replies = {"", long_answer("Теперь подробно.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    std::vector<std::string> statuses;
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind kind, const std::string& text) {
+                       if (kind == AgentEvent::Status) statuses.push_back(text);
+                   });
+    ASSERT_TRUE(fx.run(loop, response));
+
+    /* Два хода: пустой повторён с напоминанием, второй стал итогом. */
+    ASSERT_EQ(fx.host.calls(), (size_t)2);
+    bool reminder = false;
+    for (const Message& m : fx.history()) {
+        if (m.is_user() && m.text().find("[напоминание]") != std::string::npos)
+            reminder = true;
+    }
+    ASSERT_TRUE(reminder);
+    /* Про пустой ход сказано отдельно, и без «не вызвала инструмент». */
+    bool empty_named = false;
+    for (const std::string& s : statuses) {
+        if (s.find("пустым") != std::string::npos) empty_named = true;
+    }
+    ASSERT_TRUE(empty_named);
+}
+
 TEST(agent_loop_keeps_going_when_the_user_writes_mid_turn) {
     /* Условие 3: ход отвечает на последнюю реплику пользователя. Если
      * человек написал, пока ход шёл, закрывать задачу нельзя — иначе его

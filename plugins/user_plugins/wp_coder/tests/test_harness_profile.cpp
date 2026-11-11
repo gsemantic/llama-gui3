@@ -707,7 +707,11 @@ TEST(профиль_из_настройки_меняет_таймаут_запр
 TEST(профиль_убирает_инструменты_из_каталога_который_видит_модель) {
     /* Склейка целиком: настройка → профиль → правила → то, что уехало в
      * промпт. Без этой проверки всё выше проверяло бы только правила, а
-     * модель продолжала бы видеть write_file. */
+     * модель продолжала бы видеть write_file в КАТАЛОГЕ.
+     *
+     * Проверяем только секцию каталога (после "## ИНСТРУМЕНТЫ"), потому что
+     * базовый протокол содержит примеры с write_file для иллюстрации формата.
+     * Сама модель получает доступ к инструментам только через каталог. */
     Settings st;
     st.values["wp_coder.project_dir"] = "";
     st.values["wp_coder.profiles_dir"] = shipped_dir();
@@ -716,21 +720,26 @@ TEST(профиль_убирает_инструменты_из_каталога_
     Engine& eng = engine();
     ProfileGuard guard(eng);
 
-    /* Сначала без профиля: write_file виден. Иначе «стало не видно» не
-     *чего было бы сравнивать. */
+    /* Сначала без профиля: write_file виден в каталоге. */
     st.values["wp_coder.profile"] = "";
     eng.init(st.callbacks());
     {
         const std::string plain = eng.build_system_prompt();
-        ASSERT_TRUE(plain.find("write_file") != std::string::npos);
+        size_t cat_pos = plain.find("## ИНСТРУМЕНТЫ");
+        ASSERT_TRUE(cat_pos != std::string::npos);
+        std::string catalogue = plain.substr(cat_pos);
+        ASSERT_TRUE(catalogue.find("write_file") != std::string::npos);
     }
 
     st.values["wp_coder.profile"] = "secure_audit";
     eng.invalidate_prompt_cache();
     eng.load_settings();
     const std::string audited = eng.build_system_prompt();
-    ASSERT_TRUE(audited.find("write_file") == std::string::npos);
-    ASSERT_TRUE(audited.find("read_file") != std::string::npos);
+    size_t cat_pos = audited.find("## ИНСТРУМЕНТЫ");
+    ASSERT_TRUE(cat_pos != std::string::npos);
+    std::string catalogue = audited.substr(cat_pos);
+    ASSERT_TRUE(catalogue.find("write_file") == std::string::npos);
+    ASSERT_TRUE(catalogue.find("read_file") != std::string::npos);
 }
 
 TEST(явная_настройка_таймаута_важнее_профиля) {

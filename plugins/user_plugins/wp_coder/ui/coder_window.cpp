@@ -77,7 +77,12 @@ static void apply_settings_from_buffers() {
     auto& st = engine_state();
     {
         std::lock_guard<std::mutex> lk(st.mtx);
-        st.project_dir = s_project_dir;
+        /* Корень нормализуется при СОХРАНЕНИИ, а не только при загрузке
+         * (см. Engine::load_settings): человек мог набрать путь без
+         * начального слэша, и промпт тогда строится вокруг несуществующего
+         * относительно CWD каталога. Нормализация тут же видна в поле:
+         * буфер переписывается значением из состояния. */
+        st.project_dir = coder::security::normalize_project_dir(s_project_dir);
         st.php_bin = s_php_bin;
         st.wp_site_url = s_site_url;
         st.wp_app_user = s_app_user;
@@ -90,6 +95,8 @@ static void apply_settings_from_buffers() {
         st.deploy_remote_dir = s_deploy_remote;
         st.wp_local_url = s_local_url;
     }
+    /* Поле показывает то, что реально сохранено. */
+    std::snprintf(s_project_dir, sizeof(s_project_dir), "%s", st.project_dir.c_str());
     engine().invalidate_prompt_cache();
     /* И9.1: корень проекта входит в состав инструкций (AGENTS.md /
      * CLAUDE.md лежат именно там), поэтому смена корня обязана
@@ -666,6 +673,38 @@ static void render_permission_dialog() {
     ImGui::SameLine();
     if (ImGui::SmallButton((panel.ask.reject_label + "##perm" + id).c_str())) {
         engine().permission_reply(panel.ask.id, coder::PermissionReply::Reject);
+    }
+}
+
+/* Диалог «Доступ за пределами проекта» (PermissionGate).
+ *
+ * Вопрос ставится инструментом в `state_.pending_permission_path`, воркер
+ * просыпается на permission_cv и без ответа человека ждёт вечно
+ * (первая причина «агент завис»). Тело — та же отрисовка, что раньше
+ * жила строкой в render_session: решение о кнопках не уехало, а общий
+ * вид нужен в двух окнах (см. render_permission_dialogs_extras). */
+static void render_permission_gate_dialog() {
+    auto& st = engine_state();
+    std::string perm_path;
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        perm_path = st.pending_permission_path;
+    }
+    if (perm_path.empty()) return;
+
+    ImGui::Separator();
+    ImGui::Text("Доступ за пределами проекта:");
+    ImGui::TextWrapped("%s", perm_path.c_str());
+    if (ImGui::SmallButton("Разрешить (один раз)")) {
+        engine().permission_allow_once(perm_path);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Разрешить (всегда)")) {
+        engine().permission_allow_always(perm_path);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Отклонить")) {
+        engine().permission_reject(perm_path);
     }
 }
 
@@ -1636,7 +1675,21 @@ void render_all_windows() {
 void render_extras() {
     auto& st = engine_state();
 
-/* Индикатор статуса агента + кнопка Стоп + И11.10: что именно остановит
+    /* Диалоги разрешений в чате.
+     *
+     * Оба вопроса (PermissionEngine и PermissionGate) до этого рисовались
+     * ТОЛЬКО в окне «Сессия», а оно может быть закрыто — при старте оно
+     * скрыто, и вопрос оставался навсегда без ответа (воркер спит на
+     * permission_cv до решения человека), что выглядит как зависание
+     * агента. Здесь то же содержимое в окне чата: при активном agent mode
+     * чат — единственное окно, которое гарантированно открыто. Когда окно
+     * «Сессия» открыто, его диалоги рисуются там, и второй копии не нужно. */
+    if (g_win_session && !g_api->window_is_visible(g_host, g_win_session)) {
+        render_permission_dialog();
+        render_permission_gate_dialog();
+    }
+
+    /* Индикатор статуса агента + кнопка Стоп + И11.10: что именно остановит
      * отмена. Лок больше не держится на отрисовке: снимок берётся
      * функцией и отдаётся копией (D1, правило 3 SESSION_START). */
     {
@@ -1825,31 +1878,7 @@ void render_extras() {
     /* Запросы системы разрешений И2 рисует render_permission_dialog —
      * решение о подписях и кнопках принимает core/permission_panel.h. */
     render_permission_dialog();
-
-    /* Диалог разрешения доступа. */
-    {
-        std::string perm_path;
-        {
-            std::lock_guard<std::mutex> lk(st.mtx);
-            perm_path = st.pending_permission_path;
-        }
-        if (!perm_path.empty()) {
-            ImGui::Separator();
-            ImGui::Text("Доступ за пределами проекта:");
-            ImGui::TextWrapped("%s", perm_path.c_str());
-            if (ImGui::SmallButton("Разрешить (один раз)")) {
-                engine().permission_allow_once(perm_path);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Разрешить (всегда)")) {
-                engine().permission_allow_always(perm_path);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Отклонить")) {
-                engine().permission_reject(perm_path);
-            }
-        }
-    }
+    render_permission_gate_dialog();
 }
 
 } // namespace ui

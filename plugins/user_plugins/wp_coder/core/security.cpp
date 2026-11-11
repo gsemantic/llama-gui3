@@ -3,6 +3,7 @@
 #include "command_policy.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 
@@ -74,6 +75,58 @@ bool is_path_allowed(const std::string& abs_path,
         }
     }
     return false;
+}
+
+std::string normalize_project_dir(const std::string& project_dir) {
+    /* Хвостовые «/» срезаем только лишние: «/» сам по себе остаётся «/». */
+    std::string in = project_dir;
+    while (in.size() > 1 && in.back() == '/') in.pop_back();
+    if (in.empty()) return {};
+
+    const fs::path home = []() -> fs::path {
+        const char* h = std::getenv("HOME");
+        return (h && *h) ? fs::path(h) : fs::path();
+    }();
+
+    const auto canon_of = [](const fs::path& p) -> std::string {
+        /* weakly_canonical — по той же причине, что и is_path_outside:
+         * корень может ещё не существовать, а canonical на таком пути
+         * даст пустую строку. */
+        std::error_code ec;
+        const fs::path canon = fs::weakly_canonical(p, ec);
+        return (!ec && !canon.empty()) ? canon.string() : p.string();
+    };
+
+    /* «~» и «~/…» — единственная развёртка пути, которую ждёт человек:
+     * глобальные инструкции и так живут в «~/.config/wp_coder/», и после
+     * неё путь уже абсолютный — кандидаты ниже не нужны. */
+    if (in == "~" || (in.size() > 1 && in.front() == '~' && in[1] == '/')) {
+        if (home.empty()) return in;   /* развёртывать нечем */
+        return canon_of(home / (in.size() > 1 ? in.substr(2) : std::string()));
+    }
+
+    const fs::path p = fs::path(in);
+    if (p.is_absolute()) return canon_of(p);
+
+    std::error_code ec;
+    /* Порядок кандидатов значим: cwd-вариант — буквальный смысл
+     * относительного пути, и подменять его догадкой (слэш перед первым
+     * компонентом, домашний каталог) можно только когда буквального
+     * каталога на диске нет. */
+    const fs::path candidates[] = {
+        fs::absolute(p, ec),
+        fs::path("/") / p,
+        home.empty() ? fs::path() : home / p,
+    };
+    for (const fs::path& cand : candidates) {
+        if (cand.empty()) continue;
+        ec.clear();
+        if (fs::is_directory(cand, ec) && !ec) return canon_of(cand);
+    }
+    /* Ничего не нашли: путь от cwd — единственный, что не угадывает.
+     * Двойной вид пропадёт (путь станет абсолютным), а «не прочитан»
+     * останется честным. */
+    return fs::absolute(p, ec).string();
 }
 
 bool is_project_dir_valid(const std::string& project_dir) {

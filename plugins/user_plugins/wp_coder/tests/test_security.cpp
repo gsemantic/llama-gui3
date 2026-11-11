@@ -1,6 +1,10 @@
 #include "test_framework.h"
 #include "../core/security.h"
 
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+
 using namespace coder::security;
 
 TEST(security_path_safe_normal) {
@@ -82,6 +86,82 @@ TEST(security_project_dir_valid) {
 
 TEST(security_project_dir_empty) {
     ASSERT_TRUE(is_project_dir_valid(""));
+}
+
+/* --- normalize_project_dir: корень обязан стать абсолютным --- */
+
+TEST(security_normalize_empty) {
+    ASSERT_EQ(normalize_project_dir(""), std::string(""));
+}
+
+TEST(security_normalize_absolute_unchanged) {
+    ASSERT_EQ(normalize_project_dir("/opt/wp-norm-check"),
+              std::string("/opt/wp-norm-check"));
+}
+
+TEST(security_normalize_trailing_slash_trimmed) {
+    ASSERT_EQ(normalize_project_dir("/tmp/"), std::string("/tmp"));
+}
+
+TEST(security_normalize_missing_slash_restored) {
+    /* ВВЕДЁННЫЙ без слэша «tmp/x» обязан найти каталог «/tmp/x» кандидатом
+     * №2: ровно этот случай дал «Корень: home/alex/projects/calc/» в промпте
+     * и двойной путь в инструментах. */
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const std::string lost = "/tmp/wp_coder_norm_lost_dir";
+    fs::create_directories(lost, ec);
+    const std::string got = normalize_project_dir("tmp/wp_coder_norm_lost_dir");
+    fs::remove_all(lost, ec);
+    ASSERT_EQ(got, lost);
+}
+
+TEST(security_normalize_relative_existing_at_cwd) {
+    /* Буквальный смысл относительного пути имеет ПЕРВЫЙ приоритет: если
+     * каталог есть относительно текущего каталога приложения, его не
+     * переспрашивают догадкой про потерянный слэш. */
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path here = fs::current_path(ec) / "wp_coder_norm_cwd_dir";
+    fs::create_directories(here, ec);
+    const std::string got = normalize_project_dir("wp_coder_norm_cwd_dir");
+    fs::remove_all(here, ec);
+    ASSERT_EQ(got, here.string());
+}
+
+TEST(security_normalize_relative_from_home) {
+    /* Третий кандидат: путь набран от домашнего каталога. Каталог
+     * создаётся и удаляется в $HOME — тест не оставляет следов. */
+    namespace fs = std::filesystem;
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return;
+    std::error_code ec;
+    const fs::path target = fs::path(home) / "wp_coder_norm_home_dir";
+    fs::create_directories(target, ec);
+    const std::string got = normalize_project_dir("wp_coder_norm_home_dir");
+    fs::remove_all(target, ec);
+    ASSERT_EQ(got, target.string());
+}
+
+TEST(security_normalize_relative_unknown_goes_cwd_absolute) {
+    /* Ничего не нашли: возвращается путь от cwd — абсолютный. Угадать
+     * конкретное место нечем, но двойной вид «/home/.../home/...» уже
+     * не рождается: строка осмысленно абсолютная. */
+    namespace fs = std::filesystem;
+    const std::string got = normalize_project_dir("wp_coder_norm_absent_dir");
+    ASSERT_TRUE(std::string::npos != got.find("wp_coder_norm_absent_dir"));
+    ASSERT_TRUE(got.rfind(fs::current_path().string(), 0) == 0);
+}
+
+TEST(security_normalize_tilde_to_home) {
+    namespace fs = std::filesystem;
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return;
+    std::error_code ec;
+    const std::string got = normalize_project_dir("~");
+    /* Домашний каталог может приходить через симлинк, поэтому сверяемся
+     * с его канонизированным видом, а не со строкой из окружения. */
+    ASSERT_EQ(got, fs::weakly_canonical(fs::path(home), ec).string());
 }
 
 TEST(security_sanitize_ident_alnum) {

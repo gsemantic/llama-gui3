@@ -3,6 +3,7 @@
 #include "llm_source.h"
 #include "json_utils.h"
 #include "tool_protocol.h"
+#include <iostream>
 
 namespace coder {
 namespace llm_source {

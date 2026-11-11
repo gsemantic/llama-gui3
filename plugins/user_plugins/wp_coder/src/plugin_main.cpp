@@ -13,6 +13,7 @@
  */
 
 #include "core/engine.h"
+#include <cstdlib>
 #include "core/tools_registry.h"
 #include "core/skills_manager.h"
 #include "core/base_tools.h"
@@ -42,6 +43,22 @@ const LlamaHostApi* g_api = nullptr;
 
 /* --- Agent mode callbacks --- */
 
+/* Ответ подтверждающий доставку. Это НЕ результат агента, а отчёт о приёме:
+ * текст каждого хода плагин сам отправляет в чат через
+ * AgentEvent::Assistant (agent_mode_push_event), поэтому ждать здесь
+ * блокирующе незачем.
+ *
+ * Раньше было так: on_message звал submit() и ждал wait_response(5 минут).
+ * Пока агент стоял на вопросе пользователю, поток отправки чата простаивал
+ * всё это время — итоговый ответ в чат не приходил, и это выглядело как
+ * «GUI завис на синхронном ожидании». Ожидание лишнее и по устройству:
+ * ответ и так уходит в чат событиями, а держать поток ради «финальной
+ * строки» значило бы подвешивать отправку каждой задачи на время всей
+ * её работы. */
+static const char kPromptAck[] =
+    "Задача принята агентом. Прогресс и ответ приходят в чат; "
+    "окно «Сессия» — Ctrl+Shift+S.";
+
 static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_message, void* user_data) {
     if (!user_message || !user_message[0]) return nullptr;
     std::string message = coder::text::sanitize_utf8(user_message);
@@ -50,12 +67,16 @@ static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_messa
     auto& eng = coder::engine();
     eng.submit(message);
 
-    /* Агент работает в worker-потоке. Ждём результат (таймаут 5 минут). */
-    std::cerr << "[wp_coder] agent_mode_on_message: waiting for response..." << std::endl;
-    std::string response = eng.wait_response(300000);
-    std::cerr << "[wp_coder] agent_mode_on_message response_len=" << response.size()
-              << " head=" << coder::text::utf8_prefix(response, 120) << std::endl;
+    /* Не ждём ответа: агент работает в собственном worker-потоке, а
+     * wait_response(5 минут) держал бы поток отправки чата до конца задачи —
+     * в том числе пока агент ждёт подтверждения, которого без открытого
+     * окна «Сессия» пользователь мог и не увидеть. Каждый ход приходит
+     * в чат сам (AgentEvent::Assistant), дополнительный канал никто
+     * не читает. */
+    std::cerr << "[wp_coder] agent_mode_on_message: задача принята, агент"
+              << " работает в фоне" << std::endl;
 
+    std::string response = kPromptAck;
     char* out = (char*)malloc(response.size() + 1);
     if (out) memcpy(out, response.c_str(), response.size() + 1);
     return out;

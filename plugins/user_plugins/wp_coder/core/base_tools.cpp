@@ -170,6 +170,16 @@ std::string base_grep(const std::string& root, const std::string& pattern,
     if (pattern.empty())
         return "[ошибка] пустой PATTERN — укажи регулярное выражение";
 
+    /* libstdc++ ::regex исполняет бэктрекинг рекурсией, глубина которой
+     * растёт с длиной совпадения: строка в десятки килобайт переполняет
+     * стек и роняет процесс (сегфолт, порог ~16–32 КБ на обычной сборке
+     * и ~8 КБ под ASAN — измерено). Гигантская «строка» — не экзотика:
+     * бинарник, прочитанный getline'ом как одна строка, мини-скрипт,
+     * дамп. Предел ниже обоих порогов с запасом; строки исходников он
+     * не режет. Строка ОБРЕЗАЕТСЯ, а не пропускается: матч в начале
+     * длинной строки полезнее тишины. */
+    constexpr size_t kMaxGrepLineBytes = 4096;
+
     std::regex re;
     try {
         re = std::regex(pattern, std::regex::ECMAScript);
@@ -209,6 +219,9 @@ std::string base_grep(const std::string& root, const std::string& pattern,
                 out << "\n" << kWalkCancelledNote << "\n[досмотрено файлов: "
                     << fp << " — совпадений ниже может быть больше]\n";
                 return out.str();
+            }
+            if (line.size() > kMaxGrepLineBytes) {
+                line.resize(kMaxGrepLineBytes);
             }
             std::smatch m;
             if (std::regex_search(line, m, re)) {
@@ -943,6 +956,14 @@ void register_base_tools() {
              * не по тому, что записано, врал бы о числе правок. */
             const std::string before_raw = read_existing(abs);
             const diff::FileDiff fd = diff::make_file_diff(rel, before_raw, body);
+            /* И4.5: создаём родительские каталоги, если их нет. Без этого
+             * запись в новые подкаталоги (например "src/new/file.php")
+             * падает с ошибкой "не удалось записать". apply_patch уже делает
+             * то же самое (см. строки 1330-1333). */
+            {
+                std::error_code ec;
+                fs::create_directories(fs::path(abs).parent_path(), ec);
+            }
             std::ofstream f(abs, std::ios::binary | std::ios::trunc);
             if (!f) return out("[ошибка] не удалось записать: " + abs);
             f << body;
@@ -986,7 +1007,21 @@ void register_base_tools() {
          .required("pattern");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
-            return out("grep", base_grep(arg_str(a, "root"), arg_str(a, "pattern"),
+            /* Пустой root = корень проекта; относительный разрешается от
+             * него же, а не от каталога процесса. Тот же порядок, что у
+             * glob. Без резолва root=".« вёл обход по cwd ПРИЛОЖЕНИЯ —
+             * там бинарники сборки и дампы, поиск по которым читал их
+             * как гигантские «строки» и ронял процесс (см. предел длины
+             * строки в base_grep), а root=".." уходил из проекта мимо
+             * проверки внешних путей. */
+            const std::string rel_root = arg_str(a, "root");
+            std::string root = rel_root.empty() ? ctx.project_dir()
+                                                : project_resolve(rel_root);
+            if (root.empty())
+                return out("[ошибка] не задан root и не задан корень проекта");
+            std::string perm = guard_permission(ctx, root);
+            if (!perm.empty()) return out(std::move(perm));
+            return out("grep", base_grep(root, arg_str(a, "pattern"),
                                         ctx.project_dir(),
                                         [&ctx]() { return ctx.cancelled(); }));
         };

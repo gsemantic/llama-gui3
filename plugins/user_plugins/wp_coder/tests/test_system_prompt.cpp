@@ -57,7 +57,7 @@ const char* const kSharedStrings[] = {
 /* Строго ТЕКСТОВОГО протокола: формат вызова, который пишет модель. */
 const char* const kTextOnlyStrings[] = {
     "wp_action",
-    "```json",
+    "```",
     "РОВНО ОДИН wp_action блок за сообщение",
 };
 
