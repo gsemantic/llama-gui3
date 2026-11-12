@@ -17,6 +17,7 @@
 #include "snapshot.h"
 #include "subagent.h"
 #include "ast_symbols.h"
+#include "command_policy.h"
 
 #include <fstream>
 #include <sstream>
@@ -1605,7 +1606,9 @@ void register_base_tools() {
             "Запуск shell-команды. КРАЙНЯЯ мера: сначала пробуй"
             " специализированные инструменты. Таймаут по умолчанию 120 с;"
             " полный вывод длинной команды сохраняется в файл, путь"
-            " возвращается в ответе.";
+            " возвращается в ответе. Если команде нужен sudo с паролем,"
+            " приложение само покажет окно ввода пароля — пароль не"
+            " попадёт ни в чат, ни в логи, ни в вывод команды.";
         /* DESTRUCTIVE: команда может сделать что угодно, и откатить это
          * инструмент не умеет. Именно поэтому он обязан быть виден
          * политике режимов и подтверждению пользователя. */
@@ -1640,6 +1643,65 @@ void register_base_tools() {
                 if (!denial.empty()) return out(std::move(denial));
             }
 
+            /* sudo без предварительно кэшированных учётных данных: команда
+             * исполняется без PTY, а `sudo` запрашивает пароль с
+             * управляющего терминала, которого у процесса нет. Раньше
+             * инструмент отказывался и предлагал человеку вручную сделать
+             * `sudo -v` в терминале — уже после выполнения задачи.
+             * Теперь (И13.10) пароль спрашивает окно приложения, а команда
+             * идёт на PTY (core/sudo_auth.cpp): sudo получает терминал,
+             * один ввод пароля покрывает все sudo внутри команды, а
+             * пароль не уходит в argv/вывод/логи.
+             *
+             * `sudo -n true` остаётся: если права уже есть (NOPASSWD или
+             * кэш), лишний вопрос человеку не нужен. */
+            bool needs_sudo_auth = false;
+            {
+                const auto has_prog = [](const ParsedCommand& c,
+                                         const char* name,
+                                         const auto& self) -> bool {
+                    if (c.program() == name) return true;
+                    for (const auto& sub : c.sub_commands)
+                        if (self(sub, name, self)) return true;
+                    return false;
+                };
+                bool needs_sudo = false;
+                bool needs_doas = false;
+                for (const auto& pc : parse_command_line(cmd)) {
+                    if (has_prog(pc, "sudo", has_prog)) { needs_sudo = true; break; }
+                    if (has_prog(pc, "doas", has_prog)) needs_doas = true;
+                }
+                if (needs_sudo) {
+                    /* Сначала «есть ли sudo вообще»: иначе окно пароля
+                     * появилось бы ради команды, которой нет, и человек
+                     * вводил бы пароль в пустоту. */
+                    std::string which;
+                    int wcode = -1;
+                    const bool installed =
+                        shell::run_capture_status("command -v sudo", which, wcode, 5);
+                    if (!installed || which.empty()) {
+                        return out("shell",
+                            "[sudo] команде нужны права root, но sudo не"
+                            " установлен. Установите его системным пакетом"
+                            " или выполните команду от root вручную.");
+                    }
+                    std::string sout;
+                    int scode = -1;
+                    const bool ok = shell::run_capture_status("sudo -n true", sout, scode, 10);
+                    if (!ok) needs_sudo_auth = true;
+                }
+                /* doas не умеет ни -p, ни кэш по tty: окно пароля рассчитано
+                 * на sudo. Честно называем это, а не гоняем три попытки
+                 * заглушки, которая заведомо не подойдёт. */
+                if (!needs_sudo && needs_doas) {
+                    return out("shell",
+                        "[doas] ввод пароля в окне приложения поддерживается"
+                        " только для sudo: doas не принимает приглашение через"
+                        " -p и не кэширует аутентификацию. Выполните команду"
+                        " вручную в терминале или настройте NOPASSWD.");
+                }
+            }
+
             shell::RunOptions opt;
             const int t = arg_int(a, "timeout");
             opt.timeout_sec = (t > 0) ? static_cast<unsigned>(t)
@@ -1667,7 +1729,29 @@ void register_base_tools() {
             }
 
             shell::RunStats stats;
-            std::string result = shell::run_capture_stream(cmd, opt, stats);
+            std::string result;
+            if (needs_sudo_auth) {
+                /* Ожидание пароля — тоже отменяемое ожидание: «стоп»
+                 * обязан разбудить окно, а не оставить агента висеть на
+                 * condvar до конца времён. */
+                const SudoRunResult sr = Engine::instance().sudo_auth().run(
+                    cmd, opt.timeout_sec,
+                    [&ctx]() { return ctx.cancelled(); },
+                    opt.on_progress, opt.spill_path);
+                if (!sr.executed) {
+                    return out("shell", "[sudo] " + sr.error);
+                }
+                result = sr.output;
+                stats.exit_code = sr.exit_code;
+                stats.timed_out = sr.timed_out;
+                stats.cancelled = sr.cancelled;
+                stats.total_bytes = sr.total_bytes;
+                stats.dropped_bytes = sr.dropped_bytes;
+                stats.elapsed_ms = sr.elapsed_ms;
+                stats.spill_path = sr.spill_path;
+            } else {
+                result = shell::run_capture_stream(cmd, opt, stats);
+            }
             if (!result.empty() && result.rfind("[запрещено политикой", 0) == 0)
                 return out("shell", result);
 

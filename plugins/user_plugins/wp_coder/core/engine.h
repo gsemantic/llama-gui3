@@ -20,6 +20,7 @@
 #include "skills_manager.h"
 #include "tool_protocol.h"
 #include "permission_engine.h"
+#include "sudo_auth.h"
 #include "message.h"
 #include "stream_panel.h"
 #include "limits.h"
@@ -1051,10 +1052,30 @@ public:
     PermissionEngine& permissions() { return permissions_; }
     const PermissionEngine& permissions() const { return permissions_; }
 
+    /* Пароль sudo (И13.10): окно приложения спрашивает пароль, ядро
+     * выполняет команду на PTY. Живёт рядом с разрешениями, потому что
+     * это тоже «мир ждёт человека», но секрет и правила разрешений не
+     * смешиваются: ответ «всегда» здесь невозможен. */
+    SudoAuth& sudo_auth() { return sudo_auth_; }
+    const SudoAuth& sudo_auth() const { return sudo_auth_; }
+    std::vector<SudoRequest> sudo_pending() const { return sudo_auth_.pending(); }
+    bool sudo_reply(uint64_t id, const std::string& password) {
+        return sudo_auth_.reply(id, password);
+    }
+    bool sudo_reply(uint64_t id, const char* password) {
+        if (!password) return false;
+        std::string pw(password);
+        const bool ok = sudo_auth_.reply(id, pw);
+        secure_wipe(pw);
+        return ok;
+    }
+    bool sudo_reject(uint64_t id) { return sudo_auth_.reject(id); }
+
 private:
     EngineState state_;
     HostCallbacks cb_;
     PermissionEngine permissions_;
+    SudoAuth sudo_auth_;
     /* И9.1: свой лок загрузки инструкций. Отдельный от state_.mtx
      * (см. ensure_instructions) и по той же причине — загрузка не должна
      * держать общий лок, пока ходит по диску и в сеть. */

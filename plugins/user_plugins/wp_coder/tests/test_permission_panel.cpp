@@ -355,7 +355,12 @@ TEST(окно_берёт_решение_панели_из_core) {
     const std::string ui = ss.str();
     ASSERT_FALSE(ui.empty());
 
-    const std::size_t at = ui.find("static void render_permission_dialog()");
+    /* Граница тела окна для сверки — функция ask-диалога. Внутри неё
+     * (уровень 1) рисуется и вложенный вопрос Gate, поэтому её же
+     * проверяют на отсутствие посторонних уровней попапов: OpenPopup
+     * ask-версии живёт на уровне 0, и второй попап плагина на нём
+     * означал бы дуэль (см. шапку render_permission_dialog). */
+    const std::size_t at = ui.find("static bool render_permission_dialog()");
     ASSERT_TRUE(at != std::string::npos);
     const std::size_t end = ui.find("\nstatic ", at + 10);
     /* Сравнивается код без комментариев: слова в комментарии —

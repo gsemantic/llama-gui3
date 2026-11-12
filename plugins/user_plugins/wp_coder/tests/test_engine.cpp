@@ -171,6 +171,169 @@ TEST(engine_extract_action_generic_fence_non_json) {
     ASSERT_TRUE(block.empty());
 }
 
+/* --- И12.х: блок с CONTENT не режется по пустой строке ---
+ *
+ * Наблюдение (qwen-flash, DashScope, 2026-11): модель написала
+ * НЕОГОРОЖЕННЫЙ wp_action с write_file и кодом калькулятора. Блок
+ * обрезался по первой пустой строке кода — в файл ушли 2 строки
+ * импортов (51 байт), остальные 4190 символов стали текстом ответа, и
+ * цикл закрыл задачу как выполненную с файлом из двух строк. Таблица
+ * покрывает и огороженные случаи той же ошибки. */
+
+TEST(engine_extract_action_unfenced_content_with_blank_line_no_end) {
+    std::string text =
+        "wp_action\nTOOL: write_file\nPATH: main.py\nCONTENT_BEGIN\n"
+        "import tkinter as tk\nfrom tkinter import messagebox\n"
+        "\nclass Calculator:\n    def __init__(self):\n        pass\n";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    /* Пустая строка ВНУТРИ кода не отрезала его: класс в блоке. */
+    ASSERT_TRUE(block.find("class Calculator:") != std::string::npos);
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("write_file"));
+    ASSERT_TRUE(act.content.find("class Calculator:") != std::string::npos);
+    /* Блок забрал всё: в тексте ответа кода не осталось. */
+    ASSERT_TRUE(rest.find("class Calculator") == std::string::npos);
+}
+
+TEST(engine_extract_action_unfenced_content_blank_line_then_end_marker) {
+    /* CONTENT_END есть, но ПОСЛЕ пустой строки внутри кода: блок
+     * дотягивается до конца строки CONTENT_END, а не до первой пустой. */
+    std::string text =
+        "wp_action\nTOOL: write_file\nPATH: main.py\nCONTENT_BEGIN\n"
+        "import os\n\nclass C:\n    pass\nCONTENT_END\n";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_TRUE(act.content.find("class C:") != std::string::npos);
+    /* Маркер в контент не попадает: разбор остановился на нём. */
+    ASSERT_TRUE(act.content.find("CONTENT_END") == std::string::npos);
+}
+
+TEST(engine_extract_action_unfenced_header_block_keeps_blank_line_cut) {
+    /* Блок без CONTENT — прежнее поведение: пустая строка остаётся
+     * границей (за ней начинается обычный текст ответа). */
+    std::string text =
+        "wp_action\nTOOL: read_file\nPATH: main.py\n\nДальше обычный текст.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    ASSERT_TRUE(block.find("TOOL: read_file") != std::string::npos);
+    ASSERT_TRUE(rest.find("Дальше обычный текст.") != std::string::npos);
+}
+
+TEST(engine_extract_action_fenced_wp_action_without_closing_fence) {
+    /* Огороженный wp_action без закрывающего ``` — модель забыла фенс на
+     * длинном содержимом. Вызов не должен теряться целиком. */
+    std::string text =
+        "Записываю.\n```wp_action\nTOOL: write_file\nPATH: main.py\n"
+        "CONTENT_BEGIN\nimport os\n\nclass C:\n    pass\n";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("write_file"));
+    ASSERT_TRUE(act.content.find("class C:") != std::string::npos);
+    ASSERT_TRUE(rest.find("Записываю.") != std::string::npos);
+}
+
+TEST(engine_extract_action_unclosed_plain_fence_stays_text) {
+    /* Незакрытый БЕЗЫМЯННЫЙ фенс без wp_action — обычный текст с
+     * примером кода, а не вызов: протаскивать его в инструмент нельзя. */
+    std::string text = "Вот пример:\n```\nprint('hi')\n";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(block.empty());
+    ASSERT_TRUE(rest.find("print('hi')") != std::string::npos);
+}
+
+/* --- Bare-блок «TOOL: …» вообще без заголовка wp_action ---
+ *
+ * Наблюдение (qwen-flash, DashScope, ses_000000000166, 2026-11): модель
+ * ответила РОВНО двумя строками «TOOL: pip_install\nQUERY: tkinter» —
+ * без заголовка wp_action и без фенса. extract_action блок не находил,
+ * весь текст становился текстом хода, вызов не выполнялся; на
+ * напоминание модель повторяла тот же bare-блок, сработал детектор
+ * застревания и задача закрылась принудительным итогом. pip_install не
+ * выполнился ни разу, хотя разрешение было получено, — tkinter так и не
+ * установился, и задача была провалена разбором, а не моделью. */
+
+TEST(engine_extract_action_bare_tool_block) {
+    std::string text = "TOOL: pip_install\nQUERY: tkinter";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("pip_install"));
+    ASSERT_EQ(act.query, std::string("tkinter"));
+    /* Блок забрал весь ответ: в тексте хода протокола не осталось. */
+    ASSERT_TRUE(rest.find("TOOL:") == std::string::npos);
+}
+
+TEST(engine_extract_action_bare_tool_after_prose) {
+    std::string text = "Установлю библиотеку.\nTOOL: pip_install\nQUERY: tkinter\n";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("pip_install"));
+    /* Проза перед блоком осталась текстом хода. */
+    ASSERT_TRUE(rest.find("Установлю библиотеку.") != std::string::npos);
+}
+
+TEST(engine_extract_action_bare_tool_content_block) {
+    /* Bare-блок с CONTENT: пустая строка внутри кода не режет блок —
+     * то же правило, что у заголовочного wp_action (И12.х). */
+    std::string text =
+        "TOOL: write_file\nPATH: main.py\nCONTENT_BEGIN\n"
+        "import os\n\nclass C:\n    pass\nCONTENT_END\nХвост ответа.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("write_file"));
+    ASSERT_TRUE(act.content.find("class C:") != std::string::npos);
+    ASSERT_TRUE(act.content.find("CONTENT_END") == std::string::npos);
+    ASSERT_TRUE(rest.find("Хвост ответа.") != std::string::npos);
+}
+
+TEST(engine_extract_action_bare_tool_russian_prose_stays_text) {
+    /* Слово «TOOL:» в начале строки — ещё не вызов: имя не
+     * идентификатор, строка не исчерпывается им. Обычный текст не уезжает
+     * в инструмент. */
+    std::string text = "TOOL: список инструментов:\nPATH не указан.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(block.empty());
+    ASSERT_TRUE(rest.find("список") != std::string::npos);
+}
+
+TEST(engine_extract_action_bare_tool_without_key_next_stays_text) {
+    /* Имя-идентификатор есть, но следующая строка — не ключ протокола:
+     * одиночный «TOOL: bash» — проза, а не вызов. */
+    std::string text = "TOOL: bash\nДальше обычный текст ответа.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(block.empty());
+    ASSERT_TRUE(rest.find("Дальше обычный текст ответа.") != std::string::npos);
+}
+
 TEST(engine_parse_action_simple) {
     std::string block = "TOOL: read_file\nPATH: wp-config.php\n";
     Engine::Action act;
@@ -1678,4 +1841,41 @@ TEST(каталог_профилей_берётся_из_плагина_когд
     std::error_code ec;
     fs::remove_all(own.parent_path(), ec);
     fs::remove_all(bundled.parent_path(), ec);
+}
+
+/* --- И14: финальный ответ не режется при пересылке в чат ---
+ *
+ * Наблюдение (ses_000000000166): Engine::push_event резал ЛЮБУЮ строку
+ * до 300 байт, включая AgentEvent::Assistant. Отчёт ~1300 байт приходил
+ * в чат огрызком ~150 символов с «…», полный текст был только в файле
+ * сессии — «агент не вывел финальный отчёт». */
+
+TEST(push_event_delivers_the_final_answer_untruncated) {
+    HostCallbacks cb;
+    cb.llm_is_connected = []() { return false; };
+    std::string delivered;
+    cb.chat_event = [&delivered](const std::string& e) { delivered = e; };
+    engine().init(cb);
+
+    /* Отчёт больше 300 байт (кириллица — 2 байта на букву). */
+    const std::string report =
+        "Разработан калькулятор. " + std::string(400, 'ж');
+    ASSERT_TRUE(report.size() > 300);
+    engine().push_event(AgentEvent::Assistant, report);
+
+    /* Дошло целиком: без обреза и без «…». */
+    ASSERT_EQ(delivered, report);
+}
+
+TEST(push_event_still_trims_service_lines) {
+    HostCallbacks cb;
+    cb.llm_is_connected = []() { return false; };
+    std::string delivered;
+    cb.chat_event = [&delivered](const std::string& e) { delivered = e; };
+    engine().init(cb);
+
+    engine().push_event(AgentEvent::Status, std::string(400, 's'));
+    /* Служебная строка по-прежнему обрезана: 300 байт + «…» (3 байта). */
+    ASSERT_EQ(delivered.size(), (size_t)303);
+    ASSERT_EQ(delivered.substr(delivered.size() - 3), std::string("\xE2\x80\xA6"));
 }

@@ -22,6 +22,7 @@
 #include "test_printers.h"
 #include "../core/id_prefix.h"
 #include "../core/json_utils.h"
+#include "../core/limits.h"
 #include "../core/message.h"
 
 #include <algorithm>
@@ -767,6 +768,63 @@ TEST(turn_verdict_tells_every_reason_the_task_is_not_over) {
         ASSERT_TRUE(turn_completes_task(c.response, c.turn, c.last_user_id) ==
                     (c.expected == TurnVerdict::Completed));
     }
+}
+
+TEST(looks_like_code_answer_separates_report_from_code_dump) {
+    /* Отчёт с коротким примером — отчёт: пример половину текста не
+     * занимает. Тот случай, ради которого порог и выбран. */
+    const std::string report =
+        "Готово. Создал файл main.py с калькулятором на tkinter: поле ввода, "
+        "цифры, операции, равно. Запуск: python3 main.py.\n\n"
+        "Пример использования:\n```python\nimport main\n```\n"
+        "Если нужно меню или память вычислений — скажи.";
+    ASSERT_TRUE(!looks_like_code_answer(report));
+
+    /* Код вместо отчёта: фенс занимает почти весь текст. */
+    std::string code = "```python\n";
+    code += std::string(600, 'x');
+    code += "\n```\n";
+    ASSERT_TRUE(looks_like_code_answer(code));
+
+    /* Протокольные метки в тексте — блок вызова не вырезался. */
+    ASSERT_TRUE(looks_like_code_answer(
+        std::string(500, ' ') + "wp_action\nTOOL: write_file"));
+    ASSERT_TRUE(looks_like_code_answer("CONTENT_BEGIN\nimport os\n"));
+    /* Пустой и чистый текст — не код. */
+    ASSERT_TRUE(!looks_like_code_answer(""));
+    ASSERT_TRUE(!looks_like_code_answer("Просто текст без кода."));
+}
+
+TEST(turn_verdict_does_not_close_task_on_code_instead_of_report) {
+    /* И12.х: длинный «итог» из сплошного кода — не Completed. Ход без
+     * вызовов с 4355 символами кода закрывал задачу «выполненной», хотя
+     * файл так и не был записан (наблюдение qwen-flash: калькулятор). */
+    const std::string kUser = "msg_000000000001";
+    const std::string code = "```python\n" + std::string(700, 'x') + "\n```\n";
+
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(code));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(r.text().size() >= limits::kMinFinalAnswerLen);
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::CodeAnswer);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+
+    /* Ход С вызовом тем же текстом — проверка кода к нему не применяется:
+     * условие 5 требует ход без вызовов. Закрытый вызов при finish=stop
+     * ведёт себя как в таблице И5.8 (см.
+     * turn_verdict_sees_an_open_tool_part_even_with_a_final_finish): без
+     * оснований продолжать — Completed, и код в тексте вызова — норма. */
+    LlmResponse::reduce(r, LlmEvent::tool_call(
+        "call_0", "write_file", json::JsonValue::object()));
+    LlmResponse::reduce(r, LlmEvent::tool_result("call_0", ToolOutput()));
+    const Message call_turn = turn_of(r, kUser);
+    ASSERT_FALSE(call_turn.has_open_tool_part());
+    ASSERT_EQ((int)turn_verdict(r, call_turn, kUser),
+              (int)TurnVerdict::Completed);
 }
 
 TEST(turn_verdict_sees_an_open_tool_part_even_with_a_final_finish) {

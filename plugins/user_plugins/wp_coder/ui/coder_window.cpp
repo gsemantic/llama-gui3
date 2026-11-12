@@ -623,21 +623,93 @@ static void render_tool_diffs() {
     ImGui::TreePop();
 }
 
+/* Диалог Gate определён ниже и вызывается вложенно из ask-попапа. */
+static void render_permission_gate_dialog();
+
 /* --- И11.8: диалог разрешения ---
  *
  * Решение — что показать, какие кнопки есть и что будет с остальными
  * вопросами — принимает `core/permission_panel.h`; здесь только отрисовка
  * готовых полей. Обоснование в шапке того файла.
  *
+ * И12.х: отрисовка стала МОДАЛЬНЫМ ПОПАПОМ, а не строками в теле окна.
+ * Причина — кнопки. У inline-версии диалога движка кнопки получали ID
+ * «подпись##perm<id>», а у диалога PermissionGate подписи были БЕЗ
+ * суффикса вообще («Отклонить»); при двух ожидающих вопросах (движок +
+ * Gate) или при повторном вопросе в том же окне чата ImGui строил
+ * элементы с совпадающими ID в одном скоупе, и клик уходил не той
+ * кнопке. Модал закрывает весь класс сразу:
+ *   - у попапа один стабильный ID (##-суффикс), один на окно;
+ *   - кнопки живут в скоупе попапа, где у каждой свой ID, и суффикс
+ *     есть у каждой из них;
+ *   - вопрос ждёт воркер (спит на condvar), и «утащить» его кликом мимо
+ *     нельзя: модал сам по клику вне окна не закрывается (imgui.h:
+ *     BeginPopupModal — «cannot be closed by user»), а OpenPopup каждый
+ *     кадр держит его открытым, пока вопрос не отвечен (повторный
+ *     OpenPopup для уже открытого попапа ImGui обрабатывает без сброса
+ *     позиции — imgui.cpp, OpenPopupEx, ветка keep_existing);
+ *   - два вопроса одновременно рисуются двумя попапами друг над другом,
+ *     а не вперемешку строками в теле окна.
+ *
+ * ПРАВКА И13.х — ПОЧЕМУ ЕДИНАЯ ТОЧКА ВХОДА И ВЛОЖЕННЫЙ GATE.
+ * Первая версия модала рисовалась из ДВУХ мест (окно «Сессия» и чат хоста
+ * через render_extras) двумя попапами на УРОВНЕ 0 стека попапов, и на
+ * двух ждущих вопросах сразу они стреляли друг в друга: OpenPopup на
+ * уровне 0 для уже открытого ЧУЖОГО попапа не берёт ветку keep_existing
+ * (импли восстанавливает её только для СЕБЯ), а зовёт ClosePopupToLevel
+ * и переоткрывает свой. Каждый кадр попап Gate закрывал попап движка и
+ * наоборот — оба были «appearing» каждый кадр: постоянное переоткрытие,
+ * прыжки поверх друг друга и пульсация затемнения (DimBgRatio сбрасывался
+ * на каждом переоткрытии). Второй дефект той версии: ID попапа скоупится
+ * родительским окном (GetID от IDStack), поэтому попап, открытый из окна
+ * «Сессия», не был виден как открытый из чата — и ветка закрытия
+ * (`BeginPopupModal` + CloseCurrentPopup при пропавшем вопросе) молча
+ * промахивалась, оставляя мёртвый модал висеть над всем интерфейсом.
+ * Теперь ровно ОДНА точка вызова (render_permission_dialogs, ниже) и
+ * РОВНО ОДИН невидимый родительский скоуп, а второй вопрос рисуется
+ * ВЛОЖЕННЫМ попапом внутри скоупа первого (уровень 1) — на уровне 0 живёт
+ * максимум один попап плагина, дуэль возможна только с чужими попапами
+ * хоста, а они закрываются однократно при появлении модала, как и
+ * положено модалу.
+ *
+ * Порядок отрисовки окон (bring-to-front) управляется фокусом: попап
+ * поднимается наверх при появлении, и per-frame `SetNextWindowFocus`
+ * здесь НЕ ставится: FocusWindow попапа каждый кадр зовёт
+ * ClosePopupsOverWindow и закрывает вложенный попап Gate, что возвращает
+ * мерцание (проверено на импли 1.92.6).
+ *
  * Снимок берётся ДО отрисовки и БЕЗ `st.mtx`: PermissionEngine живёт под
  * своим мьютексом и правилу D-6 не подчиняется — вычисления отдельно,
- * рисование отдельно. */
-static void render_permission_dialog() {
+ * рисование отдельно.
+ *
+ * Возвращает true, когда вопрос движка ждёт и попап открыт (включая
+ * вложенный вопрос Gate); false — когда вопроса нет. */
+static void render_sudo_dialog();
+
+static bool render_permission_dialog() {
+    static const char* kAskPopup = "Разрешение агенту##wp_perm_ask";
     const coder::permission_panel::Panel panel =
         coder::permission_panel::build(engine().permission_pending());
-    if (!panel.visible) return;
+    if (!panel.visible) {
+        /* Вопрос ушёл (ответили/каскад) между кадрами — закрыть попап
+         * самим: сам по себе модал не закрывается, и мёртвое окно висело
+         * бы над чатом до перезапуска. Скоуп один и тот же каждый кадр
+         * (см. render_permission_dialogs), поэтому закрытие всегда
+         * находит именно тот попап, что открыт. */
+        if (ImGui::BeginPopupModal(kAskPopup, nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        return false;
+    }
+    /* Вопрос ждёт — попап держим открытым каждый кадр. */
+    ImGui::OpenPopup(kAskPopup);
+    if (!ImGui::BeginPopupModal(kAskPopup, nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return false;
+    }
 
-    ImGui::Separator();
     ImGui::TextUnformatted(panel.ask.headline.c_str());
     if (!panel.ask.metadata.empty()) {
         ImGui::TextWrapped("%s", panel.ask.metadata.c_str());
@@ -656,24 +728,37 @@ static void render_permission_dialog() {
 
     /* Ответ идёт по id, а не по позиции: очередь меняется между кадром и
      * кликом (каскад снимает вопросы пачкой), и ответ по позиции ушёл бы
-     * не тому. */
-    const std::string id = std::to_string(panel.ask.id);
-    if (ImGui::SmallButton((panel.ask.once_label + "##perm" + id).c_str())) {
+     * не тому. Суффикс ## у каждой кнопки: скоуп попапа один на вопрос,
+     * и даже внутри него ID строится из полной подписи. */
+    if (ImGui::SmallButton((panel.ask.once_label + "##ask_once").c_str())) {
         engine().permission_reply(panel.ask.id, coder::PermissionReply::Once);
+        ImGui::CloseCurrentPopup();
     }
     /* Кнопки «Всегда» нет, когда записывать нечего (пустой suggested):
      * показать её — значит пообещать постоянное разрешение, которого не
      * будет. На doom_loop она была в точности «Разрешить разово». */
     if (panel.ask.can_always) {
         ImGui::SameLine();
-        if (ImGui::SmallButton((panel.ask.always_label + "##perm" + id).c_str())) {
+        if (ImGui::SmallButton((panel.ask.always_label + "##ask_always").c_str())) {
             engine().permission_reply(panel.ask.id, coder::PermissionReply::Always);
+            ImGui::CloseCurrentPopup();
         }
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton((panel.ask.reject_label + "##perm" + id).c_str())) {
+    if (ImGui::SmallButton((panel.ask.reject_label + "##ask_reject").c_str())) {
         engine().permission_reply(panel.ask.id, coder::PermissionReply::Reject);
+        ImGui::CloseCurrentPopup();
     }
+    /* Второй ждущий вопрос (Gate) — ВЛОЖЕННЫМ попапом над этим: его
+     * OpenPopup живёт на уровне 1 внутри скоупа ask и не стреляет в
+     * чужой попап уровня 0. Когда вопроса движка нет, Gate рисуется
+     * отдельно на уровне 0 (см. render_permission_dialogs). */
+    render_permission_gate_dialog();
+    /* Пароль sudo — тем же модальным стеком: когда вопрос разрешения уже
+     * открыт, вложенный попап не воюет с ним за уровень 0. */
+    render_sudo_dialog();
+    ImGui::EndPopup();
+    return true;
 }
 
 /* Диалог «Доступ за пределами проекта» (PermissionGate).
@@ -682,30 +767,191 @@ static void render_permission_dialog() {
  * просыпается на permission_cv и без ответа человека ждёт вечно
  * (первая причина «агент завис»). Тело — та же отрисовка, что раньше
  * жила строкой в render_session: решение о кнопках не уехало, а общий
- * вид нужен в двух окнах (см. render_permission_dialogs_extras). */
+ * вид нужен в двух окнах (см. render_permission_dialogs_extras).
+ *
+ * И12.х: модальный попап по тем же причинам, что и у диалога движка
+ * (см. шапку render_permission_dialog) — у inline-версии кнопки были с
+ * фиксированными подписями без ##-суффикса.
+ *
+ * И13.х: зовётся ИЗ ДВУХ МЕСТ, но никогда не в одном кадре дважды:
+ *   - когда вопроса движка нет — отдельно, на уровне 0 стека попапов;
+ *   - когда оба вопроса ждут — ВНУТРИ скоупа открытого попапа движка
+ *     (уровень 1), из render_permission_dialog: вложенный OpenPopup не
+ *     трогает чужой уровень 0 и не закрывает попап движка.
+ * Уровень попапа определяется местом вызова, поэтому содержимое (и
+ * ##-суффиксы кнопок) не зависит от него. */
 static void render_permission_gate_dialog() {
+    static const char* kGatePopup =
+        "Доступ за пределами проекта##wp_perm_gate";
     auto& st = engine_state();
     std::string perm_path;
     {
         std::lock_guard<std::mutex> lk(st.mtx);
         perm_path = st.pending_permission_path;
     }
-    if (perm_path.empty()) return;
+    if (perm_path.empty()) {
+        if (ImGui::BeginPopupModal(kGatePopup, nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        return;
+    }
+    ImGui::OpenPopup(kGatePopup);
+    if (!ImGui::BeginPopupModal(kGatePopup, nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
 
-    ImGui::Separator();
     ImGui::Text("Доступ за пределами проекта:");
     ImGui::TextWrapped("%s", perm_path.c_str());
-    if (ImGui::SmallButton("Разрешить (один раз)")) {
+    if (ImGui::SmallButton("Разрешить (один раз)##gate_once")) {
         engine().permission_allow_once(perm_path);
+        ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Разрешить (всегда)")) {
+    if (ImGui::SmallButton("Разрешить (всегда)##gate_always")) {
         engine().permission_allow_always(perm_path);
+        ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Отклонить")) {
+    if (ImGui::SmallButton("Отклонить##gate_reject")) {
         engine().permission_reject(perm_path);
+        ImGui::CloseCurrentPopup();
     }
+    ImGui::EndPopup();
+}
+
+/* Диалог пароля sudo (И13.10).
+ *
+ * Почему модал, а не строка в чате: пароль нельзя прогонять через
+ * контекст модели и журнал событий. Буфер окна затирается сразу после
+ * ответа; в движок уходит только id запроса и сам пароль.
+ *
+ * Снимок запроса приходит из SudoAuth::pending(), который вырезает
+ * password: окно физически не может ни показать пароль, ни записать его
+ * в лог — в его копии этого поля нет. */
+static void render_sudo_dialog() {
+    static const char* kSudoPopup = "Пароль sudo##wp_sudo_pass";
+    static char s_pass[128] = "";
+    static uint64_t s_shown_id = 0;
+
+    const std::vector<coder::SudoRequest> pending = engine().sudo_pending();
+    const coder::SudoRequest* req = nullptr;
+    for (const auto& r : pending) {
+        if (!r.decided) { req = &r; break; }
+    }
+
+    if (!req) {
+        /* Буфер живёт между кадрами, поэтому при уходе запроса его надо
+         * затирать: иначе пароль остался бы в памяти окна до конца
+         * сессии — ровно то, чего обещает не делать. */
+        if (s_shown_id != 0) {
+            volatile char* p = reinterpret_cast<volatile char*>(s_pass);
+            for (size_t i = 0; i < sizeof(s_pass); ++i) p[i] = 0;
+            s_shown_id = 0;
+        }
+        if (ImGui::BeginPopupModal(kSudoPopup, nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        return;
+    }
+    if (req->id != s_shown_id) {
+        volatile char* p = reinterpret_cast<volatile char*>(s_pass);
+        for (size_t i = 0; i < sizeof(s_pass); ++i) p[i] = 0;
+        s_shown_id = req->id;
+    }
+
+    ImGui::OpenPopup(kSudoPopup);
+    if (!ImGui::BeginPopupModal(kSudoPopup, nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    ImGui::TextUnformatted("Команде нужны права root.");
+    ImGui::TextWrapped("%s", req->command.c_str());
+    if (!req->error.empty()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f), "%s",
+                           req->error.c_str());
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("Пароль уйдёт только процессу sudo и не попадёт"
+                        " в чат, журнал или вывод команды.");
+    ImGui::PushItemWidth(280);
+    const bool enter = ImGui::InputText(
+        "##sudo_password", s_pass, sizeof(s_pass),
+        ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::PopItemWidth();
+
+    if (ImGui::SmallButton("Выполнить##sudo_ok") ||
+        (enter && s_pass[0] != '\0')) {
+        if (s_pass[0] != '\0') {
+            engine().sudo_reply(req->id, s_pass);
+            volatile char* p = reinterpret_cast<volatile char*>(s_pass);
+            for (size_t i = 0; i < sizeof(s_pass); ++i) p[i] = 0;
+            s_shown_id = 0;
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Отмена##sudo_cancel")) {
+        engine().sudo_reject(req->id);
+        volatile char* p = reinterpret_cast<volatile char*>(s_pass);
+        for (size_t i = 0; i < sizeof(s_pass); ++i) p[i] = 0;
+        s_shown_id = 0;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+/* Единая точка вызова обоих диалогов разрешения (И13.х).
+ *
+ * Вызывается из render_all_windows() КАЖДЫЙ кадр, независимо от
+ * видимости окон плагина: модал — окно верхнего уровня, и видимость
+ * «Сессии» на него не влияет. Раньше их звали из render_session и из
+ * render_extras (окно чата) по очереди — это давало два дефекта сразу:
+ * duel OpenPopup на уровне 0 (постоянное переоткрытие = мерцание, см.
+ * шапку render_permission_dialog) и чужой скоуп ID после смены окна-
+ * владельца (мёртвый модал, который ветка закрытия не находила).
+ *
+ * Родительский скоуп — невидимое окно-невидимка: OpenPopup требует
+ * текущего окна, а после End() последнего окна плагина текущего окна
+ * нет. Ровно один Begin/End на кадр даёт попапам ОДИН скоуп всегда,
+ * независимо от того, какое окно открыто: ID стабилен, и ветки
+ * закрытия находят свои попапы при любом составе открытых окон.
+ * Флаги подобраны так, чтобы окно не существовало для человека:
+ * не рисуется (NoBackground/NoDecoration), не берёт мышь и навигацию
+ * (NoInputs/NoNav), не поднимается по фокусу (NoBringToFrontOnFocus,
+ * NoFocusOnAppearing) и не пишется в ini (NoSavedSettings). */
+static void render_permission_dialogs() {
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1, 1));
+    const ImGuiWindowFlags kParentFlags = ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
+    ImGui::Begin("##wp_perm_parent", nullptr, kParentFlags);
+    /* Оба вопроса ждут → Gate рисуется вложенным попапом ИЗ ask-попапа
+     * (render_permission_dialog), и второй вызов здесь не нужен: он
+     * открыл бы попап Gate на уровне 0 и закрыл бы ask — та дуэль,
+     * ради которой единая точка и заведена. */
+    if (!render_permission_dialog()) {
+        render_permission_gate_dialog();
+        /* Если висит вопрос Gate, sudo-модал не открываем: два попапа на
+         * уровне 0 закроют друг друга (та же дуэль, что закрыта для
+         * разрешений). Вопрос пароля появится сразу после ответа Gate. */
+        auto& st = engine_state();
+        std::string gate_path;
+        {
+            std::lock_guard<std::mutex> lk(st.mtx);
+            gate_path = st.pending_permission_path;
+        }
+        if (gate_path.empty()) render_sudo_dialog();
+    }
+    ImGui::End();
 }
 
 /* --- И11.3: дерево вызовов инструментов по ходам ---
@@ -1670,6 +1916,12 @@ void render_all_windows() {
     render_modules();
     render_tools();
     render_session();
+
+    /* И13.х: диалоги разрешения — ровно один раз за кадр, независимо от
+     * видимости окон. Модал — окно верхнего уровня, видимость «Сессии» и
+     * чата на него не влияет; раньше их звали и отсюда, и из чата, и на
+     * двух ждущих вопросах попапы стреляли друг в друга (мерцание). */
+    render_permission_dialogs();
 }
 
 void render_extras() {
@@ -1681,13 +1933,15 @@ void render_extras() {
      * ТОЛЬКО в окне «Сессия», а оно может быть закрыто — при старте оно
      * скрыто, и вопрос оставался навсегда без ответа (воркер спит на
      * permission_cv до решения человека), что выглядит как зависание
-     * агента. Здесь то же содержимое в окне чата: при активном agent mode
-     * чат — единственное окно, которое гарантированно открыто. Когда окно
-     * «Сессия» открыто, его диалоги рисуются там, и второй копии не нужно. */
-    if (g_win_session && !g_api->window_is_visible(g_host, g_win_session)) {
-        render_permission_dialog();
-        render_permission_gate_dialog();
-    }
+     * агента.
+     *
+     * И13.х: с превращением диалогов в МОДАЛЬНЫЕ ПОПАПЫ надобность в
+     * дубле в чате отпала — попап это окно верхнего уровня, он виден при
+     * любом составе открытых окон плагина. Здесь он больше не рисуется:
+     * единственная точка — render_all_windows (см.
+     * render_permission_dialogs), иначе попап получил бы второго
+     * владельца с другим скоупом ID, и обе дефекта версии И12.х
+     * (дуэль OpenPopup и мёртвый модал) вернулись бы. */
 
     /* Индикатор статуса агента + кнопка Стоп + И11.10: что именно остановит
      * отмена. Лок больше не держится на отрисовке: снимок берётся
@@ -1875,10 +2129,11 @@ void render_extras() {
         }
     }
 
-    /* Запросы системы разрешений И2 рисует render_permission_dialog —
-     * решение о подписях и кнопках принимает core/permission_panel.h. */
-    render_permission_dialog();
-    render_permission_gate_dialog();
+    /* Запросы системы разрешений И2 больше не рисуются здесь: модал —
+     * окно верхнего уровня, и его видимость не привязана к окну «Сессия».
+     * Он рисуется ровно один раз за кадр из render_all_windows (см.
+     * render_permission_dialogs): два владельца попапа давали дуэль
+     * OpenPopup и мёртвые скоупы ID. */
 }
 
 } // namespace ui

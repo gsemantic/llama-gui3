@@ -685,6 +685,36 @@ TEST(agent_loop_names_the_empty_turn_separately) {
     ASSERT_TRUE(empty_named);
 }
 
+TEST(agent_loop_asks_to_write_the_file_when_the_answer_is_code) {
+    /* И12.х: «итог» из сплошного кода — не итог. Модель печатает код в
+     * чат вместо записи в файл (наблюдение qwen-flash: калькулятор);
+     * общее напоминание «дай ИТОГОВЫЙ ответ не короче N» на код в чате
+     * подтолкнуло бы ЕЩЁ код, поэтому напоминание называет действие:
+     * код — в файл, отчёт — текстом. */
+    LoopFixture fx;
+    std::string code_answer = "```python\n";
+    code_answer += std::string(600, 'x');
+    code_answer += "\n```\n";
+    fx.host.replies = {code_answer, long_answer("Готово: код записан в main.py.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+    ASSERT_EQ(fx.host.calls(), (size_t)2);
+
+    bool write_reminder = false;
+    for (const Message& m : fx.history()) {
+        if (m.is_user() &&
+            m.text().find("КОД, а не итоговый отчёт") != std::string::npos)
+            write_reminder = true;
+    }
+    ASSERT_TRUE(write_reminder);
+}
+
 TEST(agent_loop_keeps_going_when_the_user_writes_mid_turn) {
     /* Условие 3: ход отвечает на последнюю реплику пользователя. Если
      * человек написал, пока ход шёл, закрывать задачу нельзя — иначе его

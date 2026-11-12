@@ -118,6 +118,16 @@ void Engine::init(HostCallbacks callbacks) {
     permissions_.bind(&state_, [this](const std::string& text) {
         push_event(AgentEvent::Tool, text);
     });
+    /* Пароль sudo — тот же мост в состояние и лог, но отдельный объект:
+     * у него свой секрет и свой поток ожидания (И13.10). */
+    sudo_auth_.bind(&state_, [this](const std::string& text) {
+        push_event(AgentEvent::Tool, text);
+    });
+    /* Инициализация — новая жизнь движка: старый ожидающий запрос и
+     * отмена прошлой сессии не должны ни висеть в окне, ни мгновенно
+     * отклонять первый же вопрос пароля. */
+    sudo_auth_.cancel_all();
+    sudo_auth_.clear_cancel();
     /* И12.2: вывод о нативном вызове НЕ переживает переинициализацию.
      *
      * Он про ПРОВАЙДЕРА, а не про плагин: переинициализация означает, что
@@ -167,6 +177,9 @@ void Engine::stop() {
      * state_.mtx здесь нельзя — PermissionEngine ходит в state_.mtx
      * короткими захватами, и обратный порядок означал бы дедлок. */
     permissions_.cancel_all();
+    /* Ожидание пароля — тоже ожидание человека: «стоп» обязан разбудить
+     * его, иначе поток агента остался бы спать на condvar до ответа. */
+    sudo_auth_.cancel_all();
     if (state_.worker.joinable()) state_.worker.join();
     /* Resume (5.2): сохраняем последний диалог перед выключением. */
     save_session();
@@ -178,6 +191,7 @@ void Engine::submit(const std::string& prompt) {
      * конца сессии. Вне лока: cancel_all/clear_cancel берут свой mtx_,
      * и брать его поверх state_.mtx нельзя (порядок блокировок). */
     permissions_.clear_cancel();
+    sudo_auth_.clear_cancel();
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         bool resume = state_.preserve_session;
@@ -250,6 +264,7 @@ void Engine::request_abort() {
      * «стоп» работал бы не на том шаге, где агент висит на вопросе
      * пользователю. */
     permissions_.cancel_all();
+    sudo_auth_.cancel_all();
 }
 
 snapshot::DiffReport Engine::level_diff(size_t index) {
@@ -1085,7 +1100,17 @@ void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
                 break;
         }
         if (forward && !chat_line.empty()) {
-            if (chat_line.size() > 300) { chat_line = text::utf8_prefix(chat_line, 300); chat_line += "…"; }
+            /* И14: текст хода агента (Assistant — текст модели, включая
+             * финальный отчёт) НЕ режется: это результат задачи. Обрезка
+             * до 300 байт превращала отчёт в огрызок ~150 символов
+             * («…»): пользователь читал в чате четверть отчёта, полный
+             * текст был только в файле сессии (ses_000000000166).
+             * Остальные события — служебные строки (статусы шагов,
+             * инструменты, ошибки), обрез им не вредит. */
+            if (k != AgentEvent::Assistant && chat_line.size() > 300) {
+                chat_line = text::utf8_prefix(chat_line, 300);
+                chat_line += "…";
+            }
             cb_.chat_event(chat_line);
         }
     }

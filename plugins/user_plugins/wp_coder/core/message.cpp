@@ -594,8 +594,31 @@ const char* turn_verdict_name(TurnVerdict v) {
         case TurnVerdict::ToolStillOpen: return "tool_still_open";
         case TurnVerdict::NotLastUser:   return "not_last_user";
         case TurnVerdict::TooShort:      return "too_short";
+        case TurnVerdict::CodeAnswer:    return "code_answer";
     }
     return "unknown";
+}
+
+bool looks_like_code_answer(const std::string& text) {
+    /* Протокольные метки в тексте — блок вызова, который парсер не
+     * вырезал (например, оборванный). Код уже в тексте, отчёта нет. */
+    if (text.find("wp_action") != std::string::npos ||
+        text.find("CONTENT_BEGIN") != std::string::npos) {
+        return true;
+    }
+    /* Огороженный код, занимающий больше половины текста. Считается
+     * длина СИНТАКСИСА фенса тоже: пример на 5 строк в отчёте на 30
+     * строк половину не займёт, а код, выданный вместо отчёта, займёт
+     * почти весь ответ. */
+    size_t fenced = 0;
+    for (size_t a = text.find("```"); a != std::string::npos;
+         a = text.find("```", a + 3)) {
+        const size_t b = text.find("```", a + 3);
+        if (b == std::string::npos) break;
+        fenced += b + 3 - a;
+        a = b;  /* следующий find начнёт после этой пары */
+    }
+    return fenced * 2 > text.size();
 }
 
 TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
@@ -616,6 +639,15 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
     /* 4. Слишком короткий текст — это «начало работы», а не итог. */
     if (response.text().size() < limits::kMinFinalAnswerLen) {
         return TurnVerdict::TooShort;
+    }
+    /* 5. Длинный «итог» из сплошного кода — тоже не итог: модель выдала
+     * код в чат вместо записи в файл, и длина текста проходила порог.
+     * Проверяется только у хода БЕЗ вызовов: ход с вызовом — не финальный
+     * по определению (условие 1), и код в его тексте — нормальное
+     * сопровождение вызова. */
+    if (response.tool_calls().empty() &&
+        looks_like_code_answer(response.text())) {
+        return TurnVerdict::CodeAnswer;
     }
     return TurnVerdict::Completed;
 }

@@ -29,6 +29,7 @@ set(CORE_SOURCES
     core/tool.cpp
     core/permission.cpp
     core/permission_engine.cpp
+    core/sudo_auth.cpp
     core/tool_protocol.cpp
     core/tool_repair.cpp
     core/glob.cpp
@@ -73,6 +74,12 @@ set_target_properties(wp_coder_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(wp_coder_core PRIVATE -Wall -Wextra)
 find_package(Threads REQUIRED)
 target_link_libraries(wp_coder_core PUBLIC Threads::Threads)
+# forkpty() для запуска sudo на PTY (core/sudo_auth.cpp). На Linux живёт
+# в libutil; без него плагин не соберётся, а не «тихо уйдёт на sudo -S».
+find_library(UTIL_LIBRARY NAMES util)
+if(UTIL_LIBRARY)
+    target_link_libraries(wp_coder_core PUBLIC ${UTIL_LIBRARY})
+endif()
 
 # --- Модули ---
 set(MODULE_SOURCES
@@ -199,6 +206,7 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_tool.cpp
         tests/test_permission.cpp
         tests/test_permission_engine.cpp
+        tests/test_sudo_auth.cpp
         tests/test_tools_registry.cpp
         tests/test_tool_repair.cpp
         tests/test_llm_error.cpp
