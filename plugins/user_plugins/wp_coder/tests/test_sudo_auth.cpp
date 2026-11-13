@@ -19,8 +19,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace coder;
 using namespace std::chrono_literals;
@@ -66,6 +68,7 @@ FakeSudo make_fake_sudo(const std::string& good, const char* mode) {
         << "    *) shift ;;\n"
         << "  esac\n"
         << "done\n"
+        << "printf '%s\\n' \"$prompt\" >> '" << f.dir << "/prompts'\n"
         << "if [ \"$nonint\" = 1 ]; then exit 1; fi\n";
     if (std::string(mode) == "ok") {
         out << "if [ -f '" << marker << "' ]; then\n"
@@ -73,11 +76,17 @@ FakeSudo make_fake_sudo(const std::string& good, const char* mode) {
             << "  exit 0\n"
             << "fi\n";
     }
-    out << "stty -echo 2>/dev/null\n"
-        << "printf '%s' \"$prompt\"\n"
+    if (std::string(mode) == "echo") {
+        /* Пароль отражается терминалом: ровно тот случай, ради которого
+         * фильтр вырезает его из вывода и spill. */
+        out << "stty echo 2>/dev/null\n";
+    } else {
+        out << "stty -echo 2>/dev/null\n";
+    }
+    out << "printf '%s' \"$prompt\"\n"
         << "IFS= read -r pw\n"
         << "stty echo 2>/dev/null\n";
-    if (std::string(mode) == "ok") {
+    if (std::string(mode) == "ok" || std::string(mode) == "echo") {
         out << "if [ \"$pw\" = '" << good << "' ]; then\n"
             << "  : > '" << marker << "'\n"
             << "  exit 0\n"
@@ -301,4 +310,65 @@ TEST(sudo_auth_second_prompt_fails_fast) {
      * и ждать его молчания до таймаута значит «завис на пять минут». */
     ASSERT_TRUE(elapsed < std::chrono::milliseconds(5000));
     ASSERT_TRUE(r.output.find("NEVER") == std::string::npos);
+}
+
+TEST(sudo_auth_spill_never_contains_password_or_prompt) {
+    const std::string good = "s3cret-pass";
+    FakeSudo fake = make_fake_sudo(good, "echo");
+
+    SudoAuth sa;
+    sa.set_sudo_binary(fake.script);
+    sa.set_max_attempts(1);
+    sa.set_prompt_timeout_ms(5000);
+
+    const std::string spill = fake.dir + "/spill.log";
+    SudoRunResult r;
+    std::thread worker([&] {
+        r = sa.run("echo COMMAND_RAN", 10, {}, {}, spill);
+    });
+    answer_when_ready(sa, good);
+    worker.join();
+
+    ASSERT_TRUE(r.executed);
+    ASSERT_TRUE(r.output.find("COMMAND_RAN") != std::string::npos);
+    ASSERT_TRUE(r.output.find(good) == std::string::npos);
+
+    std::ifstream f(spill, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+    ASSERT_TRUE(text.find("COMMAND_RAN") != std::string::npos);
+    /* Секрет не должен попасть в файл, который читает модель: PTY
+     * отразил пароль (stty echo), и фильтр обязан его заменить. */
+    ASSERT_TRUE(text.find(good) == std::string::npos);
+    ASSERT_TRUE(text.find("wp_coder_sudo_password:") == std::string::npos);
+}
+
+TEST(sudo_auth_prompt_is_unique_per_run) {
+    FakeSudo fake = make_fake_sudo("good", "bad");
+
+    SudoAuth sa;
+    sa.set_sudo_binary(fake.script);
+    sa.set_max_attempts(1);
+    sa.set_prompt_timeout_ms(5000);
+
+    for (int i = 0; i < 2; ++i) {
+        SudoRunResult r;
+        std::thread worker([&] { r = sa.run("echo NEVER", 5, {}); });
+        answer_when_ready(sa, "wrong");
+        worker.join();
+        ASSERT_TRUE(!r.executed);
+    }
+
+    std::ifstream f(fake.dir + "/prompts");
+    std::vector<std::string> prompts;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty()) prompts.push_back(line);
+    }
+    ASSERT_TRUE(prompts.size() >= 2);
+    /* Постоянная метка была бы угадываемой: агент читает исходники и
+     * может напечатать её, чтобы пароль ушёл в команду. */
+    ASSERT_TRUE(prompts[0] != prompts[1]);
+    ASSERT_TRUE(prompts[0].rfind("wp_coder_sudo_password:", 0) == 0);
+    ASSERT_TRUE(prompts[1].rfind("wp_coder_sudo_password:", 0) == 0);
 }

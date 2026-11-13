@@ -216,3 +216,47 @@ TEST(spill_paths_are_unique_and_stay_in_one_directory) {
      * относительным мусором вроде «wp_coder/trunc/...» от рабочего каталога. */
     ASSERT_TRUE(shell::next_spill_path("", "bash").empty());
 }
+
+TEST(bash_sudo_precheck_uses_an_allowed_probe) {
+    /* Регрессия: проверка «есть ли sudo» звала `command -v sudo`, а слово
+     * `command` — в списке запрещённых (универсальный обход). Политика
+     * отвечала отказом, инструмент читал его как «sudo не установлен» и
+     * не предлагал окно пароля на машине, где sudo есть. */
+    fs::path t = make_tmp_tree();
+    init_tools(t);
+    /* Ход без токена: `ToolContext::abort()` берёт токен из состояния, а
+     * предыдущий тест мог оставить отменённый — тогда SudoAuth честно
+     * ответил бы «отменено» и не дошёл бы до окна пароля. */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().turn_abort = std::make_shared<AbortToken>();
+        engine_state().abort_requested.store(false);
+    }
+    engine().sudo_auth().clear_cancel();
+    engine().sudo_auth().set_max_attempts(1);
+    engine().sudo_auth().set_wait_timeout_ms(50);
+    engine().sudo_auth().set_prompt_timeout_ms(100);
+
+    const fs::path bin = t / "bin";
+    fs::create_directories(bin);
+    const fs::path fake = bin / "sudo";
+    {
+        std::ofstream f(fake, std::ios::binary | std::ios::trunc);
+        f << "#!/bin/sh\nexit 1\n";
+    }
+    fs::permissions(fake, fs::perms::owner_all, fs::perm_options::replace);
+
+    const char* old_path = std::getenv("PATH");
+    const std::string saved = old_path ? old_path : "";
+    setenv("PATH", (bin.string() + ":" + saved).c_str(), 1);
+
+    const ToolOutput o = run_bash("sudo -n true");
+    setenv("PATH", saved.c_str(), 1);
+
+    ASSERT_TRUE(o.output.find("[sudo]") != std::string::npos);
+    /* Не «не установлен»: sudo в PATH есть, вопрос должен дойти до окна
+     * (в тесте окна нет, поэтому ожидание истекает). */
+    ASSERT_TRUE(o.output.find("не установлен") == std::string::npos);
+    ASSERT_TRUE(o.output.find("пароль") != std::string::npos);
+    fs::remove_all(t);
+}

@@ -1674,11 +1674,17 @@ void register_base_tools() {
                 if (needs_sudo) {
                     /* Сначала «есть ли sudo вообще»: иначе окно пароля
                      * появилось бы ради команды, которой нет, и человек
-                     * вводил бы пароль в пустоту. */
+                     * вводил бы пароль в пустоту. `command -v` здесь не
+                     * годится: слово `command` — в списке запрещённых
+                     * (универсальный обход), и проверка получила бы
+                     * отказ политики, то есть «sudo не установлен» на
+                     * машине, где он есть. `which` — в allowlist. */
                     std::string which;
                     int wcode = -1;
-                    const bool installed =
-                        shell::run_capture_status("command -v sudo", which, wcode, 5);
+                    const bool installed = shell::run_capture_status(
+                        "which sudo 2>/dev/null || ls /usr/bin/sudo /bin/sudo "
+                        "/usr/local/bin/sudo 2>/dev/null",
+                        which, wcode, 5);
                     if (!installed || which.empty()) {
                         return out("shell",
                             "[sudo] команде нужны права root, но sudo не"

@@ -22,17 +22,44 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <random>
 #include <sstream>
 
 namespace coder {
 namespace {
 
-/* Уникальная метка приглашения. Пароль отправляется ТОЛЬКО когда этот
- * текст виден в конце вывода: у sudo свой `passprompt` задаётся флагом
- * -p, поэтому чужой вывод «password for …» не может спровоцировать
- * отправку (иначе команда, печатающая такой текст и читающая stdin,
- * получила бы пароль). */
-constexpr const char* kSudoPrompt = "wp_coder_sudo_password:";
+/* Уникальная метка приглашения — НА КАЖДЫЙ ЗАПУСК, а не константа.
+ *
+ * Постоянная строка угадываема: агент читает исходники плагина (у него
+ * есть read_file), видит метку и может напечатать её в выводе команды,
+ * которая читает stdin, — пароль ушёл бы в команду, а не в sudo.
+ * Случайные 8 байт делают такую подстановку невозможной, а метка всё
+ * равно отдаётся sudo через -p и вырезается фильтром. */
+std::string make_sudo_prompt() {
+    unsigned char raw[8] = {0};
+    size_t got = 0;
+    std::ifstream urandom("/dev/urandom", std::ios::binary);
+    if (urandom) {
+        urandom.read(reinterpret_cast<char*>(raw), sizeof(raw));
+        got = static_cast<size_t>(urandom.gcount());
+    }
+    if (got != sizeof(raw)) {
+        /* /dev/urandom недоступен (песочница, не-Linux) — не повод
+         * отказываться от пароля: random_device даёт тот же смысл. */
+        std::random_device rd;
+        for (size_t i = 0; i < sizeof(raw); ++i)
+            raw[i] = static_cast<unsigned char>(rd() & 0xffu);
+    }
+    static const char* kHex = "0123456789abcdef";
+    std::string s = "wp_coder_sudo_password:";
+    for (size_t i = 0; i < sizeof(raw); ++i) {
+        s += kHex[raw[i] >> 4];
+        s += kHex[raw[i] & 0x0f];
+    }
+    s += ":";
+    return s;
+}
 
 /* Хвост вывода, который показывается модели и UI — тот же предел, что у
  * shell::run_capture_stream. */
@@ -61,12 +88,13 @@ bool is_star_or_blank(int c) {
     return c == '*' || c == '\b' || c == 0x7f || is_blank(c);
 }
 
-/* Убрать приглашение sudo из вывода. Метка уникальна, но после неё sudo
- * может напечатать звёздочки (passwd_asterisks) — они тоже уходят, если
- * до конца строки нет ничего другого. */
-void strip_prompt(std::string& out) {
-    const size_t tlen = std::strlen(kSudoPrompt);
-    size_t p = out.find(kSudoPrompt);
+/* Убрать приглашение sudo из вывода. Метка уникальна для запуска, но
+ * после неё sudo может напечатать звёздочки (passwd_asterisks) — они тоже
+ * уходят, если до конца строки нет ничего другого. */
+void strip_prompt(std::string& out, const std::string& marker) {
+    if (marker.empty()) return;
+    const size_t tlen = marker.size();
+    size_t p = out.find(marker);
     while (p != std::string::npos) {
         const size_t e = out.find('\n', p);
         const size_t line_end = (e == std::string::npos) ? out.size() : e;
@@ -77,7 +105,7 @@ void strip_prompt(std::string& out) {
         } else {
             out.erase(p, tlen);
         }
-        p = out.find(kSudoPrompt, p);
+        p = out.find(marker, p);
     }
 }
 
@@ -94,21 +122,77 @@ void replace_all(std::string& s, const std::string& from,
 /* Приглашение вырезается, переводы строк PTY нормализуются, а пароль
  * (если он всё-таки отразился — чужой getpass, passwd_asterisks) на
  * всякий случай заменяется. Этот же фильтр применяется к хвосту,
- * который уходит в on_progress. */
-std::string filter_output(std::string s, const std::string& password) {
+ * который уходит в on_progress, и к spill-файлу. */
+std::string filter_output(std::string s, const std::string& password,
+                          const std::string& marker) {
     std::string r;
     r.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n') continue;
         r.push_back(s[i]);
     }
-    strip_prompt(r);
+    strip_prompt(r, marker);
     if (!password.empty()) replace_all(r, password, "***");
     /* Исходная копия (до фильтра) может содержать отражённый пароль —
      * затираем её, а не отдаём наружу. */
     secure_wipe_impl(s);
     return r;
 }
+
+/* Потоковый фильтр spill: полный вывод идёт на диск, но НЕ сырым.
+ *
+ * Сырой PTY-поток — это ровно то место, где пароль может отразиться
+ * (чужой getpass, passwd_asterisks) или где видно приглашение; spill
+ * лежит в каталоге данных, и модель читает его инструментом read_file.
+ * Поэтому в файл попадает только результат filter_output.
+ *
+ * Буфер хвоста: приглашение и пароль могут прийти двумя порциями (poll
+ * читает по 8 КБ), поэтому последние marker/password.size() байт
+ * придерживаются до следующей записи или до finish(). */
+struct SpillFilter {
+    std::ofstream& file;
+    std::string marker;
+    std::string password;
+    std::string tail;
+
+    SpillFilter(std::ofstream& f, std::string m, std::string p)
+        : file(f), marker(std::move(m)), password(std::move(p)) {}
+
+    void push(const char* data, size_t n) {
+        tail.append(data, n);
+        size_t start = 0;
+        for (;;) {
+            const size_t nl = tail.find('\n', start);
+            if (nl == std::string::npos) break;
+            std::string line = tail.substr(start, nl - start + 1);
+            write_filtered(std::move(line));
+            start = nl + 1;
+        }
+        if (start > 0) tail.erase(0, start);
+        const size_t keep =
+            std::max(marker.size(), password.size()) + 1;
+        if (tail.size() > keep) {
+            const size_t ready = tail.size() - keep;
+            std::string chunk = tail.substr(0, ready);
+            tail.erase(0, ready);
+            write_filtered(std::move(chunk));
+        }
+    }
+
+    void finish() {
+        if (!tail.empty()) {
+            write_filtered(std::move(tail));
+            tail.clear();
+        }
+        file.flush();
+    }
+
+    void write_filtered(std::string s) {
+        const std::string clean = filter_output(std::move(s), password, marker);
+        if (!clean.empty())
+            file.write(clean.data(), static_cast<std::streamsize>(clean.size()));
+    }
+};
 
 /* Запуск `sudo -p <метка> -v && { <команда> }` на PTY.
  *
@@ -135,8 +219,9 @@ SudoRunResult run_pty(const std::string& sudo_bin,
                       const std::string& spill_path) {
     SudoRunResult res;
 
+    const std::string marker = make_sudo_prompt();
     const std::string script =
-        shell::shell_quote(sudo_bin) + " -p " + shell::shell_quote(kSudoPrompt) +
+        shell::shell_quote(sudo_bin) + " -p " + shell::shell_quote(marker) +
         " -v && { printf ok >&3; exec 3>&-; exec sh -c " +
         shell::shell_quote(command) + "; }";
 
@@ -195,12 +280,15 @@ SudoRunResult run_pty(const std::string& sudo_bin,
 
     std::ofstream spill;
     bool spill_ok = false;
+    std::unique_ptr<SpillFilter> spill_filter;
     if (!spill_path.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(
             std::filesystem::path(spill_path).parent_path(), ec);
         spill.open(spill_path, std::ios::binary | std::ios::trunc);
         spill_ok = spill.is_open();
+        if (spill_ok)
+            spill_filter = std::make_unique<SpillFilter>(spill, marker, password);
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -265,8 +353,10 @@ SudoRunResult run_pty(const std::string& sudo_bin,
             const ssize_t n = ::read(master, buf, sizeof(buf));
             if (n > 0) {
                 total += static_cast<size_t>(n);
-                if (spill.is_open())
-                    spill.write(buf, static_cast<std::streamsize>(n));
+                /* Спill — полный вывод, но фильтрованный: в нём не должно
+                 * быть ни приглашения, ни отражённого пароля. */
+                if (spill_filter)
+                    spill_filter->push(buf, static_cast<size_t>(n));
                 out.append(buf, static_cast<size_t>(n));
                 if (out.size() > ring_limit) {
                     const size_t drop = out.size() - ring_limit;
@@ -287,9 +377,9 @@ SudoRunResult run_pty(const std::string& sudo_bin,
                  * неё только пробелы/перевод строки). Иначе это упоминание
                  * в тексте команды, и пароль туда уходить не должен. */
                 {
-                    const size_t p = out.rfind(kSudoPrompt);
+                    const size_t p = out.rfind(marker);
                     if (p != std::string::npos) {
-                        size_t e = p + std::strlen(kSudoPrompt);
+                        size_t e = p + marker.size();
                         while (e < out.size() && is_blank(static_cast<unsigned char>(out[e]))) ++e;
                         if (e == out.size() && sent) {
                             /* sudo показал приглашение ВТОРОЙ раз: пароль
@@ -330,7 +420,7 @@ SudoRunResult run_pty(const std::string& sudo_bin,
                         /* Хвост уходит в чат приложения, поэтому фильтр
                          * тот же: приглашение и пароль (если чужой getpass
                          * его отразил) в него попасть не должны. */
-                        on_progress(total, filter_output(last_line, password));
+                        on_progress(total, filter_output(last_line, password, marker));
                     }
                 }
             } else if (n == 0) {
@@ -393,8 +483,8 @@ SudoRunResult run_pty(const std::string& sudo_bin,
                     const ssize_t n = ::read(master, buf, sizeof(buf));
                     if (n <= 0) break;
                     total += static_cast<size_t>(n);
-                    if (spill.is_open())
-                        spill.write(buf, static_cast<std::streamsize>(n));
+                    if (spill_filter)
+                        spill_filter->push(buf, static_cast<size_t>(n));
                     out.append(buf, static_cast<size_t>(n));
                     if (out.size() > ring_limit) {
                         const size_t drop = out.size() - ring_limit;
@@ -413,6 +503,7 @@ SudoRunResult run_pty(const std::string& sudo_bin,
         exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
     }
     if (master_open) ::close(master);
+    if (spill_filter) spill_filter->finish();
     if (spill.is_open()) spill.close();
 
     res.total_bytes = total;
@@ -423,7 +514,7 @@ SudoRunResult run_pty(const std::string& sudo_bin,
     res.exit_code = exit_code;
     res.timed_out = timed_out;
     res.cancelled = was_cancelled;
-    res.output = filter_output(out, password);
+    res.output = filter_output(out, password, marker);
     secure_wipe_impl(out);
     secure_wipe_impl(last_line);
     volatile char* vbuf = reinterpret_cast<volatile char*>(buf);
@@ -519,6 +610,10 @@ SudoAuth::AskResult SudoAuth::ask(const std::string& command,
                        pending_.end());
         if (cancelled_) res.cancelled = true;
     }
+    /* Признак «человек не ответил» обязан дойти до вызывающего: без него
+     * истёкшее ожидание выглядело как «пароль отклонён», и модель/лог
+     * получали неверную причину. */
+    res.timed_out = timed_out;
 
     if (state_) {
         std::lock_guard<std::mutex> lk(state_->mtx);
