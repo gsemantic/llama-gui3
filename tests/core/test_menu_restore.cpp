@@ -16,6 +16,7 @@
 #include "ui/command_manager.h"
 #include "ui/window_manager.h"
 #include "ui/workspace_manager.h"
+#include "ui/window_coordinator.h"
 #include "imgui.h"
 
 #include <cstdio>
@@ -81,11 +82,20 @@ int main() {
     build_agents_menu(menu_system);
     const int app_items = count_items(menu_system.getMenuByKey("Agents"));
 
+    /* Координатор окон — как в приложении. С ним плагины с render_fn
+     * регистрируются в нём (rendered_by_coordinator=true), и
+     * render_plugins() не зовёт их render_fn напрямую -> нет ImGui::Begin
+     * вне кадра (OI-1, docs/OPEN_ISSUES.md). Восстановление пунктов меню
+     * идёт в render_plugins() ДО вызова render_fn и от координатора не
+     * зависит, поэтому тест меню остаётся валидным. */
+    ui::WindowCoordinator coordinator;
+
     // Плагины с реальными подсистемами меню/команд/окон.
     plugin::PluginSubsystems subsystems;
     subsystems.command_manager = &command_manager;
     subsystems.window_manager = &window_manager;
     subsystems.menu_system = &menu_system;
+    subsystems.window_coordinator = &coordinator;
     subsystems.config_dir = ".";
     subsystems.data_dir = ".";
     subsystems.plugins_dir = PLUGIN_TEST_DIR;

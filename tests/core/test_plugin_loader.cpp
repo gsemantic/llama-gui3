@@ -7,6 +7,7 @@
 //   - PluginManager корректно выгружает плагин (ll_plugin_shutdown + dlclose).
 
 #include "plugins/plugin_manager.h"
+#include "ui/window_coordinator.h"
 #include "imgui.h"
 
 #include <cstdio>
@@ -18,15 +19,20 @@
 #endif
 
 int main() {
-    /* Плагины рисуют UI через ImGui; как и в приложении, мини-хост обязан
-     * создать контекст до render_plugins(), иначе GImGui == NULL и любой
-     * ImGui-вызов плагина (wp_coder, calculator) сегфолтит. */
+    /* Плагины рисуют UI через ImGui; контекст нужен, как и в приложении. */
     ImGui::CreateContext();
+
+    /* Координатор окон — как в приложении. С ним плагины с render_fn
+     * регистрируются в нём (rendered_by_coordinator=true), и
+     * render_plugins() НЕ зовёт их render_fn напрямую. Иначе render_fn ->
+     * ImGui::Begin вне кадра -> SIGSEGV (OI-1, docs/OPEN_ISSUES.md). */
+    llama_gui::ui::WindowCoordinator coordinator;
 
     llama_gui::plugin::PluginSubsystems subsystems;
     subsystems.config_dir = ".";
     subsystems.data_dir = ".";
     subsystems.plugins_dir = PLUGIN_TEST_DIR;
+    subsystems.window_coordinator = &coordinator;
 
     llama_gui::plugin::PluginManager manager;
 
@@ -93,7 +99,14 @@ int main() {
         return 1;
     }
 
-    // Пустое состояние — должно отработать без ошибок.
+    /* Пустое состояние — должно отработать без ошибок.
+     *
+     * Окна плагинов в этом тесте НЕ рисуются: в реальном приложении их
+     * рисует WindowCoordinator, и тест эмулирует то же окружение
+     * (координатор задан выше). Без координатора render_plugins() позвал бы
+     * render_fn -> ImGui::Begin вне кадра -> SIGSEGV (OI-1,
+     * docs/OPEN_ISSUES.md). Меню (если бы оно было) восстанавливается в
+     * render_plugins() до вызова render_fn и от координатора не зависит. */
     manager.render_plugins();
 
     manager.shutdown();

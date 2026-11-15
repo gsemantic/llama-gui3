@@ -6,10 +6,28 @@
 
 ---
 
-## OI-1. `PluginLoader` и `MenuRestore` падают с SIGSEGV в ctest
+## OI-1. `PluginLoader` и `MenuRestore` падают с SIGSEGV в ctest — RESOLVED
 
-**Статус:** OPEN. **Найден:** 2026-11-16 (вместе с коммитами `e191f15` —
-плагин 0.18.8–0.18.11 — и `1c7742d` — хостовые правки).
+**Статус:** RESOLVED 2026-11-16 (правка тестов: координатор окон).
+**Найден:** 2026-11-16 (вместе с коммитами `e191f15` — плагин
+0.18.8–0.18.11 — и `1c7742d` — хостовые правки).
+
+> **Итог.** Тесты дают `WindowCoordinator` в `PluginSubsystems` — как в
+> реальном приложении. Тогда плагины с `render_fn` регистрируются в
+> координаторе (`rendered_by_coordinator=true`), и
+> `PluginManager::render_plugins()` **не** зовёт их `render_fn` напрямую:
+> окна рисует координатор в `renderAll()` (а тесты его не зовут).
+> Восстановление пунктов меню идёт в `render_plugins()` **до** проверки
+> `rendered_by_coordinator`, поэтому `MenuRestore` остаётся валидным.
+> `ctest`: 15/15 зелёные.
+>
+> **Почему не `NewFrame()/EndFrame()` (первая редакция, вариант 1).**
+> `ImGui::NewFrame()` в тестовом контексте (без backend и без font atlas)
+> сам падает SIGSEGV внутри `UpdateFontsNewFrame` → `GetDefaultFont`:
+> `AddFontDefault()` не спасает, потому что при незаданном
+> `ImGuiBackendFlags_RendererHasTextures` atlas блокируется и дефолтный
+> шрифт не добавляется. Обернуть рендер в кадр без инициализации
+> backend-а — не вариант.
 
 ### Симптом
 
@@ -58,39 +76,42 @@ cd build && ctest --output-on-failure -R "PluginLoader|MenuRestore"
 
 `PluginManager::render_plugins()` (`src/plugins/plugin_manager.cpp:1780`)
 для плагинов без `rendered_by_coordinator` вызывает `p->render_fn()`. В
-`test_plugin_loader` подсистема `window_coordinator` не задана (nullptr),
-поэтому для `wp_coder` вызывается `ll_plugin_render()` →
-`coder::ui::render_all_windows()`, которое делает `ImGui::Begin()/End()`
-вне кадра. `ImGui::Begin` вне `NewFrame` — неопределённое поведение;
-на практике это разыменование неготового состояния контекста → SIGSEGV.
+тестах подсистема `window_coordinator` не была задана (nullptr), поэтому
+для `wp_coder` вызывался `ll_plugin_render()` →
+`coder::ui::render_all_windows()` → `ImGui::Begin()/End()` вне кадра.
+`ImGui::Begin` вне `NewFrame` — неопределённое поведение; на практике
+разименование неготового состояния контекста → SIGSEGV.
 
-В реальном приложении `NewFrame()` вызывается в главном цикле перед
-`render_plugins()` (`src/ui/main_window.cpp:1628`), поэтому дефект виден
-только в тестах.
+В реальном приложении `render_plugins()` зовётся после `NewFrame()`
+(`src/ui/main_window.cpp:1628`), а окна плагинов рисует `WindowCoordinator`
+в `renderAll()`; `render_fn` из `render_plugins()` для них не зовётся.
+Тесты это окружение не воспроизводили.
 
-### Варианты исправления
+### Исправление (принято)
 
-1. **Исправить тесты (предпочтительно, хостовое изменение).** Обрамить
-   вызов `render_plugins()` в
-   `ImGui::NewFrame(); manager.render_plugins(); ImGui::EndFrame();` в
-   обоих тестах. Это делает тест честным: он эмулирует реальный кадр,
-   как приложение. Минимальная и безопасная правка.
-2. **Сделать `render_plugins()` устойчивым к отсутствию кадра.** В
-   `PluginManager::render_plugins()` пропускать вызов `render_fn`, если
-   кадр не начат. Требует доступа к признаку «кадр идёт»
-   (`ImGuiContext::WithinFrameScope` — внутренний API; публичного
-   `ImGui::IsFrameStarted()` в используемой версии может не быть).
-   Риск: тест перестанет проверять рендер вообще — станет зелёным «на
-   пустоте».
-3. **Контракт плагина.** `ll_plugin_render` должен сам проверять, что
-   кадр начат, и не рисовать иначе. Требует публичного признака из
-   `imgui.h`; если его нет — заводить свой `g_frame_active` в
-   `host_bridge/` по вызовам `NewFrame`/`EndFrame` хоста. Больше работы,
-   чем вариант 1.
+Тестам добавлен `ui::WindowCoordinator` в `PluginSubsystems` — как в
+приложении. Плагины с `render_fn` регистрируются в нём
+(`rendered_by_coordinator=true`), `render_plugins()` их `render_fn` не
+зовёт, окна рисует координатор (в тестах `renderAll()` не зовётся).
+Блок восстановления меню выполняется до проверки
+`rendered_by_coordinator`, поэтому `MenuRestore` остаётся валидным.
 
-Рекомендуется вариант 1 как первый шаг (зелёный ctest без изменения
-продуктового поведения), вариант 3 — как долгосрочный контракт, если
-появится требование «плагин не падает вне кадра».
+### Отклонённые варианты
+
+1. **`NewFrame()/EndFrame()` вокруг `render_plugins()`.** Не работает в
+   тестовом контексте: `ImGui::NewFrame()` без backend (не задан
+   `ImGuiBackendFlags_RendererHasTextures`, нет font atlas) падает
+   SIGSEGV в `UpdateFontsNewFrame → GetDefaultFont`; `AddFontDefault()`
+   не спасает, потому что atlas блокируется и дефолтный шрифт не
+   добавляется.
+2. **Пропуск `render_fn` при отсутствии кадра в `render_plugins()`.**
+   Требует внутреннего признака `ImGuiContext::WithinFrameScope` или
+   своего `g_frame_active`; тест перестал бы проверять рендер — зелёный
+   «на пустоте».
+3. **Контракт плагина (`ll_plugin_render` проверяет кадр).** Требует
+   публичного признака из `imgui.h`; в реальном приложении кадр всегда
+   начат, так что это долг, а не дефект. Оставлено на будущее, если
+   появится требование «плагин не падает вне кадра».
 
 ### Ссылки
 
