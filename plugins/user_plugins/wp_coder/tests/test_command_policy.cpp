@@ -201,6 +201,17 @@ TEST(command_policy_allows_ordinary_development_commands) {
     expect("rsync -az --delete src/ host:/srv/app", true);
     expect("psql -U app -d app -c 'SELECT 1'", true);
     expect("tar -xzf archive.tar.gz", true);
+    /* cd — обычная часть составной команды; без неё агент не мог
+     * перейти в каталог проекта и запустить проверку. */
+    expect("cd /srv/app && pytest -q", true);
+    expect("cd build && cmake --build .", true);
+    expect("cd .. && git status", true);
+    /* Убийство процессов не входит в allowlist: агент мог убить само
+     * приложение, «проверяя», что процесс жив. */
+    expect("kill 1234", false);
+    expect("killall llama-gui-core", false);
+    expect("ps aux", true);
+    expect("pgrep llama", false);
 }
 
 TEST(command_policy_denies_unknown_binary_in_arbitrary_command) {

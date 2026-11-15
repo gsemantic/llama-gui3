@@ -76,6 +76,10 @@ size_t legacy_block_end(const std::string& text, size_t block_start) {
 const char* const kLegacyKeys[] = {
     "PATH", "QUERY", "ROOT", "PATTERN",
     "CONTENT_BEGIN", "CONTENT", "CONTENT_END", "CLI", "URL", "K",
+    /* read_file/limit и таймауты: модель пишет их по описанию инструмента,
+     * а парсер их не знал и молча выбрасывал — read_file с OFFSET: 40
+     * возвращал первую страницу, и агент тратил шаги на повторные чтения. */
+    "OFFSET", "LIMIT", "TIMEOUT",
 };
 
 /* Первая непустая строка ПОСЛЕ line_end начинается с известного ключа. */
@@ -153,8 +157,147 @@ size_t find_bare_tool_line(const std::string& text) {
 
 } // anonymous namespace
 
+/* --- DeepSeek DSML (текстовый протокол вызова) ---
+ *
+ * Модели DeepSeek (v3/v4) в text-режиме пишут вызов не wp_action-блоком и
+ * не JSON, а XML-подобной разметкой:
+ *
+ *   <｜DSML｜ calls>
+ *   <｜DSML｜ invoke name="read_file">
+ *   <｜DSML｜ parameter name="path" string="true">calculator.py</｜DSML｜ parameter>
+ *   </｜DSML｜ invoke>
+ *   </｜DSML｜ calls>
+ *
+ * Плагин её не знал: модель «вызывала инструмент», а цикл видел обычный
+ * текст и отвечал напоминанием. В сессии 0.18.9 это выглядело как «агент
+ * не вызывает инструменты», хотя вызов был — просто в чужом формате.
+ *
+ * Разбор намеренно терпимый: убираем zero-width пробелы (DeepSeek вставляет
+ * их после '<'), ищем `invoke name="..."`, затем параметры до `</...>`. */
+std::string strip_zero_width(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        if (i + 2 < s.size()) {
+            const unsigned char a = static_cast<unsigned char>(s[i]);
+            const unsigned char b = static_cast<unsigned char>(s[i + 1]);
+            const unsigned char c = static_cast<unsigned char>(s[i + 2]);
+            if (a == 0xE2 && b == 0x80 &&
+                (c == 0x8B || c == 0x8C || c == 0x8D)) { i += 3; continue; }
+            if (a == 0xEF && b == 0xBB && c == 0xBF) { i += 3; continue; }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
+bool extract_dsml(const std::string& text, std::string& block,
+                  std::string& rest) {
+    const std::string clean = strip_zero_width(text);
+    const size_t dsml = clean.find("DSML");
+    if (dsml == std::string::npos) return false;
+    const size_t invoke = clean.find("invoke name=\"", dsml);
+    if (invoke == std::string::npos) return false;
+    const size_t name_start = invoke + std::strlen("invoke name=\"");
+    const size_t name_end = clean.find('"', name_start);
+    if (name_end == std::string::npos) return false;
+    const std::string tool = clean.substr(name_start, name_end - name_start);
+    if (tool.empty()) return false;
+
+    json::JsonValue args = json::JsonValue::object();
+    args.set("tool", tool);
+
+    size_t pos = name_end;
+    for (;;) {
+        const size_t p = clean.find("parameter name=\"", pos);
+        if (p == std::string::npos) break;
+        /* Не уходим в следующий invoke: параметры текущего. */
+        const size_t invoke_end = clean.find("invoke>", p);
+        if (invoke_end == std::string::npos) break;
+        const size_t pstart = p + std::strlen("parameter name=\"");
+        const size_t pend = clean.find('"', pstart);
+        if (pend == std::string::npos || pend > invoke_end) break;
+        const std::string key = clean.substr(pstart, pend - pstart);
+        const size_t tag_end = clean.find('>', pend);
+        if (tag_end == std::string::npos || tag_end > invoke_end) break;
+        const std::string attrs = clean.substr(pend + 1, tag_end - pend - 1);
+        const bool is_string = attrs.find("string=\"true\"") != std::string::npos;
+        const size_t vstart = tag_end + 1;
+        /* Закрывающий тег — тот же префикс, что у открывающего, без
+         * атрибутов: `</｜DSML｜ parameter>`. Искать просто "parameter>"
+         * нельзя: значение может быть кодом с `<` и куском `parameter`.
+         * p указывает на слово parameter, а не на '<': берём '<' перед ним. */
+        const size_t lt = clean.rfind('<', p);
+        if (lt == std::string::npos || lt > invoke_end) break;
+        const size_t name_attr = clean.find(" name=\"", lt);
+        if (name_attr == std::string::npos || name_attr > tag_end) break;
+        const std::string close_tag =
+            "</" + clean.substr(lt + 1, name_attr - (lt + 1)) + ">";
+        const size_t vend = clean.find(close_tag, vstart);
+        if (vend == std::string::npos) break;
+        std::string val = clean.substr(vstart, vend - vstart);
+        /* Trim. */
+        size_t b = val.find_first_not_of(" \t\r\n");
+        size_t e = val.find_last_not_of(" \t\r\n");
+        val = (b == std::string::npos) ? "" : val.substr(b, e - b + 1);
+        if (is_string) {
+            args.set(key, val);
+        } else {
+            /* string="false": число или bool. */
+            if (val == "true" || val == "false") {
+                args.set(key, val == "true");
+            } else {
+                char* endp = nullptr;
+                const long long ll = std::strtoll(val.c_str(), &endp, 10);
+                if (endp && *endp == '\0' && !val.empty()) {
+                    args.set(key, ll);
+                } else {
+                    const double d = std::strtod(val.c_str(), &endp);
+                    if (endp && *endp == '\0' && !val.empty()) {
+                        args.set(key, d);
+                    } else {
+                        args.set(key, val);
+                    }
+                }
+            }
+        }
+        pos = vend + close_tag.size();
+    }
+
+    block = args.dump();
+    /* Убираем блок из ответа модели: иначе он уедет в историю как текст
+     * и будет виден пользователю. */
+    const size_t orig_dsml = text.find("DSML");
+    if (orig_dsml != std::string::npos) {
+        const size_t start = text.rfind('<', orig_dsml);
+        /* rfind, а не find: открывающий тег <... calls> тоже содержит
+         * "calls>", и find обрезал бы блок по первому совпадению, оставив
+         * остальные invoke в тексте ответа. */
+        size_t end = text.rfind("calls>");
+        if (end != std::string::npos) end += 6;
+        if (start != std::string::npos && end != std::string::npos &&
+            start < end) {
+            rest = text.substr(0, start) + text.substr(end);
+        } else {
+            rest.clear();
+        }
+    } else {
+        rest.clear();
+    }
+    return true;
+}
+
 std::string extract_action(const std::string& text, std::string& rest) {
     rest = text;
+    /* DeepSeek DSML — до всех остальных форматов: блок не содержит ни
+     * wp_action, ни JSON, и обычные эвристики его не видят. */
+    {
+        std::string dsml_block, dsml_rest;
+        if (extract_dsml(text, dsml_block, dsml_rest)) {
+            rest = dsml_rest;
+            return dsml_block;
+        }
+    }
     size_t a = text.find("```wp_action");
     if (a == std::string::npos) {
         a = text.find("```json");
@@ -309,7 +452,16 @@ bool parse_legacy_action(const std::string& block, json::JsonValue& args) {
         trim_ws(val);
         if (key == "TOOL") args.set("tool", val);
         else if (key == "K") args.set("k", static_cast<long long>(std::atoi(val.c_str())));
-        else {
+        else if (key == "OFFSET" || key == "LIMIT" || key == "TIMEOUT" ||
+                 key == "offset" || key == "limit" || key == "timeout") {
+            /* Числовые параметры: строкой их читать нельзя — arg_int
+             * вернёт 0, и read_file снова начнёт с первой строки. */
+            std::string num_key = key;
+            for (auto& c : num_key) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            args.set(num_key, static_cast<long long>(std::atoll(val.c_str())));
+        } else {
             /* Имена legacy-ключей совпадают с ключами JSON-протокола
              * (PATH → path и т.д.), поэтому конвертируем только регистр. */
             for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

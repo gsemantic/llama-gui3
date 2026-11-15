@@ -650,7 +650,7 @@ TEST(limits_file_is_single_source_of_truth) {
     ASSERT_TRUE(lim.find("kResultBudget") != std::string::npos);
     /* Символические константы равны ожидаемым значениям. */
     ASSERT_EQ((int)limits::kMaxToolOutput, 12000);
-    ASSERT_EQ((int)limits::kResultBudget, 1500);
+    ASSERT_EQ((int)limits::kResultBudget, 6000);
     ASSERT_EQ((int)limits::kMaxGrepMatches, 200);
     ASSERT_EQ((int)limits::kMaxSteps, 12);
     ASSERT_EQ((int)limits::kSessionBudget, 60000);

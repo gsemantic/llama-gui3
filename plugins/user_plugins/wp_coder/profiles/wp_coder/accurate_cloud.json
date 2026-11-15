@@ -1,9 +1,8 @@
 {
   "model": "cloud",
   "temperature": 0.0,
-  "max_tokens": 4096,
   "tools_policy": "standard",
-  "timeout_ms": 120000,
+  "timeout_ms": 300000,
   "allowed_commands": [
     "ls",
     "cat",
@@ -27,6 +26,6 @@
     ".yaml"
   ],
   "rag_enabled": true,
-  "description": "Облачная модель, длинные промпты, с RAG. Для сложных задач и деплоя.",
+  "description": "Облачная reasoning-модель, длинные промпты, с RAG. max_tokens не задан: используется дефолт провайдера, как в OpenCode (для particle-1 каталог заявляет output 131072).",
   "min_final_answer_len": 0
 }

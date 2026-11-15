@@ -23,7 +23,7 @@ inline constexpr size_t kMaxSymFile = 40;         // символов в фай�
 /* ReAct-цикл. */
 inline constexpr int kMaxSteps = 12;              // шагов на задачу (было 8 vs 12 — исправлено)
 inline constexpr size_t kSessionBudget = 60000;   // бюджет символов истории сессии
-inline constexpr size_t kResultBudget = 1500;     // обрезка одного RESULT в сессии
+inline constexpr size_t kResultBudget = 6000;     // обрезка одного RESULT в сессии
 /* Минимальная длина текста, который цикл считает ИТОГОМ (И5.8).
  *
  * Четвёртое условие завершения, добавленное к трём портовым: у opencode

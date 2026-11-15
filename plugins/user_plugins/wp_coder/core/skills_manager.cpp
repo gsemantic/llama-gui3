@@ -26,7 +26,15 @@ void SkillsManager::load() {
         if (mod->get_skills) {
             auto mod_skills = mod->get_skills();
             for (auto& sk : mod_skills) {
-                skills_.push_back(std::move(sk));
+                /* Один модуль может быть зарегистрирован дважды (например,
+                 * в тестах), а навыки с одним именем сделали бы active_
+                 * с дублями: выключение одного экземпляра оставляло бы
+                 * второй активным, и «навык выключен» был бы ложью. */
+                bool exists = false;
+                for (const auto& s : skills_) {
+                    if (s.name == sk.name) { exists = true; break; }
+                }
+                if (!exists) skills_.push_back(std::move(sk));
             }
         }
     }
@@ -48,29 +56,32 @@ void SkillsManager::load() {
 }
 
 void SkillsManager::refresh_active() {
-    if (active_module_.empty() || active_module_ == "generic") {
-        /* Модуль не выбран или проект generic — активны только базовые
-         * навыки (без module_name), чтобы WP/Python/DevOps-навыки не
-         * засоряли промпт для чужого проекта. */
-        std::vector<std::string> base;
+    /* Базовые навыки (без модуля) активны всегда: они не привязаны к
+     * стеку и нужны любому проекту. Навыки выбранного модуля
+     * добавляются к ним.
+     *
+     * Раньше при выбранном модуле оставались ТОЛЬКО его навыки, а при
+     * отсутствии навыков у модуля включались ВСЕ навыки всех модулей —
+     * то есть в проекте-калькуляторе оказывались активны WP-навыки.
+     * Второе и есть причина, по которой «навыки добавляются в промпт,
+     * когда не нужны»: fallback включал чужой модуль вместо того, чтобы
+     * оставить базовый набор. */
+    std::vector<std::string> selected;
+    for (const auto& sk : skills_) {
+        if (sk.module_name.empty()) selected.push_back(sk.name);
+    }
+    if (!active_module_.empty() && active_module_ != "generic") {
         for (const auto& sk : skills_) {
-            if (sk.module_name.empty()) base.push_back(sk.name);
+            if (sk.module_name == active_module_) selected.push_back(sk.name);
         }
-        if (base.empty()) set_active(all_skill_names());
-        else set_active(base);
+    }
+    if (selected.empty()) {
+        /* Ни базовых, ни модульных навыков нет — лучше показать все, чем
+         * оставить промпт без единого имени (модель хотя бы узнает, что
+         * навыки существуют). */
+        set_active(all_skill_names());
     } else {
-        std::vector<std::string> only;
-        for (const auto& sk : skills_) {
-            if (sk.module_name == active_module_) only.push_back(sk.name);
-        }
-        if (only.empty()) {
-            std::cerr << "[wp_coder] skills: модуль '" << active_module_
-                      << "' не дал навыков, активны навыки всех модулей"
-                      << std::endl;
-            set_active(all_skill_names());
-        } else {
-            set_active(only);
-        }
+        set_active(selected);
     }
 }
 
@@ -214,6 +225,16 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
         if (!exists) {
             sk.module_name = module_name;
             skills_.push_back(std::move(sk));
+            /* Установленный навык активен по умолчанию: человек положил
+             * файл в каталог навыков, значит он хочет, чтобы агент его
+             * видел. Иначе build_skills_prompt() (только активные) не
+             * показал бы его до ручного включения в UI, и «навык
+             * установлен, но модель о нём не знает» выглядело бы как
+             * ошибка загрузки. */
+            if (std::find(active_.begin(), active_.end(),
+                          skills_.back().name) == active_.end()) {
+                active_.push_back(skills_.back().name);
+            }
         }
     }
 }
@@ -224,7 +245,12 @@ void SkillsManager::set_module(const std::string& module_name) {
 }
 
 void SkillsManager::set_active(const std::vector<std::string>& names) {
-    active_ = names;
+    active_.clear();
+    for (const std::string& n : names) {
+        if (std::find(active_.begin(), active_.end(), n) == active_.end()) {
+            active_.push_back(n);
+        }
+    }
 }
 
 void SkillsManager::toggle(const std::string& name, bool on) {
@@ -245,9 +271,17 @@ const std::vector<std::string>& SkillsManager::active_skills() const {
 }
 
 std::string SkillsManager::build_skills_prompt() const {
-    /* Только имена и описания активно включённых навыков. Полные тела навыков
+    /* Только имена и описания АКТИВНЫХ навыков. Полные тела навыков
      * НЕ инжектируются в промпт — они тяжёлые и оплачиваются на каждом шаге.
-     * Модель подгружает нужный навык через инструмент skill_detail. */
+     * Модель подгружает нужный навык через инструмент skill_detail.
+     *
+     * Выключенные навыки НЕ перечисляются: они не относятся к текущей
+     * задаче, но каждый вызов платил бы за их имена и описания. Раньше
+     * печатались все с пометкой «(выключен)» — якобы чтобы модель видела,
+     * что можно включить; но инструмента «включить навык» у неё нет,
+     * и список только удлинял промпт и путал её (наблюдение на qwen-flash:
+     * в проекте-калькуляторе модель читала WP-навыки и отвечала про
+     * WordPress). Полный список — инструмент list_skills. */
     if (skills_.empty()) {
         /* Навыков нет вообще. Модель всё равно должна знать про
          * skill_detail — иначе она не сможет вызвать его, даже если
@@ -257,17 +291,26 @@ std::string SkillsManager::build_skills_prompt() const {
                "вызови его, чтобы проверить, не появились ли навыки.\n";
     }
 
-    /* Каталог строим по всем навыкам, но с пометкой активных — так модель
-     * видит и активные, и те, что можно включить через UI. */
-    std::string result = "\n\n## НАВЫКИ\n"
-                         "(подробная инструкция — через skill_detail QUERY: <имя>)\n";
+    std::string result = "\n\n## НАВЫКИ\n";
+    bool any_active = false;
     for (const auto& sk : skills_) {
-        bool on = std::find(active_.begin(), active_.end(), sk.name) != active_.end();
-        result += on ? "- " : "- (выключен) ";
+        const bool on =
+            std::find(active_.begin(), active_.end(), sk.name) != active_.end();
+        if (!on) continue;
+        any_active = true;
+        result += "- ";
         result += sk.name;
         if (!sk.description.empty()) result += " — " + sk.description;
         result += "\n";
     }
+    if (!any_active) {
+        result +=
+            "Активных навыков нет. Полный список — инструмент list_skills; "
+            "подробности навыка — skill_detail QUERY: <имя>.\n";
+        return result;
+    }
+    result +=
+        "(полный список — list_skills; подробности — skill_detail QUERY: <имя>)\n";
     return result;
 }
 

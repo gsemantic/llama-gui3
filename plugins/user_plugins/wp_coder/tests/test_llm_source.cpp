@@ -93,6 +93,27 @@ TEST(llm_source_plain_text_is_one_text_delta) {
     ASSERT_EQ(r.finish_reason(), std::string("stop"));
 }
 
+/* Служебный блок классификатора шлюза — не текст модели. Сессия 0.18.10:
+ * такой ход попадал в историю и в чат, а короткий «ответ» получал
+ * напоминание, хотя инструмент уже был вызван на прошлом шаге. */
+TEST(llm_source_strips_provider_safety_noise) {
+    std::vector<LlmEvent> events;
+    llm_source::reply_to_events(reply_with(
+        "<ds_safety>[用户未成年]否\n[分类]其他\n[判定]正常编程协助。\n"
+        "[规则]无</ds_safety>Safe"),
+        events);
+    const LlmResponse r = llm_source::fold(events);
+    ASSERT_EQ(r.text(), std::string(""));
+    ASSERT_TRUE(r.text().find("ds_safety") == std::string::npos);
+
+    /* Вокруг настоящего текста блок тоже убирается, текст остаётся. */
+    std::vector<LlmEvent> events2;
+    llm_source::reply_to_events(reply_with(
+        "<ds_safety>ok</ds_safety>Safe\nГотово: файл записан."), events2);
+    ASSERT_EQ(llm_source::fold(events2).text(),
+              std::string("Готово: файл записан."));
+}
+
 TEST(llm_source_json_block_becomes_a_tool_call) {
     std::vector<LlmEvent> events;
     llm_source::reply_to_events(reply_with(

@@ -97,6 +97,22 @@ TEST(bash_reports_exit_code_and_metadata) {
     fs::remove_all(t);
 }
 
+/* Команда выполняется в корне проекта. Сессия 0.18.10: `wc calculator.py`
+ * отвечал «нет такого файла», потому что bash наследовал каталог GUI, а
+ * файл лежал в проекте, открытом агентом. */
+TEST(bash_runs_in_project_dir_not_in_app_cwd) {
+    fs::path t = make_tmp_tree();
+    {
+        std::ofstream f(t / "marker.txt", std::ios::binary);
+        f << "project-dir-marker";
+    }
+    init_tools(t);
+    ToolOutput o = run_bash("cat marker.txt");
+    ASSERT_TRUE(o.output.find("project-dir-marker") != std::string::npos);
+    ASSERT_EQ(o.metadata.get_int("exit_code", -1), (long long)0);
+    fs::remove_all(t);
+}
+
 TEST(bash_spills_long_output_to_file_and_keeps_the_tail) {
     fs::path t = make_tmp_tree();
     init_tools(t);

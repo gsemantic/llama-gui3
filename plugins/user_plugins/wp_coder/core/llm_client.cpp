@@ -6,6 +6,7 @@
 #include "json_utils.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <iomanip>
 #include <locale>
@@ -30,6 +31,13 @@ struct LiveTurn {
     std::condition_variable done_cv;
     bool done = false;
 
+    /* Когда последний раз приходили данные от провайдера. Нужен для
+     * таймаута БЕЗДЕЙСТВИЯ, а не общего времени хода: reasoning-модель
+     * может законно стримить размышление минутами, и общий лимит
+     * обрывал бы живой поток. */
+    std::chrono::steady_clock::time_point last_activity =
+        std::chrono::steady_clock::now();
+
     /* После таймаута ход брошен: колбэки обязаны перестать что-либо
      * отдавать, иначе модель допишет текст в UI уже после того, как цикл
      * ушёл на следующий шаг, и пользователь увидит два ответа вперемешку. */
@@ -47,6 +55,25 @@ struct LiveTurn {
      * другая причина, а доказательство нативного вызова обязано читаться
      * там, где видны именно его дельты. */
     bool saw_native_tool = false;
+    /* Накопленные НАТИВНЫЕ вызовы: id, имя и склеенные аргументы.
+     *
+     * Без этого накопления вызов существовал только в предпросмотре:
+     * куски аргументов уходили в on_event (панель стриминга), а
+     * авторитетный поток событий собирался из `reply.content`, где
+     * нативного вызова нет вовсе. Модель вызывала инструмент, плагин
+     * подтверждал нативный режим (saw_native_tool) и... не выполнял
+     * вызов: `run_task` видел пустой ход и отключал нативный протокол.
+     * Наблюдение 0.18.11 на particle-1/kilo.
+     *
+     * Порядок — по первому появлению id: провайдер нумерует вызовы
+     * индексом, и модель вправе прислать несколько за один ход. */
+    struct NativeCall {
+        std::string call_id;
+        std::string name;
+        std::string arguments;
+    };
+    std::vector<NativeCall> native_calls;
+    std::map<std::string, size_t> native_index;  /* call_id → native_calls */
     /* Финальный JSON приходит в on_done, который зовут уже после нашего
      * ожидания; он лежит здесь, а не в локальной переменной fetch: колбэк
      * живёт дольше вызова, и запись в локальную переменную была бы записью
@@ -70,6 +97,7 @@ void emit(LiveTurn& turn, const LlmEvent& event)
 void on_text_delta(LiveTurn& turn, const std::string& text)
 {
     if (turn.abandoned.load() || text.empty()) return;
+    turn.last_activity = std::chrono::steady_clock::now();
     if (!turn.text_open) {
         turn.text_open = true;
         emit(turn, LlmEvent::text_start());
@@ -80,6 +108,7 @@ void on_text_delta(LiveTurn& turn, const std::string& text)
 void on_reasoning_delta(LiveTurn& turn, const std::string& text)
 {
     if (turn.abandoned.load() || text.empty()) return;
+    turn.last_activity = std::chrono::steady_clock::now();
     if (!turn.reasoning_open) {
         turn.reasoning_open = true;
         emit(turn, LlmEvent::reasoning_start());
@@ -90,19 +119,34 @@ void on_reasoning_delta(LiveTurn& turn, const std::string& text)
 void on_tool_delta(LiveTurn& turn, const char* call_id, const char* tool_name,
                    const char* fragment)
 {
-    if (turn.abandoned.load() || !call_id || !fragment || !*fragment) return;
+    if (turn.abandoned.load() || !call_id) return;
+    const bool has_name = tool_name && *tool_name;
+    const bool has_fragment = fragment && *fragment;
+    if (!has_name && !has_fragment) return;
+
+    turn.last_activity = std::chrono::steady_clock::now();
     const std::string id(call_id);
-    /* Имя приходит только в первом фрагменте — так его и присылает
-     * провайдер, и блок ToolInputStart его несёт (И5.1). Запоминать имя «на
-     * потом» незачем: позже оно прийти не может, а событие дельты имени не
-     * имеет вообще, так что сохранять было бы некуда. */
+    const std::string name = has_name ? std::string(tool_name) : std::string();
+    /* Имя приходит в первом фрагменте; позже оно не повторяется. Сохраняем
+     * его в накопителе рядом с аргументами — именно эта пара станет
+     * авторитетным ToolCall. */
     turn.saw_native_tool = true;
+    auto it = turn.native_index.find(id);
+    if (it == turn.native_index.end()) {
+        turn.native_index.emplace(id, turn.native_calls.size());
+        turn.native_calls.push_back({id, name, has_fragment ? std::string(fragment)
+                                                            : std::string()});
+    } else {
+        LiveTurn::NativeCall& c = turn.native_calls[it->second];
+        if (!name.empty()) c.name = name;
+        if (has_fragment) c.arguments += fragment;
+    }
+
     if (!turn.tool_open[id]) {
         turn.tool_open[id] = true;
-        emit(turn, LlmEvent::tool_input_start(
-                        id, tool_name ? std::string(tool_name) : std::string()));
+        emit(turn, LlmEvent::tool_input_start(id, name));
     }
-    emit(turn, LlmEvent::tool_input_delta(id, std::string(fragment)));
+    if (has_fragment) emit(turn, LlmEvent::tool_input_delta(id, std::string(fragment)));
 }
 
 /* Закрытие открытых блоков перед концом хода. Порядок тот же, что и при
@@ -148,8 +192,57 @@ LlmReply reply_from_result(const std::string& json_text)
      * принимает и вернул бы 0 — то есть «отказа не было», и нативный
      * вызов не выключался бы никогда. Хост и плагин обязаны сойтись в
      * формате, и этот комментарий — половина контракта. */
+    reply.tools_reported =
+        json_text.find("\"tools_rejected\"") != std::string::npos;
     reply.tools_rejected = json::int_(json_text, "tools_rejected") == 1;
     return reply;
+}
+
+/* Нативные вызовы, накопленные из дельт, → авторитетные события хода.
+ *
+ * Вставляются ПЕРЕД закрытием шага: reply_to_events уже положил
+ * StepFinish и Finish последними двумя событиями, а вызов обязан быть
+ * закрыт до них — иначе условие завершения (И5.8) увидит незакрытую
+ * часть, а LlmResponse не сможет собрать аргументы.
+ *
+ * Аргументы разбираются здесь, а не на каждой дельте: провайдер вправе
+ * присылать JSON кусками, и частичный разбор был бы вторым парсером
+ * протокола. Ошибка разбора — не молчание: вызов закрывается ошибкой и
+ * модель увидит настоящую причину на следующем шаге. */
+void append_native_tool_events(const std::vector<LiveTurn::NativeCall>& calls,
+                               std::vector<LlmEvent>& events)
+{
+    if (calls.empty()) return;
+    std::vector<LlmEvent> native;
+    native.reserve(calls.size() * 4);
+    for (const auto& c : calls) {
+        if (c.name.empty()) {
+            native.push_back(LlmEvent::tool_error(
+                c.call_id, "native tool call without a tool name"));
+            continue;
+        }
+        native.push_back(LlmEvent::tool_input_start(c.call_id, c.name));
+        if (!c.arguments.empty()) {
+            native.push_back(LlmEvent::tool_input_delta(c.call_id, c.arguments));
+        }
+        json::JsonValue args = json::JsonValue::object();
+        if (!c.arguments.empty()) {
+            std::string parse_error;
+            if (!json::JsonValue::parse(c.arguments, args, &parse_error)) {
+                native.push_back(LlmEvent::tool_input_end(c.call_id));
+                native.push_back(LlmEvent::tool_error(
+                    c.call_id, "native tool arguments are not valid JSON (" +
+                                   parse_error + "): " +
+                                   text::utf8_prefix(c.arguments, 200)));
+                continue;
+            }
+        }
+        native.push_back(LlmEvent::tool_call(c.call_id, c.name, args));
+        native.push_back(LlmEvent::tool_input_end(c.call_id));
+    }
+    const size_t at = events.size() >= 2 ? events.size() - 2 : 0;
+    events.insert(events.begin() + static_cast<std::ptrdiff_t>(at),
+                  native.begin(), native.end());
 }
 
 /* И12.2 (+ И11.14): request_json — параметры генерации активного профиля
@@ -344,30 +437,38 @@ int timeout_ms,
          * lock/unlock на мьютексе токена. Обратная сторона названа прямо:
          * это опрос, и его НЕЛЬЗЯ применять там, где отмена должна
          * будить работу (инструмент ждёт kill по токену — И6.7). Здесь
-         * ждать и нечего: ход уже идёт, его прерывание делает хост. */
-        constexpr int kAbortSliceMs = 50;
+         * ждать и нечего: ход уже идёт, его прерывание делает хост.
+         *
+         * Таймаут — по БЕЗДЕЙСТВИЮ, а не по общему времени: любая дельта
+         * (текст, reasoning, фрагмент вызова) сбрасывает счётчик. Общий
+         * лимит рвал живой поток reasoning-модели на 120-й секунде, и
+         * пользователь видел «таймаут LLM-потока», хотя провайдер
+         * продолжал отвечать. */
+        constexpr int kSliceMs = 50;
         bool finished = false;
         bool aborted = false;
-        if (abort) {
-            int waited = 0;
-            while (waited < wait_ms) {
-                const int slice = (wait_ms - waited) < kAbortSliceMs
-                                      ? (wait_ms - waited) : kAbortSliceMs;
-                if (turn->done_cv.wait_for(guard, std::chrono::milliseconds(slice),
-                                           [&] { return turn->done; })) {
-                    finished = true;
-                    break;
-                }
-                if (abort->aborted()) {
-                    aborted = true;
-                    break;
-                }
-                waited += slice;
+        int idle_ms = 0;
+        auto last_activity = turn->last_activity;
+        while (idle_ms < wait_ms) {
+            const int slice = (wait_ms - idle_ms) < kSliceMs
+                                  ? (wait_ms - idle_ms) : kSliceMs;
+            /* Без предиката: done будит notify, дельты — нет, но 50-мс
+             * срез и так проверяет last_activity. */
+            turn->done_cv.wait_for(guard, std::chrono::milliseconds(slice));
+            if (turn->done) {
+                finished = true;
+                break;
             }
-        } else {
-            finished = turn->done_cv.wait_for(
-                guard, std::chrono::milliseconds(wait_ms),
-                [&] { return turn->done; });
+            if (abort && abort->aborted()) {
+                aborted = true;
+                break;
+            }
+            if (turn->last_activity != last_activity) {
+                last_activity = turn->last_activity;
+                idle_ms = 0;
+            } else {
+                idle_ms += slice;
+            }
         }
 
         if (aborted) {
@@ -408,12 +509,14 @@ int timeout_ms,
         }
 
         if (!finished) {
-            /* Хост не закрыл поток. Поток может прийти и позже, поэтому он
-             * помечается брошенным: иначе «печать» продолжилась бы в UI
-             * после того, как цикл ушёл дальше. */
+            /* Хост не закрыл поток и данных не было wait_ms подряд.
+             * Поток может прийти и позже, поэтому он помечается
+             * брошенным: иначе «печать» продолжилась бы в UI после того,
+             * как цикл ушёл дальше. */
             turn->abandoned.store(true);
             out_events.push_back(LlmEvent::provider_error(
-                "таймаут LLM-потока: ответ не закрыт за " + std::to_string(wait_ms) + " мс"));
+                "таймаут LLM-потока: нет данных от провайдера за " +
+                std::to_string(wait_ms) + " мс"));
             return false;
         }
     }
@@ -423,10 +526,24 @@ int timeout_ms,
      * блокирующем пути это делает llm_source::fetch, и если бы стриминг
      * молчал, провайдерская ошибка превратилась бы в пустой успешный ход:
      * ровно тот дефект, из-за которого И6.1 ввёл ok в on_done. */
-    const LlmReply reply = reply_from_result(turn->result_json);
+    LlmReply reply = reply_from_result(turn->result_json);
     if (!reply.error.empty()) {
         out_events.push_back(LlmEvent::provider_error(reply.error));
         return false;
+    }
+    /* Нативные вызовы собраны из дельт. Копия под локом: колбэк хоста
+     * мог ещё дописывать, а читать чужой вектор без лока — гонка. */
+    std::vector<LiveTurn::NativeCall> native_calls;
+    {
+        std::lock_guard<std::mutex> lk(turn->mtx);
+        native_calls = turn->native_calls;
+    }
+    /* Провайдер при нативном вызове может прислать stop вместо tool-calls.
+     * Без этой правки ход с вызовом выглядел бы финальным ответом: цикл
+     * закрыл бы задачу, а инструмент не выполнил. */
+    if (!native_calls.empty() &&
+        (reply.finish_reason.empty() || reply.finish_reason == "stop")) {
+        reply.finish_reason = "tool-calls";
     }
 
     /* И12.2: отказ по tools — сюда, ДО разбора ответа. Это НЕ ошибка хода:
@@ -434,7 +551,12 @@ int timeout_ms,
      * текстом. Записать это в историю значило бы показать модели ошибку
      * там, где её нет, и человек узнал бы о выключенном нативном вызове
      * из пустого сообщения. */
-    engine().note_tools_rejected(reply.tools_rejected);
+    /* Отсутствие ключа — не «не отвергли», а «не слали»: сбрасывать
+     * выключение нативного вызова по такому ответу нельзя, иначе шаг,
+     * который мы намеренно вели текстом, снова включил бы tools. */
+    if (reply.tools_reported) {
+        engine().note_tools_rejected(reply.tools_rejected);
+    }
 
     /* И12.2: подтверждение нативного вызова.
      *
@@ -453,8 +575,21 @@ int timeout_ms,
     /* Авторитетная последовательность — из финального ответа тем же
      * разбором, что и на блокирующем пути. Разбор один, поэтому разойтись
      * эти пути не могут; предпросмотр в on_event для этого не годится
-     * (блок вызова в нём ещё не вырезан). */
+     * (блок вызова в нём ещё не вырезан).
+     *
+     * Нативные вызовы добавляются ПОСЛЕ, но вставляются ПЕРЕД закрытием
+     * шага (см. append_native_tool_events): их нет в reply.content, и без
+     * этого шага цикл получал ход без вызова — ровно то, из-за чего
+     * нативный режим выключался на particle-1. */
     llm_source::reply_to_events(reply, out_events);
+    /* Если в тексте уже был разобран wp_action, второй (нативный) вызов
+     * того же хода был бы дублем с тем же call_id. Текст — запасной путь,
+     * нативный — основной; дублировать нельзя ни тот, ни другой. */
+    bool text_call_found = false;
+    for (const LlmEvent& e : out_events) {
+        if (e.is(LlmEventKind::ToolCall)) { text_call_found = true; break; }
+    }
+    if (!text_call_found) append_native_tool_events(native_calls, out_events);
     return true;
 }
 

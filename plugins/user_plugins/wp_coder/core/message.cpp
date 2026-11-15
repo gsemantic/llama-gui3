@@ -434,9 +434,20 @@ std::string tool_call_text(const MessagePart& p) {
     return block.dump();
 }
 
+bool message_is_plan(const Message& m) {
+    return m.is_assistant() && m.text().rfind("[ПЛАН]", 0) == 0;
+}
+
 std::vector<ModelMessage> to_model_messages(const std::vector<Message>& history) {
     std::vector<ModelMessage> out;
     for (const Message& m : history) {
+        /* План планировщика модели НЕ показывается. Он остаётся в сессии
+         * и в UI, но из контекста исключён: реплика ассистента «[ПЛАН] …»
+         * читается моделью как «я уже начал планировать», и продолжение
+         * плана становится естественнее выполнения. Наблюдение 0.18.10:
+         * после плана модель три шага читала файлы, а затем выдала ещё
+         * один план — с теми же пунктами, что и первый. */
+        if (message_is_plan(m)) continue;
         std::string pending;      /* накопитель текущей реплики */
         const std::string role =
             m.role.empty() ? std::string(kRoleUser) : m.role;
@@ -594,7 +605,10 @@ const char* turn_verdict_name(TurnVerdict v) {
         case TurnVerdict::ToolStillOpen: return "tool_still_open";
         case TurnVerdict::NotLastUser:   return "not_last_user";
         case TurnVerdict::TooShort:      return "too_short";
+        case TurnVerdict::Truncated:     return "truncated";
         case TurnVerdict::CodeAnswer:    return "code_answer";
+        case TurnVerdict::PlanningText:  return "planning_text";
+        case TurnVerdict::ToolArgsJson:  return "tool_args_json";
     }
     return "unknown";
 }
@@ -621,6 +635,134 @@ bool looks_like_code_answer(const std::string& text) {
     return fenced * 2 > text.size();
 }
 
+bool answer_looks_truncated(const std::string& text) {
+    const size_t end = text.find_last_not_of(" \t\r\n");
+    if (end == std::string::npos) return false;
+
+    /* Незакрытый блок кода. Каждая пара ``` даёт два вхождения; нечётное
+     * число означает, что открывающий фенс остался без закрывающего. */
+    size_t fences = 0;
+    for (size_t p = text.find("```"); p != std::string::npos;
+         p = text.find("```", p + 3)) {
+        ++fences;
+    }
+    if (fences % 2 != 0) return true;
+
+    /* Незакрытый inline-код. У тройных фенсов кратность 3 не меняет
+     * чётность, поэтому достаточно посчитать все обратные кавычки. */
+    size_t ticks = 0;
+    for (char c : text) {
+        if (c == '`') ++ticks;
+    }
+    if (ticks % 2 != 0) return true;
+
+    const char last = text[end];
+    /* Список/мысль оборваны на вводном знаке. */
+    if (last == ':' || last == ',' || last == ';' || last == '-' ||
+        last == '=') {
+        return true;
+    }
+
+    /* Открытая скобка, которой не хватило закрывающей. Считаем только
+     * круглые/квадратные/фигурные и только когда последний символ —
+     * открывающий: несбалансированная скобка внутри кода сама по себе
+     * не доказывает обрыв. */
+    const auto count = [&text](char c) {
+        size_t n = 0;
+        for (char x : text) {
+            if (x == c) ++n;
+        }
+        return n;
+    };
+    if (last == '(' && count('(') > count(')')) return true;
+    if (last == '[' && count('[') > count(']')) return true;
+    if (last == '{' && count('{') > count('}')) return true;
+
+    /* Обрыв ПОСРЕДИ СЛОВА. Шлюз закрывает поток с finish=stop ровно на
+     * последнем символе: в сессии 0.18.10 ответ кончался одним «П», и
+     * такой ход был принят за готовый итог, потому что все признаки выше
+     * молчали. Последнее слово из одного символа не бывает концом
+     * осмысленного отчёта: буква без точки, стоящая после пробела, —
+     * это признак обрыва, а не стиля. Цифры и знаки не считаются:
+     * «... версия 2» — нормальный конец. */
+    size_t word_start = end + 1;
+    while (word_start > 0) {
+        const unsigned char c = static_cast<unsigned char>(text[word_start - 1]);
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') break;
+        --word_start;
+    }
+    const size_t word_len = end + 1 - word_start;
+    if (word_len == 1) {
+        const unsigned char c = static_cast<unsigned char>(text[word_start]);
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) return true;
+    }
+    /* Кириллическая буква занимает два байта. */
+    if (word_len == 2 &&
+        static_cast<unsigned char>(text[word_start]) >= 0xC0) {
+        return true;
+    }
+
+    return false;
+}
+
+bool looks_like_planning_text(const std::string& text) {
+    /* Маркеры — только БУДУЩЕЕ действие: «Сделаю», «Перепишу», «Напишу».
+     * Прошедшее время («сделал», «переписал», «готово») в список не
+     * входит, иначе нормальный итоговый отчёт закрывался бы как план.
+     *
+     * Русские формы добавлены после сессии 0.18.10: модель написала
+     * «перепишу целиком… сделаю инженерный калькулятор… напишу файл
+     * целиком… добавлю параметр… использую math.cbrt», то есть чистый
+     * план, а в списке было всего три русских маркера — совпал один, и
+     * ход закрыл задачу без правки файла. */
+    static const char* kMarkers[] = {
+        "Let me ", "I'll ", "I will ", "I need to ", "Next, I ",
+        "First, I ", "Then I ", "Plan:", "Design:",
+        "Сейчас я ", "Теперь я ", "Напишу ", "План:", "Перепишу ",
+        "Добавлю ", "Сделаю ", "Создам ", "Обновлю ", "Изменю ",
+        "Реализую ", "Проверю ", "Затем ", "Далее ", "После этого ",
+        "Нужно решить ", "Нужно добавить ", "Использую ", "Реализация:",
+        "Требуется ",
+    };
+    int hits = 0;
+    for (const char* m : kMarkers) {
+        if (text.find(m) != std::string::npos) ++hits;
+    }
+    return hits >= 2;
+}
+
+bool looks_like_tool_args_json(const std::string& text) {
+    const size_t b = text.find_first_not_of(" \t\r\n");
+    const size_t e = text.find_last_not_of(" \t\r\n");
+    if (b == std::string::npos || e == std::string::npos ||
+        text[b] != '{' || text[e] != '}') {
+        return false;
+    }
+    const std::string body = text.substr(b, e - b + 1);
+    /* Отчёт-JSON с явными ключами ответа не трогаем. */
+    if (body.find("\"summary\"") != std::string::npos ||
+        body.find("\"report\"") != std::string::npos ||
+        body.find("\"answer\"") != std::string::npos ||
+        body.find("\"message\"") != std::string::npos) {
+        return false;
+    }
+    static const char* kKeys[] = {
+        "\"path\"", "\"content\"", "\"cli\"", "\"query\"", "\"pattern\"",
+        "\"root\"", "\"url\"", "\"command\"", "\"file\"", "\"patch\"",
+    };
+    int hits = 0;
+    for (const char* k : kKeys) {
+        if (body.find(k) != std::string::npos) ++hits;
+    }
+    /* Для итогового «вот файл» мало одного совпадения: требуем хотя бы
+     * два ключа инструмента или командный ключ. */
+    const bool command_key =
+        body.find("\"cli\"") != std::string::npos ||
+        body.find("\"query\"") != std::string::npos ||
+        body.find("\"command\"") != std::string::npos;
+    return hits >= 2 || command_key;
+}
+
 TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
                          const std::string& last_user_id) {
     /* 1. Провайдер остановился, чтобы вызвать инструмент, — ход не финальный.
@@ -630,6 +772,22 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
     const std::string& finish = response.finish_reason();
     if (finish.empty() || finish == "tool-calls" || finish == "unknown") {
         return TurnVerdict::NeedsTools;
+    }
+    /* length — ответ ОБОРВАН, а не завершён. Раньше такой текст
+     * (особенно у reasoning-моделей, где размышление занимает весь лимит)
+     * считался итогом: в чат уезжала половина мысли, а в сессии оставался
+     * «финальный ответ» без вывода. */
+    if (finish == "length") {
+        return TurnVerdict::Truncated;
+    }
+    /* finish=stop — ещё не доказательство, что мысль закончена: шлюзы
+     * (наблюдение на kilo/particle-1, 2026-11) отвечают `stop` и на
+     * обрыве по лимиту. Такой ход раньше закрывал задачу, и в чат уходил
+     * огрызок итогового ответа. Незакрытая скобка/кавычка/фенс — повод
+     * попросить продолжить, а не считать ответ готовым. */
+    if (response.tool_calls().empty() &&
+        answer_looks_truncated(response.text())) {
+        return TurnVerdict::Truncated;
     }
     /* 2. Незакрытая часть-вызов: результата ещё нет, и он был бы потерян. */
     if (turn.has_open_tool_part()) return TurnVerdict::ToolStillOpen;
@@ -648,6 +806,19 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
     if (response.tool_calls().empty() &&
         looks_like_code_answer(response.text())) {
         return TurnVerdict::CodeAnswer;
+    }
+    /* 6. «Итог» — это план на будущее, а не выполненная работа. Модель
+     * после осмотра проекта писала «Plan: … Let me write…» без вызова
+     * инструмента; длина проходила порог, и задача закрывалась, хотя
+     * файл не менялся. */
+    if (response.tool_calls().empty() &&
+        looks_like_planning_text(response.text())) {
+        return TurnVerdict::PlanningText;
+    }
+    /* 7. JSON-аргументы инструмента текстом — не отчёт пользователю. */
+    if (response.tool_calls().empty() &&
+        looks_like_tool_args_json(response.text())) {
+        return TurnVerdict::ToolArgsJson;
     }
     return TurnVerdict::Completed;
 }

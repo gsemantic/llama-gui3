@@ -672,6 +672,25 @@ TEST(visible_tools_respects_global_deny) {
     ASSERT_EQ(pe.visible_tools(sample_tools()).size(), (size_t)0);
 }
 
+/* Проект — рабочий каталог: чтение файлов через cat/sed/head/tail не
+ * должно спрашивать разрешение, иначе агент тратит шаги и внимание
+ * человека на безопасные команды. Опасные команды остаются под вопросом. */
+TEST(default_policy_allows_read_only_bash_but_not_destructive) {
+    PermissionGuard g;
+    PermissionEngine& pe = engine().permissions();
+    pe.apply_agent_defaults({"/tmp"});
+    ASSERT_EQ((int)pe.evaluate("bash", "cat -n calculator.py"),
+              (int)PermissionAction::Allow);
+    ASSERT_EQ((int)pe.evaluate("bash", "sed -n '1,10p' calculator.py"),
+              (int)PermissionAction::Allow);
+    ASSERT_EQ((int)pe.evaluate("bash", "tail -n 8 calculator.py"),
+              (int)PermissionAction::Allow);
+    ASSERT_EQ((int)pe.evaluate("bash", "rm -rf /"),
+              (int)PermissionAction::Ask);
+    ASSERT_EQ((int)pe.evaluate("bash", "python3 -c 'print(1)'"),
+              (int)PermissionAction::Ask);
+}
+
 /* Правила пользователя приезжают JSON-строкой из настроек. Без этого
  * запрет недостижим в принципе: правила меняет только approve(), а он
  * добавляет Allow. */
@@ -695,12 +714,12 @@ TEST(user_rules_survive_garbage) {
     PermissionEngine& pe = engine().permissions();
     pe.apply_agent_defaults({"/tmp"});
     pe.load_user_rules("не json вовсе");
-    ASSERT_EQ((int)pe.evaluate("bash", "ls"), (int)PermissionAction::Ask);
+    ASSERT_EQ((int)pe.evaluate("bash", "rm -rf /"), (int)PermissionAction::Ask);
     /* 42 — не объект, пропускается; {"action":"deny"} без ключа
      * запрещает всё; {"permission":"deploy"} без действия — спрашивает
      * (действие по умолчанию «спросить», а не «запретить»). */
     pe.load_user_rules(R"([{"action":"deny"}, {"permission":"deploy"}, 42])");
-    ASSERT_EQ((int)pe.evaluate("bash", "ls"), (int)PermissionAction::Deny);
+    ASSERT_EQ((int)pe.evaluate("bash", "rm -rf /"), (int)PermissionAction::Deny);
     ASSERT_EQ((int)pe.evaluate("deploy", "site"), (int)PermissionAction::Ask);
     /* Явный deny после мусора всё ещё применяется. */
     pe.load_user_rules(
@@ -1088,8 +1107,8 @@ TEST(permission_engine_survives_parallel_use) {
     for (int t = 0; t < 4; ++t) {
         threads.emplace_back([&] {
             for (int i = 0; i < 10; ++i) {
-                if (pe.evaluate("bash", "ls") != PermissionAction::Ask) continue;
-                if (pe.ask("bash", {"ls"}, "ls", "bash")) {
+                if (pe.evaluate("bash", "rm -rf /") != PermissionAction::Ask) continue;
+                if (pe.ask("bash", {"rm -rf /"}, "rm -rf /", "bash")) {
                     granted.fetch_add(1);
                 }
             }

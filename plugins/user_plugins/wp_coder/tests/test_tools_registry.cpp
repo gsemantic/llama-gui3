@@ -9,10 +9,12 @@
  */
 
 #include "test_framework.h"
+#include "test_support.h"
 #include "../core/json.h"
 #include "../core/tools_registry.h"
 #include "../core/tool.h"
 #include "../core/engine.h"
+#include "../core/base_tools.h"
 
 using namespace coder;
 
@@ -49,6 +51,96 @@ TEST(tools_registry_register_and_run) {
     ToolArgs legacy;
     legacy.query = "hello";
     ASSERT_EQ(reg.run("test_echo", legacy), std::string("echo:hello"));
+}
+
+/* Инструмент запоминает модуль, который его регистрировал. Владелец
+ * ставится ModuleRegistry::init_all, а не каждым объявлением: иначе
+ * новый модуль забудет тег, и его инструменты останутся видимыми в
+ * проекте другого домена. */
+TEST(tools_registry_stamps_the_registration_module) {
+    auto& reg = ToolsRegistry::instance();
+    reg.clear();
+
+    reg.set_registration_module("python");
+    ToolDef py;
+    py.name = "python_probe";
+    py.description = "python tool";
+    reg.register_def(std::move(py));
+    reg.set_registration_module("");
+
+    ToolDef core;
+    core.name = "core_probe";
+    core.description = "core tool";
+    reg.register_def(std::move(core));
+
+    ASSERT_TRUE(reg.find("python_probe") != nullptr);
+    ASSERT_EQ(reg.find("python_probe")->module, std::string("python"));
+    ASSERT_TRUE(reg.find("core_probe")->module.empty());
+    reg.clear();
+}
+
+/* Активный модуль скрывает чужие инструменты, но не запрещает их:
+ * каталог для калькулятора на Python не должен содержать wp_cli и
+ * docker_build. Проверяется именно ВИДИМОСТЬ (visible_tools — единственный
+ * источник и для промпта, и для нативных спецификаций). */
+TEST(engine_visible_tools_hide_other_modules) {
+    HostCallbacks cb;
+    cb.llm_chat = [](const std::string&, const std::vector<ModelMessage>&,
+                     LlmReply&) { return false; };
+    cb.llm_complete = [](const std::string&, const std::string&,
+                         std::string&) { return false; };
+    cb.llm_is_connected = []() { return false; };
+    cb.chat_event = [](const std::string&) {};
+    auto& eng = Engine::instance();
+    eng.init(cb);
+    test_support::approve_all_permissions();
+
+    auto& reg = ToolsRegistry::instance();
+    reg.clear();
+    register_base_tools();
+
+    reg.set_registration_module("python");
+    ToolDef py;
+    py.name = "python_probe_visible";
+    py.description = "python";
+    reg.register_def(std::move(py));
+
+    reg.set_registration_module("wordpress");
+    ToolDef wp;
+    wp.name = "wp_probe_hidden";
+    wp.description = "wordpress";
+    reg.register_def(std::move(wp));
+    reg.set_registration_module("");
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().active_module = "python";
+    }
+    const std::vector<std::string> visible = eng.visible_tools();
+    bool has_py = false, has_wp = false, has_core = false;
+    for (const std::string& n : visible) {
+        if (n == "python_probe_visible") has_py = true;
+        if (n == "wp_probe_hidden") has_wp = true;
+        if (n == "read_file") has_core = true;
+    }
+    ASSERT_TRUE(has_py);
+    ASSERT_TRUE(has_core);
+    ASSERT_FALSE(has_wp);
+
+    /* «generic» возвращает прежнее поведение: видны все домены. */
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().active_module = "generic";
+    }
+    has_wp = false;
+    for (const std::string& n : eng.visible_tools()) {
+        if (n == "wp_probe_hidden") has_wp = true;
+    }
+    ASSERT_TRUE(has_wp);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().active_module.clear();
+    }
 }
 
 TEST(tools_registry_list) {

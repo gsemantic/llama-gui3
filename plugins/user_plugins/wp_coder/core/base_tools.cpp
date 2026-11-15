@@ -1712,6 +1712,12 @@ void register_base_tools() {
             const int t = arg_int(a, "timeout");
             opt.timeout_sec = (t > 0) ? static_cast<unsigned>(t)
                                        : limits::kShellTimeoutSec;
+            /* Команда выполняется в корне проекта, а не в каталоге
+             * процесса. Инструменты файлов уже разрешают пути от корня;
+             * shell обязан работать там же, иначе относительный путь в
+             * `wc file.py` ведёт не туда и модель получает «файла нет»
+             * про файл, который только что прочитала. */
+            opt.cwd = ctx.project_dir();
             const std::string data_dir = ctx.callbacks().path_data_dir
                                              ? ctx.callbacks().path_data_dir()
                                              : "";
@@ -1729,7 +1735,7 @@ void register_base_tools() {
             if (ctx.callbacks().chat_event) {
                 opt.on_progress = [&ctx](size_t bytes, const std::string& tail) {
                     ctx.callbacks().chat_event(
-                        "[bash] выполняется, " + std::to_string(bytes) +
+                        "\x01[bash] выполняется, " + std::to_string(bytes) +
                         " байт вывода" + (tail.empty() ? "" : ": " + tail));
                 };
             }

@@ -10,10 +10,12 @@
 
 #include "core/llm_client.h"
 
+#include "core/engine.h"
 #include "core/llm_source.h"
 #include "test_framework.h"
 
 #include <chrono>
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,6 +35,9 @@ struct Script {
      * без этого флаг «ход брошен» нечем было бы проверить — хост, который
      * не зовёт on_done, по определению молчит и в дельтах. */
     bool capture_callbacks = false;
+    /* Сигнал тесту, что колбэки сохранены: без него фоновый «писатель»
+     * читал бы g_late_delta до присваивания (гонка). */
+    std::atomic<bool> captured{false};
 };
 
 using DeltaFn = std::function<void(const char*, int)>;
@@ -60,6 +65,7 @@ bool fake_stream(const std::string&, const std::vector<ModelMessage>&,
         g_late_delta = on_delta;
         g_late_tool = on_tool_delta;
         g_late_done = on_done;
+        g_script->captured.store(true, std::memory_order_release);
     }
     for (const auto& d : g_script->deltas) on_delta(d.first.c_str(), d.second);
     for (const auto& t : g_script->tool_frags) {
@@ -287,6 +293,55 @@ TEST(tool_fragments_are_previewed_with_names_and_closed) {
     ASSERT_EQ(std::to_string(deltas), std::string("2"));
 }
 
+/* Нативные дельты обязаны стать ИСПОЛНИМЫМ вызовом, а не только
+ * предпросмотром. В 0.18.11 они уходили в on_event и терялись: модель
+ * вызывала инструмент, режим подтверждался, а цикл видел ход без вызова и
+ * выключал нативный протокол. */
+TEST(native_tool_fragments_become_a_runnable_call) {
+    Script script;
+    script.tool_frags = {"call_0|write_file|{\"path\":\"a.txt\",",
+                         "call_0|write_file|\"content\":\"hi\"}"};
+    /* Провайдер вправе сказать stop даже при вызове. */
+    script.done_json = ok_json("", "stop");
+    g_script = &script;
+
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 1000);
+    g_script = nullptr;
+
+    ASSERT_TRUE(ok);
+    const LlmResponse response = llm_source::fold(events);
+    ASSERT_EQ(response.tool_calls().size(), size_t(1));
+    const LlmToolCall& call = response.tool_calls()[0];
+    ASSERT_EQ(call.name, std::string("write_file"));
+    ASSERT_EQ(call.arguments.get_string("path"), std::string("a.txt"));
+    ASSERT_EQ(call.arguments.get_string("content"), std::string("hi"));
+    ASSERT_TRUE(call.runnable());
+    /* Ход с нативным вызовом не финальный: иначе задача закроется, не
+     * выполнив инструмент. */
+    ASSERT_EQ(response.finish_reason(), std::string("tool-calls"));
+}
+
+TEST(native_tool_call_with_broken_arguments_is_closed_as_an_error) {
+    Script script;
+    script.tool_frags = {"call_0|write_file|{not json"};
+    script.done_json = ok_json("", "tool-calls");
+    g_script = &script;
+
+    std::vector<LlmEvent> events;
+    LlmClient::fetch(callbacks_with_stream(), "sys", {{"user", "x"}}, events,
+                     [](const LlmEvent&) {}, 1000);
+    g_script = nullptr;
+
+    const LlmResponse response = llm_source::fold(events);
+    ASSERT_EQ(response.tool_calls().size(), size_t(1));
+    ASSERT_FALSE(response.tool_calls()[0].runnable());
+    ASSERT_TRUE(response.tool_calls()[0].failed);
+    ASSERT_TRUE(response.tool_calls()[0].error.find("JSON") != std::string::npos);
+}
+
 /* --- Ошибки и откат --- */
 
 /* Отказ провайдера обязан дойти до вызывающего как ProviderError, а не как
@@ -390,6 +445,49 @@ TEST(unclosed_stream_times_out_with_an_error) {
     ASSERT_FALSE(ok);
     const LlmResponse response = llm_source::fold(events);
     ASSERT_TRUE(response.error().find("таймаут") != std::string::npos);
+}
+
+/* Таймаут — по бездействию, а не по общему времени хода.
+ *
+ * Провайдер может стримить reasoning минутами; общий лимит 120 с обрывал
+ * живой поток, и пользователь видел «таймаут LLM-потока». Здесь дельты
+ * приходят чаще таймаута (60 мс против 200 мс), поэтому ход обязан
+ * дождаться on_done, а не упасть на 200-й миллисекунде. */
+TEST(stream_timeout_resets_on_activity) {
+    Script script;
+    script.never_finishes = true;
+    script.capture_callbacks = true;
+    g_script = &script;
+
+    std::atomic<bool> stop{false};
+    std::thread feeder([&] {
+        while (!script.captured.load(std::memory_order_acquire) &&
+               !stop.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        for (int i = 0; i < 16 && !stop.load(std::memory_order_relaxed); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (g_late_delta) g_late_delta("x", 0);
+        }
+        if (!stop.load(std::memory_order_relaxed) && g_late_done) {
+            g_late_done(ok_json("x", "stop"));
+        }
+    });
+
+    std::vector<LlmEvent> events;
+    const bool ok = LlmClient::fetch(callbacks_with_stream(), "sys",
+                                     {{"user", "x"}}, events,
+                                     [](const LlmEvent&) {}, 600);
+    stop.store(true, std::memory_order_relaxed);
+    feeder.join();
+    g_script = nullptr;
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(llm_source::fold(events).text(), std::string("x"));
+
+    g_late_delta = nullptr;
+    g_late_tool = nullptr;
+    g_late_done = nullptr;
 }
 
 /* После таймаута поток может ещё присылать дельты — отмены у хоста нет
@@ -620,4 +718,46 @@ TEST(provider_error_is_not_mistaken_for_an_abort) {
     ASSERT_FALSE(ok);
     ASSERT_EQ(static_cast<int>(llm_source::fold(events).failure()),
               static_cast<int>(FailureKind::Provider));
+}
+
+/* И9.8: ответ БЕЗ tools не должен сбрасывать выключение нативного вызова.
+ *
+ * Хост сообщает tools_rejected только когда tools действительно слались.
+ * Раньше любой ответ (в том числе шаг, который мы намеренно вели текстом)
+ * читался как «не отвергли» и возвращал native_tools в Unknown — то есть
+ * следующий шаг снова слал tools провайдеру, отвечающему на них пустотой. */
+TEST(a_turn_without_tools_does_not_re_enable_native_tools) {
+    engine().note_tools_rejected(false);   /* базовое состояние: Unknown */
+
+    Script rejected;
+    rejected.done_json =
+        "{\"ok\":1,\"content\":\"ok\",\"finish_reason\":\"stop\","
+        "\"tools_rejected\":1}";
+    g_script = &rejected;
+    std::vector<LlmEvent> events;
+    ASSERT_TRUE(LlmClient::fetch(callbacks_with_stream(), "sys",
+                                 {{"user", "x"}}, events,
+                                 [](const LlmEvent&) {}, 1000, nullptr));
+    ASSERT_TRUE(engine().native_tool_support() == NativeToolSupport::Rejected);
+
+    /* Следующий ответ пришёл БЕЗ tools (ключа нет) — выключение остаётся. */
+    Script no_tools;
+    no_tools.done_json = ok_json("текст");
+    g_script = &no_tools;
+    ASSERT_TRUE(LlmClient::fetch(callbacks_with_stream(), "sys",
+                                 {{"user", "x"}}, events,
+                                 [](const LlmEvent&) {}, 1000, nullptr));
+    ASSERT_TRUE(engine().native_tool_support() == NativeToolSupport::Rejected);
+
+    /* Явный ответ «tools слались, не отвергнуты» — можно вернуть Unknown. */
+    Script accepted;
+    accepted.done_json =
+        "{\"ok\":1,\"content\":\"ok\",\"finish_reason\":\"stop\","
+        "\"tools_rejected\":0}";
+    g_script = &accepted;
+    ASSERT_TRUE(LlmClient::fetch(callbacks_with_stream(), "sys",
+                                 {{"user", "x"}}, events,
+                                 [](const LlmEvent&) {}, 1000, nullptr));
+    ASSERT_TRUE(engine().native_tool_support() == NativeToolSupport::Unknown);
+    g_script = nullptr;
 }

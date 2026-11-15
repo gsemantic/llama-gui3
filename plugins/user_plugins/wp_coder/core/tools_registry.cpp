@@ -146,7 +146,18 @@ ToolsRegistry& ToolsRegistry::instance() {
 
 void ToolsRegistry::register_def(ToolDef def) {
     if (def.name.empty()) return;
+    /* Явно заданный владелец не перетирается: субагент/тест может
+     * зарегистрировать инструмент с готовым module вне init_all. */
+    if (def.module.empty()) def.module = registration_module_;
     tools_[def.name] = std::move(def);
+}
+
+void ToolsRegistry::set_registration_module(const std::string& module) {
+    registration_module_ = module;
+}
+
+const std::string& ToolsRegistry::registration_module() const {
+    return registration_module_;
 }
 
 ToolOutput ToolsRegistry::run_output(const std::string& tool_name,

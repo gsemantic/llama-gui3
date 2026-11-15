@@ -590,11 +590,35 @@ std::vector<std::string> Engine::visible_tools() const {
      * правила сессии), у хода сессии — правила сессии. Та же функция
      * visible_tool_names на оба ответа. */
     std::shared_ptr<agent::Info> info;
+    std::string active_module;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         info = state_.scope.info;
+        active_module = state_.active_module;
     }
     std::vector<ToolDef> all = ToolsRegistry::instance().defs();
+    /* Инструменты ЧУЖОГО модуля не показываются.
+     *
+     * Каталог из 55 инструментов занимал 18 КБ системного промпта: для
+     * калькулятора на Python модель читала wp_cli, docker_build и
+     * nginx_reload — 5 КБ описаний, к задаче не относящихся. Выбор
+     * инструмента на каждом шаге — это тоже стоимость, и не только
+     * токенная.
+     *
+     * Скрытие — не запрет: прямой вызов по имени работает, права
+     * проверяются как раньше. Пустой active_module («generic»/не выбран)
+     * оставляет поведение прежним — видны все, потому что непонятной
+     * задаче может понадобиться любой домен. */
+    if (!active_module.empty() && active_module != "generic") {
+        std::vector<ToolDef> same_module;
+        same_module.reserve(all.size());
+        for (ToolDef& d : all) {
+            if (d.module.empty() || d.module == active_module) {
+                same_module.push_back(std::move(d));
+            }
+        }
+        all.swap(same_module);
+    }
     /* И12.4: подмена edit+write → apply_patch для семейства gpt-*.
      *
      * Именно здесь, а не в каталоге и не в LlmClient: это единственная
@@ -727,9 +751,10 @@ std::string Engine::build_system_prompt() const {
             ? SystemPrompt::Protocol::Native
             : SystemPrompt::Protocol::Text;
 
-    sys += state_.agent_system_prompt.empty()
-        ? SystemPrompt::provider(model_id, protocol)
-        : state_.agent_system_prompt;
+    sys += (state_.agent_system_prompt.empty() ||
+            state_.agent_system_prompt_blocked)
+               ? SystemPrompt::provider(model_id, protocol)
+               : state_.agent_system_prompt;
 
     /* И8.7: промпт агента — ДОПОЛНЕНИЕ к базовому, а не замена. Базовый
      * объясняет протокол вызовов инструментов, агентский — роль и
@@ -741,6 +766,11 @@ std::string Engine::build_system_prompt() const {
         sys += "\n\n";
         sys += agent_rules->prompt();
     }
+
+    /* Страховка, не зависящая от выбранного промпта: пользовательский
+     * agent_system_prompt заменяет базу целиком, и вместе с ней пропадает
+     * правило «сначала осмотри проект». */
+    sys += kProjectSafetyPrompt;
 
     /* И9.4: env-блок. Место — сразу за базовым промптом и ДО правил
      * проекта: это факты о том, где агент работает, а правила проекта
@@ -1062,6 +1092,28 @@ void Engine::set_state(AgentState s) {
  * События
  * ====================================================================== */
 
+namespace {
+
+/* Управляющие байты из вывода команд (apt рисует прогресс через \b/\r)
+ * в чате выглядят как мусор/вопросительные знаки. Оставляем перевод
+ * строки и табуляцию, \r превращаем в \n; остальные C0 и DEL убираем. */
+std::string chat_safe_text(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (c == '\n' || c == '\t') {
+            out += static_cast<char>(c);
+        } else if (c == '\r') {
+            out += '\n';
+        } else if (c >= 0x20 && c != 0x7f) {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
 void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
     bool forward = false;
     std::string chat_line;
@@ -1072,12 +1124,16 @@ void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
     }
     if (cb_.chat_event) {
         switch (k) {
+            /* Маркеры \x01/\x02/\x03 — только для хоста: он снимает их и
+             * выбирает роль сообщения (прогресс/инструмент/ошибка). В
+             * самом тексте чата их нет, поэтому пользователь видит
+             * обычный текст, а не служебные символы. */
             case AgentEvent::Status:
-                chat_line = text;
+                chat_line = "\x01" + chat_safe_text(text);
                 forward = true;
                 break;
             case AgentEvent::Error:
-                chat_line = "! " + text;
+                chat_line = "\x03" + chat_safe_text(text);
                 forward = true;
                 break;
             /* И12.6: повтор виден и в чате приложения. Раньше он шёл
@@ -1085,17 +1141,31 @@ void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
              * с блокирующего пути — то есть ход агента на стриминге о своём
              * ожидании не говорил вовсе. */
             case AgentEvent::Retry:
-                chat_line = text;
+                chat_line = "\x01" + chat_safe_text(text);
                 forward = true;
                 break;
             case AgentEvent::Assistant:
-                chat_line = text;
+                chat_line = chat_safe_text(text);
                 forward = true;
                 break;
-            case AgentEvent::Tool:
-                chat_line = "🛠 " + text;
+            case AgentEvent::Tool: {
+                /* Инструмент — отдельный визуальный блок, а не строка
+                 * того же вида, что статус. MarkdownRenderer рисует
+                 * ```text``` как код; заодно это отделяет вывод
+                 * инструмента от рассуждений и итогового ответа. */
+                std::string safe = chat_safe_text(text);
+                for (size_t p = safe.find("```"); p != std::string::npos;
+                     p = safe.find("```", p + 3)) {
+                    safe.replace(p, 3, "'''");
+                }
+                if (safe.size() > 300) {
+                    safe = text::utf8_prefix(safe, 300);
+                    safe += "…";
+                }
+                chat_line = "\x02```text\n" + safe + "\n```";
                 forward = true;
                 break;
+            }
             default:
                 break;
         }
@@ -1106,8 +1176,10 @@ void Engine::push_event(AgentEvent::Kind k, const std::string& text) {
              * («…»): пользователь читал в чате четверть отчёта, полный
              * текст был только в файле сессии (ses_000000000166).
              * Остальные события — служебные строки (статусы шагов,
-             * инструменты, ошибки), обрез им не вредит. */
-            if (k != AgentEvent::Assistant && chat_line.size() > 300) {
+             * инструменты, ошибки), обрез им не вредит. Tool уже обрезан
+             * выше — повторный обрез срезал бы закрывающий фенс. */
+            if (k != AgentEvent::Assistant && k != AgentEvent::Tool &&
+                chat_line.size() > 300) {
                 chat_line = text::utf8_prefix(chat_line, 300);
                 chat_line += "…";
             }
@@ -1132,6 +1204,38 @@ static std::string setting_get(const HostCallbacks& cb, const std::string& key, 
 static void setting_set(const HostCallbacks& cb, const std::string& key, const std::string& value) {
     if (!cb.settings_set) return;
     cb.settings_set(key, "\"" + value + "\"");
+}
+
+/* Навыки хранятся одной строкой в настройке профиля: имена через запятую.
+ * JSON-массив здесь был бы честнее, но значение всё равно уходит в
+ * settings_set как строка, а разбирать массив пришлось бы вторым
+ * парсером рядом с allowed_external_paths. Имена навыков — имена файлов
+ * без расширения; запятая в них не встречается, и ограничение названо
+ * здесь, а не спрятано. */
+static const char kNoSkills[] = "__none__";
+
+static std::vector<std::string> split_skill_names(const std::string& csv) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos <= csv.size()) {
+        const size_t comma = csv.find(',', pos);
+        const std::string item = csv.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (!item.empty()) out.push_back(item);
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return out;
+}
+
+static std::string join_skill_names(const std::vector<std::string>& names) {
+    if (names.empty()) return kNoSkills;
+    std::string out;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i) out += ",";
+        out += names[i];
+    }
+    return out;
 }
 
 void Engine::load_settings() {
@@ -1182,6 +1286,33 @@ void Engine::load_settings() {
     state_.deploy_remote_dir = setting_get(cb_, "wp_coder.deploy_remote_dir", "");
     state_.wp_local_url    = setting_get(cb_, "wp_coder.local_url", "");
     state_.agent_system_prompt = setting_get(cb_, "wp_coder.agent_system_prompt", "");
+    state_.agent_system_prompt_blocked = false;
+    const std::string detected_module =
+        project_detect_module(state_.project_dir);
+    /* Старый WP-промпт в чужом проекте — это не ошибка кода, но причина,
+     * по которой агент «не понимает, что перед ним»: пользовательский
+     * промпт заменяет базу целиком. Молча исправлять текст человека
+     * нельзя, а назвать вслух — можно. */
+    if (!state_.agent_system_prompt.empty() &&
+        detected_module != "wordpress" && detected_module != "generic") {
+        std::string low = state_.agent_system_prompt;
+        for (char& c : low) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (low.find("wordpress") != std::string::npos ||
+            low.find("wp-config") != std::string::npos ||
+            low.find("wp_cli") != std::string::npos) {
+            state_.agent_system_prompt_blocked = true;
+            std::cout << "[wp_coder] ВНИМАНИЕ: пользовательский "
+                         "agent_system_prompt выглядит как WordPress, а проект "
+                      << state_.project_dir << " определён как «"
+                      << detected_module << "». Этот промпт заменяет базовый "
+                         "целиком — в этом проекте он НЕ применяется. "
+                         "Очистите wp_coder.agent_system_prompt в настройках, "
+                         "если он больше не нужен."
+                      << std::endl;
+        }
+    }
     /* И9.1: список источников инструкций из настройки. Читается здесь,
      * вместе со всеми остальными настройками, и по той же причине: это
      * единственное место, где плагин ходит к хосту за настройками.
@@ -1194,21 +1325,32 @@ void Engine::load_settings() {
      * разбирается при первой сборке промпта — там известен корень. */
     reload_instructions();
     {
-        std::string m = setting_get(cb_, "wp_coder.active_module", "");
-        if (m.empty() && !state_.project_dir.empty()) {
-            namespace fs = std::filesystem;
-            fs::path root(state_.project_dir);
-            std::error_code ec;
-            if (fs::exists(root / "wp-config.php", ec) ||
-                fs::exists(root / "wp-content", ec)) {
-                m = "wordpress";
-            } else if (fs::exists(root / "requirements.txt", ec) ||
-                       fs::exists(root / "pyproject.toml", ec) ||
-                       fs::exists(root / "setup.py", ec)) {
-                m = "python";
-            } else {
-                m = "generic";
-            }
+        /* Модуль: настройка важнее, но только пока она не противоречит
+         * проекту. Наблюдение (qwen-flash, 2026-11): в профиле остался
+         * "wordpress" после работы над WP-сайтом, а открыт проект-калькулятор
+         * (/home/alex/projects/calc, один calculator.py). В промпт уходил
+         * WP-промпт и семь WP-навыков, агент ни разу не прочитал проект и
+         * написал отчёт про index.php/functions.php, которых там нет.
+         *
+         * Правило: если проект явно узнаётся как другой модуль, настройка
+         * проигрывает. "generic" не перебивает явный выбор: на пустом или
+         * незнакомом каталоге человек волен оставить WP-модуль. */
+        const std::string saved = setting_get(cb_, "wp_coder.active_module", "");
+        const std::string detected = detected_module;
+        std::string m = saved;
+        if (!detected.empty() && detected != "generic" &&
+            detected != saved) {
+            std::cout << "[wp_coder] модуль «" << (saved.empty() ? "не задан" : saved)
+                      << "» не совпадает с проектом " << state_.project_dir
+                      << " (определён «" << detected << "») — переключаю на «"
+                      << detected << "»" << std::endl;
+            m = detected;
+            /* Пишем обратно: окно «Модули» и следующий запуск обязаны
+             * видеть то же, что агент. */
+            setting_set(cb_, "wp_coder.active_module", m);
+        }
+        if (m.empty()) {
+            m = detected.empty() ? "generic" : detected;
         }
         state_.active_module = m;
     }
@@ -1652,6 +1794,63 @@ void Engine::save_settings() {
     setting_set(cb_, "wp_coder.llm_timeout_ms", std::to_string(state_.llm_timeout_ms));
     setting_set(cb_, "wp_coder.max_steps", std::to_string(state_.max_steps));
     setting_set(cb_, "wp_coder.session_budget", std::to_string(state_.session_budget));
+    /* Навыки — часть той же настройки профиля: модуль и точечный выбор
+     * сохраняются вместе, иначе после перезапуска set_module() вернул бы
+     * набор по модулю и стёр ручную правку. */
+    save_skills_settings();
+}
+
+void Engine::apply_saved_skills() {
+    SkillsManager& sm = SkillsManager::instance();
+    std::string module;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        module = state_.active_module;
+    }
+
+    const std::string saved = setting_get(cb_, "wp_coder.active_skills", "");
+    const std::string saved_module =
+        setting_get(cb_, "wp_coder.skills_module", "");
+
+    /* Набор, сохранённый для ДРУГОГО модуля, не применяется: имена
+     * навыков глобальны (все модули загружены), и WP-навык нашёлся бы в
+     * Python-проекте — ровно та ошибка, из-за которой выбор ломался. */
+    if (!saved.empty() && (saved_module.empty() || saved_module == module)) {
+        if (saved == kNoSkills) {
+            sm.set_active({});
+            return;
+        }
+        std::vector<std::string> names;
+        for (const std::string& n : split_skill_names(saved)) {
+            const Skill* sk = sm.find(n);
+            if (!sk) continue;
+            /* Навык чужого модуля не активируем, даже если он есть в
+             * глобальном списке: все модули загружены, и WP-навык
+             * «нашёлся» бы в Python-проекте. */
+            if (!sk->module_name.empty() && sk->module_name != module) {
+                continue;
+            }
+            names.push_back(n);
+        }
+        if (!names.empty()) {
+            sm.set_active(names);
+            return;
+        }
+    }
+
+    if (!module.empty()) sm.set_module(module);
+    else sm.refresh_active();
+}
+
+void Engine::save_skills_settings() {
+    std::string module;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        module = state_.active_module;
+    }
+    setting_set(cb_, "wp_coder.skills_module", module);
+    setting_set(cb_, "wp_coder.active_skills",
+                join_skill_names(SkillsManager::instance().active_skills()));
 }
 
 /* ======================================================================

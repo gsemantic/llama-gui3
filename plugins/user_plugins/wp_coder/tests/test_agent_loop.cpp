@@ -638,23 +638,26 @@ TEST(agent_loop_asks_again_when_the_answer_is_too_short) {
     const std::vector<Message> h = fx.history();
     bool reminder = false;
     for (const Message& m : h) {
-        if (m.is_user() && m.text().find("[напоминание]") != std::string::npos) {
+        if (m.is_user() && m.text().find("[reminder]") != std::string::npos) {
             reminder = true;
         }
     }
     ASSERT_TRUE(reminder);
     /* И оно ушло модели, а не осталось в UI-логе. */
-    ASSERT_TRUE(fx.host.transcript(1).find("[напоминание]") !=
+    ASSERT_TRUE(fx.host.transcript(1).find("[reminder]") !=
                 std::string::npos);
 }
 
 TEST(agent_loop_names_the_empty_turn_separately) {
-    /* ПУСТОЙ ход (ни текста, ни вызова, finish=stop) — не «короткий
-     * ответ», а вырожденный ответ провайдера (наблюдение qwen-flash,
-     * DashScope). Цикл ведёт себя как для короткого: напоминание и
-     * продолжение, но статус называет пустоту пустотой — иначе человек
-     * видит в чате «модель не вызвала инструмент», хотя модель не
-     * отвечала вовсе, и ищет несуществующую вину протокола. */
+    /* ПУСТОЙ ход (ни текста, ни вызова, finish=stop) — вырожденный ответ
+     * провайдера (наблюдение qwen-flash, DashScope: 200, finish=stop,
+     * content пуст, usage 0+0). Ломается именно НАТИВНЫЙ вызов: на
+     * запрос с tools провайдер отвечает пустотой, а планировщик без
+     * инструментов отвечает нормально.
+     *
+     * Поэтому первый пустой ход выключает нативные инструменты и повторяет
+     * шаг текстовым протоколом — без напоминания в истории (это не ответ
+     * модели, а сбой транспорта) и без траты трёх шагов. */
     LoopFixture fx;
     fx.host.replies = {"", long_answer("Теперь подробно.")};
     HostCallbacks cb = fx.callbacks();
@@ -669,20 +672,46 @@ TEST(agent_loop_names_the_empty_turn_separately) {
                    });
     ASSERT_TRUE(fx.run(loop, response));
 
-    /* Два хода: пустой повторён с напоминанием, второй стал итогом. */
+    /* Два хода: пустой повторён без нативных инструментов, второй стал
+     * итогом. */
     ASSERT_EQ(fx.host.calls(), (size_t)2);
-    bool reminder = false;
-    for (const Message& m : fx.history()) {
-        if (m.is_user() && m.text().find("[напоминание]") != std::string::npos)
-            reminder = true;
-    }
-    ASSERT_TRUE(reminder);
-    /* Про пустой ход сказано отдельно, и без «не вызвала инструмент». */
+    /* Про пустой ход сказано отдельно и названо следствие. */
     bool empty_named = false;
     for (const std::string& s : statuses) {
-        if (s.find("пустым") != std::string::npos) empty_named = true;
+        if (s.find("пустым") != std::string::npos &&
+            s.find("нативными") != std::string::npos) {
+            empty_named = true;
+        }
     }
     ASSERT_TRUE(empty_named);
+    /* Напоминание в историю НЕ пишется: пустой ход — не реплика модели. */
+    for (const Message& m : fx.history()) {
+        ASSERT_TRUE(!m.is_user() ||
+                    m.text().find("[reminder]") == std::string::npos);
+    }
+    /* Нативный вызов выключен — следующий шаг шёл текстовым протоколом. */
+    ASSERT_TRUE(engine().native_tool_support() ==
+                NativeToolSupport::Rejected);
+}
+
+TEST(agent_loop_stops_after_two_empty_turns_without_tools) {
+    /* Если и текстовый протокол возвращает пустоту, продолжать нечего:
+     * два хода подряд — честный провал задачи, а не три шага
+     * напоминаний, после которых пользователь получает «(пустой ответ)». */
+    LoopFixture fx;
+    fx.host.replies = {"", ""};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+    /* Текстовый протокол уже выключен: провайдер отверг tools раньше. */
+    engine().note_tools_rejected(true);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_FALSE(fx.run(loop, response));
+    ASSERT_EQ(fx.host.calls(), (size_t)2);
+    ASSERT_TRUE(response.find("пуст") != std::string::npos);
 }
 
 TEST(agent_loop_asks_to_write_the_file_when_the_answer_is_code) {
@@ -709,7 +738,7 @@ TEST(agent_loop_asks_to_write_the_file_when_the_answer_is_code) {
     bool write_reminder = false;
     for (const Message& m : fx.history()) {
         if (m.is_user() &&
-            m.text().find("КОД, а не итоговый отчёт") != std::string::npos)
+            m.text().find("CODE, not a final report") != std::string::npos)
             write_reminder = true;
     }
     ASSERT_TRUE(write_reminder);
@@ -772,13 +801,13 @@ TEST(agent_loop_warns_on_the_last_step_and_finishes_normally) {
 
     /* Ровно два запроса: форсированного третьего не было. */
     ASSERT_EQ(fx.host.calls(), (size_t)2);
-    ASSERT_TRUE(fx.host.transcript(1).find("последний шаг") != std::string::npos);
+    ASSERT_TRUE(fx.host.transcript(1).find("LAST step") != std::string::npos);
     ASSERT_TRUE(response.find("Итог.") != std::string::npos);
     /* Напоминание осталось в истории — следующая задача в той же сессии
      * не должна начинаться с него. */
     bool reminder_in_history = false;
     for (const Message& m : fx.history()) {
-        if (m.is_user() && m.text().find("последний шаг") != std::string::npos) {
+        if (m.is_user() && m.text().find("LAST step") != std::string::npos) {
             reminder_in_history = true;
         }
     }
@@ -799,7 +828,7 @@ TEST(agent_loop_warns_only_after_the_first_step) {
                    [&](AgentEvent::Kind, const std::string&) {});
     ASSERT_TRUE(fx.run(loop, response));
     ASSERT_EQ(fx.host.calls(), (size_t)1);
-    ASSERT_TRUE(fx.host.transcript(0).find("последний шаг") == std::string::npos);
+    ASSERT_TRUE(fx.host.transcript(0).find("LAST step") == std::string::npos);
 }
 
 TEST(agent_loop_forces_a_summary_when_the_last_step_still_calls_tools) {
@@ -820,7 +849,7 @@ TEST(agent_loop_forces_a_summary_when_the_last_step_still_calls_tools) {
     fx.run(loop, response);
 
     ASSERT_EQ(fx.host.calls(), (size_t)3);
-    ASSERT_TRUE(fx.host.transcript(2).find("последний шаг") != std::string::npos);
+    ASSERT_TRUE(fx.host.transcript(2).find("LAST step") != std::string::npos);
     ASSERT_TRUE(response.find("Итог по факту.") != std::string::npos);
     /* И ответ лежит в истории, а не только в результате задачи: вопрос
      * «а что ты сделал?» после задачи иначе получил бы пустоту. */

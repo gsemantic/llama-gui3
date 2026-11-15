@@ -413,13 +413,18 @@ const std::vector<const char*> kAllowedBinaries = {
     "cmp", "sort", "uniq", "cut", "tr", "sed", "awk", "gawk", "jq", "yq", "xxd",
     "od", "base64", "md5sum", "sha1sum", "sha256sum", "realpath", "readlink",
     "basename", "dirname", "pwd", "echo", "printf", "true", "false", "test",
+    /* cd — встроенная команда оболочки, но агент пишет её как обычную
+     * программу: «cd /проект && pytest». Без неё вся составная команда
+     * отклонялась на первом же шаге, хотя остальные её части разрешены. */
+    "cd", "pushd", "popd",
     "expr", "date", "seq", "nl", "strings", "split", "tac", "paste", "comm",
     "column", "fold", "join", "rev", "shuf", "which", "type", "man", "info",
     "tee", "touch", "mkdir", "cp", "mv", "ln", "rm", "chmod", "chown", "chgrp",
     "mktemp", "truncate", "tar", "gzip", "gunzip", "bzip2", "bunzip2", "xz",
     "zip", "unzip", "rsync", "scp",
-    /* Процессы и система — для диагностики. */
-    "ps", "kill", "killall", "uptime", "id", "whoami", "hostname", "uname",
+    /* Процессы и система — для диагностики. kill/killall сюда не входят:
+     * агент, «проверяя» чужой процесс, мог убить само приложение. */
+    "ps", "uptime", "id", "whoami", "hostname", "uname",
     "printenv", "ldd", "lsof", "free", "vmstat", "iostat", "lscpu", "lsblk",
     "systemctl", "service", "journalctl", "crontab", "nice", "ionice",
     "taskset", "timeout", "stdbuf",

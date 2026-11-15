@@ -56,7 +56,7 @@ const LlamaHostApi* g_api = nullptr;
  * строки» значило бы подвешивать отправку каждой задачи на время всей
  * её работы. */
 static const char kPromptAck[] =
-    "Задача принята агентом. Прогресс и ответ приходят в чат; "
+    "\x01Задача принята агентом. Прогресс и ответ приходят в чат; "
     "окно «Сессия» — Ctrl+Shift+S.";
 
 static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_message, void* user_data) {
@@ -251,6 +251,11 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
              * были видны навыки всех модулей. */
             sm.refresh_active();
         }
+        /* Ручной выбор навыков (окно «Сессия») переживает перезапуск:
+         * set_module выше восстановил набор по модулю, apply_saved_skills
+         * накладывает сохранённый точечный выбор. Если его нет — остаётся
+         * набор модуля. */
+        coder::engine().apply_saved_skills();
         std::cerr << "[wp_coder] skills: загружено " << sm.all_skills().size()
                   << ", активно " << sm.active_skills().size() << std::endl;
     }

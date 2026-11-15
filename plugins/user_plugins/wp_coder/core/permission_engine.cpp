@@ -153,6 +153,25 @@ void PermissionEngine::apply_agent_defaults(
     rs.add("git", "diff*", PermissionAction::Allow);
     rs.add("git", "log*", PermissionAction::Allow);
 
+    /* Проект — рабочий каталог агента: чтение файлов и обход дерева
+     * внутри него не должны спрашивать разрешение на каждый cat/sed.
+     * Опасные команды (python3 -c, rm, mv, chmod, sudo) остаются под
+     * общим `bash → ask`. Наблюдение: в сессии на калькуляторе агент
+     * сделал ~10 bash-вызовов только на чтение и каждый раз упирался в
+     * вопрос, хотя проект был открыт явно. */
+    rs.add("bash", "cat *", PermissionAction::Allow);
+    rs.add("bash", "sed *", PermissionAction::Allow);
+    rs.add("bash", "awk *", PermissionAction::Allow);
+    rs.add("bash", "head *", PermissionAction::Allow);
+    rs.add("bash", "tail *", PermissionAction::Allow);
+    rs.add("bash", "wc *", PermissionAction::Allow);
+    rs.add("bash", "ls *", PermissionAction::Allow);
+    rs.add("bash", "grep *", PermissionAction::Allow);
+    rs.add("bash", "find *", PermissionAction::Allow);
+    rs.add("bash", "file *", PermissionAction::Allow);
+    rs.add("bash", "stat *", PermissionAction::Allow);
+    rs.add("bash", "pwd", PermissionAction::Allow);
+
     /* Петля инструментов (детектор и сам вопрос — И4.11; здесь
      * объявлен ключ, чтобы к тому моменту правило уже было). */
     rs.add("doom_loop", "*", PermissionAction::Ask);

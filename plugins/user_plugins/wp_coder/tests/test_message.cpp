@@ -736,11 +736,11 @@ TEST(turn_verdict_tells_every_reason_the_task_is_not_over) {
         {"finish = tool-calls", response_with("tool-calls", 400),
          turn_of(response_with("tool-calls", 400), kUser), kUser,
          TurnVerdict::NeedsTools},
-        /* Любая другая причина остановки (length, stop, «eos») задачу не
-         * отменяет: закрывать должна причина, а не её отсутствие. */
-        {"причина остановки не tool-calls", response_with("length", 400),
+        /* length — ответ оборван лимитом токенов, а не завершён: такой
+         * текст (особенно у reasoning-моделей) нельзя принимать за итог. */
+        {"причина остановки length", response_with("length", 400),
          turn_of(response_with("length", 400), kUser), kUser,
-         TurnVerdict::Completed},
+         TurnVerdict::Truncated},
         {"finish пуст", response_with("", 400),
          turn_of(response_with("", 400), kUser), kUser, TurnVerdict::NeedsTools},
         /* Незакрытый вызов при finish=tool-calls: первым срабатывает
@@ -770,8 +770,130 @@ TEST(turn_verdict_tells_every_reason_the_task_is_not_over) {
     }
 }
 
-TEST(looks_like_code_answer_separates_report_from_code_dump) {
-    /* Отчёт с коротким примером — отчёт: пример половину текста не
+/* Оборванный итог виден и при finish=stop: шлюзы (kilo, particle-1)
+ * отвечают `stop`, хотя текст кончился на открытой скобке. Такой ход не
+ * должен закрывать задачу, иначе в чате остаётся половина ответа. */
+TEST(answer_looks_truncated_catches_a_cut_final_answer) {
+    ASSERT_TRUE(answer_looks_truncated("Пишу файл, осталось:("));
+    ASSERT_TRUE(answer_looks_truncated("Вот пример: `print(1)"));
+    ASSERT_TRUE(answer_looks_truncated("```python\nprint(1)"));
+    ASSERT_TRUE(answer_looks_truncated("Список пунктов:"));
+    ASSERT_FALSE(answer_looks_truncated("Готово: файл записан, тесты зелёные."));
+    ASSERT_FALSE(answer_looks_truncated(
+        "Пример: `calc(2)` — вызов корректен, скобки закрыты."));
+    /* Сессия 0.18.10: поток закрылся на одном символе «П», все прочие
+     * признаки молчали, и обрывок был принят за итог. */
+    ASSERT_TRUE(answer_looks_truncated(
+        "Также поддержка процентов? В AST это не пройдёт. П"));
+    ASSERT_FALSE(answer_looks_truncated("Обновил до версии 2"));
+    ASSERT_FALSE(answer_looks_truncated(""));
+}
+
+/* План из сессии 0.18.10: русские формы будущего времени. Старый список
+ * маркеров находил только «Напишу», порог в два маркера не срабатывал, и
+ * ход закрывал задачу без правки файла. */
+TEST(looks_like_planning_text_recognises_russian_future_actions) {
+    const std::string plan =
+        "Файл calculator.py обрывается на строке 128. Нужно переписать "
+        "целиком. Перепишу целиком: ядро + инженерные функции + CLI + GUI. "
+        "Сделаю инженерный калькулятор: добавлю sin/cos/tan, log, sqrt. "
+        "Напишу файл целиком. Плюс тесты. Реализация: _FUNCTIONS как "
+        "словарь. Использую math.cbrt, если есть.";
+    ASSERT_TRUE(looks_like_planning_text(plan));
+
+    /* Итоговый отчёт в прошедшем времени планом не считается. */
+    ASSERT_FALSE(looks_like_planning_text(
+        "Переписал calculator.py целиком, добавил инженерные функции, "
+        "создал тесты. Тесты проходят."));
+}
+
+/* План планировщика остаётся в сессии для UI, но модели не показывается.
+ * В сессии 0.18.10 реплика ассистента «[ПЛАН] …» подтолкнула модель
+ * продолжить план вместо правки файла. */
+TEST(planner_plan_is_not_projected_to_model_history) {
+    std::vector<Message> h;
+    h.push_back(Message::user("Сделай калькулятор инженерным."));
+
+    Message plan = Message::assistant(h.back().id);
+    plan.parts.push_back(MessagePart::text("[ПЛАН]\n1. Прочитать файл."));
+    h.push_back(plan);
+
+    Message answer = Message::assistant(h.back().id);
+    answer.parts.push_back(MessagePart::text("Готово: файл переписан."));
+    h.push_back(answer);
+
+    ASSERT_TRUE(message_is_plan(plan));
+    ASSERT_FALSE(message_is_plan(answer));
+
+    const std::vector<ModelMessage> msgs = to_model_messages(h);
+    ASSERT_EQ(msgs.size(), (size_t)2);
+    for (const ModelMessage& m : msgs) {
+        ASSERT_TRUE(m.content.find("[ПЛАН]") == std::string::npos);
+    }
+}
+
+TEST(turn_verdict_does_not_close_task_on_a_plan_instead_of_work) {
+    const std::string kUser = "msg_000000000001";
+    const std::string plan =
+        "The file is broken. Plan: rewrite it as an engineering calculator. "
+        "Let me write the new calculator.py. Design: safe AST evaluation, "
+        "trigonometry, logarithms. " + std::string(200, 'x');
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(plan));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(looks_like_planning_text(plan));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::PlanningText);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+
+    /* Отчёт без маркеров будущего действия закрывает задачу. */
+    ASSERT_FALSE(looks_like_planning_text(
+        "Готово: файл calculator.py перезаписан, тесты проходят."));
+}
+
+TEST(turn_verdict_does_not_close_task_on_tool_args_json) {
+    const std::string kUser = "msg_000000000001";
+    const std::string json_args =
+        R"({"path": "/home/alex/projects/reader/reader/formats/epub.py", "content": "\"\"\"Парсер EPUB\\nfrom pathlib import Path\\n)" +
+        std::string(350, 'x') + R"("})";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(json_args));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(looks_like_tool_args_json(json_args));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+
+    /* Обычный JSON-отчёт с answer/summary не считается аргументами. */
+    ASSERT_FALSE(looks_like_tool_args_json(
+        R"({"answer": "готово", "summary": "файл записан"})"));
+}
+
+TEST(turn_verdict_does_not_close_task_on_an_unfinished_final_answer) {    const std::string kUser = "msg_000000000001";
+    /* Достаточно длинный текст, но последняя скобка открыта. */
+    const std::string cut =
+        std::string(350, 'x') + " converting `N%` to `(";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(cut));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(r.text().size() >= limits::kMinFinalAnswerLen);
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::Truncated);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+}
+
+TEST(looks_like_code_answer_separates_report_from_code_dump) {    /* Отчёт с коротким примером — отчёт: пример половину текста не
      * занимает. Тот случай, ради которого порог и выбран. */
     const std::string report =
         "Готово. Создал файл main.py с калькулятором на tkinter: поле ввода, "

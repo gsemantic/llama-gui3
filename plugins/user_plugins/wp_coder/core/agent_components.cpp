@@ -441,14 +441,17 @@ void ToolRunner::record_call(const std::string& fingerprint) {
  * «есть ли план» и «как план выглядит» разъедутся (D12). */
 namespace {
 
-bool message_is_plan(const Message& m) {
-    return m.is_assistant() && m.text().rfind("[ПЛАН]", 0) == 0;
-}
-
+/* Instructions for the planning turn are in ENGLISH for the same reason as
+ * the execution contract: the model family used in the failing sessions
+ * (particle-1 behind the kilo gateway, DeepSeek-style safety wrapper)
+ * follows English imperatives more reliably than Russian ones. The plan
+ * itself is shown to the user in whatever language the user wrote in; only
+ * the instruction is English. */
 const char* kPlanPrompt =
-    "Составь краткий пошаговый план решения задачи (без вызова "
-    "инструментов, без wp_action). Перечисли только шагам одним "
-    "нумерованным списком. Потом ты выполнишь их инструментами.";
+    "Write a short plan for the task. Rules: no tools, no wp_action, no "
+    "code. At most 5 numbered steps, one line each, imperative. Do not "
+    "mention files, frameworks or versions you have not verified. The plan "
+    "will be executed with tools afterwards, so describe actions, not facts.";
 
 } // namespace
 
@@ -550,8 +553,10 @@ bool Planner::plan(const std::string& sys_prompt) {
         /* Вне блока выше: record_turn_usage берёт лок сам, а state_.mtx
          * нерекурсивный (правило 1 в SESSION_START.md). */
         record_turn_usage(state_, plan.usage());
-        this->push_event_(AgentEvent::Assistant,
-            "План: " + plan.text());
+        /* План — это рассуждение, а не ответ пользователю. В чате он
+         * уходит статусом (обрезанным), целиком остаётся в окне «Сессия».
+         * Так итоговый ответ не смешивается с планом. */
+        this->push_event_(AgentEvent::Status, "План: " + plan.text());
         return true;
     } else if (!plan_ok && !state_.abort_requested.load()) {
         this->push_event_(AgentEvent::Error, "Не удалось составить план — работаю без него.");
@@ -626,10 +631,10 @@ ToolOutput cap_result(ToolOutput out) {
  * причина («ты не прогрессируешь»), и путать её с исчерпанием шагов
  * модель не должна. */
 const char* kLastStepReminder =
-    "Это последний шаг. Инструменты больше вызывать НЕЛЬЗЯ — бюджет шагов "
-    "исчерпан, и следующий твой ответ станет ответом пользователю. Дай "
-    "текстовый итог по результатам проделанной работы: что сделано, что "
-    "не сделано и что нужно от пользователя.";
+    "This is the LAST step. You may NOT call tools any more: the step budget "
+    "is exhausted and your next message goes directly to the user. Write the "
+    "final report now: what was done, what was not done, and what you need "
+    "from the user. Do not write a plan.";
 
 } // namespace
 
@@ -717,6 +722,18 @@ Message* attach_patch_part(std::vector<Message>& history,
 bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
     int stuck_counter = 0;  // последовательных коротких ответов
+    /* Пустые ответы провайдера — отдельный счётчик: выключение нативных
+     * инструментов (первый пустой ход) и «сдаться» (второй подряд) —
+     * разные решения, и общий счётчик коротких ответов их бы смешал. */
+    int empty_streak = 0;
+    int reasoning_only_streak = 0;
+    int truncated_streak = 0;
+    int planning_streak = 0;
+    int tool_args_streak = 0;
+    /* Системный промпт пересобирается на каждом шаге: note_tools_rejected
+     * меняет протокол вызова, и старый снимок заставил бы модель писать
+     * блок, которого приложение уже не ждёт. */
+    std::string sys = sys_prompt;
 
     std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << state_.max_steps << std::endl;
 
@@ -730,6 +747,11 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             }
             return true;
         }
+
+        /* Протокол мог смениться на прошлом шаге (пустой ответ → без
+         * нативных инструментов). Кэш делает пересборку дешёвой: без
+         * изменений build_system_prompt вернёт тот же текст. */
+        sys = engine().build_system_prompt();
 
         /* И10.1: снимок рабочего каталога в начале шага. Раньше
          * откатывать правки агента было нечем: undo_edit держит ОДИН слот
@@ -838,7 +860,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             std::lock_guard<std::mutex> lk(state_.mtx);
             stream_panel::feed(state_.stream, e);
         };
-        const bool ok = LlmClient::fetch(cb_, sys_prompt, model_msgs, events,
+        const bool ok = LlmClient::fetch(cb_, sys, model_msgs, events,
                                          on_event, -1, step_abort);
         {
             /* Ход закрылся — панель гаснет. Буфер очищается НЕ сразу: пока
@@ -919,6 +941,121 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             return false;
         }
 
+        /* ПУСТОЙ ХОД (ни текста, ни вызова) обрабатывается ДО записи в
+         * историю: пустое сообщение ассистента ничего не добавляет модели,
+         * но занимает место и сбивает условие завершения.
+         *
+         * Наблюдение (qwen-flash, DashScope, 2026-11): на запрос, где
+         * отправлены tools, провайдер отвечает 200, finish=stop и пустым
+         * content — без единой ошибки. Планировщик при этом отвечает
+         * нормально: его последняя реплика — «составь план без вызова
+         * инструментов», и модель не пытается позвать инструмент. То есть
+         * ломается именно НАТИВНЫЙ вызов, а не провайдер и не промпт.
+         *
+         * Поэтому первый пустой ход не считается ошибкой модели: нативные
+         * инструменты выключаются (note_tools_rejected), и следующий шаг
+         * идёт текстовым протоколом (блок wp_action). Если и он пуст —
+         * провайдер отвечает пустотой всегда, и два хода подряд честно
+         * закрывают задачу с ошибкой, а не тратят три шага на напоминания. */
+        const bool empty_turn =
+            response.text().empty() && response.tool_calls().empty();
+        if (empty_turn) {
+            /* Диагностика: пустой ход при НЕнулевом usage означал бы, что
+             * токены провайдер посчитал, а текст не отдал — то есть ответ
+             * уехал в канал, который хост не доставляет (например,
+             * reasoning_content). */
+            std::cerr << "[wp_coder] пустой ход: finish="
+                      << response.finish_reason()
+                      << " reasoning_len=" << response.reasoning().size()
+                      << " usage=" << usage.input << "+" << usage.output
+                      << " tok" << std::endl;
+            if (!response.reasoning().empty()) {
+                /* Модель думает, но не действует. Это не «провайдер сломан»:
+                 * выключать инструменты не за что. */
+                ++reasoning_only_streak;
+                if (reasoning_only_streak >= 2) {
+                    const std::string err =
+                        "модель дважды подряд прислала только размышление, "
+                        "без вызова инструмента и без ответа";
+                    this->push_event_(AgentEvent::Error, "[ошибка] " + err);
+                    full_response = full_response.empty()
+                        ? "[ошибка] " + err : full_response;
+                    return false;
+                }
+                this->push_event_(AgentEvent::Status,
+                    "Только размышление, без действия — прошу вызвать "
+                    "инструмент или дать итог.");
+                /* Reminders are model-facing only (append_note is not shown
+                 * in the chat), so they are in English: the model family in
+                 * the failing sessions follows English imperatives more
+                 * reliably. The status line above stays Russian for the
+                 * user. */
+                append_note(
+                    "[reminder] You sent reasoning only. Call the next tool "
+                    "now (one wp_action block), or, if the task is truly "
+                    "finished, write the final report of at least " +
+                    std::to_string(limits::kMinFinalAnswerLen) + " characters.");
+                continue;
+            }
+
+            reasoning_only_streak = 0;
+            if (engine().native_tool_support() != NativeToolSupport::Rejected) {
+                engine().note_tools_rejected(true);
+                ++empty_streak;
+                this->push_event_(AgentEvent::Status,
+                    "Ход пришёл пустым: провайдер ответил на запрос с "
+                    "нативными инструментами — повторяю шаг без них "
+                    "(текстовый протокол).");
+                if (empty_streak >= 2) {
+                    const std::string err =
+                        "провайдер вернул пустой ответ и без нативных "
+                        "инструментов";
+                    this->push_event_(AgentEvent::Error, "[ошибка] " + err);
+                    full_response = full_response.empty()
+                        ? "[ошибка] " + err : full_response;
+                    return false;
+                }
+                /* Ход в историю НЕ пишется: это не ответ модели, а сбой
+                 * транспорта. Следующий шаг повторит тот же запрос. */
+                continue;
+            }
+
+            ++empty_streak;
+            if (empty_streak >= 2) {
+                const std::string err =
+                    "провайдер дважды подряд вернул пустой ответ (finish=stop, "
+                    "без текста и вызовов)";
+                std::string model = "не задана";
+                {
+                    const RunScope scope = engine().scope_snapshot();
+                    if (scope.info) model = scope.info->model();
+                }
+                const std::string diag =
+                    "model=" + model + " protocol=" +
+                    (engine().native_tool_support() == NativeToolSupport::Rejected
+                         ? "text" : "native");
+                this->push_event_(AgentEvent::Error,
+                    ("[ошибка] LLM: " + err + " (" + diag + ")").c_str());
+                full_response = full_response.empty()
+                    ? "[ошибка] " + err : full_response;
+                return false;
+            }
+            this->push_event_(AgentEvent::Status,
+                "Ход пришёл пустым (ответ без текста и без вызовов) — "
+                "повторяю шаг с напоминанием.");
+            append_note(
+                "[reminder] Your last message was EMPTY: no text and no tool "
+                "call. Continue the task: make the next tool call (one "
+                "wp_action block), or, if the task is finished, write the "
+                "final report of at least " +
+                std::to_string(limits::kMinFinalAnswerLen) + " characters.");
+            /* Пустое сообщение в историю не пишется — только напоминание
+             * выше; следующий шаг начнётся с него. */
+            continue;
+        }
+        empty_streak = 0;
+        reasoning_only_streak = 0;
+
         /* ОДИН ход — ОДНО сообщение (И5.7). Внутри: размышление, текст,
          * вызовы, в том порядке, в каком пришли события. Раньше тот же ход
          * разбрасывался по нескольким сообщениям, и текст после результата
@@ -950,10 +1087,10 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 this->push_event_(AgentEvent::Status,
                     "Модель застряла — запрашиваю итоговый ответ.");
                 commit_turn();
-                ask_for_summary(sys_prompt,
-                    "Ты делаешь очень короткие ответы и не прогрессируешь. "
-                    "Инструменты больше вызывать НЕЛЬЗЯ. "
-                    "Дай итоговый ответ по результатам проделанной работы.",
+                ask_for_summary(sys,
+                    "You keep sending very short answers without progress. "
+                    "You may NOT call tools any more. Write the final report "
+                    "on what has actually been done.",
                     full_response);
                 return true;
             }
@@ -967,13 +1104,36 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 "Разбей задачу на шаги.");
         }
 
-        /* Текст хода — пользователю. Это response.text(), а не «строка без
-         * блока»: блок вызова сюда не попадает в принципе, его разбор — забота
-         * адаптера (core/llm_source.h). */
-        if (!response.text().empty()) {
+        /* Текст хода НЕ отправляем в чат сразу: это может быть и текст
+         * инструментального хода, и план, и обрывок. В чате ответ
+         * пользователю должен быть отделён от прогресса, поэтому решение
+         * принимается после вердикта: Completed → Assistant, остальное →
+         * Status. Это response.text(), а не «строка без блока»: блок вызова
+         * сюда не попадает в принципе, его разбор — забота адаптера
+         * (core/llm_source.h). */
+        const std::string turn_text = response.text();
+        if (!turn_text.empty()) {
             if (!full_response.empty()) full_response += "\n\n";
-            full_response += response.text();
-            this->push_event_(AgentEvent::Assistant, response.text());
+            full_response += turn_text;
+        }
+
+        /* Размышление модели — отдельный канал и отдельный визуальный
+         * блок: MarkdownRenderer понимает <thinking>…</thinking> и
+         * показывает его свёрнутым. Так рассуждение не смешивается с
+         * ответом пользователю. В историю оно уже попало частью turn. */
+        if (!response.reasoning().empty()) {
+            std::string reasoning = response.reasoning();
+            /* Ограничиваем объём: в чате reasoning нужен для контекста,
+             * а не целиком. Очень длинный текст в одном ImGui-элементе
+             * раздувает vertex buffer и делает кадр тяжёлым; полный
+             * текст остаётся в панели стриминга и сессии. */
+            if (reasoning.size() > limits::kMaxStreamPanelChars) {
+                reasoning = text::utf8_prefix(
+                    reasoning, limits::kMaxStreamPanelChars);
+                reasoning += "\n…";
+            }
+            this->push_event_(AgentEvent::Assistant,
+                "<thinking>\n" + reasoning + "\n</thinking>");
         }
 
         /* Вызовы инструментов. Аргументы приходят разобранными (И5.1/И5.3),
@@ -1040,7 +1200,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             this->push_event_(AgentEvent::Status,
                 "Ожидание разрешения: " + perm_path);
             if (cb_.chat_event) {
-                cb_.chat_event("[ai-coder] ⏸ ожидание разрешения: " + perm_path);
+                cb_.chat_event("\x01[ai-coder] ⏸ ожидание разрешения: " + perm_path);
             }
             {
                 std::unique_lock<std::mutex> lk(state_.mtx);
@@ -1074,13 +1234,13 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 ? "Доступ разрешён — продолжаю."
                 : "Доступ запрещён пользователем — продолжаю без него.");
             append_note(granted
-                ? ("(пользователь разрешил доступ к " + perm_path
-                   + "; разрешение действует. Выполни инструмент ещё раз "
-                     "с теми же аргументами.)")
-                : ("(пользователь ОТКАЗАЛ в доступе к " + perm_path
-                   + ". Не повторяй этот вызов: он запрещён. Скажи "
-                     "пользователю, что нужно для работы, или предложи то же "
-                     "самое внутри проекта.)"));
+                ? ("(the user granted access to " + perm_path
+                   + "; the permission is active. Call the tool again with "
+                     "the same arguments.)")
+                : ("(the user DENIED access to " + perm_path
+                   + ". Do not repeat that call: it is forbidden. Tell the "
+                     "user what is needed, or do the same thing inside the "
+                     "project.)"));
             break;  /* ход встал на ожидание: следующий вызов — в след. ходе */
         }
 
@@ -1121,53 +1281,110 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             turn_verdict(response, turn, current_user_id);
         if (verdict == TurnVerdict::Completed) {
             final_given = true;
+            /* Заголовок отделяет итог от прогресса. Сам ответ уходит
+             * Assistant-сообщением и рендерится как markdown; всё, что
+             * было до него, — Status/Tool. */
+            this->push_event_(AgentEvent::Status, "=== Итоговый ответ ===");
+            if (!turn_text.empty()) {
+                this->push_event_(AgentEvent::Assistant, turn_text);
+            }
             this->push_event_(AgentEvent::Status, "Готово (финальный ответ).");
             return true;
         }
         if (verdict == TurnVerdict::TooShort) {
             /* Преждевременный финал: текст без вызова инструмента, но и не
-             * настоящий итог. Случая два, и сказать модели о них надо
-             * разное:
-             *  - ход ПУСТОЙ (ни текста, ни вызова): провайдер вернул
-             *    пустоту с finish=stop — вырожденный ответ (наблюдение на
-             *    qwen-flash, DashScope, 2026-11). Протокол модель тут не
-             *    нарушила, но результата в ходе нет; напоминание
-             *    выталкивает следующий ход из пустоты;
-             *  - текст КОРОТКИЙ: модель начала отвечать и остановилась.
+             * настоящий итог. Пустой ход сюда больше не попадает: он
+             * разбирается выше и в историю не пишется.
              *
-             * Если модель реально застрянет, сработает stuck-детектор и
-             * запросит принудительный итоговый ответ. */
-            const bool empty_turn =
-                response.text().empty() && response.tool_calls().empty();
-            if (empty_turn) {
-                /* Диагностика: пустой ход при НЕнулевом usage означал бы,
-                 * что токены провайдер посчитал, а текст не отдал — то есть
-                 * ответ уехал в канал, который хост не доставляет
-                 * (например, reasoning_content). */
-                std::cerr << "[wp_coder] пустой ход: finish="
-                          << response.finish_reason()
-                          << " usage=" << usage.input << "+" << usage.output
-                          << " tok" << std::endl;
-                this->push_event_(AgentEvent::Status,
-                    "Ход пришёл пустым (ответ без текста и без вызовов) — "
-                    "повторяю шаг с напоминанием.");
-                append_note(
-                    "[напоминание] Твой последний ответ пришёл ПУСТЫМ: ни "
-                    "текста, ни вызова инструмента. Продолжай задачу: вызови "
-                    "следующий инструмент (блок wp_action) либо, если задача "
-                    "завершена, дай ИТОГОВЫЙ ответ не короче " +
-                    std::to_string(limits::kMinFinalAnswerLen) + " символов.");
-            } else {
-                this->push_event_(AgentEvent::Status,
-                    "Модель не вызвала инструмент и не дала итог — продолжаю.");
-                append_note(
-                    "[напоминание] Твой последний ответ не содержал вызова "
-                    "инструмента и слишком короток для итога. Продолжай "
-                    "задачу: вызови следующий инструмент (блок wp_action) "
-                    "либо, если задача завершена, дай ИТОГОВЫЙ ответ не "
-                    "короче " + std::to_string(limits::kMinFinalAnswerLen) +
-                    " символов.");
+             * Напоминание называет не только «вызови инструмент», но и
+             * конкретный первый вызов: наблюдение (reflection/beam-free,
+             * kilo) — модель отвечает «нужно вызвать инструмент» и не
+             * вызывает, потому что не понимает, какой именно. */
+            std::string root;
+            /* Уже прочитанные файлы меняют следующий шаг: если результат
+             * инструмента в истории есть, осматриваться некуда — надо
+             * писать. Прежний пример всегда называл repo_map, и модель
+             * после осмотра снова шла в repo_map: напоминание уводило её
+             * назад, а не к правке файла. */
+            bool read_something = false;
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                root = state_.project_dir;
+                for (const Message& m : state_.session) {
+                    for (const MessagePart& p : m.parts) {
+                        if (p.kind() == PartKind::Tool && p.has_result()) {
+                            read_something = true;
+                            break;
+                        }
+                    }
+                    if (read_something) break;
+                }
             }
+            std::string example;
+            if (engine().native_tool_support() ==
+                NativeToolSupport::Rejected) {
+                if (read_something) {
+                    example =
+                        "The files are already read — the next step is a "
+                        "WRITE. Reply EXACTLY like this:\n"
+                        "```\nwp_action\nTOOL: write_file\nPATH: <file>\n"
+                        "CONTENT_BEGIN\n...complete new content...\n"
+                        "CONTENT_END\n```";
+                } else {
+                    example =
+                        "Reply EXACTLY like this:\n"
+                        "```\nwp_action\nTOOL: repo_map\nROOT: " +
+                        (root.empty() ? std::string("<project root>") : root) +
+                        "\n```";
+                }
+            } else {
+                example = read_something
+                    ? "For example, call the write_file tool with path and the "
+                      "complete content."
+                    : "For example, call the repo_map tool with root='" +
+                          (root.empty() ? std::string("<project root>") : root) +
+                          "'.";
+            }
+            this->push_event_(AgentEvent::Status,
+                "Модель не вызвала инструмент и не дала итог — продолжаю.");
+            append_note(
+                "[reminder] Your last message had no tool call and is too "
+                "short to be a final report. I need a tool call now, not "
+                "reasoning. " + example +
+                " After the result, continue with the next action.");
+        } else if (verdict == TurnVerdict::Truncated) {
+            /* Ответ оборван. Причина видна в finish_reason: `length` —
+             * упёрлись в лимит токенов; `stop` с незакрытой скобкой или
+             * фенсом — шлюз закрыл поток посреди фразы. И то и другое НЕ
+             * итог: если принять обрывок, пользователь в чате получает
+             * половину ответа и не понимает, где остальное. */
+            ++truncated_streak;
+            if (truncated_streak >= 2) {
+                ask_for_summary(sys,
+                    "Your previous answer was cut off. Write a CONCISE final "
+                    "report: what is done and what remains. Do not repeat "
+                    "reasoning and do not start anything new.",
+                    full_response);
+                return true;
+            }
+            const bool by_tokens =
+                response.finish_reason() == "length";
+            this->push_event_(AgentEvent::Status,
+                by_tokens
+                    ? "Ответ обрезан лимитом токенов (finish=length) — прошу "
+                      "завершить мысль кратко."
+                    : "Ответ оборвался на полуслове — прошу продолжить с места "
+                      "обрыва.");
+            append_note(
+                by_tokens
+                    ? "[reminder] Your answer hit the token limit "
+                      "(finish=length). Do not repeat what you already said: "
+                      "either make the next tool call, or write a short final "
+                      "report."
+                    : "[reminder] Your previous answer was cut mid-sentence "
+                      "(an open bracket/quote or code fence). Do not start "
+                      "over and do not repeat yourself: continue exactly from "
+                      "the cut and finish the report.");
         } else if (verdict == TurnVerdict::CodeAnswer) {
             /* Отдельная причина и отдельное напоминание: общее «дай ИТОГОВЫЙ
              * ответ не короче N символов» на код в чате подтолкнуло бы
@@ -1179,13 +1396,84 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             this->push_event_(AgentEvent::Status,
                 "Итоговый ответ — код вместо отчёта: код нужно записать в файл.");
             append_note(
-                "[напоминание] Твой ответ — это КОД, а не итоговый отчёт. "
-                "Код записывается инструментом (write_file, блок wp_action), "
-                "а не печатается в ответе. Запиши его в файл ЦЕЛИКОМ и затем "
-                "дай ИТОГОВЫЙ ответ — что сделано, где лежит файл, как "
-                "запустить — не короче " +
-                std::to_string(limits::kMinFinalAnswerLen) + " символов.");
+                "[reminder] Your answer is CODE, not a final report. Code is "
+                "written with a tool (write_file, one wp_action block), not "
+                "printed in the reply. Write the complete file and then give "
+                "the final report: what was done, where the file is, how to "
+                "run it — at least " +
+                std::to_string(limits::kMinFinalAnswerLen) + " characters.");
+        } else if (verdict == TurnVerdict::PlanningText) {
+            /* Модель описала, что собирается сделать, но не сделала.
+             * Принять это за итог — значит закрыть задачу без правки;
+             * именно так калькулятор остался недописанным. Просим
+             * выполнить следующий шаг инструментом, а не повторять план. */
+            ++planning_streak;
+            /* Два плана подряд — ещё не повод сдаваться: в сессии 0.18.10
+             * именно второй «план вместо действия» закрывал задачу без
+             * единой правки. Даём третью попытку и на второй раз просим
+             * уже не «следующий шаг», а конкретный вызов записи. */
+            if (planning_streak >= 3) {
+                ask_for_summary(sys,
+                    "You sent a plan instead of an action three times. You "
+                    "may NOT call tools any more. Write the final report: "
+                    "what was actually done and what remains.",
+                    full_response);
+                return true;
+            }
+            this->push_event_(AgentEvent::Status,
+                "Это план, а не выполнение — прошу сделать следующий шаг "
+                "инструментом.");
+            append_note(
+                planning_streak == 1
+                    ? "[reminder] Your answer is a plan/reasoning, not a "
+                      "result. The plan already exists; do not repeat it. "
+                      "Call the next tool (write_file/edit_file/apply_patch or "
+                      "bash) and after the RESULT keep going until the task "
+                      "is done."
+                    : "[reminder] You sent a plan again instead of an action. "
+                      "I need EXACTLY ONE write call now: write_file (or "
+                      "edit_file/apply_patch). No text without a wp_action "
+                      "block. If the file is corrupted, rewrite it whole; do "
+                      "not re-read it.");
+        } else if (verdict == TurnVerdict::ToolArgsJson) {
+            /* JSON-аргументы инструмента, выведенные текстом. Это не
+             * отчёт: его нельзя показывать пользователю как итог и нельзя
+             * молча выполнять — модель обязана позвать инструмент сама. */
+            ++tool_args_streak;
+            if (tool_args_streak >= 3) {
+                ask_for_summary(sys,
+                    "You printed tool arguments as JSON three times instead "
+                    "of calling the tool. You may NOT call tools any more. "
+                    "Write the final report for the user: what was done, "
+                    "where the file is, how to run it.",
+                    full_response);
+                return true;
+            }
+            this->push_event_(AgentEvent::Status,
+                "Это JSON-аргументы инструмента, а не итоговый отчёт — "
+                "прошу вызвать инструмент и дать отчёт.");
+            append_note(
+                "[reminder] You printed tool arguments as JSON text instead "
+                "of calling the tool. Do not print JSON. Call write_file (or "
+                "the appropriate tool) with those arguments; after the RESULT "
+                "give the user a final report: what was done, where the file "
+                "is, how to run it.");
         }
+
+        /* Не итог: текст хода — это прогресс/рассуждение, а не ответ
+         * пользователю. Показываем его Status'ом (обрезанным), чтобы в
+         * чате не было нескольких «ответов» подряд и было видно, что это
+         * ещё работа. */
+        if (!turn_text.empty()) {
+            this->push_event_(AgentEvent::Status, turn_text);
+        }
+
+        /* Серия обрывов считается подряд: законченный ход её сбрасывает.
+         * Иначе два обрыва за всю задачу (даже далеко друг от друга)
+         * закрывали бы её принудительным итогом. */
+        if (verdict != TurnVerdict::Truncated) truncated_streak = 0;
+        if (verdict != TurnVerdict::PlanningText) planning_streak = 0;
+        if (verdict != TurnVerdict::ToolArgsJson) tool_args_streak = 0;
 
         /* Автосжатие по порогу окна (И7.10): пока переполнения нет —
          * ничего; переполнение есть — сводка отдельным агентом вместо
@@ -1208,7 +1496,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     if (!final_given && !state_.abort_requested.load()) {
         this->push_event_(AgentEvent::Status,
             "Шаги исчерпаны, а текстового ответа так и нет — прошу итоговый.");
-        ask_for_summary(sys_prompt, kLastStepReminder, full_response);
+        ask_for_summary(sys, kLastStepReminder, full_response);
     }
 
     return final_given;
@@ -1276,6 +1564,9 @@ bool AgentLoop::ask_for_summary(const std::string& sys_prompt,
     record_turn_usage(state_, answer.usage());
     if (!full_response.empty()) full_response += "\n\n";
     full_response += answer.text();
+    /* Хвостовой ответ — тоже итог: отделяем его от прогресса так же,
+     * как основной путь. */
+    this->push_event_(AgentEvent::Status, "=== Итоговый ответ ===");
     this->push_event_(AgentEvent::Assistant, answer.text());
     return true;
 }

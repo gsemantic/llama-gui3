@@ -518,7 +518,7 @@ TEST(файл_вне_проекта_останавливает_ход_а_раз�
     /* Человеку сказано ровно то, что решил он: разрешил — и модель это видит
      * в заметке, а не в пустом ходе. */
     const std::string history = fx.history_text();
-    ASSERT_TRUE(history.find("пользователь разрешил доступ") != std::string::npos);
+    ASSERT_TRUE(history.find("the user granted access") != std::string::npos);
     ASSERT_TRUE(answer.find("8080") == std::string::npos);
 
     fx.stop_worker();
@@ -576,7 +576,7 @@ TEST(отказ_оставляет_путь_закрытым_и_говорит_�
          * закончился бы. */
         ASSERT_TRUE((int)engine_state().state != (int)AgentState::WaitingPermission);
     }
-    ASSERT_TRUE(fx.history_text().find("пользователь ОТКАЗАЛ") !=
+    ASSERT_TRUE(fx.history_text().find("the user DENIED") !=
                 std::string::npos);
 
     fx.stop_worker();

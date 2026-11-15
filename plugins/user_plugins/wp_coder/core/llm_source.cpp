@@ -3,6 +3,7 @@
 #include "llm_source.h"
 #include "json_utils.h"
 #include "tool_protocol.h"
+#include <cstring>
 #include <iostream>
 
 namespace coder {
@@ -46,6 +47,54 @@ std::string without_trailing_blanks(std::string s) {
     return s;
 }
 
+/* Служебная разметка шлюза, попавшая в content.
+ *
+ * Наблюдение (particle-1 через kilo.ai, 2026-11): после вызова инструмента
+ * провайдер присылал отдельным ходом только блок классификатора
+ *
+ *   <ds_safety>[用户未成年]否 …</ds_safety>Safe
+ *
+ * Плагин считал это текстом модели: в историю попадала служебная строка,
+ * в чат — мусор, а короткий «ответ» получал напоминание «вызови
+ * инструмент», хотя модель уже вызвала его на предыдущем шаге. Ход
+ * тратился на реакцию на собственный шум классификатора.
+ *
+ * Разметка — не содержание ответа, поэтому она удаляется ДО разбора
+ * finish/текста. Одиночный «Safe» сразу после закрывающего тега — её же
+ * хвост; отдельная строка «Safe» без блока не трогается, чтобы не съесть
+ * нормальный ответ из одного слова. */
+std::string without_provider_meta(std::string s) {
+    const char* kOpen = "<ds_safety>";
+    const char* kClose = "</ds_safety>";
+    bool removed = false;
+    for (;;) {
+        const size_t a = s.find(kOpen);
+        if (a == std::string::npos) break;
+        const size_t b = s.find(kClose, a + std::strlen(kOpen));
+        if (b == std::string::npos) {
+            /* Незакрытый блок — обрыв посреди служебной разметки: хвост
+             * не текст модели и показывать его нельзя. */
+            s.erase(a);
+            removed = true;
+            break;
+        }
+        size_t after = b + std::strlen(kClose);
+        /* «Safe» — вердикт классификатора, приклеенный к закрывающему
+         * тегу без разделителя. */
+        const std::string tail = s.substr(after, 4);
+        if (tail == "Safe") after += 4;
+        s.erase(a, after - a);
+        removed = true;
+    }
+    if (removed) {
+        /* После удалённого блока на месте стыка остаётся перевод строки;
+         * ведущие пробелы исходного текста не трогаем — их не было. */
+        const size_t first = s.find_first_not_of(" \t\r\n");
+        s.erase(0, first == std::string::npos ? s.size() : first);
+    }
+    return s;
+}
+
 } // namespace
 
 void reply_to_events(const LlmReply& reply, std::vector<LlmEvent>& events) {
@@ -55,7 +104,7 @@ void reply_to_events(const LlmReply& reply, std::vector<LlmEvent>& events) {
      * транскрипт дважды — и как текст, и как вызов. */
     std::string rest;
     const std::string block = extract_action(reply.content, rest);
-    const std::string text = without_trailing_blanks(rest);
+    const std::string text = without_trailing_blanks(without_provider_meta(rest));
 
     if (!text.empty()) {
         events.push_back(LlmEvent::text_start());

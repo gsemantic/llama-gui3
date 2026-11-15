@@ -260,6 +260,8 @@ static void render_modules() {
             st.active_module = mod->name;
             SkillsManager::instance().set_module(mod->name);
             engine().invalidate_prompt_cache();
+            /* save_settings() ниже сохранит и модуль, и набор навыков:
+             * save_skills_settings() вызывается из него. */
             engine().save_settings();
         }
         ImGui::SameLine();
@@ -2093,6 +2095,10 @@ void render_extras() {
                     if (ImGui::Checkbox(("##sk" + std::to_string(i)).c_str(), &on)) {
                         SkillsManager::instance().toggle(skills[i].name, on);
                         engine().invalidate_prompt_cache();
+                        /* Выбор переживает перезапуск: без записи
+                         * set_module() при следующем init вернул бы
+                         * набор по модулю. */
+                        engine().save_skills_settings();
                     }
                     ImGui::SameLine();
                     ImGui::Text("%s", skills[i].name.c_str());

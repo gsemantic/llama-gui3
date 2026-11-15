@@ -29,8 +29,16 @@ const CoderModule* ModuleRegistry::find(const std::string& name) const {
 }
 
 void ModuleRegistry::init_all() {
+    ToolsRegistry& tools = ToolsRegistry::instance();
     for (auto* mod : modules_) {
+        if (!mod) continue;
+        /* Владелец инструментов ставится вокруг init(): модуль регистрирует
+         * свои инструменты и не обязан повторять своё имя в каждом def.
+         * Снимается после — инструменты ядра, зарегистрированные позже
+         * (base/git/rag), получают пустой module и видны всегда. */
+        tools.set_registration_module(mod->name ? mod->name : "");
         if (mod->init) mod->init();
+        tools.set_registration_module("");
     }
 }
 

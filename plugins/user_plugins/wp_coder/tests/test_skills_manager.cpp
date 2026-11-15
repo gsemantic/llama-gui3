@@ -5,6 +5,7 @@
 
 #include <fstream>
 #include <filesystem>
+#include <map>
 
 using namespace coder;
 namespace fs = std::filesystem;
@@ -158,14 +159,122 @@ TEST(skills_prompt_mentions_skill_detail_even_with_zero_skills) {
     (void)saved;
 }
 
-TEST(skills_set_module_falls_back_when_module_has_no_skills) {
+TEST(skills_set_module_keeps_base_when_module_has_no_skills) {
     auto& mgr = SkillsManager::instance();
     mgr.load();
-    /* Модуля с таким именем нет — раньше active_ становился пустым. */
+    /* Модуля с таким именем нет: остаются базовые навыки, а не пустота. */
     mgr.set_module("no_such_module_xyz");
     ASSERT_TRUE(!mgr.active_skills().empty());
     ASSERT_TRUE(mgr.build_skills_prompt().find("test_skill_a") != std::string::npos);
     mgr.set_module("");
+}
+
+/* И9.8: выключенный навык НЕ уходит в промпт.
+ *
+ * Раньше build_skills_prompt() перечислял ВСЕ навыки с пометкой
+ * «(выключен)»: якобы чтобы модель видела, что можно включить. Но
+ * инструмента «включить навык» у модели нет, а список оплачивался на
+ * каждом шаге и в чужом проекте выглядел как приглашение работать с
+ * чужим стеком (WP-навыки в проекте-калькуляторе). */
+TEST(skills_prompt_lists_only_active_skills) {
+    auto& mgr = SkillsManager::instance();
+    mgr.load();
+    const std::string active_before = mgr.build_skills_prompt();
+    ASSERT_TRUE(active_before.find("test_skill_a") != std::string::npos ||
+                active_before.find("test_skill_b") != std::string::npos);
+
+    /* Гасим всё, что есть. */
+    mgr.set_active({});
+    const std::string empty = mgr.build_skills_prompt();
+    ASSERT_TRUE(empty.find("test_skill_a") == std::string::npos);
+    ASSERT_TRUE(empty.find("test_skill_b") == std::string::npos);
+    /* Модель всё равно должна знать, как посмотреть полный список. */
+    ASSERT_TRUE(empty.find("list_skills") != std::string::npos);
+    ASSERT_TRUE(empty.find("skill_detail") != std::string::npos);
+
+    /* Возвращаем набор, чтобы не влиять на следующие проверки. */
+    mgr.load();
+}
+
+/* И9.8: модуль без навыков НЕ включает навыки всех остальных модулей.
+ *
+ * Прежний fallback «модуль не дал навыков — берём все» и был тем путём,
+ * по которому WP-навыки оказывались активны в Python-проекте. */
+TEST(skills_module_without_skills_does_not_activate_other_modules) {
+    static std::vector<Skill> other_skills = {
+        {"other_module_skill", "навык чужого модуля", "тело", "other_module_xyz"}};
+    static CoderModule other_mod = {
+        "other_module_xyz", "Other", "other",
+        nullptr,
+        []() -> std::vector<ToolInfo> { return {}; },
+        []() -> std::vector<Skill> { return other_skills; },
+        nullptr, nullptr, nullptr, nullptr, nullptr};
+    ModuleRegistry::instance().register_module(&other_mod);
+
+    auto& mgr = SkillsManager::instance();
+    mgr.load();
+    mgr.set_module("no_such_module_xyz");
+    for (const auto& n : mgr.active_skills()) {
+        if (n == "other_module_skill") {
+            std::cerr << "  чужой навык активен: " << n << std::endl;
+        }
+        ASSERT_TRUE(n != "other_module_skill");
+    }
+    mgr.set_module("");
+}
+
+/* И9.8: точечный выбор навыков переживает перезапуск.
+ *
+ * До этого active_ жил только в памяти: set_module() при следующем init
+ * восстанавливал набор по модулю и стирал ручную правку. Настройки
+ * хранятся в профиле хоста — как project_dir и active_module. */
+TEST(skills_selection_survives_a_restart) {
+    std::map<std::string, std::string> settings;
+    settings["wp_coder.active_module"] = "\"test_mod\"";
+    HostCallbacks cb;
+    cb.settings_get = [&settings](const std::string& key,
+                                  const std::string& def) -> std::string {
+        auto it = settings.find(key);
+        return it != settings.end() ? it->second : def;
+    };
+    cb.settings_set = [&settings](const std::string& key,
+                                  const std::string& value) {
+        settings[key] = value;
+    };
+    cb.llm_is_connected = []() { return false; };
+
+    auto& mgr = SkillsManager::instance();
+    engine().init(cb);
+    mgr.load();
+    mgr.set_module("test_mod");
+    const std::vector<std::string> before = mgr.active_skills();
+    ASSERT_TRUE(before.size() >= 2);
+    const std::string off = before.front();
+    mgr.toggle(off, false);
+
+    /* Сохраняем выбор и модуль. */
+    {
+        std::lock_guard<std::mutex> lk(engine().state().mtx);
+        engine().state().active_module = "test_mod";
+    }
+    engine().save_skills_settings();
+
+    /* Новая сессия: тот же профиль, навыки загружены заново. */
+    engine().init(cb);
+    mgr.load();
+    mgr.set_module("test_mod");
+    engine().apply_saved_skills();
+
+    bool still_off = true;
+    for (const auto& n : mgr.active_skills()) {
+        if (n == off) still_off = false;
+    }
+    if (!still_off) {
+        std::cerr << "  навык не остался выключенным: " << off << std::endl;
+    }
+    ASSERT_TRUE(still_off);
+    /* Остальные навыки модуля не потеряны. */
+    ASSERT_TRUE(mgr.active_skills().size() + 1 == before.size());
 }
 
 TEST(skills_refresh_active_picks_up_late_directory_skills) {

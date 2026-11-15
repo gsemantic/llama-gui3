@@ -10,6 +10,7 @@
 #include "../core/json_utils.h"
 #include "../core/prompts.h"   /* kCompactionSystemPrompt: сводщик получает свой промпт */
 #include "../core/session_store.h"   /* сжатая история переживает файл сессии */
+#include "../core/project.h"         /* project_detect_module: модуль по содержимому */
 
 #include <map>
 #include <fstream>
@@ -51,6 +52,38 @@ TEST(engine_parse_action_defaults_k_to_zero) {
 
     ASSERT_TRUE(ok);
     ASSERT_EQ(act.k, 0);
+}
+
+/* И9.8: модуль определяется по содержимому проекта, а не только по
+ * настройке. Наблюдение: в профиле остался "wordpress", а открыт
+ * каталог с одним calculator.py — агент получил WP-промпт и WP-навыки
+ * и написал отчёт про index.php, которого там нет. */
+TEST(project_detect_module_reads_the_project_not_the_setting) {
+    const std::string root = "/tmp/wp_coder_detect_module";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+
+    /* Один .py — уже Python-проект, даже без requirements.txt. */
+    { std::ofstream f(root + "/calculator.py"); f << "print(1)\n"; }
+    ASSERT_EQ(project_detect_module(root), std::string("python"));
+
+    /* Ядро WordPress узнаётся по wp-config.php. */
+    { std::ofstream f(root + "/wp-config.php"); f << "<?php\n"; }
+    ASSERT_EQ(project_detect_module(root), std::string("wordpress"));
+
+    /* Dockerfile без языка — devops, а не «ничего». */
+    fs::remove(fs::path(root) / "wp-config.php", ec);
+    fs::remove(fs::path(root) / "calculator.py", ec);
+    { std::ofstream f(root + "/Dockerfile"); f << "FROM scratch\n"; }
+    ASSERT_EQ(project_detect_module(root), std::string("devops"));
+
+    /* Пустой каталог — generic: выдумывать модуль нельзя. */
+    fs::remove(fs::path(root) / "Dockerfile", ec);
+    ASSERT_EQ(project_detect_module(root), std::string("generic"));
+
+    fs::remove_all(root, ec);
+    ASSERT_EQ(project_detect_module(""), std::string(""));
 }
 
 TEST(json_utf8_prefix_does_not_split_codepoint) {
@@ -1865,6 +1898,31 @@ TEST(push_event_delivers_the_final_answer_untruncated) {
 
     /* Дошло целиком: без обреза и без «…». */
     ASSERT_EQ(delivered, report);
+}
+
+TEST(push_event_marks_progress_tool_and_error_for_the_chat) {
+    /* Хост по этим меткам выбирает роль сообщения: прогресс, инструмент,
+     * ошибка. Без них всё ложилось как assistant, и в чате нельзя было
+     * отличить ответ от статуса. */
+    HostCallbacks cb;
+    cb.llm_is_connected = []() { return false; };
+    std::string delivered;
+    cb.chat_event = [&delivered](const std::string& e) { delivered = e; };
+    engine().init(cb);
+
+    engine().push_event(AgentEvent::Status, "шаг 1");
+    ASSERT_EQ(delivered, std::string("\x01шаг 1"));
+
+    engine().push_event(AgentEvent::Error, "сбой");
+    ASSERT_EQ(delivered, std::string("\x03сбой"));
+
+    engine().push_event(AgentEvent::Tool, "read_file -> ok");
+    ASSERT_TRUE(delivered.size() > 2);
+    ASSERT_EQ(delivered[0], '\x02');
+    ASSERT_TRUE(delivered.find("```text\n") != std::string::npos);
+
+    engine().push_event(AgentEvent::Assistant, "итог");
+    ASSERT_EQ(delivered, std::string("итог"));
 }
 
 TEST(push_event_still_trims_service_lines) {

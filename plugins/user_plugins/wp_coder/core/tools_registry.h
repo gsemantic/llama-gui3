@@ -40,6 +40,16 @@ public:
      * невалидировал аргументы и был невидим для политики режимов. */
     void register_def(ToolDef def);
 
+    /* Модуль, которому принадлежат регистрируемые сейчас инструменты.
+     *
+     * Ставит ModuleRegistry::init_all вокруг mod->init(), снимает после.
+     * Пусто — регистрация ядра. Отдельный сеттер, а не поле ToolDef у
+     * каждого вызова: 55 объявлений инструментов не должны помнить о
+     * теге, иначе новый модуль забудет его и его инструменты останутся
+     * видимыми в чужом проекте (см. ToolDef::module). */
+    void set_registration_module(const std::string& module);
+    const std::string& registration_module() const;
+
     /* --- Вызов --- */
 
     /* Полный результат: текст для модели плюс title/metadata/truncated
@@ -101,6 +111,7 @@ public:
 
 private:
     std::map<std::string, ToolDef> tools_;
+    std::string registration_module_;
 };
 
 } // namespace coder

@@ -16,6 +16,7 @@
 #include "../core/engine.h"
 #include "../core/base_tools.h"
 #include "../core/project.h"
+#include "../core/tool_protocol.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -75,6 +76,62 @@ std::string read_tool(const std::string& path, int offset = 0, int limit = 0) {
 }
 
 } // anonymous namespace
+
+/* И9.11: legacy-протокол (wp_action) обязан понимать OFFSET/LIMIT.
+ *
+ * Модель читала файл по описанию read_file, писала `OFFSET: 40`, а парсер
+ * знал только PATH/QUERY/ROOT/PATTERN/CONTENT/CLI/URL/K — ключи молча
+ * терялись, и read_file возвращал первую страницу. В сессии на калькуляторе
+ * это стоило ~10 шагов: модель читала один и тот же файл и не могла
+ * добраться до конца, чтобы начать правку. */
+TEST(read_tool_legacy_block_parses_offset_and_limit) {
+    json::JsonValue args;
+    const bool ok = parse_action(
+        "wp_action\nTOOL: read_file\nPATH: calculator.py\n"
+        "OFFSET: 40\nLIMIT: 90",
+        args);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(args.get_string("tool"), std::string("read_file"));
+    ASSERT_EQ(args.get_int("offset", 0), 40);
+    ASSERT_EQ(args.get_int("limit", 0), 90);
+}
+
+/* И9.12: DeepSeek DSML — формат вызова, который модель пишет текстом,
+ * когда провайдер не отдаёт нативный tool_calls. Плагин его не знал и
+ * отвечал «ты не вызвал инструмент», хотя вызов был:
+ *
+ *   <｜DSML｜ calls>
+ *   <｜DSML｜ invoke name="read_file">
+ *   <｜DSML｜ parameter name="path" string="true">calculator.py</｜DSML｜ parameter>
+ *   </｜DSML｜ invoke>
+ *   </｜DSML｜ calls>
+ */
+TEST(extract_dsml_call_from_deepseek_text) {
+    /* Ноль-ширинные пробелы после '<' — DeepSeek вставляет их на
+     * практике; без strip_zero_width блок не находится.
+     *
+     * \x9C и следующий D нельзя писать в одном литерале: \x съедает
+     * все hex-цифры подряд, и \x9CD превращается в один неверный байт.
+     * Поэтому \xEF\xBD\x9C и "DSML" разделены. */
+    const std::string text =
+        "<\xE2\x80\x8B\xEF\xBD\x9C" "DSML" "\xEF\xBD\x9C calls>\n"
+        "<\xE2\x80\x8B\xEF\xBD\x9C" "DSML" "\xEF\xBD\x9C invoke name=\"read_file\">\n"
+        "<\xE2\x80\x8B\xEF\xBD\x9C" "DSML" "\xEF\xBD\x9C parameter name=\"path\" "
+        "string=\"true\">calculator.py</\xE2\x80\x8B\xEF\xBD\x9C" "DSML" "\xEF\xBD\x9C "
+        "parameter>\n"
+        "</\xE2\x80\x8B\xEF\xBD\x9C" "DSML" "\xEF\xBD\x9C invoke>\n"
+        "</\xE2\x80\x8B\xEF\xBD\x9C" "DSML" "\xEF\xBD\x9C calls>";
+    std::string rest;
+    const std::string block = extract_action(text, rest);
+    std::cerr << "  DSML block: " << block << std::endl;
+    ASSERT_FALSE(block.empty());
+    json::JsonValue args;
+    ASSERT_TRUE(parse_action(block, args));
+    ASSERT_EQ(args.get_string("tool"), std::string("read_file"));
+    ASSERT_EQ(args.get_string("path"), std::string("calculator.py"));
+    /* Блок не остаётся в тексте ответа. */
+    ASSERT_TRUE(rest.find("DSML") == std::string::npos);
+}
 
 TEST(read_tool_has_offset_and_limit_instead_of_k) {
     fs::path t = make_tmp_tree();
