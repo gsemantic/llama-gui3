@@ -29,6 +29,7 @@ public:
     std::string create_conversation(const std::string& title = "New Chat");
     bool delete_conversation(const std::string& conversation_id);
     bool set_active_conversation(const std::string& conversation_id);
+    Conversation* get_active_conversation() const;
     Conversation* get_conversation(const std::string& conversation_id);
     std::vector<Conversation*> get_all_conversations() const;
 

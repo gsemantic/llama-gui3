@@ -1,6 +1,7 @@
 #include "../../include/core/openrouter_http_client.h"
 #include "../../include/core/logger.h"
 #include "../../include/core/net_utils.h"
+#include <chrono>
 #include <iostream>
 
 namespace llama_gui {
@@ -15,6 +16,13 @@ std::string utf8_log_prefix(const std::string& value, size_t limit) {
            (static_cast<unsigned char>(value[end]) & 0xC0) == 0x80)
         --end;
     return value.substr(0, end);
+}
+
+/* Монотонные миллисекунды для watchdog'а данных. */
+long long steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
 
 }
@@ -95,6 +103,7 @@ size_t OpenRouterHttpClient::stream_write_callback(void* contents, size_t size, 
         // Пропускаем пустые строки и не-data строки (комментарии ": ..." и т.п.)
         if (line.empty()) continue;
         if (line.find("data: ") != 0) continue;
+        ctx->last_data_ms = steady_ms();
 
         std::string data = line.substr(6);
         if (data == "[DONE]") {
@@ -112,6 +121,14 @@ int OpenRouterHttpClient::xferinfo_callback(void* clientp, curl_off_t, curl_off_
     auto* ctx = static_cast<StreamContext*>(clientp);
     // Возврат ненулевого значения немедленно прерывает transfer (connect/ожидание/данные).
     if (ctx && ctx->aborted && ctx->aborted->load()) {
+        return 1;
+    }
+    /* Keep-alive-строки (": ping") не считаются данными: если data:-чанков
+     * нет дольше data_idle_ms, обрываем попытку, чтобы
+     * complete_streaming_async сделал повтор/фолбэк, а не ждал до
+     * таймаута плагина. */
+    if (ctx && ctx->data_idle_ms > 0 && ctx->last_data_ms > 0 &&
+        steady_ms() - ctx->last_data_ms > ctx->data_idle_ms) {
         return 1;
     }
     return 0;
@@ -140,6 +157,8 @@ bool OpenRouterHttpClient::make_streaming_request(const std::string& endpoint, c
     StreamContext ctx;
     ctx.callback = callback;
     ctx.aborted = &aborted_;
+    ctx.data_idle_ms = idle_timeout_s > 0 ? static_cast<long long>(idle_timeout_s) * 1000 : 0;
+    ctx.last_data_ms = steady_ms();
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);

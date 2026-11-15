@@ -104,6 +104,11 @@ public:
     bool delete_conversation(const std::string& conversation_id);
     bool set_active_conversation(const std::string& conversation_id);
     Conversation* get_conversation(const std::string& conversation_id);
+    /* Беседа, в которую идёт текущий диалог. Возвращает запись по
+     * active_conversation_id_, а не «первую с флагом is_active»: флаг
+     * могли оставить включённым у нескольких бесед, и тогда события
+     * агента уезжали бы в чужую вкладку. */
+    Conversation* get_active_conversation() const;
     std::vector<Conversation*> get_all_conversations() const;
 
     // Управление сообщениями (делегирование StateManagerConversation)

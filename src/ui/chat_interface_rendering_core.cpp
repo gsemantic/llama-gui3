@@ -108,14 +108,7 @@ void ChatInterface::render_message_list() {
         last_scroll_y = current_scroll_y;
     }
 
-    std::vector<llama_gui::core::Conversation*> all_conversations = state_manager_.get_all_conversations();
-    const llama_gui::core::Conversation* active_conversation = nullptr;
-    for (llama_gui::core::Conversation* conv : all_conversations) {
-        if (conv->is_active) {
-            active_conversation = conv;
-            break;
-        }
-    }
+    const llama_gui::core::Conversation* active_conversation = state_manager_.get_active_conversation();
 
     if (!active_conversation) {
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", TR("chat.no_active_conversation"));
@@ -136,6 +129,14 @@ void ChatInterface::render_message_list() {
     static const ImVec4 ASSISTANT_COLOR(0.0f, 0.8f, 0.0f, 1.0f);
     static const ImVec4 SYSTEM_COLOR(0.8f, 0.8f, 0.0f, 1.0f);
     static const ImVec4 DEFAULT_COLOR(0.0f, 0.0f, 0.0f, 1.0f);
+    /* Прогресс агента — приглушённый, вывод инструмента — жёлтый.
+     * Итоговый ответ остаётся ASSISTANT_COLOR и markdown'ом. */
+    static const ImVec4 AGENT_STATUS_COLOR(0.65f, 0.65f, 0.65f, 1.0f);
+    static const ImVec4 AGENT_TOOL_COLOR(0.95f, 0.82f, 0.35f, 1.0f);
+    static const ImVec4 AGENT_ERROR_COLOR(1.0f, 0.4f, 0.4f, 1.0f);
+    static const std::string AGENT_STATUS_ROLE = "Status";
+    static const std::string AGENT_TOOL_ROLE = "Tool";
+    static const std::string AGENT_ERROR_ROLE = "Error";
 
     // Режим выделения действителен только для активной беседы и существующего индекса
     if (selectable_message_index_ >= 0 &&
@@ -150,9 +151,19 @@ void ChatInterface::render_message_list() {
     for (size_t i = 0; i < active_conversation->messages.size(); ++i) {
         const auto& message = active_conversation->messages[i];
 
+        /* У каждого сообщения свой ID-скоуп. MarkdownRenderer сбрасывает
+         * счётчик блоков на каждый render(), поэтому code-блоки разных
+         * сообщений получали одинаковые ##codeblk_0 и ImGui ругался на
+         * дубли ID. PushID(i) делает их уникальными, не меняя разметку. */
+        ImGui::PushID(static_cast<int>(i));
+
         const ImVec4& message_color = (message.role == "user") ? USER_COLOR :
                                        (message.role == "assistant") ? ASSISTANT_COLOR :
-                                       (message.role == "system") ? SYSTEM_COLOR : DEFAULT_COLOR;
+                                       (message.role == "system") ? SYSTEM_COLOR :
+                                       (message.role == "agent-status") ? AGENT_STATUS_COLOR :
+                                       (message.role == "agent-tool") ? AGENT_TOOL_COLOR :
+                                       (message.role == "agent-error") ? AGENT_ERROR_COLOR :
+                                       DEFAULT_COLOR;
 
         ImGui::BeginGroup();
 
@@ -165,7 +176,11 @@ void ChatInterface::render_message_list() {
 
         const std::string& role_text = (message.role == "user") ? cached_user_role :
                                        (message.role == "assistant") ? cached_assistant_role :
-                                       (message.role == "system") ? cached_system_role : message.role;
+                                       (message.role == "system") ? cached_system_role :
+                                       (message.role == "agent-status") ? AGENT_STATUS_ROLE :
+                                       (message.role == "agent-tool") ? AGENT_TOOL_ROLE :
+                                       (message.role == "agent-error") ? AGENT_ERROR_ROLE :
+                                       message.role;
 
         ImGui::TextColored(message_color, "%s:", role_text.c_str());
 
@@ -268,9 +283,9 @@ void ChatInterface::render_message_list() {
             select_menu_open_prev_ = menu_open_now;
         } else {
             // Рендеринг текста сообщения
-            if (message.role == "assistant") {
-                // Для ассистента — markdown с подсветкой кода и thinking-блоками
-                // Обернуть в Group для получения ID и hover-детекции
+            if (message.role == "assistant" || message.role == "agent-tool") {
+                // Для ассистента и вывода инструмента — markdown с
+                // подсветкой кода и thinking-блоками.
                 ImGui::BeginGroup();
                 MarkdownRenderer::instance().render_with_thinking(
                     message.content, message_color);
@@ -289,7 +304,7 @@ void ChatInterface::render_message_list() {
         if (!in_select_mode) {
             // Для ассистентских сообщений: проверяем hover по группе
             bool msg_hovered = false;
-            if (message.role == "assistant") {
+            if (message.role == "assistant" || message.role == "agent-tool") {
                 // Group rect доступен через GetItemRect — после EndGroup
                 ImVec2 r_min = ImGui::GetItemRectMin();
                 ImVec2 r_max = ImGui::GetItemRectMax();
@@ -324,6 +339,7 @@ void ChatInterface::render_message_list() {
         }
 
         ImGui::EndGroup();
+        ImGui::PopID();
         ImGui::Spacing();
         ImGui::Spacing();
     }

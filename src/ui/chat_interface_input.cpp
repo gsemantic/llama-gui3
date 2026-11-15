@@ -351,14 +351,8 @@ void ChatInterface::send_message_to_agent(const std::string& message) {
 
     // Получаем ID активной конверсации для доставки ответа агента
     std::string conv_id;
-    {
-        auto all_convs = state_manager_.get_all_conversations();
-        for (auto* conv : all_convs) {
-            if (conv->is_active) {
-                conv_id = conv->id;
-                break;
-            }
-        }
+    if (auto* active = state_manager_.get_active_conversation()) {
+        conv_id = active->id;
     }
 
     // Копируем данные для фонового потока (modes — локальный vector)

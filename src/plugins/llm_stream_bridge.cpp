@@ -41,6 +41,10 @@ void StreamBridge::push_text(const std::string& text) {
     emit_text(text, LLAMA_STREAM_DELTA_TEXT);
 }
 
+void StreamBridge::push_reasoning(const std::string& text) {
+    emit_text(text, LLAMA_STREAM_DELTA_REASONING);
+}
+
 void StreamBridge::set_usage(int prompt_tokens, int completion_tokens) {
     if (prompt_tokens > 0) prompt_tokens_ = prompt_tokens;
     if (completion_tokens > 0) completion_tokens_ = completion_tokens;

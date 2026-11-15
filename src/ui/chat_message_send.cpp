@@ -25,14 +25,7 @@ bool ChatInterface::submit_message(const std::string& content) {
 void ChatInterface::add_user_message(const std::string& content) {
     if (content.empty()) return;
 
-    std::vector<llama_gui::core::Conversation*> all_conversations = state_manager_.get_all_conversations();
-    llama_gui::core::Conversation* active_conv = nullptr;
-    for (llama_gui::core::Conversation* conv : all_conversations) {
-        if (conv->is_active) {
-            active_conv = conv;
-            break;
-        }
-    }
+    llama_gui::core::Conversation* active_conv = state_manager_.get_active_conversation();
 
     if (!active_conv) {
         std::string new_conv_id = state_manager_.create_conversation("New Chat");
@@ -55,14 +48,7 @@ void ChatInterface::add_user_message(const std::string& content) {
 void ChatInterface::add_assistant_message(const std::string& content) {
     if (content.empty()) return;
 
-    std::vector<llama_gui::core::Conversation*> all_conversations = state_manager_.get_all_conversations();
-    llama_gui::core::Conversation* active_conv = nullptr;
-    for (llama_gui::core::Conversation* conv : all_conversations) {
-        if (conv->is_active) {
-            active_conv = conv;
-            break;
-        }
-    }
+    llama_gui::core::Conversation* active_conv = state_manager_.get_active_conversation();
 
     if (!active_conv) {
         std::string new_conv_id = state_manager_.create_conversation("New Chat");
@@ -445,8 +431,11 @@ void ChatInterface::send_message() {
                 for (const auto& msg : active_conv->messages) {
                     if (msg.content.find("Error:") == std::string::npos) {
                         llama_gui::core::MessageRole role_enum = llama_gui::core::MessageRole::User;
-                        if (msg.role == "assistant") role_enum = llama_gui::core::MessageRole::Assistant;
-                        else if (msg.role == "system") role_enum = llama_gui::core::MessageRole::System;
+                        if (msg.role == "assistant" || msg.role == "agent-tool")
+                            role_enum = llama_gui::core::MessageRole::Assistant;
+                        else if (msg.role == "system" || msg.role == "agent-status" ||
+                                 msg.role == "agent-error")
+                            role_enum = llama_gui::core::MessageRole::System;
                         all_messages.push_back(llama_gui::core::ChatMessage(role_enum, msg.content));
                     }
                 }

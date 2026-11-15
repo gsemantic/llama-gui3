@@ -387,6 +387,27 @@ OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestP
         long http_code = http_client_.last_http_code();
         OpenRouterCompletionResponse resp = model_parser_.parse_completion_response(response_str);
 
+        /* HTML вместо JSON — не «ошибка парсинга», а страница шлюза
+         * (Cloudflare/Astro, 403/429). Она транзиентна чаще, чем кажется,
+         * поэтому даём шанс повторить; после попыток вернётся понятное
+         * сообщение из парсера. */
+        const bool html_body =
+            !resp.success &&
+            (response_str.find("<html") != std::string::npos ||
+             response_str.find("<body") != std::string::npos ||
+             response_str.find("<!DOCTYPE") != std::string::npos ||
+             response_str.find("</style>") != std::string::npos);
+        if (html_body && attempt < kMaxAttempts - 1 && !aborted_.load()) {
+            std::cout << "[CloudClient] HTML вместо JSON — попытка "
+                      << (attempt + 2) << "/" << kMaxAttempts << " через "
+                      << kRetryDelaysMs[attempt] << " мс" << std::endl;
+            for (int waited = 0; waited < kRetryDelaysMs[attempt] && !aborted_.load();
+                 waited += 100) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            continue;
+        }
+
         if (http_code == 429) {
             resp.success = false;
             resp.content.clear();
@@ -434,7 +455,8 @@ OpenRouterCompletionResponse OpenRouterClient::complete(const OpenRouterRequestP
 
 bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback,
                                                 OpenRouterCompletionResponse* out_response,
-                                                ToolChunkCallback on_tool) {
+                                                ToolChunkCallback on_tool,
+                                                ReasoningCallback on_reasoning) {
     if (!callback) return false;
 
     OpenRouterCompletionResponse acc_usage;  // Аккумулятор usage (токены) за всю генерацию
@@ -445,6 +467,11 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
     OpenRouterRequestParams stream_params = params;
     stream_params.stream = true;
     std::string body = build_completion_body(stream_params);
+    /* Агентский запрос (tools непусты) отличается от обычного чата:
+     * размышление здесь — не ответ. Если модель не выдала content и
+     * вызовов, reasoning обязан уйти только в reasoning-канал, иначе
+     * плагин примет обрывок мысли за итоговый отчёт и закроет задачу. */
+    const bool agent_request = !params.tools.empty() && on_reasoning != nullptr;
 
     // Стратегия ретраев:
     //  - до 3 попыток суммарно;
@@ -479,9 +506,18 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
         bool failed = false;
         bool retryable = false;
         std::string error_message;
+        /* Размышление приходит отдельным каналом. Модели вроде
+         * reflection/beam-free (kilo) кладут в reasoning_content весь
+         * ответ, оставляя content пустым: без этого накопления плагин
+         * видел пустой ход, а стриминговый запрос повторялся и уходил в
+         * дорогой не-стриминговый фолбэк. */
+        std::string reasoning_text;
+        bool saw_content = false;
+        bool saw_tool = false;
 
         http_client_.make_streaming_request("chat/completions", body,
-            [this, &callback, on_tool, &delivered_meaningful, &any_meaningful_delivered, &failed, &retryable, &error_message, &acc_usage, attempt](
+            [this, &callback, on_tool, on_reasoning, &delivered_meaningful, &any_meaningful_delivered, &failed, &retryable, &error_message, &acc_usage, attempt,
+             &reasoning_text, &saw_content, &saw_tool, agent_request](
                 const std::string& data, bool is_error, bool is_done, bool is_retryable) {
                 if (is_done) {
                     if (is_error) {
@@ -507,6 +543,17 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                                   << (attempt + 1) << "/" << kMaxAttempts
                                   << std::endl;
                     } else {
+                        /* Модель ответила только «размышлением» (content
+                         * пуст, инструментов нет). Для обычного чата отдаём
+                         * накопленный текст как ответ, ровно как это делает
+                         * не-стриминговый парсер (openrouter_model_parser.cpp).
+                         * Для агентского запроса reasoning уже ушёл в свой
+                         * канал, и подмешивать его в content нельзя: плагин
+                         * принял бы обрывок мысли за итоговый отчёт. */
+                        if (!saw_content && !saw_tool &&
+                            !reasoning_text.empty() && !agent_request) {
+                            callback(reasoning_text, false);
+                        }
                         callback("", true);
                     }
                     return;
@@ -531,8 +578,37 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                                 if (has_non_space(token)) {
                                     delivered_meaningful = true;
                                     any_meaningful_delivered = true;
+                                    /* Пробельный контент не считается
+                                     * ответом: иначе reasoning-модель,
+                                     * приславшая "\n\n" + reasoning_content,
+                                     * заблокировала бы подстановку
+                                     * размышления как текста. */
+                                    saw_content = true;
                                 }
                                 callback(token, false);
+                            }
+                        }
+                        /* «Размышление»: отдельный канал, не контент.
+                         * reflection/beam-free и подобные модели кладут сюда
+                         * весь ответ, оставляя content пустым. */
+                        if (choice.contains("delta") &&
+                            choice["delta"].is_object()) {
+                            const auto& delta = choice["delta"];
+                            for (const char* key :
+                                 {"reasoning_content", "reasoning"}) {
+                                if (!delta.contains(key) ||
+                                    !delta[key].is_string()) {
+                                    continue;
+                                }
+                                const std::string r =
+                                    delta[key].get<std::string>();
+                                if (r.empty()) continue;
+                                if (has_non_space(r)) {
+                                    delivered_meaningful = true;
+                                    any_meaningful_delivered = true;
+                                }
+                                reasoning_text += r;
+                                if (on_reasoning) on_reasoning(r);
                             }
                         }
                         /* И12.2: нативный вызов. Ход, состоящий ТОЛЬКО из
@@ -562,6 +638,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                                     delivered_meaningful = true;
                                     any_meaningful_delivered = true;
                                 }
+                                saw_tool = true;
                                 on_tool(index, name, arguments);
                             }
                         }
@@ -628,6 +705,24 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
          * быть не должно. finish_reason фолбэка («tool_calls» у ход-вызова)
          * доезжает наружу, иначе снаружи ход выглядел бы завершённым текстом. */
         const bool has_native_calls = !fallback.tool_calls.empty() && on_tool != nullptr;
+        /* Reasoning-модель без content: для агента (tools слались) это не
+         * ответ, а размышление. Отдаём его в reasoning-канал и закрываем
+         * ход пустым текстом — плагин попросит модель дать ответ, а не
+         * примет обрезок мысли за финал. Для обычного чата (tools нет)
+         * поведение прежнее: reasoning подставляется как текст. */
+        const bool agent_reasoning_only =
+            fallback.content_from_reasoning && !params.tools.empty() &&
+            on_reasoning != nullptr;
+        if (fallback.success && agent_reasoning_only) {
+            acc_usage.prompt_tokens = fallback.prompt_tokens;
+            acc_usage.completion_tokens = fallback.completion_tokens;
+            acc_usage.total_tokens = fallback.total_tokens;
+            acc_usage.finish_reason = fallback.finish_reason;
+            on_reasoning(fallback.content);
+            callback("", true);
+            if (out_response) *out_response = acc_usage;
+            return true;
+        }
         if (fallback.success &&
             (!fallback.content.empty() || has_native_calls)) {
             acc_usage.prompt_tokens = fallback.prompt_tokens;

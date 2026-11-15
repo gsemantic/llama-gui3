@@ -146,6 +146,11 @@ struct OpenRouterCompletionResponse {
     std::string model;
     std::string content;
     std::string finish_reason;
+    /* Текст, взятый из reasoning_content/reasoning, а не из content.
+     * Для агента это не ответ: reasoning-модель может потратить весь лимит
+     * на размышление и не дойти до вывода. Плагин должен попросить ответ,
+     * а не принять обрезок мысли за финал. */
+    bool content_from_reasoning = false;
 
     /* message.tool_calls нестримингового ответа. В стриминге куски вызова
      * идут дельтами и там своё накопление; здесь вызов приходит целиком.

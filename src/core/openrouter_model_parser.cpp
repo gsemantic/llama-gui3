@@ -477,15 +477,21 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
             // GLM/OpenCode-Zen и пр. reasoning-модели кладут ответ в
             // reasoning_content, оставляя content пустым. Используем его как
             // запасной вариант, иначе ответ кажется пустым.
+            bool used_reasoning = false;
             if (text.empty() && !native_calls) {
                 auto try_reasoning = [&](const json& msg) -> std::string {
                     if (msg.contains("reasoning_content") &&
                         msg["reasoning_content"].is_string()) {
-                        return msg["reasoning_content"].get<std::string>();
+                        std::string r =
+                            msg["reasoning_content"].get<std::string>();
+                        if (!r.empty()) used_reasoning = true;
+                        return r;
                     }
                     if (msg.contains("reasoning") &&
                         msg["reasoning"].is_string()) {
-                        return msg["reasoning"].get<std::string>();
+                        std::string r = msg["reasoning"].get<std::string>();
+                        if (!r.empty()) used_reasoning = true;
+                        return r;
                     }
                     return "";
                 };
@@ -506,11 +512,16 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
                 auto try_reasoning = [&](const json& msg) -> std::string {
                     if (msg.contains("reasoning_content") &&
                         msg["reasoning_content"].is_string()) {
-                        return msg["reasoning_content"].get<std::string>();
+                        std::string r =
+                            msg["reasoning_content"].get<std::string>();
+                        if (!r.empty()) used_reasoning = true;
+                        return r;
                     }
                     if (msg.contains("reasoning") &&
                         msg["reasoning"].is_string()) {
-                        return msg["reasoning"].get<std::string>();
+                        std::string r = msg["reasoning"].get<std::string>();
+                        if (!r.empty()) used_reasoning = true;
+                        return r;
                     }
                     return "";
                 };
@@ -521,6 +532,7 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
                 }
             }
             response.content = sanitize_response_text(text);
+            response.content_from_reasoning = used_reasoning;
         }
 
         if (response.content.empty() && response.tool_calls.empty() && !data.contains("error")) {
@@ -565,11 +577,35 @@ OpenRouterCompletionResponse OpenRouterModelParser::parse_completion_response(co
         response.success = true;
 
     } catch (const json::parse_error& e) {
-        response.error = "Ошибка парсинга ответа\n\n";
-        response.error += "Не удалось обработать ответ от сервера (обычно это ошибка "
-                          "провайдера, а не проблема сети).\n\n";
-        response.error += "Тело ответа: " + json_str.substr(0, 200) + "\n\n";
-        response.error += "Детали: " + std::string(e.what());
+        const std::string head = json_str.substr(0, 200);
+        const auto is_html = [&json_str]() {
+            const std::string h = json_str.substr(0, 1024);
+            return h.find("<!DOCTYPE html") != std::string::npos ||
+                   h.find("<!doctype html") != std::string::npos ||
+                   h.find("<html") != std::string::npos ||
+                   h.find("<body") != std::string::npos ||
+                   h.find("</style>") != std::string::npos ||
+                   h.find("<head") != std::string::npos;
+        };
+        if (is_html()) {
+            /* Шлюз вернул HTML-страницу (Cloudflare/Astro, 403/429 или
+             * неверный endpoint). Пользователю нужен не «парсинг JSON»,
+             * а причина и что проверить. */
+            response.error =
+                "Провайдер вернул HTML-страницу вместо JSON.\n\n"
+                "Обычно это HTTP 403/429, проверка Cloudflare или неверный "
+                "endpoint. Проверьте endpoint и API-ключ облачного "
+                "провайдера; если это лимит — подождите минуту.\n\n"
+                "Тело ответа: " + head;
+            LOG_ERROR("[CloudParser] HTML вместо JSON: " +
+                      (json_str.size() > 400 ? json_str.substr(0, 400) : json_str));
+        } else {
+            response.error = "Ошибка парсинга ответа\n\n";
+            response.error += "Не удалось обработать ответ от сервера (обычно это ошибка "
+                              "провайдера, а не проблема сети).\n\n";
+            response.error += "Тело ответа: " + head + "\n\n";
+            response.error += "Детали: " + std::string(e.what());
+        }
         response.success = false;
     } catch (const std::exception& e) {
         response.error = "Внутренняя ошибка\n\n";

@@ -99,20 +99,38 @@ void ChatInterface::process_pending_responses() {
 
         // Если conversation_id пуст (событие от агента), используем активную
         if (conv_id.empty()) {
-            auto all_convs = state_manager_.get_all_conversations();
-            for (auto* conv : all_convs) {
-                if (conv->is_active) {
-                    conv_id = conv->id;
-                    break;
-                }
+            if (auto* active = state_manager_.get_active_conversation()) {
+                conv_id = active->id;
             }
         }
 
-        if (conv_id.empty()) continue;
+        if (conv_id.empty()) {
+            std::cerr << "[Chat] событие агента отброшено: нет активной "
+                         "беседы" << std::endl;
+            continue;
+        }
 
         if (!content.empty()) {
+            /* Плагин помечает событие управляющим байтом в начале
+             * (Engine::push_event): \x01 — прогресс/рассуждение,
+             * \x02 — вывод инструмента, \x03 — ошибка. Хост снимает
+             * метку и выбирает роль, чтобы в чате прогресс, инструменты
+             * и итоговый ответ не выглядели одинаково. */
+            std::string text = content;
+            std::string role = "assistant";
+            if (text[0] == '\x01') {
+                role = "agent-status";
+                text.erase(0, 1);
+            } else if (text[0] == '\x02') {
+                role = "agent-tool";
+                text.erase(0, 1);
+            } else if (text[0] == '\x03') {
+                role = "agent-error";
+                text.erase(0, 1);
+            }
+            if (text.empty()) continue;
             // Add assistant response
-            llama_gui::core::Message assistant_msg("assistant", content);
+            llama_gui::core::Message assistant_msg(role, text);
             state_manager_.add_message(conv_id, assistant_msg);
 
             // Invalidate cache for this conversation since we added a new message

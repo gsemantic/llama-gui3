@@ -47,6 +47,10 @@ Conversation* StateManager::get_conversation(const std::string& conversation_id)
     return conversation_module_->get_conversation(conversation_id);
 }
 
+Conversation* StateManager::get_active_conversation() const {
+    return conversation_module_->get_active_conversation();
+}
+
 std::vector<Conversation*> StateManager::get_all_conversations() const {
     return conversation_module_->get_all_conversations();
 }

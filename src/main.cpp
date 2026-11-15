@@ -12,6 +12,10 @@
 #include <atomic>
 #include <thread>
 #include <cstring>
+#include <exception>
+#ifdef __linux__
+#include <execinfo.h>
+#endif
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include "core/llama_interface.h"
@@ -29,6 +33,45 @@
 using namespace llama_gui::core;
 using namespace llama_gui::ui;
 // using namespace agents;  // ОТКЛЮЧЕНО: агенты временно отключены
+
+// =========================================================================
+// Crash diagnostics
+// =========================================================================
+
+/* Приложение может упасть во время работы агента, и терминал закрывается
+ * вместе с ним — лога не остаётся. Этот обработчик пишет стек в
+ * llama-gui-crash.log рядом с текущим каталогом. Он не заменяет fix, но
+ * даёт следующий раз точку падения. */
+namespace {
+
+void crash_handler(int sig) {
+    void* frames[64];
+    int n = 0;
+#ifdef __linux__
+    n = backtrace(frames, 64);
+#endif
+    const int fd = open("llama-gui-crash.log",
+                        O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (fd >= 0) {
+        static const char kHeader[] = "\n=== llama-gui crash ===\n";
+        (void)write(fd, kHeader, sizeof(kHeader) - 1);
+#ifdef __linux__
+        backtrace_symbols_fd(frames, n, fd);
+#endif
+        close(fd);
+    }
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
+void install_crash_handlers() {
+    for (int sig : {SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS}) {
+        std::signal(sig, crash_handler);
+    }
+    std::set_terminate([] { crash_handler(SIGABRT); });
+}
+
+} // namespace
 
 // =========================================================================
 // Single-instance guard
@@ -334,6 +377,7 @@ int main(int argc, char* argv[]) {
     if (audit_ui) {
         setenv("SDL_VIDEODRIVER", "dummy", 0);
     } else {
+        install_crash_handlers();
         // Проверка single-instance: если другой экземпляр уже запущен — завершаемся
         if (!acquire_single_instance_lock()) {
             return 1;

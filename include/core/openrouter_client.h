@@ -77,9 +77,16 @@ public:
     using ToolChunkCallback = std::function<void(int index, const std::string& name,
                                                  const std::string& arguments)>;
 
+    /* «Размышление» модели (reasoning_content / reasoning). Отдельный
+     * колбэк по той же причине, что и ToolChunkCallback: у текста и
+     * размышления разные каналы, и склеивать их в один токен нельзя —
+     * плагин кладёт их в разные части сообщения. */
+    using ReasoningCallback = std::function<void(const std::string& text)>;
+
     bool complete_streaming_async(const OpenRouterRequestParams& params, StreamCallback callback,
                                  OpenRouterCompletionResponse* out_response = nullptr,
-                                 ToolChunkCallback on_tool = nullptr);
+                                 ToolChunkCallback on_tool = nullptr,
+                                 ReasoningCallback on_reasoning = nullptr);
 
     // API
     bool is_api_available();

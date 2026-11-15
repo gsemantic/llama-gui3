@@ -80,6 +80,14 @@ public:
     void set_enabled(bool e) { enabled_ = e; }
     bool is_enabled() const { return enabled_; }
 
+    /* Тестовая точка входа: токенизация одной строки без ImGui-контекста.
+     * Нужна, чтобы generic-язык (keywords == nullptr) проверялся
+     * регрессионно, а не только глазами в GUI. */
+    std::vector<HighlightToken> tokenize_for_test(const std::string& line,
+                                                  const std::string& lang) {
+        return tokenize(line, lang);
+    }
+
 private:
     MarkdownRenderer();
     SyntaxTheme theme_;
@@ -121,7 +129,7 @@ private:
     static std::string trim(const std::string& s);
 
     /* Состояние свёрнутости thinking-блоков (по индексу в сообщении). */
-    std::unordered_map<int, bool> thinking_collapsed_;
+    std::unordered_map<ImGuiID, bool> thinking_collapsed_;
     int thinking_counter_ = 0;
 };
 

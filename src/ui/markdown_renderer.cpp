@@ -347,6 +347,10 @@ static const char* kw_json[] = {
 
 /* Поиск ключевого слова в массиве. */
 static bool is_keyword(const std::string& word, const char** kws) {
+    /* nullptr — обычный случай generic-подсветки (язык не распознан).
+     * Прежний цикл разыменовывал kws[0] без проверки: любой code-блок
+     * с языком вроде text и словом в строке падал в tokenize→is_keyword. */
+    if (!kws) return false;
     for (int i = 0; kws[i]; ++i) {
         if (word == kws[i]) return true;
     }
@@ -368,6 +372,20 @@ static std::vector<HighlightToken> base_tokenize(const std::string& line,
     };
 
     while (i < line.size()) {
+        /* Не-ASCII (кириллица и др.) — одна UTF-8 последовательность как
+         * Plain-токен. Иначе generic-лексер режет байты по одному, и
+         * ImDrawList::AddText рисует обрывки как «?»: код-блок с русским
+         * текстом выглядел сломанной кодировкой, а обычный текст — нет. */
+        if (static_cast<unsigned char>(line[i]) >= 0x80) {
+            const size_t s = i++;
+            while (i < line.size() &&
+                   (static_cast<unsigned char>(line[i]) & 0xC0) == 0x80) {
+                ++i;
+            }
+            add_tok(s, i, TokKind::Plain);
+            continue;
+        }
+
         /* Комментарии C-стиля: // и /* */
         if (cpp_comments && i + 1 < line.size() && line[i] == '/' && line[i+1] == '/') {
             add_tok(i, line.size(), TokKind::Comment);
@@ -583,7 +601,10 @@ std::vector<HighlightToken> MarkdownRenderer::tokenize_xml_html(const std::strin
 
 std::vector<HighlightToken> MarkdownRenderer::tokenize(const std::string& line, const std::string& lang) {
     std::string l = lang;
-    std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+    /* ::tolower с отрицательным char — UB на байтах UTF-8. */
+    std::transform(l.begin(), l.end(), l.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
 
     if (l == "cpp" || l == "c++" || l == "c" || l == "hpp" || l == "h" ||
         l == "cc" || l == "cxx" || l == "hxx")
@@ -835,7 +856,12 @@ void MarkdownRenderer::render_code_block(const std::string& code, const std::str
 void MarkdownRenderer::render_thinking_block(const std::string& content) {
     ImGuiStyle& style = ImGui::GetStyle();
     int id = thinking_counter_++;
-    bool& collapsed = thinking_collapsed_[id];
+    const std::string toggle_id = "##think_toggle_" + std::to_string(id);
+    /* Ключ — ImGuiID с учётом текущего скоупа сообщения (ChatInterface
+     * делает PushID на каждое сообщение). Иначе первый thinking-блок
+     * каждого сообщения имел key 0 и сворачивался вместе с остальными. */
+    const ImGuiID state_key = ImGui::GetID(toggle_id.c_str());
+    bool& collapsed = thinking_collapsed_[state_key];
 
     /* Заголовок thinking. */
     ImVec4 header_color = theme_.thinking_label;
@@ -858,7 +884,7 @@ void MarkdownRenderer::render_thinking_block(const std::string& content) {
     if (collapsed && !preview.empty()) {
         label += ": " + preview;
     }
-    if (ImGui::SmallButton(("##think_toggle_" + std::to_string(id)).c_str())) {
+    if (ImGui::SmallButton(toggle_id.c_str())) {
         collapsed = !collapsed;
     }
     ImGui::SameLine(0, 0);

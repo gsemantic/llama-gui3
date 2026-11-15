@@ -75,6 +75,12 @@ private:
         std::string buffer;
         bool done = false;
         std::atomic<bool>* aborted = nullptr;
+        /* Контроль именно ДАННЫХ SSE, а не любых байтов: шлюзы шлют
+         * ":\n\n" как keep-alive, curl считает их трафиком, и
+         * CURLOPT_LOW_SPEED не срабатывает. Без этого счётчика поток без
+         * единого data:-чанка мог висеть до таймаута плагина. */
+        long long last_data_ms = 0;
+        long long data_idle_ms = 0;
     };
 
     std::string base_url_ = "https://openrouter.ai/api/v1";

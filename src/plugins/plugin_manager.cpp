@@ -1123,8 +1123,22 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
 
     /* Облако. complete_streaming_async работает синхронно (клиент обязан
      * дожить конца запроса), поэтому поток хоста — наш. */
+    /* Плагин вообще прислал max_tokens? ChatCompletionRequest по умолчанию
+     * содержит 512, и «не прислал» неотличимо от «прислал 512» по самому
+     * числу. Смотрим исходный JSON верхнего уровня, а не подстроку: слово
+     * max_tokens может встретиться в описании инструмента. */
+    bool agent_max_tokens_sent = false;
+    if (request_json && request_json[0]) {
+        const nlohmann::json req = nlohmann::json::parse(
+            request_json, nullptr, /*allow_exceptions=*/false);
+        agent_max_tokens_sent =
+            !req.is_discarded() && req.is_object() && req.contains("max_tokens");
+    }
+
     std::thread([bridge, finish, msgs, api_key, settings, system_prompt,
-                 cloud_tools, cloud_tool_choice, user_data]() {
+                 cloud_tools, cloud_tool_choice, user_data,
+                 agent_max_tokens = local_req.max_tokens,
+                 agent_max_tokens_sent]() {
         auto client = std::make_shared<core::OpenRouterClient>(api_key);
         const auto& cp = settings->cloud_provider();
         client->set_timeout(cp.timeout_ms);
@@ -1132,7 +1146,19 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
 
         core::OpenRouterRequestParams params;
         params.model = cp.model_id;
-        params.max_tokens = cp.max_output_tokens > 0 ? cp.max_output_tokens : std::max(settings->chat().max_tokens, 8192);
+        /* max_tokens: только если его прислал ПЛАГИН (профиль harness).
+         *
+         * Если ключа нет — поле не отправляется вообще, и действует дефолт
+         * провайдера. Это то же, что делает OpenCode: он берёт предел из
+         * каталога модели (для particle-1 — 131072), а не подставляет
+         * своё маленькое число.
+         *
+         * Раньше здесь был фолбэк на cp.max_output_tokens (1024) или 8192.
+         * Для reasoning-модели это обрывало размышление до ответа:
+         * finish_reason=length, content пуст. Пустое значение в
+         * OpenRouterRequestParams означает «не слать max_tokens» —
+         * OpenRouterHttpClient добавляет поле только при max_tokens > 0. */
+        params.max_tokens = agent_max_tokens_sent ? agent_max_tokens : 0;
         params.temperature = settings->chat().temperature;
         params.top_p = settings->chat().top_p;
         params.stream = true;
@@ -1184,6 +1210,12 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
             [bridge](int index, const std::string& name,
                      const std::string& arguments) {
                 bridge->push_tool_fragment(index, name, arguments);
+            },
+            /* «Размышление» — отдельный канал: плагин кладёт его в
+             * reasoning-часть, а не в ответ. Без этого reasoning-модели
+             * (reflection/beam-free и подобные) выглядели пустым ходом. */
+            [bridge](const std::string& text) {
+                bridge->push_reasoning(text);
             });
 
         if (!ok) {

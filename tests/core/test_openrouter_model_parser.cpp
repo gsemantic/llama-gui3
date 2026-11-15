@@ -268,9 +268,18 @@ void test_parse_completion_response_tool_calls_not_overwritten_by_reasoning() {
     TEST_ASSERT_EQUAL(response.tool_calls[0].name, std::string("calc_add"));
 }
 
+void test_parse_completion_response_html_is_named_as_provider_page() {
+    OpenRouterModelParser parser;
+    const std::string html =
+        "</style></head><body data-astro-cid-4wdtffzm><div>429</div></body></html>";
+    const auto response = parser.parse_completion_response(html);
+    TEST_ASSERT_TRUE(!response.success);
+    TEST_ASSERT_TRUE(response.error.find("HTML") != std::string::npos);
+    TEST_ASSERT_TRUE(response.error.find("endpoint") != std::string::npos);
+}
+
 int main() {
-    REGISTER_TEST(test_parse_model_basic);
-    REGISTER_TEST(test_parse_model_free_detection);
+    REGISTER_TEST(test_parse_model_basic);    REGISTER_TEST(test_parse_model_free_detection);
     REGISTER_TEST(test_parse_model_provider);
     REGISTER_TEST(test_parse_models_response_valid);
     REGISTER_TEST(test_parse_models_response_invalid);
@@ -282,6 +291,7 @@ int main() {
     REGISTER_TEST(test_parse_completion_response_native_tool_calls);
     REGISTER_TEST(test_parse_completion_response_tool_calls_arguments_object);
     REGISTER_TEST(test_parse_completion_response_tool_calls_not_overwritten_by_reasoning);
+    REGISTER_TEST(test_parse_completion_response_html_is_named_as_provider_page);
 
     return test::TestRunner::instance().run();
 }

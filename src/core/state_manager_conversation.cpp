@@ -22,6 +22,16 @@ std::string StateManagerConversation::create_conversation(const std::string& tit
     new_conversation.updated_at = std::to_string(std::time(nullptr));
     new_conversation.is_active = true; // Set conversation as active
 
+    /* Новая беседа становится единственной активной. Раньше флаг
+     * ставился только новой записи, а у прежних оставался прежним:
+     * после «Новый чат» в unordered_map оказывалось две активных
+     * беседы, и поиск «первой is_active» мог вернуть старую. События
+     * агента (у них пустой conversation_id) уезжали не в ту вкладку,
+     * поэтому в чате не было видно ни прогресса, ни итогового ответа. */
+    for (auto& pair : impl.conversations_) {
+        pair.second.is_active = false;
+    }
+
     // Add the conversation to our internal storage
     impl.conversations_[conversation_id] = new_conversation;
 
@@ -71,6 +81,14 @@ Conversation* StateManagerConversation::get_conversation(const std::string& conv
         return &it->second;
     }
     return nullptr;
+}
+
+Conversation* StateManagerConversation::get_active_conversation() const {
+    auto& impl = *state_manager_.impl_;
+    if (impl.active_conversation_id_.empty()) return nullptr;
+    auto it = impl.conversations_.find(impl.active_conversation_id_);
+    if (it == impl.conversations_.end()) return nullptr;
+    return &it->second;
 }
 
 std::vector<Conversation*> StateManagerConversation::get_all_conversations() const {
