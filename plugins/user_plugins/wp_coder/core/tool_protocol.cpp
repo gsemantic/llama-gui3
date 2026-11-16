@@ -287,6 +287,32 @@ bool extract_dsml(const std::string& text, std::string& block,
     return true;
 }
 
+/* Имя инструмента по форме аргументов.
+ *
+ * Модель в text-режиме иногда выдаёт только объект аргументов, без
+ * "tool": `{"content":"…","path":"a.txt"}`. Раньше такой объект не
+ * распознавался как вызов: он оставался в тексте ответа и уезжал
+ * пользователю нечитаемым JSON, а файл не создавался.
+ *
+ * Угадываем только однозначные формы реальных схем инструментов. Обычный
+ * JSON-ответ с другими ключами ({"answer":…}, {"items": […]}) сюда не
+ * попадает и остаётся текстом. */
+std::string infer_tool_from_args(const json::JsonValue& a) {
+    if (!a.is_object()) return "";
+    const std::string path = a.get_string("path");
+    const std::string content = a.get_string("content");
+    const bool has_k = !a.get("k").is_null() &&
+                       a.get_int("k", 0) > 0;
+    if (!path.empty() && has_k && !content.empty()) return "edit_file";
+    if (!path.empty() && !content.empty()) return "write_file";
+    if (!a.get_string("patchText").empty()) return "apply_patch";
+    if (!a.get_string("cli").empty()) return "bash";
+    /* path без содержимого — чтение: у write_file/edit_file content
+     * обязателен, у read_file — нет. */
+    if (!path.empty()) return "read_file";
+    return "";
+}
+
 std::string extract_action(const std::string& text, std::string& rest) {
     rest = text;
     /* DeepSeek DSML — до всех остальных форматов: блок не содержит ни
@@ -347,12 +373,32 @@ std::string extract_action(const std::string& text, std::string& rest) {
                 }
                 /* Unfenced JSON: строка начинается с { и содержит "tool": */
                 size_t uf_json = text.find("{\"tool\"");
-                if (uf_json == std::string::npos) return "";
-                size_t json_end = text.find('}', uf_json);
-                if (json_end == std::string::npos) return "";
-                std::string block = text.substr(uf_json, json_end - uf_json + 1);
-                rest = text.substr(0, uf_json) + text.substr(json_end + 1);
-                return block;
+                if (uf_json != std::string::npos) {
+                    size_t json_end = text.find('}', uf_json);
+                    if (json_end != std::string::npos) {
+                        std::string block = text.substr(uf_json, json_end - uf_json + 1);
+                        rest = text.substr(0, uf_json) + text.substr(json_end + 1);
+                        return block;
+                    }
+                }
+                /* Unfenced JSON БЕЗ "tool", но по форме аргументов это
+                 * вызов (наблюдение: {"content":…,"path":…}). Объект
+                 * вырезается из текста целиком, иначе он остаётся в
+                 * ответе пользователю нечитаемым JSON. */
+                for (size_t pos = text.find('{'); pos != std::string::npos;
+                     pos = text.find('{', pos + 1)) {
+                    json::JsonValue obj;
+                    size_t consumed = 0;
+                    if (!json::JsonValue::parse_prefix(text.substr(pos), consumed,
+                                                       obj)) {
+                        continue;
+                    }
+                    if (infer_tool_from_args(obj).empty()) continue;
+                    std::string block = text.substr(pos, consumed);
+                    rest = text.substr(0, pos) + text.substr(pos + consumed);
+                    return block;
+                }
+                return "";
             }
 
             /* Generic ``` fence (без "json" или "wp_action" суффикса).
@@ -485,11 +531,18 @@ bool parse_action(const std::string& block, json::JsonValue& args) {
         json::JsonValue parsed;
         size_t consumed = 0;
         if (json::JsonValue::parse_prefix(block, consumed, parsed) &&
-            parsed.is_object() && !parsed.get_string("tool").empty()) {
-            args = std::move(parsed);
-            return true;
+            parsed.is_object()) {
+            if (parsed.get_string("tool").empty()) {
+                const std::string inferred = infer_tool_from_args(parsed);
+                if (!inferred.empty()) parsed.set("tool", inferred);
+            }
+            if (!parsed.get_string("tool").empty()) {
+                args = std::move(parsed);
+                return true;
+            }
         }
-        /* Если tool нет — это не наш JSON (обычный ответ), падаем в legacy. */
+        /* Если tool нет и форма не опознана — это не наш JSON (обычный
+         * ответ), падаем в legacy. */
     }
     return parse_legacy_action(block, args);
 }

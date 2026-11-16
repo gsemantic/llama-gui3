@@ -160,6 +160,48 @@ TEST(engine_extract_action_no_block) {
     ASSERT_TRUE(block.empty());
 }
 
+/* Модель выдала только АРГУМЕНТЫ вызова, без "tool": такой JSON раньше
+ * оставался в тексте ответа и уезжал пользователю нечитаемым, а файл не
+ * создавался. */
+TEST(engine_extract_action_unfenced_json_args_only) {
+    std::string text =
+        "Создаю файл.\n\n{\"content\":\"print(1)\\n\",\"path\":\"src/a.py\"}";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+
+    ASSERT_TRUE(!block.empty());
+    ASSERT_TRUE(block.find("\"path\"") != std::string::npos);
+    ASSERT_TRUE(rest.find("Создаю файл.") != std::string::npos);
+    ASSERT_TRUE(rest.find("\"content\"") == std::string::npos);
+
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("write_file"));
+    ASSERT_EQ(act.path, std::string("src/a.py"));
+    ASSERT_EQ(act.content, std::string("print(1)\n"));
+}
+
+TEST(engine_extract_action_fenced_json_args_only) {
+    std::string text =
+        "Пишу.\n```json\n{\"content\":\"x\",\"path\":\"b.txt\"}\n```\nГотово.";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+    ASSERT_TRUE(!block.empty());
+    ASSERT_TRUE(rest.find("Готово.") != std::string::npos);
+
+    Engine::Action act;
+    ASSERT_TRUE(Engine::parse_action(block, act));
+    ASSERT_EQ(act.tool, std::string("write_file"));
+}
+
+/* Обычный JSON-ответ не должен приниматься за вызов. */
+TEST(engine_extract_action_leaves_plain_json_answer) {
+    std::string text = "Вот результат: {\"answer\":42,\"items\":[]}";
+    std::string rest;
+    std::string block = Engine::extract_action(text, rest);
+    ASSERT_TRUE(block.empty());
+}
+
 /* Generic ``` fence с JSON (без "json" суффикса) — модель qwen3-30b
  * часто генерирует именно такой формат:
  *   ```{"tool": "read_file", "path": "main.py"}``` */
