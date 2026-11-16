@@ -301,15 +301,47 @@ std::string infer_tool_from_args(const json::JsonValue& a) {
     if (!a.is_object()) return "";
     const std::string path = a.get_string("path");
     const std::string content = a.get_string("content");
+    const std::string query = a.get_string("query");
+    const std::string cli = a.get_string("cli");
     const bool has_k = !a.get("k").is_null() &&
                        a.get_int("k", 0) > 0;
-    if (!path.empty() && has_k && !content.empty()) return "edit_file";
-    if (!path.empty() && !content.empty()) return "write_file";
+
     if (!a.get_string("patchText").empty()) return "apply_patch";
-    if (!a.get_string("cli").empty()) return "bash";
-    /* path без содержимого — чтение: у write_file/edit_file content
-     * обязателен, у read_file — нет. */
-    if (!path.empty()) return "read_file";
+    if (!cli.empty()) return "bash";
+
+    if (!path.empty()) {
+        if (!content.empty()) {
+            /* k — обязателен у edit_file (замена диапазона строк), а query
+             * у него номер строки. search_replace — наоборот: query это
+             * искомый текст, k отсутствует. Без этого различия
+             * {"path","query","content"} был бы записан как write_file,
+             * то есть файл затёрся бы строкой замены. */
+            if (has_k) return "edit_file";
+            if (!query.empty()) return "search_replace";
+            return "write_file";
+        }
+        /* depth или хвостовой «/» — это каталог, а не файл. */
+        if (!a.get("depth").is_null() ||
+            (!path.empty() && path.back() == '/')) {
+            return "list";
+        }
+        /* path+query без content — pytest_run, но без подтверждения не
+         * угадываем: ошибка стоила бы теста. */
+        if (!query.empty()) return "";
+        return "read_file";
+    }
+
+    /* query без path: pip_install или skill_detail — обе схемы с одним
+     * query. Различаем по форме: у пакета бывает версия/дополнение. */
+    if (!query.empty() &&
+        (query.find(">=") != std::string::npos ||
+         query.find("<=") != std::string::npos ||
+         query.find("==") != std::string::npos ||
+         query.find('~') != std::string::npos ||
+         query.find('!') != std::string::npos ||
+         query.find('[') != std::string::npos)) {
+        return "pip_install";
+    }
     return "";
 }
 

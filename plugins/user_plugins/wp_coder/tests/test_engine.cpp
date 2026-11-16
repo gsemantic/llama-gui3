@@ -202,6 +202,38 @@ TEST(engine_extract_action_leaves_plain_json_answer) {
     ASSERT_TRUE(block.empty());
 }
 
+/* Формы из живой сессии: их нельзя путать между собой. */
+TEST(engine_infers_tool_by_exact_arg_shape) {
+    struct Case { const char* json; const char* tool; };
+    const Case cases[] = {
+        {"{\"content\":\"x\",\"path\":\"a.py\"}", "write_file"},
+        {"{\"content\":\"x\",\"path\":\"a.py\",\"k\":3}", "edit_file"},
+        {"{\"content\":\"new\",\"path\":\"a.py\",\"query\":\"old\",\"replace_all\":true}",
+         "search_replace"},
+        {"{\"path\":\"src/\"}", "list"},
+        {"{\"path\":\"src/\",\"depth\":2}", "list"},
+        {"{\"path\":\"a.py\",\"limit\":60}", "read_file"},
+        {"{\"cli\":\"pip install x\",\"timeout\":120}", "bash"},
+        {"{\"query\":\"Pillow>=10.0\"}", "pip_install"},
+    };
+    for (const Case& c : cases) {
+        std::string rest;
+        const std::string block = Engine::extract_action(c.json, rest);
+        Engine::Action act;
+        const bool ok = Engine::parse_action(block, act);
+        if (!ok || act.tool != c.tool) {
+            std::cerr << "  для " << c.json << " ожидался " << c.tool
+                      << ", получено «" << act.tool << "»" << std::endl;
+        }
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(act.tool, std::string(c.tool));
+    }
+    /* Неоднозначную «query» без версии не угадываем: это может быть
+     * skill_detail, а не пакет. */
+    std::string rest;
+    ASSERT_TRUE(Engine::extract_action("{\"query\":\"python_django\"}", rest).empty());
+}
+
 /* Generic ``` fence с JSON (без "json" суффикса) — модель qwen3-30b
  * часто генерирует именно такой формат:
  *   ```{"tool": "read_file", "path": "main.py"}``` */
