@@ -493,6 +493,12 @@ struct EngineState {
     double price_input_per_1m = 0;
     double price_output_per_1m = 0;
 
+    /* Фактическая модель хоста из model_current (шаг 3). Пусто — хост не
+     * умеет справочник (старый ABI) или модель не названа. Это НЕ то же
+     * самое, что model_hint профиля: здесь id модели, а не «local/cloud». */
+    std::string host_model_id;
+    std::string host_model_family;   // family из каталога models.dev
+
     /* Агент. */
     std::deque<AgentEvent> events;
     std::queue<std::string> inbox;
@@ -743,6 +749,20 @@ struct HostCallbacks {
                               const std::string& def)> settings_get;
     std::function<void(const std::string& key,
                        const std::string& value)> settings_set;
+
+    /* Справочник моделей models.dev (шаг 2 хоста).
+     *
+     * model_current — JSON текущей модели хоста ({"kind":"cloud"|"local",
+     * "source":..., "model_id":...,"family":...,"context":...,"max_output":...,
+     * "price_in":...,"price_out":...,"tools_supported":...}).
+     * model_info(model_id) — то же для названной модели.
+     *
+     * Слот пуст на старом хосте (в ABI нет полей) — и это НЕ ошибка:
+     * лимиты, цены и семейство остаются из настроек плагина/агента, как
+     * раньше. Пустой слот обязан вести себя как «каталога нет», а не как
+     * «модель не найдена», иначе старая связка молча потеряла бы лимиты. */
+    std::function<std::string()> model_current;
+    std::function<std::string(const std::string& model_id)> model_info;
 
     /* RAG. */
     std::function<bool(const std::string& path)> rag_process_document;

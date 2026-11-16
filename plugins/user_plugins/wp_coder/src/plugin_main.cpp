@@ -22,6 +22,7 @@
 #include "core/json_utils.h"
 #include "ui/coder_window.h"
 #include "host_bridge/llm_slots.h"
+#include "host_bridge/llm_stream_probe.h"
 
 /* Модули. */
 #include "modules/wordpress/wp_module.h"
@@ -182,6 +183,28 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         if (!g_api || !g_host) return;
         g_api->settings_set(g_host, key.c_str(), value.c_str());
     };
+    /* Справочник моделей. Поля в ABI появились позже — на старом хосте
+     * слоты остаются пустыми, и ядро берёт лимиты/цены из настроек. */
+    {
+        auto take = [](char* p) -> std::string {
+            if (!p) return "";
+            std::string s(p);
+            if (g_api && g_host) g_api->free_string(g_host, p);
+            return s;
+        };
+        if (coder::host::has_model_current(g_api)) {
+            cb.model_current = [take]() -> std::string {
+                if (!g_api || !g_host) return "";
+                return take(g_api->model_current(g_host));
+            };
+        }
+        if (coder::host::has_model_info(g_api)) {
+            cb.model_info = [take](const std::string& id) -> std::string {
+                if (!g_api || !g_host) return "";
+                return take(g_api->model_info(g_host, id.c_str()));
+            };
+        }
+    }
     cb.rag_process_document = [](const std::string& path) -> bool {
         if (!g_api || !g_host) return false;
         return g_api->rag_process_document(g_host, path.c_str()) == 1;

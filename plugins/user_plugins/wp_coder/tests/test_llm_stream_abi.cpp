@@ -47,6 +47,9 @@ using DeltaFn = void (*)(void*, const char*, int);
 using ToolDeltaFn = void (*)(void*, const char*, const char*, const char*);
 using DoneFn = void (*)(void*, const char*);
 
+char* fake_model_info(LlamaPluginHost*, const char*) { return nullptr; }
+char* fake_model_current(LlamaPluginHost*) { return nullptr; }
+
 int fake_llm_chat_stream(LlamaPluginHost*, const char* system_prompt,
                          const char* messages_json, const char* request_json,
                          void* user_data, DeltaFn on_delta,
@@ -116,6 +119,25 @@ TEST(probe_survives_a_null_api) {
     ASSERT_FALSE(host::has_llm_chat_stream(nullptr));
     ASSERT_FALSE(host::has_llm_ast_symbols(nullptr));
     ASSERT_FALSE(host::has_llm_chat_messages(nullptr));
+    ASSERT_FALSE(host::has_model_info(nullptr));
+    ASSERT_FALSE(host::has_model_current(nullptr));
+}
+
+/* Справочник моделей — append-only поля. У старого хоста их нет, и проба
+ * обязана ответить «нет» по размеру, не читая поле. */
+TEST(probe_rejects_an_old_host_without_model_catalog) {
+    LlamaHostApi api = api_with_stream();
+    api.model_info = nullptr;
+    api.model_current = nullptr;
+    api.size = offsetof(LlamaHostApi, model_info);  /* конец llm_chat_cancel */
+    ASSERT_FALSE(host::has_model_info(&api));
+    ASSERT_FALSE(host::has_model_current(&api));
+
+    api.model_info = fake_model_info;
+    api.model_current = fake_model_current;
+    api.size = offsetof(LlamaHostApi, model_current) + sizeof(api.model_current);
+    ASSERT_TRUE(host::has_model_info(&api));
+    ASSERT_TRUE(host::has_model_current(&api));
 }
 
 /* Проба не должна зависеть от того, заполнены ли более новые поля: хост

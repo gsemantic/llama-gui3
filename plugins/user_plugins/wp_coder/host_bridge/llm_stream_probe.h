@@ -46,5 +46,11 @@ bool has_llm_ast_symbols(const LlamaHostApi* api);
  * останавливать генерацию, а не только чтение. */
 bool has_llm_chat_cancel(const LlamaHostApi* api);
 
+/* Есть ли у хоста справочник моделей (шаг 2 хоста): model_info/model_current.
+ * Старый плагин их не читает, новый обязан проверить offsetof: поля в конце
+ * структуры, и у старого хоста за его `size` лежит чужое. */
+bool has_model_info(const LlamaHostApi* api);
+bool has_model_current(const LlamaHostApi* api);
+
 } // namespace host
 } // namespace coder

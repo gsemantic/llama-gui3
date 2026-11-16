@@ -29,6 +29,8 @@
 #include <filesystem>
 #include <limits>
 
+#include "json.h"
+
 namespace coder {
 
 /* Бюджет символов на историю сессии — единый источник: core/limits.h (4.5). */
@@ -729,6 +731,19 @@ std::string Engine::build_system_prompt() const {
     const std::string model_id =
         agent_rules ? agent_rules->model() : std::string();
 
+    /* Шаг 3: если агент модель не объявил — берём ФАКТИЧЕСКУЮ модель хоста
+     * из справочника. Семейство каталога уже нормализовано (deepseek-*,
+     * qwen, llama…), но family_of принимает и model_id, поэтому сначала
+     * пробуем family (он точнее: у local-модели имя файла может не
+     * содержать семейства). Пусто в обоих — остаётся прежний Default. */
+    std::string family_for_prompt = model_id;
+    if (family_for_prompt.empty()) {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        family_for_prompt = state_.host_model_family.empty()
+                                ? state_.host_model_id
+                                : state_.host_model_family;
+    }
+
     /* Пользовательский промпт (`wp_coder.agent_system_prompt`) заменяет
      * базовый ЦЕЛИКОМ, и акцент семейства подменённым текстом НЕ
      * добавляется: человек, заменивший протокол своим текстом, не
@@ -753,7 +768,7 @@ std::string Engine::build_system_prompt() const {
 
     sys += (state_.agent_system_prompt.empty() ||
             state_.agent_system_prompt_blocked)
-               ? SystemPrompt::provider(model_id, protocol)
+               ? SystemPrompt::provider(family_for_prompt, protocol)
                : state_.agent_system_prompt;
 
     /* И8.7: промпт агента — ДОПОЛНЕНИЕ к базовому, а не замена. Базовый
@@ -1455,6 +1470,43 @@ void Engine::load_settings() {
         state_.session_budget = budget > 0 ? static_cast<size_t>(budget) : 60000;
     }
 
+    /* Шаг 3: фактическая модель хоста из справочника models.dev.
+     *
+     * Порядок источников: явная настройка плагина важнее каталога (человек
+     * выставил число осознанно), каталог — важнее «не задано». Модель
+     * называется настоящим id: frontmatter агента — это роль, а не модель,
+     * и семейство по нему угадывалось мимо.
+     *
+     * Каталог спрашивается здесь, в load_settings, а не при рисовании: тот
+     * же принцип, что у цен выше, — цифра не должна меняться под рукой. */
+    long long catalog_context = 0;
+    long long catalog_max_output = 0;
+    double catalog_price_in = 0.0;
+    double catalog_price_out = 0.0;
+    state_.host_model_id.clear();
+    state_.host_model_family.clear();
+    if (cb_.model_current) {
+        json::JsonValue j;
+        const std::string raw = cb_.model_current();
+        if (!raw.empty() && json::JsonValue::parse(raw, j)) {
+            state_.host_model_id = j.get_string("model_id");
+            state_.host_model_family = j.get_string("family");
+            if (j.get_bool("found")) {
+                catalog_context = j.get_int("context");
+                catalog_max_output = j.get_int("max_output");
+                catalog_price_in = j.get_double("price_in");
+                catalog_price_out = j.get_double("price_out");
+            }
+        }
+    }
+    if (!state_.host_model_id.empty()) {
+        std::cout << "[wp_coder] модель хоста: " << state_.host_model_id
+                  << (state_.host_model_family.empty()
+                          ? std::string()
+                          : " (family " + state_.host_model_family + ")")
+                  << std::endl;
+    }
+
     /* И7.2: лимиты модели и настройки компакшна.
      *
      * У хоста их взять нечем — в ABI нет ни окна, ни лимита ответа, — а
@@ -1476,6 +1528,14 @@ void Engine::load_settings() {
         state_.model_limits.context = read_num("wp_coder.context_limit");
         state_.model_limits.input = read_num("wp_coder.input_limit");
         state_.model_limits.max_output = read_num("wp_coder.max_output_tokens");
+        /* Каталог — резерв, когда настройка не задана. Явный ноль/мусор
+         * настройки означает «не задано» (см. выше). */
+        if (state_.model_limits.context == 0 && catalog_context > 0) {
+            state_.model_limits.context = catalog_context;
+        }
+        if (state_.model_limits.max_output == 0 && catalog_max_output > 0) {
+            state_.model_limits.max_output = catalog_max_output;
+        }
         if (state_.model_limits.context < 0) state_.model_limits.context = 0;
         if (state_.model_limits.input < 0) state_.model_limits.input = 0;
         if (state_.model_limits.max_output < 0) state_.model_limits.max_output = 0;
@@ -1533,6 +1593,14 @@ void Engine::load_settings() {
         };
         state_.price_input_per_1m = read_price("wp_coder.price_input_per_1m");
         state_.price_output_per_1m = read_price("wp_coder.price_output_per_1m");
+        /* Каталог — только если настройка не задана; явная цена человека
+         * важнее ориентировочной из справочника. */
+        if (state_.price_input_per_1m == 0.0 && catalog_price_in > 0.0) {
+            state_.price_input_per_1m = catalog_price_in;
+        }
+        if (state_.price_output_per_1m == 0.0 && catalog_price_out > 0.0) {
+            state_.price_output_per_1m = catalog_price_out;
+        }
     }
 
     state_.allowed_external_paths.clear();

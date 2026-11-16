@@ -52,5 +52,25 @@ bool has_llm_chat_cancel(const LlamaHostApi* api)
     return api->llm_chat_cancel != nullptr;
 }
 
+bool has_model_info(const LlamaHostApi* api)
+{
+    if (!api) return false;
+    if (api->size < offsetof(LlamaHostApi, model_info) +
+                        sizeof(api->model_info)) {
+        return false;
+    }
+    return api->model_info != nullptr;
+}
+
+bool has_model_current(const LlamaHostApi* api)
+{
+    if (!api) return false;
+    if (api->size < offsetof(LlamaHostApi, model_current) +
+                        sizeof(api->model_current)) {
+        return false;
+    }
+    return api->model_current != nullptr;
+}
+
 } // namespace host
 } // namespace coder

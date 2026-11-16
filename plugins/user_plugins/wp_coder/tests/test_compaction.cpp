@@ -274,18 +274,30 @@ struct LimitsGuard {
         : limits(engine_state().model_limits),
           config(engine_state().compaction_config),
           budget(engine_state().session_budget),
-          steps(engine_state().max_steps) {}
+          steps(engine_state().max_steps),
+          price_in(engine_state().price_input_per_1m),
+          price_out(engine_state().price_output_per_1m),
+          host_model_id(engine_state().host_model_id),
+          host_model_family(engine_state().host_model_family) {}
     ~LimitsGuard() {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
         engine_state().model_limits = limits;
         engine_state().compaction_config = config;
         engine_state().session_budget = budget;
         engine_state().max_steps = steps;
+        engine_state().price_input_per_1m = price_in;
+        engine_state().price_output_per_1m = price_out;
+        engine_state().host_model_id = host_model_id;
+        engine_state().host_model_family = host_model_family;
     }
     compaction::ModelLimits limits;
     compaction::CompactionConfig config;
     size_t budget;
     int steps;
+    double price_in;
+    double price_out;
+    std::string host_model_id;
+    std::string host_model_family;
 };
 
 } // anonymous namespace
@@ -311,6 +323,74 @@ TEST(limits_are_read_from_settings) {
     /* Настройки должны влиять на порог, а не просто лежать в состоянии. */
     ASSERT_EQ(usable(engine_state().model_limits,
                      engine_state().compaction_config), 16000LL);
+}
+
+/* Шаг 3: если хост умеет model_current, лимиты и цены берутся из каталога,
+ * когда настройка плагина не задана. Пустые настройки — самый частый случай
+ * (compaction::usable()==0 → история не сжимается никогда). */
+TEST(catalog_fills_limits_and_prices_when_settings_unset) {
+    LimitsGuard guard;
+    {
+        std::map<std::string, std::string> v;
+        v["wp_coder.compaction_auto"] = "false";
+        HostCallbacks cb = settings_host(v);
+        cb.model_current = []() {
+            return std::string(
+                "{\"ok\":1,\"found\":true,\"kind\":\"cloud\","
+                "\"source\":\"exact\",\"model_id\":\"qwen3-32b\","
+                "\"family\":\"qwen\",\"context\":131072,\"max_output\":8192,"
+                "\"price_in\":0.11,\"price_out\":2.8}");
+        };
+        engine().init(cb);
+        engine().load_settings();
+    }
+    ASSERT_EQ(engine_state().model_limits.context, 131072LL);
+    ASSERT_EQ(engine_state().model_limits.max_output, 8192LL);
+    ASSERT_EQ(engine_state().price_input_per_1m, 0.11);
+    ASSERT_EQ(engine_state().price_output_per_1m, 2.8);
+    ASSERT_EQ(engine_state().host_model_id, std::string("qwen3-32b"));
+    ASSERT_EQ(engine_state().host_model_family, std::string("qwen"));
+}
+
+/* Явная настройка человека важнее ориентировочного каталога. */
+TEST(explicit_settings_win_over_catalog) {
+    LimitsGuard guard;
+    {
+        std::map<std::string, std::string> v;
+        v["wp_coder.context_limit"] = "32768";
+        v["wp_coder.max_output_tokens"] = "4096";
+        v["wp_coder.price_input_per_1m"] = "2";
+        v["wp_coder.price_output_per_1m"] = "3";
+        v["wp_coder.compaction_auto"] = "false";
+        HostCallbacks cb = settings_host(v);
+        cb.model_current = []() {
+            return std::string(
+                "{\"ok\":1,\"found\":true,\"model_id\":\"m\",\"context\":1000000,"
+                "\"max_output\":384000,\"price_in\":0.5,\"price_out\":1.5}");
+        };
+        engine().init(cb);
+        engine().load_settings();
+    }
+    ASSERT_EQ(engine_state().model_limits.context, 32768LL);
+    ASSERT_EQ(engine_state().model_limits.max_output, 4096LL);
+    ASSERT_EQ(engine_state().price_input_per_1m, 2.0);
+    ASSERT_EQ(engine_state().price_output_per_1m, 3.0);
+}
+
+/* Старый хост: слота model_current нет — лимиты остаются «не задано»,
+ * а не выдуманными. Это то же поведение, что до шага 3. */
+TEST(old_host_without_catalog_keeps_limits_unknown) {
+    LimitsGuard guard;
+    {
+        std::map<std::string, std::string> v;
+        v["wp_coder.compaction_auto"] = "false";
+        HostCallbacks cb = settings_host(v);
+        engine().init(cb);
+        engine().load_settings();
+    }
+    ASSERT_EQ(engine_state().model_limits.context, 0LL);
+    ASSERT_EQ(engine_state().model_limits.max_output, 0LL);
+    ASSERT_EQ(engine_state().host_model_id, std::string(""));
 }
 
 TEST(garbage_in_limits_means_unknown_not_a_guess) {
