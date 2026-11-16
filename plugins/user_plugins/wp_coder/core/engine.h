@@ -498,6 +498,10 @@ struct EngineState {
      * самое, что model_hint профиля: здесь id модели, а не «local/cloud». */
     std::string host_model_id;
     std::string host_model_family;   // family из каталога models.dev
+    /* Каталог знает, что модель НЕ умеет нативный вызов. Тогда его не
+     * шлём: проба стоила бы целого отказа провайдера. Отсутствие данных
+     * (tools_known=false) НЕ выключает пробу. */
+    bool catalog_tools_unsupported = false;
 
     /* Агент. */
     std::deque<AgentEvent> events;
@@ -899,6 +903,12 @@ public:
     /* Текущее состояние: нужно сборщику request_json, который решает,
      * слать ли tools в этом ходе. */
     NativeToolSupport native_tool_support() const;
+
+    /* Слать ли tools в запросе. false — нативный вызов не пробуем:
+     * либо провайдер уже отказал, либо каталог exact-записью говорит, что
+     * модель их не поддерживает. Confirmed (модель реально вызвала
+     * инструмент) побеждает каталог: факт сильнее справочника. */
+    bool native_tools_blocked() const;
 
     /* --- Навыки: сохранение выбора (И9.8) ---
      *

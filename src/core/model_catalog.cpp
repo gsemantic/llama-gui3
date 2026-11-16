@@ -89,6 +89,19 @@ bool extract_tools(const json& model) {
     return false;
 }
 
+/* Отличает «инструменты не поддерживаются» от «в каталоге о них ничего
+ * нет»: в первом случае нативный вызов можно не слать вовсе, во втором —
+ * обязана решать проба (NativeToolSupport::Unknown). */
+bool extract_tools_known(const json& model) {
+    if (!model.contains("capabilities")) return false;
+    const json& caps = model["capabilities"];
+    if (!caps.is_object() || !caps.contains("tools")) return false;
+    const json& tools = caps["tools"];
+    if (tools.is_boolean()) return true;
+    return tools.is_object() && tools.contains("supported") &&
+           tools["supported"].is_boolean();
+}
+
 bool extract_reasoning(const json& model) {
     if (!model.contains("capabilities")) return false;
     const json& caps = model["capabilities"];
@@ -211,6 +224,7 @@ std::vector<CatalogModel> parse_catalog(const std::string& raw_json) {
             cm.family = m.value("family", "");
             cm.base_url = extract_base_url(m);
             cm.tools_supported = extract_tools(m);
+            cm.tools_known = extract_tools_known(m);
             cm.reasoning = extract_reasoning(m);
             if (m.contains("limit") && m["limit"].is_object()) {
                 cm.context = int_or(m["limit"], "context");
@@ -251,6 +265,7 @@ void fill_info(CatalogModelInfo& info, const CatalogModel& m, const std::string&
     info.canonical_id = m.canonical_id;
     info.family = m.family;
     info.tools_supported = m.tools_supported;
+    info.tools_known = m.tools_known;
     info.reasoning = m.reasoning;
     info.context = m.context;
     info.max_output = m.max_output;
@@ -362,6 +377,7 @@ std::string CatalogModelInfo::to_json() const {
     j["canonical_model_id"] = canonical_id;
     j["family"] = family;
     j["tools_supported"] = tools_supported;
+    j["tools_known"] = tools_known;
     j["reasoning"] = reasoning;
     j["context"] = context;
     j["max_output"] = max_output;
@@ -417,6 +433,7 @@ void ModelCatalog::load_cache_locked() {
                 cm.family = m.value("family", "");
                 cm.base_url = m.value("base_url", "");
                 cm.tools_supported = m.value("tools_supported", false);
+                cm.tools_known = m.value("tools_known", false);
                 cm.reasoning = m.value("reasoning", false);
                 cm.context = m.value("context", 0);
                 cm.max_output = m.value("max_output", 0);
@@ -463,6 +480,7 @@ void ModelCatalog::save_cache(const std::vector<CatalogModel>& models,
         if (!m.family.empty()) j["family"] = m.family;
         if (!m.base_url.empty()) j["base_url"] = m.base_url;
         j["tools_supported"] = m.tools_supported;
+        j["tools_known"] = m.tools_known;
         j["reasoning"] = m.reasoning;
         j["context"] = m.context;
         j["max_output"] = m.max_output;

@@ -58,6 +58,12 @@ static const char* kCatalog = R"JSON({
         "limit": {"context": 4096, "output": 1024},
         "capabilities": {"tools": {"supported": false}},
         "api": {"chat-completions": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"}}
+      },
+      "tools-unknown": {
+        "id": "tools-unknown",
+        "name": "Tools Unknown",
+        "limit": {"context": 2048, "output": 512},
+        "api": {"chat-completions": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"}}
       }
     }
   },
@@ -81,20 +87,27 @@ static const char* kCatalog = R"JSON({
 
 void test_parse_projection() {
     const auto models = parse_catalog(kCatalog);
-    TEST_ASSERT_EQUAL(models.size(), static_cast<size_t>(4));
+    TEST_ASSERT_EQUAL(models.size(), static_cast<size_t>(5));
 
     const CatalogModel* found = nullptr;
     const CatalogModel* free_zero = nullptr;
     const CatalogModel* no_tariff = nullptr;
+    const CatalogModel* tools_unknown = nullptr;
     for (const auto& m : models) {
         if (m.provider == "alibaba" && m.model_id == "qwen3-32b") found = &m;
         if (m.provider == "alibaba" && m.model_id == "free-zero") free_zero = &m;
         if (m.provider == "alibaba" && m.model_id == "no-tariff") no_tariff = &m;
+        if (m.provider == "alibaba" && m.model_id == "tools-unknown") tools_unknown = &m;
     }
 
     TEST_ASSERT(found != nullptr);
     TEST_ASSERT(free_zero != nullptr);
     TEST_ASSERT(no_tariff != nullptr);
+    TEST_ASSERT(tools_unknown != nullptr);
+    /* tools_known отличает «каталог сказал: не умеет» от «каталог молчит». */
+    TEST_ASSERT(found->tools_known && found->tools_supported);
+    TEST_ASSERT(no_tariff->tools_known && !no_tariff->tools_supported);
+    TEST_ASSERT(!tools_unknown->tools_known);
     /* Бесплатная модель: тариф есть, цены нулевые. */
     TEST_ASSERT(free_zero->has_cost);
     TEST_ASSERT_EQUAL(free_zero->price_in, 0.0);

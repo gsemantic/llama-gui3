@@ -38,6 +38,7 @@ struct CatalogModel {
     std::string family;          // семейство
     std::string base_url;        // chat-completions base_url
     bool tools_supported = false;
+    bool tools_known = false;    // поле capabilities.tools присутствовало
     bool reasoning = false;
     int context = 0;
     int max_output = 0;
@@ -61,6 +62,7 @@ struct CatalogModelInfo {
     std::string canonical_id;
     std::string family;
     bool tools_supported = false;
+    bool tools_known = false;
     bool reasoning = false;
     int context = 0;
     int max_output = 0;

@@ -307,7 +307,7 @@ std::string build_request_json()
      *
      * Список — тот же, что в каталоге промпта (Engine::visible_tools),
      * иначе модель получила бы в промпте один набор, а вызвать другой. */
-    if (engine().native_tool_support() != NativeToolSupport::Rejected) {
+    if (!engine().native_tools_blocked()) {
         sep();
         j += "\"tools\":" +
              ToolsRegistry::instance().build_tool_specs_json(engine().visible_tools());

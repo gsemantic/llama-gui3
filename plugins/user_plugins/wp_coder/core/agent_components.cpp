@@ -1032,8 +1032,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 }
                 const std::string diag =
                     "model=" + model + " protocol=" +
-                    (engine().native_tool_support() == NativeToolSupport::Rejected
-                         ? "text" : "native");
+                    (engine().native_tools_blocked() ? "text" : "native");
                 this->push_event_(AgentEvent::Error,
                     ("[ошибка] LLM: " + err + " (" + diag + ")").c_str());
                 full_response = full_response.empty()
@@ -1321,8 +1320,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 }
             }
             std::string example;
-            if (engine().native_tool_support() ==
-                NativeToolSupport::Rejected) {
+            if (engine().native_tools_blocked()) {
                 if (read_something) {
                     example =
                         "The files are already read — the next step is a "

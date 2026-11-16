@@ -96,6 +96,9 @@ HostCallbacks recording_host() {
 struct EngineStateGuard {
     Engine& e;
     NativeToolSupport native_tools = NativeToolSupport::Unknown;
+    bool catalog_tools_unsupported = false;
+    std::string host_model_id;
+    std::string host_model_family;
     RunScope scope;
     std::string project_dir;
     std::string agent_system_prompt;
@@ -105,6 +108,9 @@ struct EngineStateGuard {
     explicit EngineStateGuard(Engine& engine) : e(engine) {
         std::lock_guard<std::mutex> lk(e.state().mtx);
         native_tools = e.state().native_tools;
+        catalog_tools_unsupported = e.state().catalog_tools_unsupported;
+        host_model_id = e.state().host_model_id;
+        host_model_family = e.state().host_model_family;
         scope = e.state().scope;
         project_dir = e.state().project_dir;
         agent_system_prompt = e.state().agent_system_prompt;
@@ -115,6 +121,9 @@ struct EngineStateGuard {
         {
             std::lock_guard<std::mutex> lk(e.state().mtx);
             e.state().native_tools = native_tools;
+            e.state().catalog_tools_unsupported = catalog_tools_unsupported;
+            e.state().host_model_id = host_model_id;
+            e.state().host_model_family = host_model_family;
             e.state().scope = scope;
             e.state().project_dir = project_dir;
             e.state().agent_system_prompt = agent_system_prompt;
@@ -174,6 +183,60 @@ bool request_has_tool(const std::string& request_json, const std::string& name) 
 }
 
 } // namespace
+
+/* Каталог exact-записью говорит «инструментов нет» — tools не шлём вовсе.
+ * Это не догадка: каталог сообщает конкретную модель, а проба стоила бы
+ * целого отказа провайдера и хода. */
+TEST(инструменты_не_уходят_если_каталог_знает_что_их_нет) {
+    Engine& eng = engine();
+    EngineStateGuard guard(eng);
+    HostCallbacks cb = recording_host();
+    cb.model_current = []() {
+        return std::string(
+            "{\"ok\":1,\"found\":true,\"source\":\"exact\",\"model_id\":\"m\","
+            "\"tools_known\":true,\"tools_supported\":false}");
+    };
+    eng.init(cb);
+    prepare(eng);
+    eng.load_settings();
+    ASSERT_TRUE(eng.native_tools_blocked());
+    ASSERT_EQ(tools_in_request(fetch_once(eng)), static_cast<size_t>(0));
+}
+
+/* Каталог ничего не знает о tools — проба обязана состояться. */
+TEST(инструменты_уходят_если_каталог_не_знает_про_них) {
+    Engine& eng = engine();
+    EngineStateGuard guard(eng);
+    HostCallbacks cb = recording_host();
+    cb.model_current = []() {
+        return std::string(
+            "{\"ok\":1,\"found\":true,\"model_id\":\"m\","
+            "\"tools_known\":false,\"tools_supported\":false}");
+    };
+    eng.init(cb);
+    prepare(eng);
+    eng.load_settings();
+    ASSERT_FALSE(eng.native_tools_blocked());
+    ASSERT_TRUE(tools_in_request(fetch_once(eng)) > 0);
+}
+
+/* Модель реально вызвала инструмент — факт сильнее справочника. */
+TEST(подтверждённый_вызов_побеждает_каталог) {
+    Engine& eng = engine();
+    EngineStateGuard guard(eng);
+    HostCallbacks cb = recording_host();
+    cb.model_current = []() {
+        return std::string(
+            "{\"ok\":1,\"found\":true,\"model_id\":\"m\","
+            "\"tools_known\":true,\"tools_supported\":false}");
+    };
+    eng.init(cb);
+    prepare(eng);
+    eng.load_settings();
+    eng.note_native_tool_seen();
+    ASSERT_FALSE(eng.native_tools_blocked());
+    ASSERT_TRUE(tools_in_request(fetch_once(eng)) > 0);
+}
 
 TEST(инструменты_уходят_в_запрос_без_профиля_harness) {
     /* Именно БЕЗ профиля: профиль и инструменты — разные вещи, и ранний

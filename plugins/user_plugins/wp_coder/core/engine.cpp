@@ -587,6 +587,13 @@ NativeToolSupport Engine::native_tool_support() const {
     return state_.native_tools;
 }
 
+bool Engine::native_tools_blocked() const {
+    std::lock_guard<std::mutex> lk(state_.mtx);
+    if (state_.native_tools == NativeToolSupport::Confirmed) return false;
+    if (state_.native_tools == NativeToolSupport::Rejected) return true;
+    return state_.catalog_tools_unsupported;
+}
+
 std::vector<std::string> Engine::visible_tools() const {
     /* И8.7: у агента правила СВОИ (agent::Info уже сложил поверх них
      * правила сессии), у хода сессии — правила сессии. Та же функция
@@ -1485,6 +1492,7 @@ void Engine::load_settings() {
     double catalog_price_out = 0.0;
     state_.host_model_id.clear();
     state_.host_model_family.clear();
+    state_.catalog_tools_unsupported = false;
     if (cb_.model_current) {
         json::JsonValue j;
         const std::string raw = cb_.model_current();
@@ -1496,6 +1504,9 @@ void Engine::load_settings() {
                 catalog_max_output = j.get_int("max_output");
                 catalog_price_in = j.get_double("price_in");
                 catalog_price_out = j.get_double("price_out");
+                /* Только явное «знаю, что не умеет». Иначе — проба. */
+                state_.catalog_tools_unsupported =
+                    j.get_bool("tools_known") && !j.get_bool("tools_supported");
             }
         }
     }
