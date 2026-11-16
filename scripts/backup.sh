@@ -255,6 +255,7 @@ save_secrets() {
         -not -path "$PROJECT_ROOT/.git/*" \
         -not -path "$PROJECT_ROOT/build/*" \
         -not -path "$PROJECT_ROOT/_backups/*" \
+        -not -path "$PROJECT_ROOT/wp_coder/*" \
         -not -path "$PROJECT_ROOT/_secrets/*" \
         -not -path "$PROJECT_ROOT/.mimocode/*" \
         -not -path "$PROJECT_ROOT/.cache/*" \
@@ -325,6 +326,9 @@ create_backup() {
         --exclude="_backups" \
         --exclude="_secrets" \
         --exclude="build" \
+        --exclude="/wp_coder" \
+        --exclude=".venv" \
+        --exclude=".pytest_cache" \
         --exclude="llama-gui-core" \
         --exclude=".mimocode" \
         --exclude=".cache" \
