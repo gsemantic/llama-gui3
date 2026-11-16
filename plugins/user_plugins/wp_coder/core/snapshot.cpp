@@ -192,6 +192,27 @@ bool is_ancestor_of(const std::string& rel, const std::string& base) {
            base[rel.size()] == '/';
 }
 
+/* Каталоги зависимостей и кэшей — не состояние проекта.
+ *
+ * Снимок копирует рабочий каталог целиком, и без этого правила копия
+ * включала бы `.venv` (десятки мегабайт на проект), `__pycache__`,
+ * `node_modules` и т.п. На реальном прогоне это дало 368 снимков общим
+ * размером 1,7 ГБ: каждый шаг агента копировал окружение, а не код.
+ *
+ * Имя сравнивается без пути и на ЛЮБОМ уровне: `node_modules` бывает
+ * вложенным в пакет. Список — только однозначные артефакты окружений и
+ * кэшей; общие `build`/`dist`/`target` сюда НЕ входят: в некоторых
+ * проектах это исходники, а не вывод сборки. */
+bool is_artifact_dir(const std::string& name) {
+    static const std::set<std::string> kArtifacts = {
+        ".venv", "venv", ".virtualenv", "__pycache__",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+        "node_modules", ".next", ".nuxt", ".parcel-cache", ".turbo",
+        ".gradle", ".cache", ".eggs",
+    };
+    return kArtifacts.count(name) > 0;
+}
+
 bool copy_tree(const fs::path& from, const fs::path& to,
                const std::string& skip_rel, std::string& err) {
     std::error_code ec;
@@ -218,6 +239,11 @@ bool copy_tree(const fs::path& from, const fs::path& to,
         const fs::path rel = entry.path().lexically_relative(from);
         if (rel.empty()) continue;
         const std::string rel_str = rel.string();
+        if (entry.is_directory() &&
+            is_artifact_dir(entry.path().filename().string())) {
+            it.disable_recursion_pending();
+            continue;
+        }
         if (is_under(rel_str, skip_rel)) {
             if (entry.is_directory()) it.disable_recursion_pending();
             continue;
@@ -291,6 +317,11 @@ void list_files(const fs::path& root, std::set<std::string>& out) {
     for (; it != end; it.increment(ec)) {
         if (ec) return;
         const fs::directory_entry entry = *it;
+        if (entry.is_directory() &&
+            is_artifact_dir(entry.path().filename().string())) {
+            it.disable_recursion_pending();
+            continue;
+        }
         if (entry.is_symlink()) {
             it.disable_recursion_pending();
             continue;

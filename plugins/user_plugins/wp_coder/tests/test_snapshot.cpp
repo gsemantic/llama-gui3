@@ -389,6 +389,36 @@ TEST(a_symlink_is_not_copied) {
     ASSERT_TRUE(fs::exists(fs::path(s.dir) / "a.txt"));
 }
 
+/* Окружения зависимостей и кэши не копируются: они не состояние проекта,
+ * и на каждый шаг агента копия окружения вырастала до десятков мегабайт
+ * (368 снимков → 1,7 ГБ). Обычные файлы при этом обязаны остаться. */
+TEST(artifact_directories_are_not_copied) {
+    SandBox sb("artifacts");
+    const fs::path root(sb.project());
+    auto put = [](const fs::path& p, const std::string& text) {
+        std::error_code ec;
+        fs::create_directories(p.parent_path(), ec);
+        write_file(p, text);
+    };
+    put(root / "a.txt", "one\n");
+    put(root / ".venv" / "lib" / "python" / "site.py", "x\n");
+    put(root / "__pycache__" / "a.cpython.pyc", "x\n");
+    put(root / "node_modules" / "pkg" / "index.js", "x\n");
+    put(root / "src" / "node_modules" / "nested" / "i.js", "x\n");
+    put(root / "src" / "keep.py", "print(1)\n");
+
+    const Snapshot s = take(sb.project(), sb.store());
+    ASSERT_TRUE(s.kind == Kind::DirCopy);
+    ASSERT_TRUE(fs::exists(fs::path(s.dir) / "a.txt"));
+    ASSERT_TRUE(fs::exists(fs::path(s.dir) / "src" / "keep.py"));
+    ASSERT_FALSE(fs::exists(fs::path(s.dir) / ".venv"));
+    ASSERT_FALSE(fs::exists(fs::path(s.dir) / "__pycache__"));
+    ASSERT_FALSE(fs::exists(fs::path(s.dir) / "node_modules"));
+    /* Вложенный node_modules исключён так же, как корневой: имя ищется на
+     * любом уровне, иначе пакет внутри пакета остался бы в копии. */
+    ASSERT_FALSE(fs::exists(fs::path(s.dir) / "src" / "node_modules"));
+}
+
 TEST(a_copy_needs_somewhere_to_live) {
     SandBox sb("nowhere");
     write_file(fs::path(sb.project()) / "a.txt", "one\n");
