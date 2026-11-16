@@ -12,6 +12,7 @@
 #include "layout_controller.h"
 #include "input_handler.h"
 #include "core/logger.h"
+#include "core/model_catalog.h"
 // Core agents
 #include "agents/file_agent.h"
 #include "agents/web_search_agent.h"
@@ -1646,6 +1647,11 @@ void MainWindow::initializePlugins() {
     subsystems.config_dir = get_config_directory();
     subsystems.data_dir = get_cache_directory();
     subsystems.plugins_dir = "plugins";
+
+    // Справочник моделей models.dev: кэш с диска сразу, HTTP — в фоне.
+    // Плагин спрашивает model_info/model_current; каталог должен быть уже
+    // тёплым к первому ходу, а не грузиться в момент вопроса.
+    llama_gui::core::ModelCatalog::instance().ensure_loaded();
 
     plugin_manager_->initialize(subsystems);
 

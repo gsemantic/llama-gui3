@@ -301,6 +301,37 @@ struct LlamaHostApi {
      * Поле в конце структуры; проверка — offsetof, как у остальных.
      */
     void (*llm_chat_cancel)(LlamaPluginHost* host, void* handle);
+
+    /*
+     * --- Справочник моделей (models.dev) ---
+     *
+     * Плагин не знает, какая модель реально обслуживает запрос: через ABI её
+     * не спросить. Из-за этого лимиты берутся из ручных настроек
+     * (`wp_coder.context_limit`), цены — из `wp_coder.price_input_per_1m`, а
+     * поддержка инструментов определяется пробой, общей на все модели.
+     *
+     * model_info — проекция каталога для конкретной модели. model_id — id
+     * модели (для облака — как в каталоге/провайдере, для локальной — имя
+     * файла GGUF). Возвращает malloc'd JSON (освободить free_string):
+     *   {"ok":1,"found":true,"source":"exact"|"reference"|"local"|"unknown",
+     *    "provider":"alibaba","model_id":"...","canonical_model_id":"...",
+     *    "family":"...","tools_supported":true,"reasoning":false,
+     *    "context":N,"max_output":N,
+     *    "price_in":x,"price_out":x,"cache_read":x,"cache_write":x}
+     *
+     * source: "exact" — найдено у провайдера с тем же endpoint; "reference" —
+     * у чужого (цены — ориентир, не счёт); "local" — локальная модель;
+     * "unknown" — не найдено (found=false, поля нулевые). Плагин обязан
+     * смотреть на source/found, а не считать нули настоящими лимитами.
+     *
+     * model_current — та же раскладка для модели, выбранной в хосте сейчас,
+     * плюс "kind":"local"|"cloud". null/пустой model_id = текущая модель.
+     *
+     * Поля добавлены в КОНЕЦ структуры (append-only), проверка наличия —
+     * через offsetof(LlamaHostApi, model_info), как у llm_chat_stream.
+     */
+    char* (*model_info)(LlamaPluginHost* host, const char* model_id);
+    char* (*model_current)(LlamaPluginHost* host);
 };
 
 /* Информация о плагине (возвращается ll_plugin_info, статична) */

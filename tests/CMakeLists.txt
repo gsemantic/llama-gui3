@@ -14,6 +14,13 @@ target_link_libraries(test_openrouter_model_parser PRIVATE core nlohmann_json::n
 target_include_directories(test_openrouter_model_parser PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME OpenRouterModelParser COMMAND test_openrouter_model_parser)
 
+# Model catalog tests: проекция models.dev, сопоставление по endpoint.
+# Сеть не нужна — проверяются чистые функции разбора и матчинга.
+add_executable(test_model_catalog core/test_model_catalog.cpp)
+target_link_libraries(test_model_catalog PRIVATE core nlohmann_json::nlohmann_json)
+target_include_directories(test_model_catalog PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME ModelCatalog COMMAND test_model_catalog)
+
 # RAG Deep Analysis Utils tests
 add_executable(test_rag_deep_analysis_utils core/test_rag_deep_analysis_utils.cpp)
 target_link_libraries(test_rag_deep_analysis_utils PRIVATE core)
@@ -189,6 +196,6 @@ endif()
 
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j4
-    DEPENDS test_openrouter_model_parser test_rag_deep_analysis_utils test_rag_chunking test_document_parser test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_llm_stream_bridge test_markdown_renderer test_plugin_loader test_menu_restore test_ui_auditor
+    DEPENDS test_openrouter_model_parser test_model_catalog test_rag_deep_analysis_utils test_rag_chunking test_document_parser test_dialog_manager test_context_monitor test_ast_parser test_menu_layout test_llm_stream_bridge test_markdown_renderer test_plugin_loader test_menu_restore test_ui_auditor
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

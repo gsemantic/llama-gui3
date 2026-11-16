@@ -1,5 +1,8 @@
 # Задача для новой сессии: хост-каталог моделей (models.dev) + поля ABI — шаг 1
 
+> **Статус: шаг 1 ВЫПОЛНЕН** (2026-11-16, версия `0.1.97`). Ниже — исходная
+> постановка; что реально сделано и что дальше — см. раздел «Итог шага 1».
+>
 > Напоминалка для следующей сессии. Читать в первую очередь. Актуальна на
 > коммит `88d48a5` (середина 2026-11-16).
 
@@ -108,6 +111,30 @@ cache_write`, `family`, `canonical_model_id`, `status`.
   endpoint+id, отдаёт проекцию; при недоступности сети — работает из кэша.
 - Старый `libwp_coder.so` (0.18.11) загружается и `PluginLoader`/`MenuRestore`
   остаются зелёными.
+
+## Итог шага 1 (2026-11-16, 0.1.97)
+
+Сделано:
+
+- `include/core/model_catalog.h` + `src/core/model_catalog.cpp`:
+  - HTTP `api.json` (gzip, `If-None-Match` → 304), кэш
+    `~/.llama-gui/models_dev.json` + `models_dev.etag`;
+  - проекция полей → `CatalogModel` (provider, canonical_id, family,
+    tools/reasoning, context/output, цены, base_url);
+  - сопоставление по endpoint: exact → canonical-суффикс → любой провайдер
+    (reference) → нормализованное имя; локально — по имени GGUF (`local`);
+  - `ensure_loaded()` грузит кэш и запускает фоновый refresh; вызывается из
+    `MainWindow::initializePlugins`, чтобы каталог был тёплым к первому ходу.
+- ABI: `model_info` и `model_current` в КОНЕЦ `LlamaHostApi`
+  (`include/plugins/plugin_api.h`), реализация в `plugin_manager.cpp`.
+- Тесты: `tests/core/test_model_catalog.cpp` (8 проверок разбора/матчинга);
+  append-only assert расширен на два новых поля.
+- Мутационный прогон: вставка поля в середину ломает append-only assert;
+  снятие условия endpoint в exact-матчинге ломает catalog-тесты.
+- Сборка зелёная, `ctest` 16/16 (было 15).
+
+Дальше (не в этом шаге): шаг 2 — замена `get_preset_price` на lookup по
+каталогу; шаг 3 — плагин читает `model_info`/`model_current`.
 
 ## Что НЕ входит в шаг 1
 

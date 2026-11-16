@@ -16,6 +16,7 @@
 #include "core/version.h"
 #include "core/openrouter_client.h"
 #include "core/env_manager.h"
+#include "core/model_catalog.h"
 
 #include <nlohmann/json.hpp>
 
@@ -1359,6 +1360,74 @@ void host_free_float_array(LlamaPluginHost*, float* arr) {
     free(arr);
 }
 
+namespace {
+
+/* Текущая модель хоста: облако — настройки провайдера, иначе путь GGUF. */
+bool host_is_cloud_model(core::Settings* settings, std::string& endpoint,
+                         std::string& model_id, std::string& local_path) {
+    if (!settings) return false;
+    const auto& cp = settings->cloud_provider();
+    if (cp.enabled && !cp.model_id.empty()) {
+        endpoint = cp.endpoint_url;
+        model_id = cp.model_id;
+        return true;
+    }
+    local_path = settings->get_model_path();
+    return false;
+}
+
+} // namespace
+
+/*
+ * host_model_info / host_model_current — справочник models.dev (шаг 1).
+ *
+ * Источник — core::ModelCatalog. Для локальной модели source="local" (в
+ * каталоге GGUF обычно нет), но подсказки по имени файла отдаются, если
+ * нашлись. Поля добавлены в конец LlamaHostApi; старый плагин их не читает.
+ */
+char* host_model_info(LlamaPluginHost* host, const char* model_id) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager) {
+        return strdup("{\"ok\":0,\"error\":\"host unavailable\"}");
+    }
+    auto* settings = pd->manager->subsystems.settings;
+    auto& catalog = core::ModelCatalog::instance();
+    catalog.ensure_loaded();
+
+    std::string endpoint;
+    std::string current_id;
+    std::string local_path;
+    const bool cloud = host_is_cloud_model(settings, endpoint, current_id, local_path);
+
+    const std::string requested =
+        (model_id && *model_id) ? std::string(model_id)
+                                : (cloud ? current_id : local_path);
+
+    core::CatalogModelInfo info = cloud ? catalog.lookup(endpoint, requested)
+                                 : catalog.lookup_local(requested);
+    const std::string json = info.to_json();
+    return strdup(json.c_str());
+}
+
+char* host_model_current(LlamaPluginHost* host) {
+    auto* pd = to_pd(host);
+    if (!pd || !pd->manager) {
+        return strdup("{\"ok\":0,\"error\":\"host unavailable\"}");
+    }
+    auto* settings = pd->manager->subsystems.settings;
+    auto& catalog = core::ModelCatalog::instance();
+    catalog.ensure_loaded();
+
+    std::string endpoint;
+    std::string model_id;
+    std::string local_path;
+    const bool cloud = host_is_cloud_model(settings, endpoint, model_id, local_path);
+
+    const std::string json =
+        catalog.current_json(cloud, endpoint, model_id, local_path);
+    return strdup(json.c_str());
+}
+
 LlamaPluginAgentMode* host_agent_mode_register(LlamaPluginHost* host,
                                                 const LlamaPluginAgentMode* mode) {
     auto* pd = to_pd(host);
@@ -1460,6 +1529,9 @@ const LlamaHostApi& host_api_table() {
         a.agent_mode_register = host_agent_mode_register;
         a.agent_mode_unregister = host_agent_mode_unregister;
         a.agent_mode_push_event = host_agent_mode_push_event;
+
+        a.model_info = host_model_info;
+        a.model_current = host_model_current;
         return a;
     }();
     return api;

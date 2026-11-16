@@ -102,6 +102,7 @@ set(CORE_SOURCES
     kv_cache_slot_manager.cpp
     kv_cache_storage.cpp
     model_performance_stats.cpp
+    model_catalog.cpp
     openrouter_client.cpp
     openrouter_http_client.cpp
     openrouter_model_parser.cpp

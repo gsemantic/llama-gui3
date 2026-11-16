@@ -354,10 +354,14 @@ void test_new_host_api_fields_are_append_only() {
                       offsetof(LlamaHostApi, llm_chat_stream) + sizeof(void*));
     TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, llm_chat_cancel),
                       offsetof(LlamaHostApi, llm_ast_symbols) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, model_info),
+                      offsetof(LlamaHostApi, llm_chat_cancel) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, model_current),
+                      offsetof(LlamaHostApi, model_info) + sizeof(void*));
     /* Хвост структуры — последнее добавленное поле. Сюда же добавляется
      * assert для следующего поля; суть проверки — «ничего не вставлено
      * в середину». */
-    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, llm_chat_cancel) + sizeof(void*),
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, model_current) + sizeof(void*),
                       sizeof(LlamaHostApi));
 }
 
