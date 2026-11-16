@@ -39,6 +39,25 @@ static const char* kCatalog = R"JSON({
         "cost": {"text": {"input": {"price": 0.5, "cache": {"read": 0.1, "write": 0.2}},
                           "output": {"price": 1.5}}},
         "api": {"chat-completions": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"}}
+      },
+      "free-zero": {
+        "id": "free-zero",
+        "canonical_id": "qwen/free-zero",
+        "name": "Free Zero",
+        "family": "qwen",
+        "limit": {"context": 4096, "output": 1024},
+        "capabilities": {"tools": {"supported": false}},
+        "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}},
+        "api": {"chat-completions": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"}}
+      },
+      "no-tariff": {
+        "id": "no-tariff",
+        "canonical_id": "qwen/no-tariff",
+        "name": "No Tariff",
+        "family": "qwen",
+        "limit": {"context": 4096, "output": 1024},
+        "capabilities": {"tools": {"supported": false}},
+        "api": {"chat-completions": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"}}
       }
     }
   },
@@ -62,18 +81,32 @@ static const char* kCatalog = R"JSON({
 
 void test_parse_projection() {
     const auto models = parse_catalog(kCatalog);
-    TEST_ASSERT_EQUAL(models.size(), static_cast<size_t>(2));
+    TEST_ASSERT_EQUAL(models.size(), static_cast<size_t>(4));
 
     const CatalogModel* found = nullptr;
-    for (const auto& m : models)
+    const CatalogModel* free_zero = nullptr;
+    const CatalogModel* no_tariff = nullptr;
+    for (const auto& m : models) {
         if (m.provider == "alibaba" && m.model_id == "qwen3-32b") found = &m;
+        if (m.provider == "alibaba" && m.model_id == "free-zero") free_zero = &m;
+        if (m.provider == "alibaba" && m.model_id == "no-tariff") no_tariff = &m;
+    }
 
     TEST_ASSERT(found != nullptr);
+    TEST_ASSERT(free_zero != nullptr);
+    TEST_ASSERT(no_tariff != nullptr);
+    /* Бесплатная модель: тариф есть, цены нулевые. */
+    TEST_ASSERT(free_zero->has_cost);
+    TEST_ASSERT_EQUAL(free_zero->price_in, 0.0);
+    TEST_ASSERT_EQUAL(free_zero->price_out, 0.0);
+    /* Записи без тарифа: не путать с бесплатной. */
+    TEST_ASSERT(!no_tariff->has_cost);
     TEST_ASSERT_EQUAL(found->family, std::string("qwen"));
     TEST_ASSERT_EQUAL(found->context, 131072);
     TEST_ASSERT_EQUAL(found->max_output, 8192);
     TEST_ASSERT(found->tools_supported);
     TEST_ASSERT(!found->reasoning);
+    TEST_ASSERT(found->has_cost);
     TEST_ASSERT_EQUAL(found->price_in, 0.5);
     TEST_ASSERT_EQUAL(found->price_out, 1.5);
     TEST_ASSERT_EQUAL(found->cache_read, 0.1);
@@ -124,6 +157,7 @@ void test_model_info_json_shape() {
     TEST_ASSERT(j.find("\"ok\":1") != std::string::npos);
     TEST_ASSERT(j.find("\"source\":\"reference\"") != std::string::npos);
     TEST_ASSERT(j.find("\"context\":131072") != std::string::npos);
+    TEST_ASSERT(j.find("\"has_cost\":true") != std::string::npos);
 }
 
 int main() {

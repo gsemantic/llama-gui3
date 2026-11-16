@@ -222,6 +222,7 @@ std::vector<CatalogModel> parse_catalog(const std::string& raw_json) {
                     const json& text = cost["text"];
                     if (text.contains("input") && text["input"].is_object()) {
                         cm.price_in = number_or(text["input"], "price");
+                        cm.has_cost = true;
                         if (text["input"].contains("cache") &&
                             text["input"]["cache"].is_object()) {
                             cm.cache_read = number_or(text["input"]["cache"], "read");
@@ -230,6 +231,7 @@ std::vector<CatalogModel> parse_catalog(const std::string& raw_json) {
                     }
                     if (text.contains("output") && text["output"].is_object()) {
                         cm.price_out = number_or(text["output"], "price");
+                        cm.has_cost = true;
                     }
                 }
             }
@@ -256,6 +258,7 @@ void fill_info(CatalogModelInfo& info, const CatalogModel& m, const std::string&
     info.price_out = m.price_out;
     info.cache_read = m.cache_read;
     info.cache_write = m.cache_write;
+    info.has_cost = m.has_cost;
 }
 
 } // namespace
@@ -366,6 +369,7 @@ std::string CatalogModelInfo::to_json() const {
     j["price_out"] = price_out;
     j["cache_read"] = cache_read;
     j["cache_write"] = cache_write;
+    j["has_cost"] = has_cost;
     return j.dump();
 }
 
@@ -420,6 +424,7 @@ void ModelCatalog::load_cache_locked() {
                 cm.price_out = m.value("price_out", 0.0);
                 cm.cache_read = m.value("cache_read", 0.0);
                 cm.cache_write = m.value("cache_write", 0.0);
+                cm.has_cost = m.value("has_cost", false);
                 loaded.push_back(std::move(cm));
             }
         }
@@ -465,6 +470,7 @@ void ModelCatalog::save_cache(const std::vector<CatalogModel>& models,
         j["price_out"] = m.price_out;
         j["cache_read"] = m.cache_read;
         j["cache_write"] = m.cache_write;
+        j["has_cost"] = m.has_cost;
         arr.push_back(std::move(j));
     }
     root["models"] = std::move(arr);
@@ -567,6 +573,16 @@ CatalogModelInfo ModelCatalog::lookup(const std::string& endpoint_url,
 CatalogModelInfo ModelCatalog::lookup_local(const std::string& model_path) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return match_local_model(models_, model_path);
+}
+
+bool ModelCatalog::lookup_price(const std::string& endpoint_url,
+                                const std::string& model_id,
+                                double& price_in, double& price_out) const {
+    const CatalogModelInfo info = lookup(endpoint_url, model_id);
+    if (!info.found || !info.has_cost) return false;
+    price_in = info.price_in;
+    price_out = info.price_out;
+    return true;
 }
 
 size_t ModelCatalog::size() const {

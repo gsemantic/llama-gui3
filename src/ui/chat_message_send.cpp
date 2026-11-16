@@ -5,6 +5,7 @@
 #include "../include/core/env_manager.h"
 #include "../include/ui/localization_manager.h"
 #include "../include/core/openrouter_client.h"
+#include "../include/core/model_catalog.h"
 #include "imgui.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -789,7 +790,16 @@ void ChatInterface::send_message_via_openrouter() {
                             double out_price = cp.price_output_per_1m;
                             if (cp.auto_price) {
                                 double pin = 0.0, pout = 0.0;
-                                if (llama_gui::core::get_preset_price(cp.model_id, pin, pout)) {
+                                /* Сначала каталог models.dev (по endpoint+id),
+                                 * затем — ручная таблица пресетов как
+                                 * офлайн-подстраховка. */
+                                auto& catalog =
+                                    llama_gui::core::ModelCatalog::instance();
+                                catalog.ensure_loaded();
+                                if (catalog.lookup_price(cp.endpoint_url, cp.model_id,
+                                                         pin, pout) ||
+                                    llama_gui::core::get_preset_price(cp.model_id,
+                                                                      pin, pout)) {
                                     in_price = pin;
                                     out_price = pout;
                                 }

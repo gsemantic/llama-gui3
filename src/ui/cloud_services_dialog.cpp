@@ -1,6 +1,7 @@
 #include "../include/ui/cloud_services_dialog.h"
 #include "../include/core/env_manager.h"
 #include "../include/core/openrouter_types.h"
+#include "../include/core/model_catalog.h"
 #include "../include/ui/localization_manager.h"
 #include "../include/ui/input_text_context_menu.h"
 #include "../include/core/logger.h"
@@ -1108,28 +1109,41 @@ void CloudServicesDialog::render() {
         ImGui::Text("Cost (USD per 1M tokens):");
         if (ImGui::Checkbox("Auto price (presets by model name)##auto_price", &auto_price_)) {
             settings_modified_ = true;
-            // При включении авто — подтягиваем пресет для текущей модели
+            // При включении авто — подтягиваем тариф из каталога models.dev,
+            // иначе из встроенных пресетов.
             if (auto_price_) {
                 double pin = 0.0, pout = 0.0;
-                if (get_preset_price(model_id_buf_, pin, pout)) {
+                auto& catalog = ModelCatalog::instance();
+                catalog.ensure_loaded();
+                if (catalog.lookup_price(endpoint_url_buf_, model_id_buf_, pin, pout) ||
+                    get_preset_price(model_id_buf_, pin, pout)) {
                     price_input_per_1m_ = pin;
                     price_output_per_1m_ = pout;
                 }
             }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Подставляет цену из встроенной таблицы по имени модели.\n"
+            ImGui::SetTooltip("Подставляет цену из каталога models.dev (по endpoint и модели).\n"
+                              "Если модели в каталоге нет — из встроенной таблицы.\n"
                               "Для бесплатных моделей цена = 0 (расход $0.00).");
         }
 
         if (auto_price_) {
-            // Показываем пресетную цену (только для чтения)
+            // Показываем цену каталога, иначе — пресетную (только для чтения)
             double pin = 0.0, pout = 0.0;
-            bool found = get_preset_price(model_id_buf_, pin, pout);
+            auto& catalog = ModelCatalog::instance();
+            catalog.ensure_loaded();
+            const bool from_catalog =
+                catalog.lookup_price(endpoint_url_buf_, model_id_buf_, pin, pout);
+            const bool found =
+                from_catalog || get_preset_price(model_id_buf_, pin, pout);
             ImGui::Indent();
             if (found) {
-                ImGui::Text("Input:  $%.2f / 1M", pin);
-                ImGui::Text("Output: $%.2f / 1M", pout);
+                ImGui::Text("Input:  $%.4g / 1M", pin);
+                ImGui::Text("Output: $%.4g / 1M", pout);
+                if (!from_catalog) {
+                    ImGui::TextDisabled("(preset table, no catalog entry)");
+                }
             } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                                    "No preset for '%s' — set manual price below", model_id_buf_);

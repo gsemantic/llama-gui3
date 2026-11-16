@@ -45,6 +45,7 @@ struct CatalogModel {
     double price_out = 0.0;
     double cache_read = 0.0;
     double cache_write = 0.0;
+    bool has_cost = false;
 };
 
 /* Результат сопоставления модели хоста с каталогом. */
@@ -67,6 +68,11 @@ struct CatalogModelInfo {
     double price_out = 0.0;
     double cache_read = 0.0;
     double cache_write = 0.0;
+    /* Есть ли в каталоге тариф вообще. Цена 0 у бесплатной модели — это
+     * настоящая цена, поэтому «0/0» нельзя отличить от «тарифа нет» по
+     * значениям; флаг нужен, чтобы auto_price не принял отсутствие данных
+     * за бесплатность. */
+    bool has_cost = false;
 
     /* JSON для ABI-полей model_info / model_current. */
     std::string to_json() const;
@@ -118,6 +124,14 @@ public:
 
     /* Сопоставить локальную модель по пути. */
     CatalogModelInfo lookup_local(const std::string& model_path) const;
+
+    /* Тариф для auto_price. Возвращает true, если модель найдена в каталоге
+     * И у записи есть тариф (has_cost). Цены — USD за 1M токенов.
+     * "reference"-совпадение тоже годится: это ориентир лучше ручного
+     * пресета, но вызывающий видит источник через CatalogModelInfo. */
+    bool lookup_price(const std::string& endpoint_url,
+                      const std::string& model_id,
+                      double& price_in, double& price_out) const;
 
     /* Полный JSON-снимок текущей облачной/локальной модели для ABI. */
     std::string current_json(bool cloud, const std::string& endpoint_url,
