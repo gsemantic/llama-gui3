@@ -167,6 +167,11 @@ struct EngineStateGuard {
     std::string cached;
     bool dirty = true;
     RunScope scope;
+    std::string agent_system_prompt;
+    bool prompt_override_replace = false;
+    bool agent_prompt_blocked = false;
+    int mode = 0;
+    std::string active_module;
 
     explicit EngineStateGuard(Engine& engine)
         : e(engine), scope(engine.state().scope) {
@@ -177,6 +182,11 @@ struct EngineStateGuard {
         config = e.state().instructions_config;
         cached = e.state().cached_system_prompt;
         dirty = e.state().prompt_dirty;
+        agent_system_prompt = e.state().agent_system_prompt;
+        prompt_override_replace = e.state().prompt_override_replace;
+        agent_prompt_blocked = e.state().agent_system_prompt_blocked;
+        mode = e.state().mode;
+        active_module = e.state().active_module;
     }
     ~EngineStateGuard() {
         std::lock_guard<std::mutex> lk(e.state().mtx);
@@ -186,6 +196,11 @@ struct EngineStateGuard {
         e.state().instructions_config = config;
         e.state().cached_system_prompt = cached;
         e.state().prompt_dirty = dirty;
+        e.state().agent_system_prompt = agent_system_prompt;
+        e.state().prompt_override_replace = prompt_override_replace;
+        e.state().agent_system_prompt_blocked = agent_prompt_blocked;
+        e.state().mode = mode;
+        e.state().active_module = active_module;
         e.state().scope = scope;
         /* Колбэк настроек в синглтоне после init может быть висящим:
          * его ставит проверка с локальной таблицей, а таблица умирает вместе
@@ -1200,4 +1215,77 @@ TEST(настоящая_загрузка_url_отличает_содержимо
     std::string nothing;
     ASSERT_FALSE(instruction::fetch_url("file://" + dir.at("нет-такого.md"),
                                         nothing));
+}
+
+/* ======================================================================
+ * P1: пользовательский промпт — слой, а не замена всего
+ * ====================================================================== */
+
+TEST(prompt_override_appends_by_default_and_replace_keeps_the_safety_layers) {
+    Engine& eng = engine();
+    EngineStateGuard guard(eng);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().project_dir.clear();
+        eng.state().instructions.clear();
+        eng.state().instructions_loaded = true;  /* не читать HOME в тесте */
+        eng.state().scope = RunScope();
+        eng.state().mode = 0;
+        eng.state().active_module.clear();
+        eng.state().agent_system_prompt = "CUSTOM USER RULE";
+        eng.state().agent_system_prompt_blocked = false;
+        eng.state().prompt_override_replace = false;
+    }
+    eng.invalidate_prompt_cache();
+    const std::string append = eng.build_system_prompt();
+
+    /* Append (по умолчанию): оба текста на месте, пользовательский —
+     * отдельным слоем. */
+    ASSERT_TRUE(append.find("CUSTOM USER RULE") != std::string::npos);
+    ASSERT_TRUE(append.find("## ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ") != std::string::npos);
+    ASSERT_TRUE(append.find("EXECUTION CONTRACT") != std::string::npos);
+
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().prompt_override_replace = true;
+    }
+    eng.invalidate_prompt_cache();
+    const std::string replace = eng.build_system_prompt();
+
+    /* Replace: базовый протокол заменён, но пользовательский текст — в
+     * базовом слое, а не отдельным блоком; страховка проекта остаётся. */
+    ASSERT_TRUE(replace.find("CUSTOM USER RULE") != std::string::npos);
+    ASSERT_TRUE(replace.find("## ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ") == std::string::npos);
+    ASSERT_TRUE(replace.find("EXECUTION CONTRACT") == std::string::npos);
+    ASSERT_TRUE(replace.find("СНАЧАЛА ОСМОТРИ ПРОЕКТ") != std::string::npos);
+}
+
+/* ======================================================================
+ * P2: AGENTS.md поднимается от проекта к home
+ * ====================================================================== */
+
+TEST(agents_md_is_loaded_from_parent_directories_up_to_home) {
+    TempDir home("home_p2");
+    home.write("projects/AGENTS.md", "ПРАВИЛО РОДИТЕЛЯ\n");
+    home.write("projects/app/AGENTS.md", "ПРАВИЛО ПРОЕКТА\n");
+    FakeHome fh(home.path.string());
+
+    Engine& eng = engine();
+    EngineStateGuard guard(eng);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        eng.state().project_dir = home.at("projects/app");
+        eng.state().instructions.clear();
+        eng.state().instructions_loaded = false;
+        eng.state().scope = RunScope();
+    }
+    eng.reload_instructions();
+    const std::string prompt = eng.build_system_prompt();
+
+    ASSERT_TRUE(prompt.find("ПРАВИЛО ПРОЕКТА") != std::string::npos);
+    ASSERT_TRUE(prompt.find("ПРАВИЛО РОДИТЕЛЯ") != std::string::npos);
+    /* Сначала корень проекта, затем родитель: более конкретное правило
+     * читается раньше общего. */
+    ASSERT_TRUE(prompt.find("ПРАВИЛО ПРОЕКТА") <
+                prompt.find("ПРАВИЛО РОДИТЕЛЯ"));
 }

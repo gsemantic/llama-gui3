@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
+#include <functional>
 #include <algorithm>
 #include <iostream>
 #include <cctype>
@@ -92,6 +93,131 @@ std::vector<std::string> SkillsManager::all_skill_names() const {
     return names;
 }
 
+/* ======================================================================
+ * P2: формат навыка — плоский .md и каталог с SKILL.md
+ * ====================================================================== */
+
+namespace {
+
+std::string trim_spaces(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    const size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+/* Разбор frontmatter `--- … ---`: нужны только name и description.
+ * Остальные поля (metadata, license) не интерпретируются, но и не
+ * ломают навык. */
+bool split_frontmatter(const std::string& text, std::string& name,
+                       std::string& description, std::string& body) {
+    if (text.rfind("---", 0) != 0) return false;
+    size_t pos = text.find('\n');
+    if (pos == std::string::npos) return false;
+    ++pos;
+    const size_t end = text.find("\n---", pos);
+    if (end == std::string::npos) return false;
+    std::istringstream fm(text.substr(pos, end - pos));
+    std::string line;
+    while (std::getline(fm, line)) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        const std::string key = trim_spaces(line.substr(0, colon));
+        const std::string value = trim_spaces(line.substr(colon + 1));
+        if (key == "name" && name.empty()) name = value;
+        else if (key == "description" && description.empty()) description = value;
+    }
+    size_t body_at = text.find('\n', end + 1);
+    body = (body_at == std::string::npos) ? std::string() : text.substr(body_at + 1);
+    return true;
+}
+
+/* Ресурсы каталога навыка: до трёх уровней, без скрытых и служебных.
+ * Верхняя граница нужна, чтобы навык с node_modules не вывалил в промпт
+ * тысячи путей. */
+std::vector<std::string> list_skill_dir_files(const fs::path& base) {
+    std::vector<std::string> out;
+    std::function<void(const fs::path&, int)> walk =
+        [&](const fs::path& dir, int depth) {
+            if (depth > 3 || out.size() >= 50) return;
+            std::error_code ec;
+            fs::directory_iterator it(dir, ec);
+            const fs::directory_iterator end;
+            if (ec) return;
+            for (; it != end && out.size() < 50; it.increment(ec)) {
+                if (ec) break;
+                const std::string name = it->path().filename().string();
+                if (name.empty() || name[0] == '.') continue;
+                if (name == "node_modules") continue;
+                std::error_code sec;
+                if (it->is_directory(sec)) {
+                    out.push_back(name + "/");
+                    walk(it->path(), depth + 1);
+                } else if (name != "SKILL.md") {
+                    out.push_back(name);
+                }
+            }
+        };
+    walk(base, 1);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/* Собрать Skill из файла. Имя (id) задаёт путь: stem для плоского
+ * `name.md`, имя каталога для `name/SKILL.md`. Это единственная форма,
+ * которую модель может безошибочно передать в skill_detail. */
+bool make_skill(const fs::path& file, const std::string& id,
+                const std::vector<std::string>& files, Skill& sk) {
+    std::ifstream f(file);
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string text = ss.str();
+    if (text.empty()) return false;
+
+    std::string fm_name, fm_desc, body;
+    const bool has_fm = split_frontmatter(text, fm_name, fm_desc, body);
+    sk.name = id;
+
+    if (has_fm) {
+        sk.description = fm_desc.empty() ? fm_name : fm_desc;
+        sk.body = body;
+        sk.files = files;
+        return true;
+    }
+
+    /* Старый формат: "# Заголовок", затем строка-описание, затем тело. */
+    std::istringstream is(text);
+    std::string line;
+    bool first = true;
+    bool have_title = false;
+    std::string title_holder;
+    std::stringstream body_out;
+    while (std::getline(is, line)) {
+        if (first && !line.empty() && line[0] == '#') {
+            title_holder = line.substr(1);
+            title_holder = trim_spaces(title_holder);
+            have_title = !title_holder.empty();
+            first = false;
+            continue;
+        }
+        if (first) first = false;
+        if (sk.description.empty() && !line.empty()) {
+            sk.description = line;
+            const size_t c = sk.description.find(": ");
+            if (c != std::string::npos) sk.description = sk.description.substr(c + 2);
+        } else {
+            body_out << line << "\n";
+        }
+    }
+    sk.body = body_out.str();
+    sk.files = files;
+    if (have_title && sk.description.empty()) sk.description = title_holder;
+    return !sk.name.empty();
+}
+
+} // namespace
+
 void SkillsManager::load_from_directory(const std::string& dir, const std::string& module_name) {
     std::error_code ec;
     if (!fs::exists(dir, ec)) return;
@@ -140,103 +266,66 @@ void SkillsManager::load_from_directory(const std::string& dir, const std::strin
         std::sort(sibling_files.begin(), sibling_files.end());
     }
 
+    const auto add_skill = [this, &module_name](Skill sk) {
+        /* Не дублируем если уже есть от модуля (модуль имеет приоритет). */
+        for (const auto& s : skills_) {
+            if (s.name == sk.name) return;
+        }
+        sk.module_name = module_name;
+        const std::string name = sk.name;
+        skills_.push_back(std::move(sk));
+        /* Установленный навык активен по умолчанию: человек положил
+         * файл в каталог навыков, значит он хочет, чтобы агент его
+         * видел. */
+        if (std::find(active_.begin(), active_.end(), name) == active_.end()) {
+            active_.push_back(name);
+        }
+    };
+
+    /* 1. Плоские `.md` в корне каталога — прежний формат. */
     for (auto it = fs::directory_iterator(dir, ec);
          it != fs::directory_iterator(); it.increment(ec)) {
         if (ec) break;
         if (!it->is_regular_file() || it->path().extension() != ".md") continue;
-
-        std::ifstream f(it->path());
-        if (!f) continue;
-
-        std::string text;
-        {
-            std::stringstream ss;
-            ss << f.rdbuf();
-            text = ss.str();
-        }
-
-        /* Имя навыка = имя файла БЕЗ расширения (skills/wp_setup.md ->
-         * wp_setup). Это единственная форма, которую модель может
-         * безошибочно передать в skill_detail QUERY (поиск точный).
-         *
-         * Раньше имя бралось из строки заголовка '# ...':
-         *   "# wp_setup — настройка окружения" -> "wp_setup — настройка окружения"
-         *   "# Late Skill"                    -> "Late"
-         * Оба варианта невызываемы или вводят в заблуждение.
-         * Заголовок теперь идёт в описание. */
         Skill sk;
-        sk.name = it->path().stem().string();
-
-        /* Формат .md: "# Заголовок", затем строка-описание, затем тело. */
-        std::istringstream is(text);
-        std::string line;
-        bool first = true;
-        bool have_title = false;
-        std::string title_holder;
-        std::stringstream body;
-
-        while (std::getline(is, line)) {
-            if (first && !line.empty() && line[0] == '#') {
-                title_holder = line.substr(1);
-                size_t b = 0;
-                while (b < title_holder.size() &&
-                       (title_holder[b] == ' ' || title_holder[b] == '\t')) ++b;
-                title_holder = title_holder.substr(b);
-                have_title = !title_holder.empty();
-                first = false;
-                continue;
-            }
-            if (first) first = false;
-
-            if (sk.description.empty() && !line.empty()) {
-                sk.description = line;
-                size_t c = sk.description.find(": ");
-                if (c != std::string::npos)
-                    sk.description = sk.description.substr(c + 2);
-            } else {
-                body << line << "\n";
-            }
+        if (!make_skill(it->path(), it->path().stem().string(), sibling_files, sk)) {
+            continue;
         }
-        sk.body = body.str();
-        /* И9.5: ресурсы каталога достаются навыку вместе с телом. */
-        sk.files = sibling_files;
-
-        /* Имя из файла — основное. Заголовок в описании не дублируем: он
-         * почти всегда совпадает с именем. */
-        if (have_title && sk.name.empty()) {
-            /* Файл без имени (например ".md") — sanitized-заголовок. */
-            std::string t;
-            for (char c : title_holder) {
-                if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
-                    t += c;
-            }
-            if (t.empty()) t = "skill";
-            sk.name = t;
-        }
-        if (have_title && sk.description.empty()) {
-            sk.description = title_holder;
-        }
-
-        /* Не дублируем если уже есть от модуля (модуль имеет приоритет). */
-        bool exists = false;
-        for (const auto& s : skills_) {
-            if (s.name == sk.name) { exists = true; break; }
-        }
-        if (!exists) {
-            sk.module_name = module_name;
-            skills_.push_back(std::move(sk));
-            /* Установленный навык активен по умолчанию: человек положил
-             * файл в каталог навыков, значит он хочет, чтобы агент его
-             * видел. Иначе build_skills_prompt() (только активные) не
-             * показал бы его до ручного включения в UI, и «навык
-             * установлен, но модель о нём не знает» выглядело бы как
-             * ошибка загрузки. */
-            if (std::find(active_.begin(), active_.end(),
-                          skills_.back().name) == active_.end()) {
-                active_.push_back(skills_.back().name);
-            }
-        }
+        add_skill(std::move(sk));
     }
+
+    /* 2. Каталоги с `SKILL.md` (формат OpenCode): до шести уровней,
+     * скрытые и node_modules пропускаются, внутрь найденного навыка не
+     * спускаемся. Идентификатор — имя каталога, содержащего SKILL.md. */
+    std::function<void(const fs::path&, int)> walk_dirs =
+        [&](const fs::path& base, int depth) {
+            if (depth > 6) return;
+            std::error_code wec;
+            fs::directory_iterator it(base, wec);
+            const fs::directory_iterator end;
+            if (wec) return;
+            for (; it != end; it.increment(wec)) {
+                if (wec) break;
+                std::error_code sec;
+                if (!it->is_directory(sec)) continue;
+                const std::string name = it->path().filename().string();
+                if (name.empty() || name[0] == '.' || name == "node_modules") {
+                    continue;
+                }
+                const fs::path skill_file = it->path() / "SKILL.md";
+                std::error_code fec;
+                if (fs::is_regular_file(skill_file, fec)) {
+                    Skill sk;
+                    if (make_skill(skill_file, name,
+                                   list_skill_dir_files(it->path()), sk)) {
+                        add_skill(std::move(sk));
+                    }
+                    continue;  /* внутрь навыка не спускаемся */
+                }
+                walk_dirs(it->path(), depth + 1);
+            }
+        };
+    walk_dirs(dir, 1);
 }
 
 void SkillsManager::set_module(const std::string& module_name) {

@@ -6,6 +6,7 @@
 #include "harness_profile.h"
 #include "todo_panel.h"
 #include "prompts.h"
+#include "prompt_composer.h"
 #include "shell.h"
 #include "engine.h"
 #include "subagent.h"
@@ -709,13 +710,17 @@ std::string Engine::build_system_prompt() const {
      * пользовательском промпте окажется в самом конце. Дублировать его в
      * env-блоке не будем: у И9.4 это задача, и там решается, что из
      * «Workspace root folder» остаётся в плане, а что — уже сказано здесь. */
-    std::string sys;
+    /* Единый порядок слоёв: core/prompt_composer.h. Здесь только сборка
+     * блоков; сортировку и разделители делает compose_prompt, поэтому
+     * следующая правка не может поставить блок «не туда» незаметно. */
+    std::vector<PromptBlock> blocks;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         if (!state_.project_dir.empty()) {
-            sys = "## КОРНЕВОЙ КАТАЛОГ ПРОЕКТА\n"
-                  "Корень: " + state_.project_dir + "\n"
-                  "Все пути в инструментах — относительно этого каталога.\n\n";
+            blocks.push_back({PromptLayer::ProjectRoot,
+                "## КОРНЕВОЙ КАТАЛОГ ПРОЕКТА\n"
+                "Корень: " + state_.project_dir + "\n"
+                "Все пути в инструментах — относительно этого каталога."});
         }
     }
 
@@ -751,12 +756,6 @@ std::string Engine::build_system_prompt() const {
                                 : state_.host_model_family;
     }
 
-    /* Пользовательский промпт (`wp_coder.agent_system_prompt`) заменяет
-     * базовый ЦЕЛИКОМ, и акцент семейства подменённым текстом НЕ
-     * добавляется: человек, заменивший протокол своим текстом, не
-     * обязан узнать в приписке «ровно один блок за сообщение», а блок,
-     * поясняющий то, чего в промпте больше нет, противоречил бы ему
-     * прямо. */
     /* И12.2: протокол вызова инструмента.
      *
      * Текстовый блок уходит модели ТОЛЬКО пока нет доказательства, что
@@ -773,26 +772,38 @@ std::string Engine::build_system_prompt() const {
             ? SystemPrompt::Protocol::Native
             : SystemPrompt::Protocol::Text;
 
-    sys += (state_.agent_system_prompt.empty() ||
-            state_.agent_system_prompt_blocked)
-               ? SystemPrompt::provider(family_for_prompt, protocol)
-               : state_.agent_system_prompt;
+    /* Пользовательский промпт — СЛОЙ, а не замена всего.
+     *
+     * Раньше непустой `wp_coder.agent_system_prompt` заменял базу целиком.
+     * Одна случайная фраза в нём — и модель теряла контракт вызовов
+     * инструментов, что в живых сессиях выглядело как «агент перестал
+     * вызывать инструменты». Теперь по умолчанию (`append`) база остаётся,
+     * а текст пользователя идёт отдельным слоем. Режим `replace`
+     * сохраняется для тех, кто сознательно пишет протокол сам; даже тогда
+     * проект, безопасность, AGENTS.md и инструменты остаются ниже. */
+    const bool custom_allowed = !state_.agent_system_prompt.empty() &&
+                                !state_.agent_system_prompt_blocked;
+    const bool custom_replaces = custom_allowed && state_.prompt_override_replace;
+    blocks.push_back({PromptLayer::Base,
+        custom_replaces
+            ? state_.agent_system_prompt
+            : SystemPrompt::provider(family_for_prompt, protocol)});
+    if (custom_allowed && !custom_replaces) {
+        blocks.push_back({PromptLayer::UserInstructions,
+            "## ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ\n\n" + state_.agent_system_prompt});
+    }
 
     /* И8.7: промпт агента — ДОПОЛНЕНИЕ к базовому, а не замена. Базовый
      * объясняет протокол вызовов инструментов, агентский — роль и
      * требования к результату (у субагента они свои: вернётся только
      * текст). Место — сразу за базовым, до промпта модуля и каталога
-     * инструментов: иначе роль оказалась бы между описанием проекта и
-     * протоколом, и модель читала бы её как часть каталога. */
+     * инструментов. */
     if (agent_rules && !agent_rules->prompt().empty()) {
-        sys += "\n\n";
-        sys += agent_rules->prompt();
+        blocks.push_back({PromptLayer::AgentRole, agent_rules->prompt()});
     }
 
-    /* Страховка, не зависящая от выбранного промпта: пользовательский
-     * agent_system_prompt заменяет базу целиком, и вместе с ней пропадает
-     * правило «сначала осмотри проект». */
-    sys += kProjectSafetyPrompt;
+    /* Страховка, не зависящая от выбранного промпта. */
+    blocks.push_back({PromptLayer::Safety, kProjectSafetyPrompt});
 
     /* И9.4: env-блок. Место — сразу за базовым промптом и ДО правил
      * проекта: это факты о том, где агент работает, а правила проекта
@@ -803,7 +814,7 @@ std::string Engine::build_system_prompt() const {
             std::lock_guard<std::mutex> lk(state_.mtx);
             root = state_.project_dir;
         }
-        sys += build_env_block(root);
+        blocks.push_back({PromptLayer::Environment, build_env_block(root)});
     }
 
     /* И9.1: инструкции проекта и пользователя.
@@ -820,7 +831,8 @@ std::string Engine::build_system_prompt() const {
      * источник, с заголовком, названным в kBaseSystemPrompt. */
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        sys += instruction::render(state_.instructions);
+        blocks.push_back({PromptLayer::Instructions,
+                          instruction::render(state_.instructions)});
     }
 
     {
@@ -831,8 +843,7 @@ std::string Engine::build_system_prompt() const {
                 if (state_.active_module == mod->name && mod->get_system_prompt) {
                     const char* p = mod->get_system_prompt();
                     if (p && p[0]) {
-                        sys += "\n\n";
-                        sys += p;
+                        blocks.push_back({PromptLayer::Module, p});
                     }
                     break;
                 }
@@ -870,8 +881,7 @@ std::string Engine::build_system_prompt() const {
             std::string cat =
                 ToolsRegistry::instance().build_tool_catalogue(visible);
             if (!cat.empty()) {
-                sys += "\n\n";
-                sys += cat;
+                blocks.push_back({PromptLayer::Tools, cat});
             }
         }
     }
@@ -899,23 +909,27 @@ std::string Engine::build_system_prompt() const {
             }
         }
         if (!plan.empty()) {
-            sys += "\n\n## ПЛАН ЗАДАЧИ (todowrite)\n\n";
-            sys += plan;
-            sys +=
+            blocks.push_back({PromptLayer::Plan,
+                "## ПЛАН ЗАДАЧИ (todowrite)\n\n" + plan +
                 "\nДержи план в актуальном состоянии: отмечай выполненное"
                 " статусом completed, текущий пункт — in_progress. План"
-                " показывается пользователю, и он им вмешивается.\n";
+                " показывается пользователю, и он им вмешивается."});
         }
     }
 
-    sys += SkillsManager::instance().build_skills_prompt();
+    blocks.push_back({PromptLayer::Skills,
+                      SkillsManager::instance().build_skills_prompt()});
 
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
-        if (state_.mode == 1) sys += kModeResearch;
-        else if (state_.mode == 2) sys += kModeReview;
+        if (state_.mode == 1) {
+            blocks.push_back({PromptLayer::Mode, kModeResearch});
+        } else if (state_.mode == 2) {
+            blocks.push_back({PromptLayer::Mode, kModeReview});
+        }
     }
 
+    const std::string sys = compose_prompt(std::move(blocks));
     state_.cached_system_prompt = sys;
     state_.prompt_dirty = false;
     return sys;
@@ -1308,6 +1322,8 @@ void Engine::load_settings() {
     state_.deploy_remote_dir = setting_get(cb_, "wp_coder.deploy_remote_dir", "");
     state_.wp_local_url    = setting_get(cb_, "wp_coder.local_url", "");
     state_.agent_system_prompt = setting_get(cb_, "wp_coder.agent_system_prompt", "");
+    state_.prompt_override_replace =
+        setting_get(cb_, "wp_coder.prompt_override_mode", "append") == "replace";
     state_.agent_system_prompt_blocked = false;
     const std::string detected_module =
         project_detect_module(state_.project_dir);
@@ -1868,6 +1884,8 @@ void Engine::save_settings() {
     setting_set(cb_, "wp_coder.deploy_remote_dir", state_.deploy_remote_dir);
     setting_set(cb_, "wp_coder.local_url", state_.wp_local_url);
     setting_set(cb_, "wp_coder.agent_system_prompt", state_.agent_system_prompt);
+    setting_set(cb_, "wp_coder.prompt_override_mode",
+                state_.prompt_override_replace ? "replace" : "append");
     setting_set(cb_, "wp_coder.active_module", state_.active_module);
     setting_set(cb_, "wp_coder.continue_conversation", state_.continue_conversation ? "true" : "false");
     setting_set(cb_, "wp_coder.llm_timeout_ms", std::to_string(state_.llm_timeout_ms));

@@ -267,11 +267,47 @@ std::vector<Instruction> load(const std::string& project_dir,
                    "~/.config/wp_coder/AGENTS.md");
     }
 
-    /* 2. Корень проекта. AGENTS.md раньше CLAUDE.md: у имён есть
-     * приоритет, и «приоритет имён» из 9.8 проверяется именно на нём. */
+    /* 2. Корень проекта И родительские каталоги до home.
+     *
+     * OpenCode V2 читает AGENTS.md от рабочего каталога вверх до home
+     * (для проекта вне home — останавливается на корне проекта). Это
+     * нужно монорепозиториям и вложенным рабочим каталогам: правило
+     * уровня `~/projects/AGENTS.md` относится ко всем проектам ниже.
+     * Порядок — корень проекта, затем родители: у корня проекта
+     * приоритетнее общий родительский текст, а конфликты не разрешаются
+     * (как и в OpenCode), поэтому модель видит оба. */
     if (!project_dir.empty()) {
-        for (const char* name : {"AGENTS.md", "CLAUDE.md"}) {
-            c.add_file(fs::path(project_dir) / name);
+        std::error_code pec;
+        fs::path root = fs::weakly_canonical(fs::path(project_dir), pec);
+        if (pec) root = fs::path(project_dir);
+        std::vector<fs::path> chain{root};
+
+        const std::string home_s = expand_home("~");
+        if (!home_s.empty()) {
+            std::error_code hec;
+            const fs::path home = fs::weakly_canonical(fs::path(home_s), hec);
+            const std::string root_s = root.generic_string();
+            const std::string home_s2 = home.generic_string();
+            const bool inside_home =
+                !hec && root_s.size() > home_s2.size() &&
+                root_s.rfind(home_s2 + "/", 0) == 0;
+            if (inside_home) {
+                fs::path cur = root.parent_path();
+                for (int hops = 1;
+                     hops < limits::kInstructionWalkHops && !cur.empty(); ++hops) {
+                    chain.push_back(cur);
+                    if (cur == home) break;
+                    const fs::path up = cur.parent_path();
+                    if (up == cur) break;
+                    cur = up;
+                }
+            }
+        }
+
+        for (const fs::path& dir : chain) {
+            for (const char* name : {"AGENTS.md", "CLAUDE.md"}) {
+                c.add_file(dir / name);
+            }
         }
     }
 

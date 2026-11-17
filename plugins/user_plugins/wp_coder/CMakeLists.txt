@@ -17,6 +17,7 @@ get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOL
 # --- Ядро (статическая библиотека — переиспользуется плагином и тестами) ---
 set(CORE_SOURCES
     core/engine.cpp
+    core/prompt_composer.cpp
     core/tools_registry.cpp
     core/skills_manager.cpp
     core/module_api.cpp
@@ -215,6 +216,9 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_iter12.cpp
         tests/test_skills_manager.cpp
         tests/test_engine.cpp
+        # P1: порядок слоёв системного промпта — контракт, а не
+        # комментарий. Чистая функция, движок не поднимает.
+        tests/test_prompt_composer.cpp
         # И13.9: настоящий путь входа — submit → worker_main → run_task →
         # cleanup. Раньше он не был выполнен ни одним тестом: единственный
         # вход Engine::start() живёт в src/, а src/ в сборку тестов не

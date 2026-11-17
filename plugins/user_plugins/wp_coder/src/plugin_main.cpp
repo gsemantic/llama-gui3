@@ -247,6 +247,17 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     /* Каталог плагина (рядом с .so) — WP-навыки. */
     coder::SkillsManager::instance().load_from_directory(
         std::string(WP_CODER_SKILLS_DIR), "wordpress");
+    /* P2: навыки ПРОЕКТА, без привязки к типу проекта. Тот же формат, что
+     * у OpenCode: `<project>/.wpcode/skills/<id>/SKILL.md`; плоские
+     * `<id>.md` тоже поддерживаются. Проект известен из настроек, потому
+     * что Engine::init уже их прочитал. */
+    {
+        const std::string project_dir = coder::engine().state().project_dir;
+        if (!project_dir.empty()) {
+            coder::SkillsManager::instance().load_from_directory(
+                project_dir + "/.wpcode/skills");
+        }
+    }
 
     /* И9.7: каталог профилей harness, поставленных с плагином. Строка
      * приходит из CMake (WP_CODER_PROFILES_DIR) — ровно тем же путём, что

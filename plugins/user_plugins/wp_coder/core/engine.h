@@ -349,7 +349,12 @@ struct EngineState {
     std::string wp_local_url;         // локальный сайт для проверки
 
     /* LLM / промпт. */
-    std::string agent_system_prompt;  // пользовательский (пустой = kBaseSystemPrompt)
+    std::string agent_system_prompt;  // пользовательский (слой UserInstructions)
+    /* Как применять `agent_system_prompt`: false — append (база остаётся,
+     * текст идёт отдельным слоем), true — replace (заменяет только базовый
+     * протокол; проект/AGENTS.md/инструменты остаются). Раньше замена была
+     * единственным поведением и могла молча убрать контракт инструментов. */
+    bool prompt_override_replace = false;
     /* Пользовательский промпт похож на WordPress, а проект — нет. Текст
      * человека не стираем (настройка остаётся в профиле), но в этом
      * проекте он не применяется: иначе агент получает WP-инструкции и

@@ -187,6 +187,22 @@ static void render_project() {
         engine().invalidate_prompt_cache();
         engine().save_settings();
     }
+    {
+        /* По умолчанию пользовательский текст — ДОПОЛНИТЕЛЬНЫЙ слой:
+         * база с контрактом инструментов остаётся. «Заменять» нужно только
+         * тем, кто сознательно пишет протокол сам; даже тогда проект,
+         * AGENTS.md и каталог инструментов остаются. */
+        bool replace = st.prompt_override_replace;
+        if (ImGui::Checkbox("Заменять базовый промпт", &replace)) {
+            st.prompt_override_replace = replace;
+            engine().invalidate_prompt_cache();
+            engine().save_settings();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Снято (по умолчанию): текст добавляется к "
+                              "базовому промпту. Включено: заменяет только "
+                              "базовый протокол.");
+    }
 
     ImGui::Separator();
     ImGui::TextDisabled("Корень: %s", st.project_dir.c_str());

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <filesystem>
 #include <map>
+#include <unistd.h>
 
 using namespace coder;
 namespace fs = std::filesystem;
@@ -349,4 +350,45 @@ TEST(skills_md_title_yields_callable_name) {
     ASSERT_TRUE(mgr.find("Late") == nullptr);
 
     fs::remove_all(tmp_dir, ec);
+}
+
+/* P2: формат OpenCode — каталог с SKILL.md и frontmatter. */
+TEST(skills_manager_loads_skill_md_directory_with_frontmatter) {
+    const fs::path tmp = fs::temp_directory_path() /
+        ("wp_coder_skill_dir_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / "git-release" / "scripts");
+    register_tmp_tree(tmp.string());
+    {
+        std::ofstream f(tmp / "git-release" / "SKILL.md");
+        f << "---\n"
+             "name: Git Release\n"
+             "description: Prepare release notes and a version bump\n"
+             "---\n\n"
+             "## Workflow\n\n"
+             "1. Read the policy.\n";
+    }
+    {
+        std::ofstream f(tmp / "git-release" / "scripts" / "changelog.ts");
+        f << "// helper\n";
+    }
+
+    auto& mgr = SkillsManager::instance();
+    mgr.load_from_directory(tmp.string());
+
+    const Skill* sk = mgr.find("git-release");
+    ASSERT_TRUE(sk != nullptr);
+    /* Идентификатор — имя каталога, описание — из frontmatter. */
+    ASSERT_EQ(sk->description,
+              std::string("Prepare release notes and a version bump"));
+    ASSERT_TRUE(sk->body.find("Read the policy") != std::string::npos);
+    /* Ресурсы каталога навыка перечислены, но сам SKILL.md — нет. */
+    bool has_script = false;
+    for (const std::string& p : sk->files) {
+        if (p.find("changelog.ts") != std::string::npos) has_script = true;
+        ASSERT_TRUE(p != std::string("SKILL.md"));
+    }
+    ASSERT_TRUE(has_script);
+
+    fs::remove_all(tmp);
 }
