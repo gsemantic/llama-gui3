@@ -730,14 +730,42 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     int truncated_streak = 0;
     int planning_streak = 0;
     int tool_args_streak = 0;
+    /* Отпечаток последнего выполненного read-only вызова. Нужен, чтобы
+     * НЕ выполнять повторное чтение того же файла с теми же аргументами:
+     * в сессии 0.18.16 один и тот же read_file вызывался 6–9 раз подряд,
+     * каждый повтор стоил шага, раздувал контекст, а на третьем срабатывал
+     * вопрос doom_loop — человек ждал его десятки секунд. Любой пишущий
+     * или исполняющий вызов сбрасывает отпечаток: после правки файл мог
+     * измениться, и повторное чтение законно. */
+    std::string last_read_sig;
     /* Системный промпт пересобирается на каждом шаге: note_tools_rejected
      * меняет протокол вызова, и старый снимок заставил бы модель писать
      * блок, которого приложение уже не ждёт. */
     std::string sys = sys_prompt;
 
-    std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << state_.max_steps << std::endl;
+    /* Мягкий бюджет: если к последнему шагу план задачи закрыт не
+     * полностью (в todowrite есть pending/in_progress), цикл один раз
+     * продлевается на тот же лимит. Причина — сессия 0.18.16: задача на
+     * пять файлов упиралась в 20 шагов ровно на последней проверке, и
+     * человеку приходилось вручную писать «продолжай», вставляя ошибку
+     * запуска. Продление ровно одно, поэтому задача не может крутиться
+     * вечно; жёсткий предохранитель (2 * max_steps) остаётся.
+     *
+     * Если плана нет (todos пуст), поведение прежнее: последний шаг
+     * получает kLastStepReminder и обязан дать итог. */
+    const auto has_unfinished_todos = [this]() {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        for (const TodoItem& t : state_.todos) {
+            if (t.status == "pending" || t.status == "in_progress") return true;
+        }
+        return false;
+    };
+    int total_steps = state_.max_steps;
+    bool budget_extended = false;
 
-    for (int step = 0; step < state_.max_steps; ++step) {
+    std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << total_steps << std::endl;
+
+    for (int step = 0; step < total_steps; ++step) {
         if (state_.abort_requested.load()) {
             this->push_event_(AgentEvent::Status, "[прервано пользователем]");
             full_response += "\n\n[прервано пользователем]";
@@ -793,8 +821,29 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * увидела его в том же контексте, в котором будет отвечать. На
          * первом шаге (step == 0) оно не добавляется: там ещё нечего
          * заканчивать, и напоминание было бы враньём. */
-        const bool is_last_step = (step + 1 >= state_.max_steps);
-        if (is_last_step && step > 0) append_note(kLastStepReminder);
+        const bool is_last_step = (step + 1 >= total_steps);
+        if (is_last_step && step > 0) {
+            /* План не закрыт — даём ещё один бюджет вместо принудительного
+             * итога. Продление сообщается модели явно: иначе она увидит
+             * «продолжай» без причины и снова начнёт с осмотра проекта. */
+            if (!budget_extended && has_unfinished_todos()) {
+                budget_extended = true;
+                total_steps += state_.max_steps;
+                this->push_event_(AgentEvent::Status,
+                    "Бюджет шагов исчерпан, но план задачи не закрыт — "
+                    "продлеваю на " + std::to_string(state_.max_steps) +
+                    " шагов и продолжаю.");
+                append_note(
+                    "[reminder] The step budget was extended because the "
+                    "task plan still has unfinished items. Do NOT re-read "
+                    "files you have already read and do NOT repeat the plan. "
+                    "Continue with the NEXT tool call needed to finish the "
+                    "remaining todos. Send the final report only after every "
+                    "todo is completed or cancelled.");
+            } else {
+                append_note(kLastStepReminder);
+            }
+        }
 
         /* История — снимок под локом, сборка реплик для модели — вне
          * лока: to_model_messages ходит по всем частям, а держать
@@ -1152,6 +1201,44 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             if (MessagePart* part = find_tool_part(turn, call.call_id)) {
                 part->set_running();
             }
+
+            /* Повторное чтение того же файла с теми же аргументами не
+             * выполняем: результат уже в истории и не изменился. Модель
+             * получает вместо него явное указание перейти к действию.
+             * Это лечит именно то, что видно в сессии 0.18.16: шесть
+             * подряд read_file test_gui.py и девять read_file gui.py,
+             * между которыми не было ни одной правки. */
+            const ToolDef* call_def =
+                ToolsRegistry::instance().find(call.name);
+            const bool read_only_call =
+                call_def && (call_def->flags & TF_READ_ONLY) != 0;
+            const std::string call_sig =
+                call.name + "\n" + call.arguments.dump();
+            if (read_only_call && !last_read_sig.empty() &&
+                call_sig == last_read_sig) {
+                ToolOutput dup;
+                dup.title = "повтор " + call.name;
+                dup.output =
+                    "[повтор] You already called " + call.name + " with "
+                    "exactly these arguments on a previous step. Its result "
+                    "is in the transcript above and has not changed, so it "
+                    "was NOT executed again.\n"
+                    "Do NOT repeat this call. Take the next step now: if you "
+                    "need a different part of the file, call read_file again "
+                    "with a DIFFERENT offset/limit; otherwise write or edit "
+                    "the file, run a command, or send the final report.";
+                this->push_event_(AgentEvent::Status,
+                    "Повторное чтение " + call.name +
+                    " с теми же аргументами — не выполняю (результат уже в "
+                    "истории).");
+                LlmResponse::reduce(response, LlmEvent::tool_result(
+                    call.call_id, std::move(dup)));
+                sync_tool_parts(turn, response);
+                continue;
+            }
+            /* Пишущий/исполняющий вызов мог изменить прочитанное —
+             * сбрасываем отпечаток. Read-only вызов запоминаем. */
+            last_read_sig = read_only_call ? call_sig : std::string();
 
             ToolRunner tool_runner(state_, cb_, this->push_event_);
             const ToolOutcome outcome =

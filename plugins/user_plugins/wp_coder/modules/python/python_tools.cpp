@@ -40,10 +40,54 @@ std::string python_run(const std::string& path) {
     return result.empty() ? "[python_run: нет вывода]" : shell::cap(result, kModuleMaxOutput);
 }
 
+/* pip виртуального окружения проекта, если оно есть.
+ *
+ * `.venv` проверяется раньше `venv`: это имя создаёт `python3 -m venv
+ * .venv`, то есть дефолт. Симлинк pip — обычное дело, поэтому exists, а не
+ * is_regular_file. На Windows у venv нет bin/, поэтому путь другой; модуль
+ * собирается и там, и разница пути не должна превращаться в «venv не
+ * найден». */
+std::string project_venv_pip(const std::string& project_dir) {
+    if (project_dir.empty()) return "";
+    for (const char* name : {".venv", "venv"}) {
+        const fs::path base = fs::path(project_dir) / name;
+        const fs::path posix = base / "bin" / "pip";
+        std::error_code ec;
+        if (fs::exists(posix, ec)) return posix.string();
+#ifdef _WIN32
+        const fs::path win = base / "Scripts" / "pip.exe";
+        if (fs::exists(win, ec)) return win.string();
+#endif
+    }
+    return "";
+}
+
 std::string pip_install(const std::string& pkg,
+                        const std::string& project_dir,
                         const std::function<bool()>& should_cancel) {
     if (pkg.empty()) return "[ошибка] укажи имя пакета (query)";
-    std::string cmd = "pip install " + shell::shell_quote(pkg);
+    /* Куда ставить пакет.
+     *
+     * Раньше здесь был безусловный `pip install <pkg>`. На Debian/Ubuntu с
+     * PEP 668 такой вызов всегда падает с `externally-managed-environment`
+     * — то есть инструмент не работал на целевой системе вообще, а модель
+     * читала сырой traceback и делала вывод «в этой среде ставить нельзя».
+     * Порядок выбора:
+     *   1. venv проекта (.venv или venv) — правильное место для
+     *      зависимостей, и PEP 668 к venv не применяется;
+     *   2. системный pip с `--user --break-system-packages` — пакет
+     *      ложится в ~/.local, root не нужен, системный Python не ломается;
+     *   3. если pip старый и не знает флаг — понятная инструкция, а не
+     *      «no such option». */
+    const std::string venv_pip = project_venv_pip(project_dir);
+    const bool use_venv = !venv_pip.empty();
+    std::string cmd;
+    if (use_venv) {
+        cmd = shell::shell_quote(venv_pip) + " install " + shell::shell_quote(pkg);
+    } else {
+        cmd = "pip install --user --break-system-packages " +
+              shell::shell_quote(pkg);
+    }
     /* И11.10: установка пакета идёт долго и обрывается на полпути, если её
      * не остановить; без отметки об отмене модель сочтёт установку
      * успешной. */
@@ -51,7 +95,26 @@ std::string pip_install(const std::string& pkg,
     std::string result =
         shell::run_capture_cancel(cmd, 120, should_cancel, stats);
     if (stats.cancelled) result += shell::cancelled_note();
-    return result.empty() ? "[pip install: нет вывода]" : shell::cap(result, kModuleMaxOutput);
+
+    /* PEP 668 остаётся возможным даже с --user на некоторых сборках.
+     * Возвращаем модели действие, а не сырой traceback: иначе она
+     * повторяет тот же вызов и закрывает задачу словами «среда не
+     * позволяет». */
+    if (result.find("externally-managed-environment") != std::string::npos) {
+        return "[pip] Установка в системный Python заблокирована (PEP 668).\n"
+               "Создай venv в проекте: python3 -m venv .venv — и повтори "
+               "вызов: pip_install сам использует .venv/bin/pip.\n"
+               "Для системного пакета: apt install python3-<имя>.";
+    }
+    if (!use_venv &&
+        result.find("break-system-packages") != std::string::npos &&
+        result.find("no such option") != std::string::npos) {
+        return "[pip] Этот pip не поддерживает --break-system-packages.\n"
+               "Создай venv в проекте: python3 -m venv .venv — и повтори "
+               "вызов.";
+    }
+    return result.empty() ? "[pip install: нет вывода]"
+                          : shell::cap(result, kModuleMaxOutput);
 }
 
 std::string django_manage(const std::string& args, const std::string& project_dir) {
@@ -137,7 +200,9 @@ void register_python_tools() {
     {
         ToolDef def;
         def.name = "pip_install";
-        def.description = "Установка Python-пакета";
+        def.description =
+            "Установка Python-пакета. Если в проекте есть .venv/venv — "
+            "ставит в него; иначе в ~/.local (--user --break-system-packages).";
         /* Меняет окружение, а не файлы проекта: откатить нечем. */
         def.flags = TF_EXECUTES | TF_DESTRUCTIVE | TF_SLOW | TF_NETWORK;
         def.permission_key = "package";
@@ -145,7 +210,7 @@ void register_python_tools() {
         b.str("query", "имя пакета (например requests)").required("query");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
-            return out("pip", pip_install(arg_str(a, "query"),
+            return out("pip", pip_install(arg_str(a, "query"), ctx.project_dir(),
                                           [&ctx]() { return ctx.cancelled(); }));
         };
         reg.register_def(std::move(def));

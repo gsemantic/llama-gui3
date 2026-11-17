@@ -39,6 +39,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -442,6 +443,71 @@ TEST(agent_loop_does_not_invent_a_second_copy_of_a_refusal) {
                 std::string::npos);
     const std::string second = fx.host.transcript(1);
     ASSERT_EQ(count_occurrences(second, "запрещено режимом"), (size_t)1);
+}
+
+TEST(agent_loop_does_not_repeat_an_identical_read) {
+    /* Сессия 0.18.16: read_file одного и того же файла вызывался 6–9 раз
+     * подряд, каждый повтор тратил шаг и раздувал контекст, а на третьем
+     * срабатывал doom_loop и человек десятки секунд ждал вопроса. Второй
+     * ПОДРЯД идентичный read-only вызов не должен выполняться: результат
+     * уже в истории, и модель получает явное указание идти дальше. */
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "f.txt");
+        f << "hello\n";
+    }
+    fx.host.replies = {call_block("read_file", ",\n \"path\": \"f.txt\""),
+                       call_block("read_file", ",\n \"path\": \"f.txt\""),
+                       long_answer("Прочитано.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare();
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    const MessagePart* first = first_tool_part(h[1]);
+    const MessagePart* second = first_tool_part(h[2]);
+    ASSERT_TRUE(first != nullptr);
+    ASSERT_TRUE(second != nullptr);
+    ASSERT_TRUE(first->output().output.find("[повтор]") == std::string::npos);
+    ASSERT_TRUE(second->output().output.find("[повтор]") != std::string::npos);
+    /* Результат первого чтения действительно получен, а не подменён. */
+    ASSERT_TRUE(first->output().output.find("hello") != std::string::npos);
+}
+
+TEST(agent_loop_extends_the_budget_when_the_plan_is_unfinished) {
+    /* Сессия 0.18.16: задача упиралась в лимит шагов при незакрытом плане,
+     * и человеку приходилось писать «продолжай» вручную. Если в todowrite
+     * остались pending/in_progress, цикл один раз продлевает бюджет и
+     * говорит об этом модели вместо принудительного итога. */
+    LoopFixture fx;
+    fx.host.replies = {call_block("list_skills", ""),
+                       long_answer("Готово.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(2);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        TodoItem t;
+        t.id = "1";
+        t.content = "сделать ещё";
+        t.status = "pending";
+        engine_state().todos.push_back(t);
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::string second = fx.host.transcript(1);
+    ASSERT_TRUE(second.find("step budget was extended") != std::string::npos);
+    /* Принудительный «последний шаг» не должен был срабатывать. */
+    ASSERT_TRUE(second.find("This is the LAST step") == std::string::npos);
 }
 
 TEST(agent_loop_reports_an_unknown_tool_as_a_result_not_a_refusal) {
