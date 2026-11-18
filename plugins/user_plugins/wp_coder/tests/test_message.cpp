@@ -877,6 +877,28 @@ TEST(turn_verdict_does_not_close_task_on_tool_args_json) {
         R"({"answer": "готово", "summary": "файл записан"})"));
 }
 
+TEST(turn_verdict_does_not_show_task_arguments_in_chat) {
+    /* Сессия 0.18.20: на «запусти субагента» модель напечатала
+     * {"background":"да","description":...,"prompt":...} текстом. Ключей
+     * path/content/cli у task нет, поэтому JSON считался финальным
+     * ответом и уходил в чат сырым. */
+    const std::string kUser = "msg_000000000001";
+    const std::string task_args =
+        R"({"background": "да", "description": "Двухполосный режим и тема",)"
+        R"( "prompt": "Проект reader2. )" + std::string(350, 'x') + R"("})";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(task_args));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(looks_like_tool_args_json(task_args));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+}
+
 TEST(turn_verdict_does_not_close_task_on_an_unfinished_final_answer) {    const std::string kUser = "msg_000000000001";
     /* Достаточно длинный текст, но последняя скобка открыта. */
     const std::string cut =

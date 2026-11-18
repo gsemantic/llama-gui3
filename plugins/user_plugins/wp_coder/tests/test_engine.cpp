@@ -5,6 +5,7 @@
 #include "../core/base_tools.h"
 #include "../core/git_tools.h"
 #include "../core/json.h"
+#include "../core/limits.h"
 #include "../core/tools_registry.h"
 #include "../core/shell.h"
 #include "../core/json_utils.h"
@@ -574,7 +575,61 @@ TEST(compress_history_keeps_the_call_and_shrinks_the_result) {
     ASSERT_TRUE(part != nullptr);
     ASSERT_EQ(part->tool_name(), std::string("read_file"));
     ASSERT_TRUE(part->has_result());
-    ASSERT_TRUE(part->output().output.find("сжат") != std::string::npos);
+    /* Результат ПОМЕЧЕН, а не заменён заглушкой: сырой вывод остаётся в
+     * сессии и в окне, а модель получает метку, названную в промпте. */
+    ASSERT_TRUE(part->output_cleared());
+    ASSERT_EQ(part->output().output, std::string(2000, 'y'));
+    std::string transcript;
+    for (const ModelMessage& mm : to_model_messages(history)) {
+        transcript += mm.content;
+        transcript += "\n";
+    }
+    ASSERT_TRUE(transcript.find(limits::kClearedToolOutput) !=
+                std::string::npos);
+    ASSERT_TRUE(transcript.find("сжат") == std::string::npos);
+}
+
+TEST(compress_history_keeps_user_messages_intact) {
+    /* Реплика человека — продолжение задания. Раньше она обрезалась до
+     * 60 байт, и агент терял уже данное указание. */
+    std::vector<Message> history;
+    history.push_back(Message::user("задача"));
+    for (int i = 0; i < 60; ++i) {
+        history.push_back(turn_with_tool_result("ход " + std::to_string(i),
+                                                std::string(2000, 'y')));
+    }
+    Message user = Message::user("сделай проверку сам, две полосы по "
+                                 "умолчанию — подтверждаю");
+    history.insert(history.begin() + 30, user);
+    const std::string expected = user.text();
+
+    compress_history(history, 60000);
+
+    bool found = false;
+    for (const Message& m : history) {
+        if (m.is_user() && m.text() == expected) found = true;
+    }
+    ASSERT_TRUE(found);
+}
+
+TEST(compress_history_keeps_the_recent_turns_intact) {
+    /* Последние keep_recent сообщений — текущий и предыдущий ход. Их
+     * результаты нужны модели, чтобы не читать те же файлы заново. */
+    std::vector<Message> history;
+    history.push_back(Message::user("задача"));
+    for (int i = 0; i < 60; ++i) {
+        history.push_back(turn_with_tool_result("ход " + std::to_string(i),
+                                                std::string(2000, 'y')));
+    }
+    compress_history(history, 60000, /*keep_recent=*/24);
+
+    /* Последний ход не тронут: его результат — то, над чем модель
+     * работает прямо сейчас. */
+    const MessagePart* last =
+        find_tool_part(history.back(), "call_ход 59");
+    ASSERT_TRUE(last != nullptr);
+    ASSERT_FALSE(last->output_cleared());
+    ASSERT_EQ(last->output().output, std::string(2000, 'y'));
 }
 
 TEST(compress_history_keeps_the_first_and_the_last_turn) {
@@ -1101,6 +1156,10 @@ TEST(compact_under_a_local_budget_alone_never_asks_the_model) {
     CompactionGuard guard;
     std::vector<Message> h;
     fill_window(h, 4, 3000);
+    /* Длинная реплика человека: именно её обрезка до 60 байт и теряла
+     * продолжение задания. */
+    h.front().parts.clear();
+    h.front().parts.push_back(MessagePart::text(std::string(500, 'п')));
     {
         std::lock_guard<std::mutex> lk(engine().state().mtx);
         engine().state().session = h;
@@ -1116,6 +1175,10 @@ TEST(compact_under_a_local_budget_alone_never_asks_the_model) {
     std::lock_guard<std::mutex> lk(engine().state().mtx);
     /* Аварийная обрезка отработала: локальный предел держится. */
     ASSERT_TRUE(model_history_chars(engine().state().session) <= 1000);
+    /* Но реплика человека НЕ обрезана: её потеря и была причиной «агент
+     * теряет нить». */
+    ASSERT_EQ(engine().state().session.front().text(),
+              std::string(500, 'п'));
 }
 
 /* Общий помощник фазовых тестов определён ниже по файлу; здесь он нужен

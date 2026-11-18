@@ -2230,9 +2230,19 @@ void Engine::deliver_background_tasks() {
 
 void Engine::trim_history_if_needed() {
     /* Снаружи лока НЕ держим: захват state_.mtx — внутри. Именно из-за
-     * внешнего лока в AgentLoop раньше был дедлок (D1). */
+     * внешнего лока в AgentLoop раньше был дедлок (D1).
+     *
+     * keep_recent — текущий и предыдущий ход: их результаты нужны модели,
+     * чтобы не читать те же файлы заново. Ход может быть продлён на
+     * max_steps (И5.9), поэтому защищаем два бюджета, а не один.
+     * Раньше защищался только последний ход, и на старте следующего хода
+     * всё прочитанное оказывалось заглушкой. */
     std::lock_guard<std::mutex> lk(state_.mtx);
-    compress_history(state_.session, state_.session_budget);
+    const size_t keep_recent =
+        state_.max_steps > 0
+            ? static_cast<size_t>(state_.max_steps) * 2 + 4
+            : 44;
+    compress_history(state_.session, state_.session_budget, keep_recent);
 }
 
 /* ======================================================================

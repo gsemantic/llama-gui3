@@ -749,6 +749,10 @@ bool looks_like_tool_args_json(const std::string& text) {
     static const char* kKeys[] = {
         "\"path\"", "\"content\"", "\"cli\"", "\"query\"", "\"pattern\"",
         "\"root\"", "\"url\"", "\"command\"", "\"file\"", "\"patch\"",
+        /* Инструмент task: его аргументы не содержат path/cli, и без
+         * этих ключей JSON уходил в чат как «финальный ответ». */
+        "\"prompt\"", "\"background\"", "\"description\"",
+        "\"subagent_type\"", "\"task_id\"",
     };
     int hits = 0;
     for (const char* k : kKeys) {
@@ -759,7 +763,8 @@ bool looks_like_tool_args_json(const std::string& text) {
     const bool command_key =
         body.find("\"cli\"") != std::string::npos ||
         body.find("\"query\"") != std::string::npos ||
-        body.find("\"command\"") != std::string::npos;
+        body.find("\"command\"") != std::string::npos ||
+        body.find("\"prompt\"") != std::string::npos;
     return hits >= 2 || command_key;
 }
 
@@ -848,25 +853,20 @@ std::string cut(const std::string& s, size_t max_bytes) {
     return head;
 }
 
-/* Первая непустая строка результата — то, по чему модель решает, нужен
- * ли ей результат целиком. */
-std::string first_line(const std::string& s, size_t max_bytes) {
-    size_t start = 0;
-    while (start < s.size()) {
-        const size_t nl = s.find('\n', start);
-        const std::string line =
-            s.substr(start, nl == std::string::npos ? std::string::npos
-                                                     : nl - start);
-        if (!line.empty()) return cut(line, max_bytes);
-        if (nl == std::string::npos) break;
-        start = nl + 1;
-    }
-    return "(без вывода)";
-}
-
 const char* kReasoningStub = "(размышление сжато)";
 
-/* Сжать одну часть по правилам compress_history. */
+/* Сжать одну часть по правилам compress_history.
+ *
+ * Текст хода и реплика человека НЕ трогаются: в тексте живёт рассуждение
+ * и итог, а реплика человека — сама задача. Раньше текст обрезался до
+ * 60 байт, и на следующем ходу модель не видела ни своей мысли, ни
+ * продолжения задания; именно это выглядело как «агент теряет нить».
+ *
+ * Результат инструмента не заменяется заглушкой, а помечается clearing'ом
+ * (MessagePart::clear_output): в транскрипт уходит документированная метка
+ * kClearedToolOutput, а сам вывод остаётся в сессии и в окне. Заглушка
+ * «[сжат] …» не была описана в системном промпте, и модель читала её как
+ * содержимое инструмента, а не как «текст убран из-за объёма». */
 void compress_part(MessagePart& p) {
     if (p.kind() == PartKind::Reasoning) {
         /* Размышление в транскрипт не попадает, поэтому это самый дешёвый
@@ -874,18 +874,14 @@ void compress_part(MessagePart& p) {
         p = MessagePart::reasoning(kReasoningStub);
         return;
     }
-    if (p.kind() == PartKind::Text) {
-        p = MessagePart::text(first_line(p.text(), 60));
-        return;
-    }
     if (!is_tool_part(p)) return;
     /* САМ вызов не трогаем: стереть его — значит оставить его результат
      * сиротой («RESULT [read_file]» без вызова, который его вызвал). */
     if (p.state() == ToolState::Completed) {
-        ToolOutput stub;
-        stub.title = p.output().title;
-        stub.output = "[сжат] " + first_line(p.output().output, 60);
-        p.set_result(stub);
+        /* clear_output, а не set_result(stub): вызов остаётся завершённым,
+         * сырой вывод — в сессии и в UI, а модель получает метку, которая
+         * названа в kBaseSystemPrompt. */
+        p.clear_output();
     } else if (p.state() == ToolState::Error) {
         const std::string err = cut(p.error(), 120);
         if (err != p.error()) p.set_error(err);
@@ -894,20 +890,41 @@ void compress_part(MessagePart& p) {
 
 } // namespace
 
-void compress_history(std::vector<Message>& history, size_t budget) {
+void compress_history(std::vector<Message>& history, size_t budget,
+                      size_t keep_recent) {
     size_t total = model_history_chars(history);
     if (total <= budget) return;
     const size_t n = history.size();
-    /* Первую задачу и последний ход не трогаем: сжать задачу — значит
-     * отнять у модели её цель, а сжать ход, который обсуждается прямо
-     * сейчас, — значит стереть рассуждение, к которому модель сейчас
-     * возвращается. */
-    for (size_t i = 1; i + 1 < n && total > budget; ++i) {
-        Message& m = history[i];
+    /* Первую задачу не трогаем: сжать задачу — значит отнять у модели её
+     * цель. Последние keep_recent сообщений тоже не трогаем: это текущий
+     * и предыдущий ход, и именно их результаты модель использует, чтобы
+     * не читать файлы заново. Раньше защищался только ПОСЛЕДНИЙ ход, и
+     * на старте следующего хода все прочитанные файлы оказывались
+     * заглушками — отсюда «каждый раз начинает с осмотра проекта».
+     *
+     * Реплики человека пропускаются целиком: они короткие, а их обрезка
+     * стоила модели продолжения задания. */
+    const size_t protected_from =
+        n > keep_recent ? n - keep_recent : 0;
+    const auto compress_one = [&total](Message& m) {
+        if (m.is_user()) return;
         const size_t before = model_history_chars({m});
         for (MessagePart& p : m.parts) compress_part(p);
         const size_t after = model_history_chars({m});
         if (after < before) total -= (before - after);
+    };
+
+    /* Первый проход: всё, что старше защищённого куска. */
+    for (size_t i = 1; i < protected_from && total > budget; ++i) {
+        compress_one(history[i]);
+    }
+    /* Второй проход — аварийный: если защищённый кусок сам больше бюджета
+     * (например, один ход на 20 000 символов при локальном лимите 4 000),
+     * сжимаем и его, но ПОСЛЕДНЕЕ сообщение и реплики человека не трогаем.
+     * Без этого прохода история, в которой все сообщения «свежие», не
+     * сжималась бы вовсе. */
+    for (size_t i = protected_from; i + 1 < n && total > budget; ++i) {
+        compress_one(history[i]);
     }
 }
 

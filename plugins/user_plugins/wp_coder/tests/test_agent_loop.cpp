@@ -1367,3 +1367,164 @@ TEST(stop_during_a_turn_breaks_the_request_and_not_just_the_wait) {
     ASSERT_EQ(static_cast<int>(engine_state().state),
               static_cast<int>(AgentState::Aborted));
 }
+
+TEST(agent_loop_does_not_loop_on_many_identical_reads) {
+    /* Лог ses_000000000027: после write_file модель 14 раз подряд читала
+     * тот же файл. Защита обязана срабатывать не на втором чтении, а
+     * каждый раз: каждый повтор — это сэкономленный шаг и непрогоревший
+     * doom_loop. */
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "f.txt");
+        f << "hello\n";
+    }
+    std::vector<std::string> replies;
+    for (int i = 0; i < 6; ++i) {
+        replies.push_back(call_block("read_file", ",\n \"path\": \"f.txt\""));
+    }
+    replies.push_back(long_answer("Прочитано."));
+    fx.host.replies = replies;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(8);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    size_t repeated = 0;
+    size_t real_reads = 0;
+    for (const Message& m : h) {
+        for (const MessagePart& p : m.parts) {
+            if (!p.is(PartKind::Tool)) continue;
+            if (p.output().output.find("[повтор]") != std::string::npos) {
+                ++repeated;
+            }
+            if (p.output().output.find("hello") != std::string::npos) {
+                ++real_reads;
+            }
+        }
+    }
+    ASSERT_EQ(repeated, (size_t)5);
+    ASSERT_EQ(real_reads, (size_t)1);
+}
+
+TEST(agent_loop_canonicalizes_tool_argument_key_order) {
+    /* Тот же вызов, но ключи переставлены: провайдер не обязан
+     * сохранять порядок. Должен сработать как повтор. */
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "f.txt");
+        f << "hello\n";
+    }
+    fx.host.replies = {
+        "Смотрю.\n```json\n{\"tool\":\"read_file\",\"path\":\"f.txt\",\"limit\":10}\n```",
+        "Смотрю.\n```json\n{\"path\":\"f.txt\",\"limit\":10}\n```",
+        long_answer("Прочитано."),
+    };
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(4);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    const MessagePart* second = first_tool_part(h[2]);
+    ASSERT_TRUE(second != nullptr);
+    ASSERT_TRUE(second->output().output.find("[повтор]") != std::string::npos);
+}
+
+TEST(agent_loop_stops_a_repeated_noop_edit) {
+    /* Сессия 0.18.18: search_replace с query == content возвращал
+     * «143 -> 143 байт», модель читала это как сбой и повторяла вызов
+     * десятки раз, чередуя с edit_file. Второй одинаковый no-op
+     * выполняться не должен. */
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "a.txt");
+        f << "x\n";
+    }
+    const std::string noop =
+        "Правлю.\n```json\n{\"tool\":\"search_replace\",\"path\":\"a.txt\","
+        "\"query\":\"x\",\"content\":\"x\"}\n```";
+    fx.host.replies = {noop, noop, long_answer("Готово.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(4);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    const MessagePart* first = first_tool_part(h[1]);
+    const MessagePart* second = first_tool_part(h[2]);
+    ASSERT_TRUE(first != nullptr);
+    ASSERT_TRUE(second != nullptr);
+    ASSERT_TRUE(first->output().output.find("[no-op]") != std::string::npos);
+    ASSERT_TRUE(second->output().output.find("[repeat-noop]") != std::string::npos);
+}
+
+TEST(agent_loop_does_not_show_task_arguments_in_chat) {
+    /* Сессия 0.18.20: на «запусти субагента» модель напечатала
+     * {"background":"да","description":...,"prompt":...} текстом. Этот
+     * JSON не должен попасть ни в события чата, ни в финальный ответ. */
+    LoopFixture fx;
+    const std::string task_json =
+        R"({"background": "да", "description": "Двухполосный режим",)"
+        R"( "prompt": "Проект reader2. )" + std::string(350, 'x') + R"("})";
+    fx.host.replies = {task_json, long_answer("Готово, субагент запущен.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(4);
+
+    std::vector<std::string> shown;
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string& text) {
+                       shown.push_back(text);
+                   });
+    ASSERT_TRUE(fx.run(loop, response));
+
+    for (const std::string& text : shown) {
+        ASSERT_TRUE(text.find("\"prompt\"") == std::string::npos);
+        ASSERT_TRUE(text.find("\"background\"") == std::string::npos);
+    }
+    ASSERT_TRUE(response.find("\"prompt\"") == std::string::npos);
+}
+
+TEST(agent_loop_does_not_spend_steps_on_empty_json_object) {
+    /* Сессия 0.18.20: каждый второй ход модели был `{}` вместо вызова.
+     * Такой ход не должен ни попадать в историю, ни тратить бюджет. */
+    LoopFixture fx;
+    fx.host.replies = {"{}", "{}", long_answer("Готово, работа выполнена.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(2);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    /* Два вырожденных хода были бесплатными, и модель успела дать итог. */
+    ASSERT_TRUE(response.find("работа выполнена") != std::string::npos);
+    const std::vector<Message> h = fx.history();
+    for (const Message& m : h) {
+        if (!m.is_assistant()) continue;
+        for (const MessagePart& p : m.parts) {
+            if (!p.is(PartKind::Text)) continue;
+            std::string t = p.text();
+            const size_t b = t.find_first_not_of(" \t\r\n");
+            const size_t e = t.find_last_not_of(" \t\r\n");
+            if (b != std::string::npos) t = t.substr(b, e - b + 1);
+            ASSERT_TRUE(t != "{}");
+        }
+    }
+}

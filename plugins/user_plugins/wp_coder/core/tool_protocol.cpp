@@ -331,6 +331,15 @@ std::string infer_tool_from_args(const json::JsonValue& a) {
         return "read_file";
     }
 
+    /* Инструмент task: description + prompt (subagent_type/background —
+     * необязательные, но частые). Без этого JSON с аргументами субагента
+     * не распознавался и уходил в чат как обычный ответ. */
+    if (!a.get_string("prompt").empty() &&
+        (!a.get_string("description").empty() ||
+         a.has("background") || !a.get_string("subagent_type").empty())) {
+        return "task";
+    }
+
     /* query без path: pip_install или skill_detail — обе схемы с одним
      * query. Различаем по форме: у пакета бывает версия/дополнение. */
     if (!query.empty() &&

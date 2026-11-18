@@ -855,6 +855,19 @@ void register_base_tools() {
                 body << ln << "\n";
             }
 
+            /* Offset — НОМЕР СТРОКИ, а не байт. В живой сессии модель
+             * присылала offset=12121 (размер файла в байтах) и получала
+             * 0 строк, после чего повторяла вызов. Говорим прямо. */
+            if (taken == 0 && line_no > 0 &&
+                first_line > static_cast<size_t>(line_no)) {
+                return out("read " + rel,
+                    "[ошибка] offset=" + std::to_string(first_line) +
+                    " за пределами файла (" + std::to_string(line_no) +
+                    " строк). offset — НОМЕР СТРОКИ (с 1), не байт. "
+                    "Используй offset <= " + std::to_string(line_no) +
+                    ".");
+            }
+
             std::stringstream hdr;
             hdr << "# read: " << rel;
             if (first_line > 1) hdr << " (с строки " << first_line << ")";
@@ -867,7 +880,8 @@ void register_base_tools() {
                 hdr << (byte_capped
                             ? " — обрезано по лимиту байт, читай offset="
                             : " — обрезано по limit, дальше есть: читай offset=")
-                    << (first_line + taken);
+                    << (first_line + taken)
+                    << " (номер строки, не байт)";
             }
 
             /* И9.2: инструкции рядом с прочитанным файлом. ОДИН обход
@@ -1552,10 +1566,31 @@ void register_base_tools() {
             req.replace_all = a.get_bool("replace_all", false);
             if (req.old_text.empty())
                 return out("[ошибка] пустой поисковый запрос (query)");
+            /* No-op: замена текста на самого себя. В живой сессии так
+             * зацикливались sidebar.py/two_page_view.py: модель повторяла
+             * search_replace с query == content, инструмент отвечал
+             * «143 -> 143 байт», а модель читала это как неудачу и
+             * пробовала снова. Говорим прямо, что делать дальше. */
+            if (req.old_text == req.new_text) {
+                return out("замена в " + rel,
+                    "[no-op] query и content совпадают — файл НЕ изменён "
+                    "(замены нет). Если нужно другое содержимое — задай его "
+                    "в content; если нужно посмотреть файл — read_file; "
+                    "если нужно записать файл целиком — write_file.");
+            }
 
             const EditResult r = apply_edit(split_text(raw), req);
             if (!r.ok) return out("замена в " + rel, "[search_replace] " + r.error);
             const std::string result = join_text(r.file);
+            /* Страховка от no-op, который каскад может принять за успех
+             * (нормализация пробелов и т.п.): если байты не изменились,
+             * модели нужно сказать это прямо, иначе она повторит вызов. */
+            if (result == raw) {
+                return out("замена в " + rel,
+                    "[no-op] после замены файл не изменился. Задай другой "
+                    "content или используй read_file, чтобы посмотреть "
+                    "фрагмент, либо write_file для полной перезаписи.");
+            }
             /* И11.2: обе стороны уже в руках — прочитанное `raw` и то, что
              * уйдёт в файл (`result`). Пересчёт по патчу не нужен, форма
              * та же, что у остальных инструментов. */
@@ -1972,6 +2007,27 @@ void register_base_tools() {
             std::istringstream iss(content_in);
             while (std::getline(iss, rline)) replacement.push_back(rline);
 
+            /* No-op: строки заменяются на сами себя. В сессии 0.18.18
+             * edit_file с k=225/query=225 и тем же текстом повторялся
+             * после search_replace — модель считала «143 -> 143 байт»
+             * неудачей. Возвращаем действие, а не тихий успех. */
+            bool unchanged = replacement.size() == (end - start + 1);
+            if (unchanged) {
+                for (size_t i = 0; i < replacement.size(); ++i) {
+                    if (lines[start - 1 + i] != replacement[i]) {
+                        unchanged = false;
+                        break;
+                    }
+                }
+            }
+            if (unchanged) {
+                return out("правка " + rel,
+                    "[no-op] заменяемые строки уже совпадают с content — "
+                    "файл НЕ изменён. Если нужно другое содержимое — задай "
+                    "его в content; если нужно посмотреть файл — read_file; "
+                    "если нужно записать файл целиком — write_file.");
+            }
+
             std::vector<std::string> result;
             result.reserve(lines.size() + replacement.size());
             for (size_t i = 0; i < start - 1; ++i) result.push_back(std::move(lines[i]));
@@ -1986,6 +2042,14 @@ void register_base_tools() {
             tf.crlf = src.crlf;
             tf.trailing_newline = src.trailing_newline;
             const std::string new_content = join_text(tf);
+
+            if (new_content == raw) {
+                return out("правка " + rel,
+                    "[no-op] после замены файл не изменился. Если нужно "
+                    "другое содержимое — задай его в content; если нужно "
+                    "посмотреть файл — read_file; для полной перезаписи — "
+                    "write_file.");
+            }
 
             /* И11.2: обе стороны уже в руках — `raw` (прочитанное) и `new_content`
              * (то, что уйдёт в файл). */

@@ -442,3 +442,33 @@ TEST(search_replace_keeps_crlf_on_disk) {
     ASSERT_EQ(read_file(t / "win.txt"), std::string("a\r\nB\r\n"));
     fs::remove_all(t);
 }
+
+/* No-op-замены: живые сессии жгли шаги на search_replace/edit_file, где
+ * query == content. Инструмент обязан сказать «ничего не изменилось» и
+ * назвать следующее действие, а не отвечать «143 -> 143 байт». */
+TEST(search_replace_with_identical_text_is_a_reported_noop) {
+    fs::path t = make_tmp_tree();
+    write_file(t / "a.php", "<?php\nreturn 1;\n");
+    init_tools(t);
+    const std::string r = run_replace("a.php", "return 1;", "return 1;");
+    ASSERT_TRUE(r.find("[no-op]") != std::string::npos);
+    ASSERT_TRUE(r.find("read_file") != std::string::npos);
+    ASSERT_EQ(read_file(t / "a.php"), std::string("<?php\nreturn 1;\n"));
+    fs::remove_all(t);
+}
+
+TEST(edit_file_with_identical_lines_is_a_reported_noop) {
+    fs::path t = make_tmp_tree();
+    write_file(t / "a.php", "<?php\nreturn 1;\n");
+    init_tools(t);
+    json::JsonValue args = json::JsonValue::object();
+    args.set("path", "a.php");
+    args.set("k", 2);
+    args.set("query", "2");
+    args.set("content", "return 1;");
+    const std::string r = ToolsRegistry::instance().run("edit_file", args);
+    ASSERT_TRUE(r.find("[no-op]") != std::string::npos);
+    ASSERT_TRUE(r.find("write_file") != std::string::npos);
+    ASSERT_EQ(read_file(t / "a.php"), std::string("<?php\nreturn 1;\n"));
+    fs::remove_all(t);
+}

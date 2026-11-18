@@ -198,6 +198,22 @@ add_custom_command(TARGET wp_coder POST_BUILD
     COMMENT "wp_coder: манифест в build/plugins/wp_coder.json (без общего plugin.json)"
 )
 
+# Runtime-деплой. Хост грузит плагины из plugins/ относительно своего
+# рабочего каталога (src/plugins/plugin_manager.cpp), а не из build/plugins.
+# Без этой копии приложение продолжает работать со старым .so после
+# сборки: в логе это выглядит как «правки не помогают», хотя бинарник новый.
+if(NOT CMAKE_BINARY_DIR STREQUAL "${PROJECT_ROOT}")
+    add_custom_command(TARGET wp_coder POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:wp_coder>"
+            "${PROJECT_ROOT}/plugins/libwp_coder.so"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin.json"
+            "${PROJECT_ROOT}/plugins/wp_coder.json"
+        COMMENT "wp_coder: свежий .so и манифест в plugins/"
+    )
+endif()
+
 # --- Тесты ---
 option(WP_CODER_BUILD_TESTS "Build wp_coder unit tests" ON)
 if(WP_CODER_BUILD_TESTS)

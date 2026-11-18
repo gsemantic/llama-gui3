@@ -328,3 +328,16 @@ TEST(list_tool_skips_service_directories_like_glob) {
     ASSERT_TRUE(r.find("keep.txt") != std::string::npos);
     fs::remove_all(t);
 }
+
+TEST(read_tool_rejects_offset_beyond_eof_with_a_line_hint) {
+    /* Сессия 0.18.20, субагент: offset=12121 (размер файла в байтах)
+     * возвращал 0 строк, и вызов повторялся. Offset — номер строки. */
+    fs::path t = make_tmp_tree();
+    write_bytes(t / "n.txt", "1\n2\n3\n");
+    init_tools(t);
+    const std::string r = read_tool("n.txt", 100, 10);
+    ASSERT_TRUE(r.find("за пределами") != std::string::npos);
+    ASSERT_TRUE(r.find("3 строк") != std::string::npos);
+    ASSERT_TRUE(r.find("НОМЕР СТРОКИ") != std::string::npos || r.find("номер строки") != std::string::npos);
+    fs::remove_all(t);
+}

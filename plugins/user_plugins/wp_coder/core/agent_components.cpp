@@ -35,6 +35,38 @@ using limits::kResultBudget;
  * тоже слишком короткий для продуктивного шага агента. */
 constexpr int kStuckThreshold = 3;
 constexpr size_t kShortResponseLen = 200;
+
+namespace {
+
+/* Каноническая подпись аргументов: учитываются только параметры из схемы
+ * инструмента, ключи сортируются. Это важно, потому что модель добавляет
+ * служебные поля (`"tool":"read_file"`) и меняет порядок ключей: с сырым
+ * dump() вызовы с `{"path":"f"}` и `{"path":"f","tool":"read_file"}`
+ * считались разными, и защита от повторов их пропускала. */
+std::string canonical_args(const json::JsonValue& args,
+                           const json::JsonValue* schema) {
+    std::vector<std::string> keys;
+    if (schema && schema->is_object() && schema->has("properties")) {
+        const json::JsonValue& props = schema->get("properties");
+        if (props.is_object()) keys = props.keys();
+    }
+    if (keys.empty()) keys = args.keys();
+    std::sort(keys.begin(), keys.end());
+    std::string out = "{";
+    bool first = true;
+    for (const std::string& key : keys) {
+        if (!args.has(key)) continue;
+        if (!first) out += ",";
+        first = false;
+        out += json::JsonValue(key).dump();
+        out += ":";
+        out += args.get(key).dump();
+    }
+    out += "}";
+    return out;
+}
+
+} // namespace
 /* Порог «итога» живёт в limits.h (limits::kMinFinalAnswerLen): условие
  * завершения считает его в turn_verdict (core/message.h, И5.8), и второе
  * место с этим числом разъехалось бы с первым. */
@@ -451,7 +483,9 @@ const char* kPlanPrompt =
     "Write a short plan for the task. Rules: no tools, no wp_action, no "
     "code. At most 5 numbered steps, one line each, imperative. Do not "
     "mention files, frameworks or versions you have not verified. The plan "
-    "will be executed with tools afterwards, so describe actions, not facts.";
+    "will be executed with tools afterwards, so describe actions, not facts. "
+    "The last step MUST be verification: run the project's tests (or create "
+    "and run a minimal smoke test) and report the result.";
 
 } // namespace
 
@@ -636,6 +670,18 @@ const char* kLastStepReminder =
     "final report now: what was done, what was not done, and what you need "
     "from the user. Do not write a plan.";
 
+/* Пустой JSON-объект (`{}`), который модель иногда присылает вместо
+ * вызова инструмента. Это не ответ и не пустой ход провайдера: нативные
+ * инструменты отключать из-за него нельзя, а в историю его писать
+ * бессмысленно — он не добавляет модели ничего. */
+bool is_empty_json_object(const std::string& text) {
+    const size_t b = text.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return false;
+    const size_t e = text.find_last_not_of(" \t\r\n");
+    const std::string t = text.substr(b, e - b + 1);
+    return t == "{}" || t == "[]" || t == "null";
+}
+
 } // namespace
 
 /* И10.1: снимок рабочего каталога в начале шага.
@@ -738,6 +784,11 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
      * или исполняющий вызов сбрасывает отпечаток: после правки файл мог
      * измениться, и повторное чтение законно. */
     std::string last_read_sig;
+    /* Подпись последнего вызова, который инструмент признал no-op
+     * (`[no-op]` в результате). Если модель повторит его — не выполняем
+     * второй раз: в сессии 0.18.18 так зацикливались search_replace и
+     * edit_file с query == content. */
+    std::string last_noop_sig;
     /* Системный промпт пересобирается на каждом шаге: note_tools_rejected
      * меняет протокол вызова, и старый снимок заставил бы модель писать
      * блок, которого приложение уже не ждёт. */
@@ -762,10 +813,16 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     };
     int total_steps = state_.max_steps;
     bool budget_extended = false;
+    /* Вырожденные ходы (`{}` вместо вызова) не должны съедать бюджет:
+     * они не пишутся в историю и не приближают результат. Компенсируем
+     * их отдельным счётчиком, чтобы цикл реально получил свои
+     * total_steps продуктивных шагов. */
+    int free_retries = 0;
 
     std::cerr << "[wp_coder] agent_loop: starting, max_steps=" << total_steps << std::endl;
 
-    for (int step = 0; step < total_steps; ++step) {
+    for (int step = 0; step < total_steps + free_retries; ++step) {
+        const int effective_step = step - free_retries;
         if (state_.abort_requested.load()) {
             this->push_event_(AgentEvent::Status, "[прервано пользователем]");
             full_response += "\n\n[прервано пользователем]";
@@ -821,7 +878,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * увидела его в том же контексте, в котором будет отвечать. На
          * первом шаге (step == 0) оно не добавляется: там ещё нечего
          * заканчивать, и напоминание было бы враньём. */
-        const bool is_last_step = (step + 1 >= total_steps);
+        const bool is_last_step = (effective_step + 1 >= total_steps);
         if (is_last_step && step > 0) {
             /* План не закрыт — даём ещё один бюджет вместо принудительного
              * итога. Продление сообщается модели явно: иначе она увидит
@@ -1006,6 +1063,30 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * идёт текстовым протоколом (блок wp_action). Если и он пуст —
          * провайдер отвечает пустотой всегда, и два хода подряд честно
          * закрывают задачу с ошибкой, а не тратят три шага на напоминания. */
+        /* `{}` вместо вызова — вырожденный ход. Не considered empty_turn:
+         * провайдер жив, нативные инструменты отключать не за что. Но и
+         * в историю это писать нельзя: модель не получит ничего, кроме
+         * собственного пустого объекта, и следующий шаг начнётся с него.
+         * Шаг не списываем (free_retries), бюджет остаётся на действия. */
+        const bool blank_json_turn =
+            !response.text().empty() && response.tool_calls().empty() &&
+            is_empty_json_object(response.text());
+        if (blank_json_turn) {
+            /* Не больше пяти бесплатных повторов: если модель шлёт `{}` без
+             * конца, дальше это уже её бюджет, а не наш. */
+            const int max_free = std::min(total_steps, 5);
+            if (free_retries < max_free) ++free_retries;
+            this->push_event_(AgentEvent::Status,
+                "Модель прислала пустой JSON {} вместо вызова — шаг не "
+                "списан, прошу вызвать инструмент.");
+            append_note(
+                "[reminder] You sent an empty JSON object ({}) instead of a "
+                "tool call. Do NOT send {}. Make the next tool call now (one "
+                "wp_action block / native call), or, if the task is finished, "
+                "write the final report.");
+            continue;
+        }
+
         const bool empty_turn =
             response.text().empty() && response.tool_calls().empty();
         if (empty_turn) {
@@ -1160,7 +1241,10 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * сюда не попадает в принципе, его разбор — забота адаптера
          * (core/llm_source.h). */
         const std::string turn_text = response.text();
-        if (!turn_text.empty()) {
+        /* JSON с аргументами инструмента не попадает в full_response:
+         * иначе он уехал бы пользователю как «финальный ответ», если
+         * бюджет кончится или цикл решит, что это итог. */
+        if (!turn_text.empty() && !looks_like_tool_args_json(turn_text)) {
             if (!full_response.empty()) full_response += "\n\n";
             full_response += turn_text;
         }
@@ -1212,8 +1296,29 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 ToolsRegistry::instance().find(call.name);
             const bool read_only_call =
                 call_def && (call_def->flags & TF_READ_ONLY) != 0;
-            const std::string call_sig =
-                call.name + "\n" + call.arguments.dump();
+            const std::string call_sig = call.name + "\n" +
+                canonical_args(call.arguments, call_def ? &call_def->parameters : nullptr);
+            /* Повтор вызова, который инструмент уже признал no-op.
+             * В сессии 0.18.18 так зацикливались search_replace/edit_file:
+             * модель получала «[no-op] …» и всё равно повторяла тот же
+             * вызов. Второй раз не выполняем — сразу называем выход. */
+            if (!last_noop_sig.empty() && call_sig == last_noop_sig) {
+                ToolOutput dup;
+                dup.title = "повтор no-op " + call.name;
+                dup.output =
+                    "[repeat-noop] You already tried this exact call and the "
+                    "tool reported no change. It was NOT executed again.\n"
+                    "Change the replacement text (content), use read_file to "
+                    "look at the file, or write_file to replace the whole "
+                    "file. Do not repeat an identical no-op call.";
+                this->push_event_(AgentEvent::Status,
+                    "Повтор no-op вызова " + call.name +
+                    " — не выполняю второй раз.");
+                LlmResponse::reduce(response, LlmEvent::tool_result(
+                    call.call_id, std::move(dup)));
+                sync_tool_parts(turn, response);
+                continue;
+            }
             if (read_only_call && !last_read_sig.empty() &&
                 call_sig == last_read_sig) {
                 ToolOutput dup;
@@ -1244,9 +1349,17 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             const ToolOutcome outcome =
                 tool_runner.run(call.name, call.arguments);
             if (outcome.ok) {
+                /* Запоминаем no-op: следующий такой же вызов будет
+                 * остановлен выше, не тратя шаг и не спрашивая doom_loop. */
+                if (outcome.output.output.find("[no-op]") != std::string::npos) {
+                    last_noop_sig = call_sig;
+                } else if (!read_only_call) {
+                    last_noop_sig.clear();
+                }
                 LlmResponse::reduce(response, LlmEvent::tool_result(
                     call.call_id, cap_result(std::move(outcome.output))));
             } else {
+                if (!read_only_call) last_noop_sig.clear();
                 LlmResponse::reduce(response, LlmEvent::tool_error(
                     call.call_id, outcome.error));
             }
@@ -1537,19 +1650,35 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             this->push_event_(AgentEvent::Status,
                 "Это JSON-аргументы инструмента, а не итоговый отчёт — "
                 "прошу вызвать инструмент и дать отчёт.");
+            /* Аргументы task (prompt/description) — самая частая форма
+             * такой ошибки: модель «запускает субагента» текстом. Называем
+             * инструмент и обязательные поля прямо, иначе она повторяет
+             * тот же JSON и он снова уходит в чат. */
+            const std::string& printed = response.text();
+            const bool looks_like_task =
+                printed.find("\"prompt\"") != std::string::npos &&
+                (printed.find("\"description\"") != std::string::npos ||
+                 printed.find("\"subagent_type\"") != std::string::npos);
             append_note(
-                "[reminder] You printed tool arguments as JSON text instead "
-                "of calling the tool. Do not print JSON. Call write_file (or "
-                "the appropriate tool) with those arguments; after the RESULT "
-                "give the user a final report: what was done, where the file "
-                "is, how to run it.");
+                looks_like_task
+                    ? "[reminder] These are task tool arguments, not a final "
+                      "report. Do not print JSON. Call the task tool with "
+                      "subagent_type (see the task description in the tool "
+                      "catalogue), description, and prompt. The task tool "
+                      "requires subagent_type; without it the call is invalid."
+                    : "[reminder] You printed tool arguments as JSON text "
+                      "instead of calling the tool. Do not print JSON. Call "
+                      "write_file (or the appropriate tool) with those "
+                      "arguments; after the RESULT give the user a final "
+                      "report: what was done, where the file is, how to run "
+                      "it.");
         }
 
         /* Не итог: текст хода — это прогресс/рассуждение, а не ответ
          * пользователю. Показываем его Status'ом (обрезанным), чтобы в
          * чате не было нескольких «ответов» подряд и было видно, что это
          * ещё работа. */
-        if (!turn_text.empty()) {
+        if (!turn_text.empty() && verdict != TurnVerdict::ToolArgsJson) {
             this->push_event_(AgentEvent::Status, turn_text);
         }
 

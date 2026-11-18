@@ -148,17 +148,43 @@ std::string django_manage(const std::string& args, const std::string& project_di
 
 std::string pytest_run(const std::string& path, const std::string& marker,
                        const std::function<bool()>& should_cancel) {
+    /* Тесты — не только pytest: на чистой системе его может не быть, и
+     * «No module named pytest» модель читала как «тестов нет». Тогда
+     * пробуем стандартный unittest: он есть в Python всегда. */
+    const std::string target =
+        path.empty() ? std::string() : project_resolve(path);
     std::string cmd = "python3 -m pytest";
-    if (!path.empty()) cmd += " " + shell::shell_quote(project_resolve(path));
+    if (!target.empty()) cmd += " " + shell::shell_quote(target);
     if (!marker.empty()) cmd += " -m " + shell::shell_quote(marker);
     cmd += " -v";
-    /* И11.10: прогон тестов — самый частый долгий вызов, и самый частый
-     * повод нажать «стоп». */
     shell::RunStats stats;
     std::string result =
         shell::run_capture_cancel(cmd, 120, should_cancel, stats);
-    if (stats.cancelled) result += shell::cancelled_note();
-    return result.empty() ? "[pytest: нет вывода]" : shell::cap(result, kModuleMaxOutput);
+    if (stats.cancelled) return result + shell::cancelled_note();
+
+    const bool no_pytest =
+        result.find("No module named pytest") != std::string::npos ||
+        result.find("No module named _pytest") != std::string::npos;
+    if (no_pytest) {
+        const std::string root =
+            target.empty() ? project_resolve(".") : target;
+        std::string fallback =
+            "python3 -m unittest discover -s " + shell::shell_quote(root) +
+            " -p 'test_*.py' -v";
+        shell::RunStats ustats;
+        const std::string uresult =
+            shell::run_capture_cancel(fallback, 120, should_cancel, ustats);
+        if (ustats.cancelled) return uresult + shell::cancelled_note();
+        if (uresult.find("Ran 0 tests") != std::string::npos) {
+            return "[тесты: не найдены] pytest не установлен, unittest "
+                   "не нашёл test_*.py. Создай минимальный smoke-тест в "
+                   "tests/ или запусти проверку вручную.";
+        }
+        return uresult.empty() ? "[тесты: нет вывода]"
+                               : shell::cap(uresult, kModuleMaxOutput);
+    }
+    return result.empty() ? "[pytest: нет вывода]"
+                          : shell::cap(result, kModuleMaxOutput);
 }
 
 std::string venv_create(const std::string& path) {
@@ -236,13 +262,15 @@ void register_python_tools() {
     {
         ToolDef def;
         def.name = "pytest_run";
-        def.description = "Запуск тестов pytest";
+        def.description =
+            "Запуск тестов: pytest, а если он не установлен — стандартный "
+            "unittest discover. Возвращает «тесты не найдены», если тестов нет.";
         /* Фикстуры и сами тесты пишут файлы и кэш. */
         def.flags = TF_EXECUTES | TF_WRITES_FILES | TF_SLOW;
         def.permission_key = "test";
         SchemaBuilder b;
         b.str("path", "файл или каталог с тестами; пусто = весь проект")
-         .str("query", "маркер pytest, например «unit»");
+         .str("query", "маркер pytest, например «unit» (игнорируется для unittest)");
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             return out("pytest", pytest_run(arg_str(a, "path"), arg_str(a, "query"),
