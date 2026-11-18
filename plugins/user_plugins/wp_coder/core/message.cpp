@@ -769,7 +769,8 @@ bool looks_like_tool_args_json(const std::string& text) {
 }
 
 TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
-                         const std::string& last_user_id) {
+                         const std::string& last_user_id,
+                         size_t min_len) {
     /* 1. Провайдер остановился, чтобы вызвать инструмент, — ход не финальный.
      * «unknown» и пустая причина — в том же списке: неизвестная причина
      * остановки не доказывает завершения, и закрывать по ней задачу —
@@ -800,7 +801,7 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
      * он шёл, человек написал ещё одно, и закрывать нечего. */
     if (turn.parent_id != last_user_id) return TurnVerdict::NotLastUser;
     /* 4. Слишком короткий текст — это «начало работы», а не итог. */
-    if (response.text().size() < limits::kMinFinalAnswerLen) {
+    if (response.text().size() < min_len) {
         return TurnVerdict::TooShort;
     }
     /* 5. Длинный «итог» из сплошного кода — тоже не итог: модель выдала

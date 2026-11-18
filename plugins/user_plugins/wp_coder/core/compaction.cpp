@@ -30,7 +30,9 @@ long long reserve_for(const ModelLimits& limits, const CompactionConfig& cfg) {
      * больше, чем весь ответ, бессмысленно — места под него всё равно не
      * появится. */
     if (limits.max_output <= 0) return 0;
-    const long long buffer = limits::kCompactionBuffer;
+    const long long buffer = cfg.buffer_tokens > 0
+                                 ? cfg.buffer_tokens
+                                 : limits::kCompactionBuffer;
     return limits.max_output < buffer ? limits.max_output : buffer;
 }
 
@@ -189,9 +191,10 @@ long long preserve_recent_budget(const ModelLimits& limits,
     if (quarter < limits::kMinPreserveRecentTokens) {
         return limits::kMinPreserveRecentTokens;
     }
-    if (quarter > limits::kMaxPreserveRecentTokens) {
-        return limits::kMaxPreserveRecentTokens;
-    }
+    const long long max_recent = cfg.max_preserve_recent_tokens > 0
+                                     ? cfg.max_preserve_recent_tokens
+                                     : limits::kMaxPreserveRecentTokens;
+    if (quarter > max_recent) return max_recent;
     return quarter;
 }
 
@@ -616,8 +619,15 @@ bool protected_tool(const std::string& name) {
 
 } // namespace
 
-std::vector<MessagePart*> prune_candidates(std::vector<Message>& history) {
+std::vector<MessagePart*> prune_candidates(std::vector<Message>& history,
+                                           const CompactionConfig& cfg) {
     std::vector<MessagePart*> out;
+    const long long protect_tokens = cfg.prune_protect_tokens > 0
+                                         ? cfg.prune_protect_tokens
+                                         : limits::kPruneProtectTokens;
+    const long long minimum_tokens = cfg.prune_minimum_tokens > 0
+                                         ? cfg.prune_minimum_tokens
+                                         : limits::kPruneMinimumTokens;
     /* Счётчик ходов идёт по репликам пользователя: ровно так же, как в
      * порте, где это `msg.info.role === "user"`. Обёртка сводки — тоже
      * пользовательская реплика, но обход всё равно остановится на ней
@@ -665,7 +675,7 @@ std::vector<MessagePart*> prune_candidates(std::vector<Message>& history) {
             if (p.output_cleared()) continue;
             const long long size = estimate_tokens(p.output().output);
             fresh += size;
-            if (fresh <= limits::kPruneProtectTokens) continue;
+            if (fresh <= protect_tokens) continue;
             spare += size;
             out.push_back(&p);
         }
@@ -674,7 +684,7 @@ std::vector<MessagePart*> prune_candidates(std::vector<Message>& history) {
     /* Не стоит — не чистим (шаг «а стоит ли»). Список либо весь, либо
      * пуст: частичная очистка выглядела бы как «часть выводов пропала
      * сама», и модель не отличила бы её от поломки. */
-    if (spare <= limits::kPruneMinimumTokens) return std::vector<MessagePart*>();
+    if (spare <= minimum_tokens) return std::vector<MessagePart*>();
     return out;
 }
 

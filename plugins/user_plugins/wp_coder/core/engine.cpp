@@ -1456,8 +1456,14 @@ void Engine::load_settings() {
     }
     {
         int steps = 20;
-        std::string t = setting_get(cb_, "wp_coder.max_steps", "20");
-        try { steps = std::stoi(t); } catch (...) {}
+        /* Пустая строка = человек не задавал: тогда значение может
+         * прийти из профиля (apply_session_profile ниже). Раньше здесь
+         * стоял дефолт «20», и профиль max_steps молча проигрывал. */
+        const std::string t = setting_get(cb_, "wp_coder.max_steps", "");
+        state_.has_max_steps_setting = !t.empty();
+        if (!t.empty()) {
+            try { steps = std::stoi(t); } catch (...) {}
+        }
         state_.max_steps = steps > 0 ? steps : 20;
     }
     /* И8.8: предел вложенности субагентов. Рядом с max_steps, потому что
@@ -1488,8 +1494,11 @@ void Engine::load_settings() {
     }
     {
         int budget = 120000;
-        std::string t = setting_get(cb_, "wp_coder.session_budget", "120000");
-        try { budget = std::stoi(t); } catch (...) {}
+        const std::string t = setting_get(cb_, "wp_coder.session_budget", "");
+        state_.has_session_budget_setting = !t.empty();
+        if (!t.empty()) {
+            try { budget = std::stoi(t); } catch (...) {}
+        }
         state_.session_budget = budget > 0 ? static_cast<size_t>(budget) : 120000;
     }
 
@@ -1731,7 +1740,7 @@ void Engine::apply_session_profile() {
         /* Лимиты: без профиля — дефолты из limits.h. */
         state_.limit_max_steps = 20;
         state_.limit_session_budget_chars = 120000;
-        state_.limit_max_tool_output_bytes = 12000;
+        state_.limit_max_tool_output_bytes = 20000;
         state_.limit_shell_timeout_sec = 120;
         state_.limit_min_final_answer_len = 300;
         state_.limit_compaction_buffer_tokens = 20000;
@@ -1757,7 +1766,7 @@ void Engine::apply_session_profile() {
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
         state_.limit_max_steps = 20;
         state_.limit_session_budget_chars = 120000;
-        state_.limit_max_tool_output_bytes = 12000;
+        state_.limit_max_tool_output_bytes = 20000;
         state_.limit_shell_timeout_sec = 120;
         state_.limit_min_final_answer_len = 300;
         state_.limit_compaction_buffer_tokens = 20000;
@@ -1802,8 +1811,18 @@ void Engine::apply_session_profile() {
         if (profile.has_timeout_ms && state_.llm_timeout_setting.empty()) {
             state_.llm_timeout_ms = profile.timeout_ms;
         }
-        if (profile.has_max_steps) state_.limit_max_steps = profile.max_steps;
-        if (profile.has_session_budget_chars) state_.limit_session_budget_chars = profile.session_budget_chars;
+        if (profile.has_max_steps) {
+            state_.limit_max_steps = profile.max_steps;
+            /* Явная настройка человека важнее профиля. */
+            if (!state_.has_max_steps_setting)
+                state_.max_steps = profile.max_steps;
+        }
+        if (profile.has_session_budget_chars) {
+            state_.limit_session_budget_chars = profile.session_budget_chars;
+            if (!state_.has_session_budget_setting)
+                state_.session_budget =
+                    static_cast<size_t>(profile.session_budget_chars);
+        }
         if (profile.has_max_tool_output_bytes) state_.limit_max_tool_output_bytes = profile.max_tool_output_bytes;
         if (profile.has_shell_timeout_sec) state_.limit_shell_timeout_sec = profile.shell_timeout_sec;
         if (profile.has_min_final_answer_len) state_.limit_min_final_answer_len = profile.min_final_answer_len;
@@ -1815,6 +1834,18 @@ void Engine::apply_session_profile() {
         if (profile.has_max_output_lines) state_.limit_max_output_lines = profile.max_output_lines;
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
     }
+
+    /* Профильные лимиты компакшна — в конфиг, который читает цикл.
+     * Раньше limit_* выставлялись и НИКТО их не читал: профиль
+     * «max_preserve_recent_tokens» был файлом с красивым числом. */
+    state_.compaction_config.buffer_tokens =
+        static_cast<long long>(state_.limit_compaction_buffer_tokens);
+    state_.compaction_config.prune_protect_tokens =
+        static_cast<long long>(state_.limit_prune_protect_tokens);
+    state_.compaction_config.prune_minimum_tokens =
+        static_cast<long long>(state_.limit_prune_minimum_tokens);
+    state_.compaction_config.max_preserve_recent_tokens =
+        static_cast<long long>(state_.limit_max_preserve_recent_tokens);
 
     /* Запреты — в конец набора правил, поэтому перекрывают правила
      * пользователя (last match wins, core/permission.h). Человеку при этом
@@ -2292,7 +2323,7 @@ void Engine::compact_history_if_needed(const compaction::SummaryTurn& turn) {
     bool pruned = false;
     if (snap.cfg.prune) {
         const std::vector<MessagePart*> parts =
-            compaction::prune_candidates(snap.history);
+            compaction::prune_candidates(snap.history, snap.cfg);
         if (!parts.empty()) {
             for (MessagePart* p : parts) p->clear_output();
             pruned = true;

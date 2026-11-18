@@ -406,7 +406,7 @@ struct EngineState {
      * has_* = true; иначе остаётся дефолт. */
     int limit_max_steps = 20;
     int limit_session_budget_chars = 120000;
-    int limit_max_tool_output_bytes = 12000;
+    int limit_max_tool_output_bytes = 20000;
     int limit_shell_timeout_sec = 120;
     int limit_min_final_answer_len = 300;
     int limit_compaction_buffer_tokens = 20000;
@@ -456,6 +456,13 @@ struct EngineState {
     /* Настройки агента (5.3) — переопределяют дефолты из core/limits.h. */
     int max_steps = 20;            // лимит шагов ReAct на задачу (kMaxSteps)
     size_t session_budget = 120000; // бюджет символов истории сессии (kSessionBudget)
+    /* Была ли настройка задана ЧЕЛОВЕКОМ. Нужна, чтобы профиль не
+     * перекрывал явное значение: «max_steps: 30» в профиле не должен
+     * побеждать «wp_coder.max_steps = 12», если человек написал его сам.
+     * Раньше профиль вообще не применялся к этим полям, и флаг не был
+     * нужен; теперь он есть. */
+    bool has_max_steps_setting = false;
+    bool has_session_budget_setting = false;
 
     /* И8.8: насколько глубоко можно вкладывать `task`.
      *
@@ -1018,6 +1025,21 @@ public:
 
     /* Профиль сессии: разобран или нет, и почему. Для панели и лога. */
     bool session_profile(harness::Profile* out, std::string* error) const;
+
+    /* Runtime-лимиты, вынесенные из профиля/настроек. Читаются
+     * коротким локом и копируются: вызывающий код (усечение вывода,
+     * bash) не должен держать state_.mtx на время работы. */
+    unsigned shell_timeout_sec() const {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        return static_cast<unsigned>(state_.limit_shell_timeout_sec);
+    }
+    void output_limits(size_t& max_bytes, size_t& max_lines,
+                       size_t& tool_cap) const {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        max_bytes = static_cast<size_t>(state_.limit_max_output_bytes);
+        max_lines = static_cast<size_t>(state_.limit_max_output_lines);
+        tool_cap = static_cast<size_t>(state_.limit_max_tool_output_bytes);
+    }
 
     /* Применение/отклонение предложенных правок. */
     void pending_apply(size_t idx);

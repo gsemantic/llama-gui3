@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.18.24] - 2026-11-18
+
+Профильные лимиты `limit_*` выставлялись в EngineState и НИКТО их не читал:
+`max_steps`, `session_budget_chars`, `max_tool_output_bytes`,
+`shell_timeout_sec`, `min_final_answer_len`, `compaction_buffer_tokens`,
+`prune_*`, `max_preserve_recent_tokens`, `max_output_bytes/lines` были
+файлами с красивыми числами.
+
+- `max_steps` и `session_budget_chars` из профиля теперь применяются, если
+  человек не задал `wp_coder.max_steps` / `wp_coder.session_budget`.
+- `max_tool_output_bytes`, `max_output_bytes`, `max_output_lines` читаются в
+  `ToolsRegistry::truncate_output`.
+- `shell_timeout_sec` читается в bash.
+- `min_final_answer_len` прокинут в `turn_verdict` и напоминания.
+- `compaction_buffer_tokens`, `prune_protect_tokens`, `prune_minimum_tokens`,
+  `max_preserve_recent_tokens` перенесены в `CompactionConfig` и читаются.
+- Тесты: профиль применяет лимиты, явная настройка важнее, runtime-пороги
+  усечения и прореживания. Итого 1498 зелёных.
+
 ## [0.18.23] - 2026-11-18
 
 Живая сессия `ses_000000000273`: агент тратил шаги на повторное чтение и

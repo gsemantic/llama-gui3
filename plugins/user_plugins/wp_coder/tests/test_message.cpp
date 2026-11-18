@@ -877,6 +877,27 @@ TEST(turn_verdict_does_not_close_task_on_tool_args_json) {
         R"({"answer": "готово", "summary": "файл записан"})"));
 }
 
+TEST(turn_verdict_respects_runtime_min_len) {
+    /* Порог итога — runtime-настройка (limit_min_final_answer_len).
+     * Раньше здесь была константа, и профиль не мог её менять. */
+    const std::string kUser = "msg_000000000001";
+    const std::string answer = "Готово: файл записан, тесты проходят.";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(answer));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser, answer.size()),
+              (int)TurnVerdict::Completed);
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser, answer.size() + 1),
+              (int)TurnVerdict::TooShort);
+    /* Дефолт оставляет прежнее поведение (300). */
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::TooShort);
+}
+
 TEST(turn_verdict_does_not_show_task_arguments_in_chat) {
     /* Сессия 0.18.20: на «запусти субагента» модель напечатала
      * {"background":"да","description":...,"prompt":...} текстом. Ключей

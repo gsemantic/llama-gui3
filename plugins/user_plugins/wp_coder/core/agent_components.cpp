@@ -793,6 +793,14 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
      * меняет протокол вызова, и старый снимок заставил бы модель писать
      * блок, которого приложение уже не ждёт. */
     std::string sys = sys_prompt;
+    /* Runtime-порог итога: профиль может его менять (limit_min_final_answer_len).
+     * Раньше здесь была константа, и поле профиля никто не читал. */
+    size_t min_final_len = limits::kMinFinalAnswerLen;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        min_final_len =
+            static_cast<size_t>(state_.limit_min_final_answer_len);
+    }
 
     /* Мягкий бюджет: если к последнему шагу план задачи закрыт не
      * полностью (в todowrite есть pending/in_progress), цикл один раз
@@ -1129,7 +1137,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                     "[reminder] You sent reasoning only. Call the next tool "
                     "now (one wp_action block), or, if the task is truly "
                     "finished, write the final report of at least " +
-                    std::to_string(limits::kMinFinalAnswerLen) + " characters.");
+                    std::to_string(min_final_len) + " characters.");
                 continue;
             }
 
@@ -1182,7 +1190,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 "call. Continue the task: make the next tool call (one "
                 "wp_action block), or, if the task is finished, write the "
                 "final report of at least " +
-                std::to_string(limits::kMinFinalAnswerLen) + " characters.");
+                std::to_string(min_final_len) + " characters.");
             /* Пустое сообщение в историю не пишется — только напоминание
              * выше; следующий шаг начнётся с него. */
             continue;
@@ -1482,7 +1490,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             }
         }
         const TurnVerdict verdict =
-            turn_verdict(response, turn, current_user_id);
+            turn_verdict(response, turn, current_user_id, min_final_len);
         if (verdict == TurnVerdict::Completed) {
             final_given = true;
             /* Заголовок отделяет итог от прогресса. Сам ответ уходит
@@ -1604,7 +1612,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 "printed in the reply. Write the complete file and then give "
                 "the final report: what was done, where the file is, how to "
                 "run it — at least " +
-                std::to_string(limits::kMinFinalAnswerLen) + " characters.");
+                std::to_string(min_final_len) + " characters.");
         } else if (verdict == TurnVerdict::PlanningText) {
             /* Модель описала, что собирается сделать, но не сделала.
              * Принять это за итог — значит закрыть задачу без правки;

@@ -1746,7 +1746,7 @@ void register_base_tools() {
             shell::RunOptions opt;
             const int t = arg_int(a, "timeout");
             opt.timeout_sec = (t > 0) ? static_cast<unsigned>(t)
-                                       : limits::kShellTimeoutSec;
+                                       : engine().shell_timeout_sec();
             /* Команда выполняется в корне проекта, а не в каталоге
              * процесса. Инструменты файлов уже разрешают пути от корня;
              * shell обязан работать там же, иначе относительный путь в

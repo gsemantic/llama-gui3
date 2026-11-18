@@ -1836,6 +1836,27 @@ TEST(old_output_goes_when_the_tail_is_still_untouched) {
     ASSERT_TRUE(c[0]->has_result());
 }
 
+TEST(prune_candidates_respects_runtime_thresholds) {
+    /* Профильные prune_protect_tokens / prune_minimum_tokens должны
+     * читаться: раньше prune_candidates брал только константы limits::. */
+    CompactionConfig cfg;
+    cfg.prune_protect_tokens = 1000;
+    cfg.prune_minimum_tokens = 1;
+    std::vector<Message> h = four_turns(15000);
+    std::vector<MessagePart*> c = prune_candidates(h, cfg);
+    ASSERT_EQ(c.size(), size_t(2));
+    for (MessagePart* p : c) {
+        ASSERT_TRUE(p->call_id() == "call_0" || p->call_id() == "call_1");
+    }
+
+    /* Порог «а стоит ли» выше выгоды — не чистим ничего. */
+    CompactionConfig too_high;
+    too_high.prune_protect_tokens = 1000;
+    too_high.prune_minimum_tokens = 100000;
+    std::vector<Message> h2 = four_turns(15000);
+    ASSERT_TRUE(prune_candidates(h2, too_high).empty());
+}
+
 TEST(the_last_two_turns_are_never_touched_however_big) {
     /* Два последних хода защищены счётом реплик пользователя, а не
      * размером: 100000 токенов вывода в них остаются целыми. Очистить их

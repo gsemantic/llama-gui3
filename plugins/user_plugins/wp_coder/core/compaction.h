@@ -134,6 +134,14 @@ struct CompactionConfig {
      * меняет то, что видит модель, и без явного согласия пользователя
      * трогать это нельзя. */
     bool prune = false;
+    /* Runtime-лимиты из профиля harness (И9.7). 0 = не задан, тогда
+     * берётся дефолт из limits.h. Раньше эти числа жили в EngineState
+     * как limit_* и НИКТО их не читал: профиль с max_preserve_recent_tokens
+     * был файлом с красивым числом. */
+    long long buffer_tokens = 0;
+    long long prune_protect_tokens = 0;
+    long long prune_minimum_tokens = 0;
+    long long max_preserve_recent_tokens = 0;
 };
 
 /* Сколько токенов оставляется под саму сводку. */
@@ -506,7 +514,9 @@ std::vector<Message> compacted_history(const Selection& sel,
  * Чего здесь нет: момента запуска (7.10) и самой настройки пользователя в
  * UI (И11) — флаг prune в CompactionConfig есть, читается как остальные.
  */
-std::vector<MessagePart*> prune_candidates(std::vector<Message>& history);
+std::vector<MessagePart*> prune_candidates(
+    std::vector<Message>& history,
+    const CompactionConfig& cfg = CompactionConfig());
 
 /* ======================================================================
  * И7.7 — автопродолжение

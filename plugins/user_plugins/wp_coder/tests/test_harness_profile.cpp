@@ -165,6 +165,22 @@ struct ProfileGuard {
     int llm_timeout_ms = 0;
     std::string llm_timeout_setting;
     std::string project_dir;
+    int max_steps = 0;
+    size_t session_budget = 0;
+    bool has_max_steps_setting = false;
+    bool has_session_budget_setting = false;
+    int limit_max_steps = 0;
+    int limit_session_budget_chars = 0;
+    int limit_max_tool_output_bytes = 0;
+    int limit_shell_timeout_sec = 0;
+    int limit_min_final_answer_len = 0;
+    int limit_compaction_buffer_tokens = 0;
+    int limit_prune_protect_tokens = 0;
+    int limit_prune_minimum_tokens = 0;
+    int limit_max_preserve_recent_tokens = 0;
+    int limit_max_output_bytes = 0;
+    int limit_max_output_lines = 0;
+    compaction::CompactionConfig compaction_config;
 
     explicit ProfileGuard(Engine& engine) : e(engine) {
         std::lock_guard<std::mutex> lk(e.state().mtx);
@@ -179,6 +195,22 @@ struct ProfileGuard {
         llm_timeout_ms = e.state().llm_timeout_ms;
         llm_timeout_setting = e.state().llm_timeout_setting;
         project_dir = e.state().project_dir;
+        max_steps = e.state().max_steps;
+        session_budget = e.state().session_budget;
+        has_max_steps_setting = e.state().has_max_steps_setting;
+        has_session_budget_setting = e.state().has_session_budget_setting;
+        limit_max_steps = e.state().limit_max_steps;
+        limit_session_budget_chars = e.state().limit_session_budget_chars;
+        limit_max_tool_output_bytes = e.state().limit_max_tool_output_bytes;
+        limit_shell_timeout_sec = e.state().limit_shell_timeout_sec;
+        limit_min_final_answer_len = e.state().limit_min_final_answer_len;
+        limit_compaction_buffer_tokens = e.state().limit_compaction_buffer_tokens;
+        limit_prune_protect_tokens = e.state().limit_prune_protect_tokens;
+        limit_prune_minimum_tokens = e.state().limit_prune_minimum_tokens;
+        limit_max_preserve_recent_tokens = e.state().limit_max_preserve_recent_tokens;
+        limit_max_output_bytes = e.state().limit_max_output_bytes;
+        limit_max_output_lines = e.state().limit_max_output_lines;
+        compaction_config = e.state().compaction_config;
     }
     ~ProfileGuard() {
         {
@@ -192,6 +224,22 @@ struct ProfileGuard {
             e.state().llm_timeout_ms = llm_timeout_ms;
             e.state().llm_timeout_setting = llm_timeout_setting;
             e.state().project_dir = project_dir;
+            e.state().max_steps = max_steps;
+            e.state().session_budget = session_budget;
+            e.state().has_max_steps_setting = has_max_steps_setting;
+            e.state().has_session_budget_setting = has_session_budget_setting;
+            e.state().limit_max_steps = limit_max_steps;
+            e.state().limit_session_budget_chars = limit_session_budget_chars;
+            e.state().limit_max_tool_output_bytes = limit_max_tool_output_bytes;
+            e.state().limit_shell_timeout_sec = limit_shell_timeout_sec;
+            e.state().limit_min_final_answer_len = limit_min_final_answer_len;
+            e.state().limit_compaction_buffer_tokens = limit_compaction_buffer_tokens;
+            e.state().limit_prune_protect_tokens = limit_prune_protect_tokens;
+            e.state().limit_prune_minimum_tokens = limit_prune_minimum_tokens;
+            e.state().limit_max_preserve_recent_tokens = limit_max_preserve_recent_tokens;
+            e.state().limit_max_output_bytes = limit_max_output_bytes;
+            e.state().limit_max_output_lines = limit_max_output_lines;
+            e.state().compaction_config = compaction_config;
         }
         e.permissions().set_rules(rules);
         const std::set<std::string> now = command_policy().allowed_binaries();
@@ -702,6 +750,67 @@ TEST(профиль_из_настройки_меняет_таймаут_запр
     /* Список команд сужен. */
     ASSERT_TRUE(command_policy().binary_allowed("ls"));
     ASSERT_FALSE(command_policy().binary_allowed("git"));
+}
+
+TEST(профиль_применяет_лимиты_шагов_сессии_вывода_и_компакшна) {
+    /* Раньше limit_* выставлялись в EngineState и НИКТО их не читал:
+     * профиль с max_steps/session_budget/max_tool_output_* был файлом с
+     * красивыми числами. Проверяем склейку целиком. */
+    TempDir profiles("limits_profile");
+    profiles.write("limits.json", "{"
+        "\"tools_policy\":\"standard\","
+        "\"max_steps\":7,"
+        "\"session_budget_chars\":12345,"
+        "\"max_tool_output_bytes\":4096,"
+        "\"shell_timeout_sec\":33,"
+        "\"min_final_answer_len\":42,"
+        "\"compaction_buffer_tokens\":1111,"
+        "\"prune_protect_tokens\":2222,"
+        "\"prune_minimum_tokens\":333,"
+        "\"max_preserve_recent_tokens\":4444,"
+        "\"max_output_bytes\":5555,"
+        "\"max_output_lines\":66"
+        "}");
+
+    Settings st;
+    st.values["wp_coder.project_dir"] = "";
+    st.values["wp_coder.profiles_dir"] = profiles.str();
+    st.values["wp_coder.profile"] = "limits";
+
+    Engine& eng = engine();
+    ProfileGuard guard(eng);
+    eng.init(st.callbacks());
+
+    const unsigned shell_timeout = eng.shell_timeout_sec();
+    size_t max_bytes = 0, max_lines = 0, tool_cap = 0;
+    eng.output_limits(max_bytes, max_lines, tool_cap);
+    {
+        std::lock_guard<std::mutex> lk(eng.state().mtx);
+        ASSERT_EQ(eng.state().max_steps, 7);
+        ASSERT_EQ(eng.state().session_budget, (size_t)12345);
+        ASSERT_EQ(eng.state().limit_max_tool_output_bytes, 4096);
+        ASSERT_EQ(eng.state().limit_min_final_answer_len, 42);
+        ASSERT_EQ(eng.state().compaction_config.buffer_tokens, 1111);
+        ASSERT_EQ(eng.state().compaction_config.prune_protect_tokens, 2222);
+        ASSERT_EQ(eng.state().compaction_config.prune_minimum_tokens, 333);
+        ASSERT_EQ(eng.state().compaction_config.max_preserve_recent_tokens, 4444);
+    }
+    ASSERT_EQ(shell_timeout, 33u);
+    ASSERT_EQ(max_bytes, (size_t)5555);
+    ASSERT_EQ(max_lines, (size_t)66);
+    ASSERT_EQ(tool_cap, (size_t)4096);
+
+    /* Явная настройка человека важнее профиля. */
+    Settings st2;
+    st2.values["wp_coder.project_dir"] = "";
+    st2.values["wp_coder.profiles_dir"] = profiles.str();
+    st2.values["wp_coder.profile"] = "limits";
+    st2.values["wp_coder.max_steps"] = "9";
+    st2.values["wp_coder.session_budget"] = "999";
+    eng.init(st2.callbacks());
+    std::lock_guard<std::mutex> lk(eng.state().mtx);
+    ASSERT_EQ(eng.state().max_steps, 9);
+    ASSERT_EQ(eng.state().session_budget, (size_t)999);
 }
 
 TEST(профиль_убирает_инструменты_из_каталога_который_видит_модель) {

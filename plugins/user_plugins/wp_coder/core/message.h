@@ -37,6 +37,7 @@
 #include "json.h"
 #include "llm_event.h"
 #include "tool.h"
+#include "limits.h"
 
 #include <chrono>
 #include <string>
@@ -499,7 +500,8 @@ bool looks_like_tool_args_json(const std::string& text);
  *
  * Функция чистая: ни локов, ни состояния движка. */
 TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
-                         const std::string& last_user_id);
+                         const std::string& last_user_id,
+                         size_t min_len = limits::kMinFinalAnswerLen);
 
 /* Короткая форма: «ход закрыл задачу». */
 bool turn_completes_task(const LlmResponse& response, const Message& turn,

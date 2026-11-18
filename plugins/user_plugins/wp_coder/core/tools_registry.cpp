@@ -82,10 +82,21 @@ void truncate_output(const std::string& tool_name, ToolOutput& out) {
      * началу уничтожила бы ровно то, ради чего кольцо и делалось. */
     if (out.truncated) return;
 
-    if (out.output.size() <= limits::kMaxOutputBytes) {
+    /* Runtime-лимиты из профиля/настроек. Раньше здесь стояли только
+     * константы limits::, и поля limit_max_output_* в EngineState никто
+     * не читал. */
+    size_t max_bytes = limits::kMaxOutputBytes;
+    size_t max_lines = limits::kMaxOutputLines;
+    size_t tool_cap = 0;
+    Engine::instance().output_limits(max_bytes, max_lines, tool_cap);
+    if (tool_cap > 0 && tool_cap < max_bytes) max_bytes = tool_cap;
+    if (max_bytes == 0) max_bytes = limits::kMaxOutputBytes;
+    if (max_lines == 0) max_lines = limits::kMaxOutputLines;
+
+    if (out.output.size() <= max_bytes) {
         size_t lines = 0;
         for (char c : out.output) {
-            if (c == '\n' && ++lines > limits::kMaxOutputLines) {
+            if (c == '\n' && ++lines > max_lines) {
                 out.truncated = true;
                 break;
             }
@@ -115,9 +126,9 @@ void truncate_output(const std::string& tool_name, ToolOutput& out) {
     size_t bytes = 0, lines = 0, cut = std::string::npos;
     for (size_t i = 0; i < kept.size(); ++i) {
         if (kept[i] == '\n') {
-            if (++lines >= limits::kMaxOutputLines) { cut = i + 1; break; }
+            if (++lines >= max_lines) { cut = i + 1; break; }
         }
-        if (++bytes >= limits::kMaxOutputBytes) { cut = i + 1; break; }
+        if (++bytes >= max_bytes) { cut = i + 1; break; }
     }
     if (cut != std::string::npos) kept = kept.substr(0, cut);
 

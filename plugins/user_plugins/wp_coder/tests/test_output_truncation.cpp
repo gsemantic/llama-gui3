@@ -110,6 +110,42 @@ TEST(universal_limit_cuts_lines_and_spills_the_rest) {
     fs::remove_all(t);
 }
 
+TEST(runtime_output_limits_override_constants) {
+    /* limit_max_output_* и limit_max_tool_output_bytes должны реально
+     * читаться: раньше они лежали в EngineState и не влияли ни на что. */
+    fs::path t = make_tmp_tree();
+    init_engine(t);
+    register_oversized_tool(5000);
+
+    auto& st = engine_state();
+    int old_bytes = 0, old_lines = 0, old_tool = 0;
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        old_bytes = st.limit_max_output_bytes;
+        old_lines = st.limit_max_output_lines;
+        old_tool = st.limit_max_tool_output_bytes;
+        st.limit_max_output_bytes = 1000;
+        st.limit_max_output_lines = 5000;
+        st.limit_max_tool_output_bytes = 800;
+    }
+
+    ToolOutput o = ToolsRegistry::instance().run_output(
+        "test_oversized", json::JsonValue::object());
+
+    {
+        std::lock_guard<std::mutex> lk(st.mtx);
+        st.limit_max_output_bytes = old_bytes;
+        st.limit_max_output_lines = old_lines;
+        st.limit_max_tool_output_bytes = old_tool;
+    }
+
+    ASSERT_TRUE(o.truncated);
+    ASSERT_TRUE(o.output.size() < 2000);
+    ASSERT_TRUE(o.output.find("строка 0") != std::string::npos);
+    ASSERT_TRUE(o.output.find("строка 4999") == std::string::npos);
+    fs::remove_all(t);
+}
+
 TEST(universal_limit_leaves_small_output_untouched) {
     fs::path t = make_tmp_tree();
     init_engine(t);
