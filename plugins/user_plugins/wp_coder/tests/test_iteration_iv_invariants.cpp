@@ -288,6 +288,6 @@ TEST(iteration_limits_live_in_one_place) {
     ASSERT_EQ((int)limits::kReadDefaultLines, 2000);
     ASSERT_EQ((int)limits::kGlobLimit, 100);
     ASSERT_EQ((int)limits::kListLimit, 300);
-    ASSERT_EQ((int)limits::kMaxToolOutput, 12000);
-    ASSERT_EQ((int)limits::kReadFileChars, 12000);
+    ASSERT_EQ((int)limits::kMaxToolOutput, 20000);
+    ASSERT_EQ((int)limits::kReadFileChars, 20000);
 }

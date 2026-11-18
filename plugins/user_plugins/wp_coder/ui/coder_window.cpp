@@ -235,7 +235,7 @@ static void render_project() {
             engine().save_settings();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Максимум шагов ReAct-цикла на задачу (по умолчанию 12)");
+            ImGui::SetTooltip("Максимум шагов ReAct-цикла на задачу (по умолчанию 20)");
         if (ImGui::InputInt("Бюджет сессии (КБ)", &budget_kb, 8, 64)) {
             if (budget_kb < 8) budget_kb = 8;
             {
@@ -245,7 +245,7 @@ static void render_project() {
             engine().save_settings();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Бюджет символов истории сессии — при превышении старые RESULT сжимаются");
+            ImGui::SetTooltip("Бюджет символов истории сессии — при превышении старые RESULT помечаются");
     }
 
     ImGui::Spacing();

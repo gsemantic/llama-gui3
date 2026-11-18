@@ -141,9 +141,14 @@ void PermissionEngine::apply_agent_defaults(
      * `write`: «всегда разрешить откат» не должно молча разрешать обычную
      * запись файлов, и наоборот (тот же довод, что у `task`). */
     rs.add("revert", "*", PermissionAction::Ask);
-    /* pytest гоняет код проекта — то есть исполняет произвольный код
-     * из дерева, которое агент только что правил. */
-    rs.add("test", "*", PermissionAction::Ask);
+    /* Проверка — ЧАСТЬ ЗАДАЧИ, а не отдельное действие пользователя.
+     * Раньше каждый pytest_run спрашивал разрешение, и агент, не дождавшись
+     * ответа, писал «запустите тест у себя». Тесты запускаются в дереве,
+     * которое агент только что правил, поэтому это не «безопасное чтение»;
+     * но именно этого от кодового агента и ждут. Кто хочет спрашивать —
+     * перекрывает правило пользователя (wp_coder.permission_rules), потому
+     * что пользовательские правила грузятся ПОЗЖЕ и выигрывают. */
+    rs.add("test", "*", PermissionAction::Allow);
 
     /* Исключения ПОСЛЕ общих запретов — иначе last-match-wins съедает
      * их, и git status начнёт спрашивать (именно так и вышло в первый
@@ -171,6 +176,23 @@ void PermissionEngine::apply_agent_defaults(
     rs.add("bash", "file *", PermissionAction::Allow);
     rs.add("bash", "stat *", PermissionAction::Allow);
     rs.add("bash", "pwd", PermissionAction::Allow);
+
+    /* Типовые проверки кода. Без них агент на каждом `py_compile`/pytest
+     * упирался в вопрос, а после отказа писал пользователю «запустите
+     * сами». Команды, меняющие окружение (pip, venv), сюда НЕ входят и
+     * остаются под общим `bash → ask`. */
+    rs.add("bash", "python3 -m py_compile *", PermissionAction::Allow);
+    rs.add("bash", "python3 -m compileall *", PermissionAction::Allow);
+    rs.add("bash", "python3 -m pytest *", PermissionAction::Allow);
+    rs.add("bash", "python3 -m unittest *", PermissionAction::Allow);
+    rs.add("bash", "pytest *", PermissionAction::Allow);
+    /* Тот же набор, но с обычным «cd проект && …»: модель почти всегда
+     * пишет команды именно так, а паттерн выше требует начала строки. */
+    rs.add("bash", "cd * && python3 -m py_compile *", PermissionAction::Allow);
+    rs.add("bash", "cd * && python3 -m compileall *", PermissionAction::Allow);
+    rs.add("bash", "cd * && python3 -m pytest *", PermissionAction::Allow);
+    rs.add("bash", "cd * && python3 -m unittest *", PermissionAction::Allow);
+    rs.add("bash", "cd * && pytest *", PermissionAction::Allow);
 
     /* Петля инструментов (детектор и сам вопрос — И4.11; здесь
      * объявлен ключ, чтобы к тому моменту правило уже было). */

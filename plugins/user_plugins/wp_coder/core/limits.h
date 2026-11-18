@@ -14,16 +14,16 @@ namespace limits {
 
 /* Вывод инструментов: результат попадает в следующий запрос к LLM,
  * поэтому его размер напрямую определяет скорость и стоимость префилля. */
-inline constexpr size_t kMaxToolOutput = 12000;   // байт на результат инструмента
-inline constexpr size_t kModuleMaxOutput = 8000;  // python/wp инструменты
+inline constexpr size_t kMaxToolOutput = 20000;   // байт на результат инструмента
+inline constexpr size_t kModuleMaxOutput = 12000; // python/wp инструменты
 inline constexpr size_t kMaxGrepMatches = 200;    // строк совпадений
-inline constexpr size_t kReadFileChars = 12000;   // байт на read_file
+inline constexpr size_t kReadFileChars = 20000;   // байт на read_file
 inline constexpr size_t kMaxSymFile = 40;         // символов в файле для repo_map
 
 /* ReAct-цикл. */
-inline constexpr int kMaxSteps = 12;              // шагов на задачу (было 8 vs 12 — исправлено)
-inline constexpr size_t kSessionBudget = 60000;   // бюджет символов истории сессии
-inline constexpr size_t kResultBudget = 6000;     // обрезка одного RESULT в сессии
+inline constexpr int kMaxSteps = 20;              // шагов на задачу
+inline constexpr size_t kSessionBudget = 120000;  // бюджет символов истории сессии
+inline constexpr size_t kResultBudget = 12000;    // обрезка одного RESULT в сессии
 /* Минимальная длина текста, который цикл считает ИТОГОМ (И5.8).
  *
  * Четвёртое условие завершения, добавленное к трём портовым: у opencode
@@ -269,7 +269,7 @@ inline constexpr size_t kMaxTimelineReplyChars = 60;  // символов реп
  *
  * Тот же вопрос, что у пределов выше: сколько мы готовы показать за один
  * кадр. Здесь он острее: виджет показывает ВЫВОД вызова, а он достигает
- * 12 КБ (limits::kMaxToolOutput), и копируется под `state_.mtx` — то есть
+ * 20 КБ (limits::kMaxToolOutput), и копируется под `state_.mtx` — то есть
  * на каждом кадре окна и под мьютексом, который держит агент.
  *
  * kMaxToolDisplayOpen — сколько РАСКРЫТЫХ виджетов снимается за кадр.

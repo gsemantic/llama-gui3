@@ -404,8 +404,8 @@ struct EngineState {
     /* Ключевые лимиты, переопределяемые профилем harness. Дефолты — из
      * core/limits.h (см. limits::). Профиль задаёт их только если поле
      * has_* = true; иначе остаётся дефолт. */
-    int limit_max_steps = 12;
-    int limit_session_budget_chars = 60000;
+    int limit_max_steps = 20;
+    int limit_session_budget_chars = 120000;
     int limit_max_tool_output_bytes = 12000;
     int limit_shell_timeout_sec = 120;
     int limit_min_final_answer_len = 300;
@@ -454,8 +454,8 @@ struct EngineState {
     std::string llm_timeout_setting;
 
     /* Настройки агента (5.3) — переопределяют дефолты из core/limits.h. */
-    int max_steps = 12;            // лимит шагов ReAct на задачу (kMaxSteps)
-    size_t session_budget = 60000; // бюджет символов истории сессии (kSessionBudget)
+    int max_steps = 20;            // лимит шагов ReAct на задачу (kMaxSteps)
+    size_t session_budget = 120000; // бюджет символов истории сессии (kSessionBudget)
 
     /* И8.8: насколько глубоко можно вкладывать `task`.
      *

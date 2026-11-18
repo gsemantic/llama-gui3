@@ -160,7 +160,7 @@ TEST(defaults_ask_on_irreversible_and_outward_groups) {
     install_defaults();
     const char* keys[] = {"bash", "git", "wp-cli", "db", "deploy",
                           "systemd", "ssh", "docker", "cron", "package",
-                          "rag", "test", "doom_loop"};
+                          "rag", "doom_loop"};
     for (const char* k : keys) {
         if (decide(k, "*") != PermissionAction::Ask) {
             std::cerr << "  ключ " << k << " должен спрашивать" << std::endl;
@@ -172,6 +172,33 @@ TEST(defaults_ask_on_irreversible_and_outward_groups) {
 /* git status/diff/log — чтение состояния, хотя git при этом запускается.
  * Спрашивать на каждом нельзя: агент пользуется ими постоянно, и
  * вопрос перестают читать. */
+TEST(defaults_allow_tests_and_safe_verification) {
+    /* Проверка — часть задачи. Раньше каждый pytest_run спрашивал
+     * пользователя, и агент писал «запустите тест у себя». */
+    PermissionGuard g;
+    install_defaults();
+    ASSERT_EQ((int)decide("test", "*"), (int)PermissionAction::Allow);
+    ASSERT_EQ((int)decide("bash", "python3 -m py_compile reader2/*.py"),
+              (int)PermissionAction::Allow);
+    ASSERT_EQ((int)decide("bash", "python3 -m pytest -q"),
+              (int)PermissionAction::Allow);
+    ASSERT_EQ((int)decide("bash", "pytest tests/"),
+              (int)PermissionAction::Allow);
+    /* Модель обычно пишет «cd проект && …» — паттерн обязан покрывать и это. */
+    ASSERT_EQ((int)decide("bash",
+                          "cd /home/user/project && python3 -m py_compile a.py"),
+              (int)PermissionAction::Allow);
+    /* Но не «что угодно»: команда, меняющая окружение, остаётся под
+     * общим bash → ask. */
+    ASSERT_EQ((int)decide("bash", "pip install requests"),
+              (int)PermissionAction::Ask);
+    /* Пользователь может перекрыть дефолт своим deny-правилом: оно
+     * грузится позже и по last-match-wins обязано победить. */
+    engine().permissions().add_rule(
+        rule("test", "*", PermissionAction::Deny));
+    ASSERT_EQ((int)decide("test", "*"), (int)PermissionAction::Deny);
+}
+
 TEST(defaults_allow_readonly_git) {
     PermissionGuard g;
     install_defaults();

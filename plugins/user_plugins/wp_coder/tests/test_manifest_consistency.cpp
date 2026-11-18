@@ -649,11 +649,11 @@ TEST(limits_file_is_single_source_of_truth) {
     ASSERT_TRUE(lim.find("kMaxToolOutput") != std::string::npos);
     ASSERT_TRUE(lim.find("kResultBudget") != std::string::npos);
     /* Символические константы равны ожидаемым значениям. */
-    ASSERT_EQ((int)limits::kMaxToolOutput, 12000);
-    ASSERT_EQ((int)limits::kResultBudget, 6000);
+    ASSERT_EQ((int)limits::kMaxToolOutput, 20000);
+    ASSERT_EQ((int)limits::kResultBudget, 12000);
     ASSERT_EQ((int)limits::kMaxGrepMatches, 200);
-    ASSERT_EQ((int)limits::kMaxSteps, 12);
-    ASSERT_EQ((int)limits::kSessionBudget, 60000);
+    ASSERT_EQ((int)limits::kMaxSteps, 20);
+    ASSERT_EQ((int)limits::kSessionBudget, 120000);
     /* Буфер компакшна живёт в limits.h с И7.1, а не в compaction.h:
      * константа, объявленная в двух местах, — это расхождение,
      * которого не будет ровно до того дня, когда одно из них

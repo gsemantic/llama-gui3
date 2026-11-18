@@ -1455,10 +1455,10 @@ void Engine::load_settings() {
         state_.profile_name = name;
     }
     {
-        int steps = 12;
-        std::string t = setting_get(cb_, "wp_coder.max_steps", "12");
+        int steps = 20;
+        std::string t = setting_get(cb_, "wp_coder.max_steps", "20");
         try { steps = std::stoi(t); } catch (...) {}
-        state_.max_steps = steps > 0 ? steps : 12;
+        state_.max_steps = steps > 0 ? steps : 20;
     }
     /* И8.8: предел вложенности субагентов. Рядом с max_steps, потому что
      * это тоже предел хода, а не отдельная подсистема.
@@ -1487,10 +1487,10 @@ void Engine::load_settings() {
         state_.subagent_depth = depth;
     }
     {
-        int budget = 60000;
-        std::string t = setting_get(cb_, "wp_coder.session_budget", "60000");
+        int budget = 120000;
+        std::string t = setting_get(cb_, "wp_coder.session_budget", "120000");
         try { budget = std::stoi(t); } catch (...) {}
-        state_.session_budget = budget > 0 ? static_cast<size_t>(budget) : 60000;
+        state_.session_budget = budget > 0 ? static_cast<size_t>(budget) : 120000;
     }
 
     /* Шаг 3: фактическая модель хоста из справочника models.dev.
@@ -1729,8 +1729,8 @@ void Engine::apply_session_profile() {
         /* Таймаут: настройки не было, профиля нет — дефолт плагина. */
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
         /* Лимиты: без профиля — дефолты из limits.h. */
-        state_.limit_max_steps = 12;
-        state_.limit_session_budget_chars = 60000;
+        state_.limit_max_steps = 20;
+        state_.limit_session_budget_chars = 120000;
         state_.limit_max_tool_output_bytes = 12000;
         state_.limit_shell_timeout_sec = 120;
         state_.limit_min_final_answer_len = 300;
@@ -1755,8 +1755,8 @@ void Engine::apply_session_profile() {
         state_.profile = harness::Profile();
         state_.profile_error = why;
         if (state_.llm_timeout_ms <= 0) state_.llm_timeout_ms = 120000;
-        state_.limit_max_steps = 12;
-        state_.limit_session_budget_chars = 60000;
+        state_.limit_max_steps = 20;
+        state_.limit_session_budget_chars = 120000;
         state_.limit_max_tool_output_bytes = 12000;
         state_.limit_shell_timeout_sec = 120;
         state_.limit_min_final_answer_len = 300;

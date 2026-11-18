@@ -812,7 +812,11 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         return false;
     };
     int total_steps = state_.max_steps;
-    bool budget_extended = false;
+    /* Продлеваем бюджет не один раз, а два: задача на несколько файлов
+     * часто упирается в лимит ровно на проверке, и один раз «продолжай»
+     * не спасал — агент писал отчёт «сделайте сами». Жёсткий предел —
+     * 3 * max_steps, дальше цикл обязан дать итог. */
+    int budget_extensions = 0;
     /* Вырожденные ходы (`{}` вместо вызова) не должны съедать бюджет:
      * они не пишутся в историю и не приближают результат. Компенсируем
      * их отдельным счётчиком, чтобы цикл реально получил свои
@@ -883,13 +887,14 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             /* План не закрыт — даём ещё один бюджет вместо принудительного
              * итога. Продление сообщается модели явно: иначе она увидит
              * «продолжай» без причины и снова начнёт с осмотра проекта. */
-            if (!budget_extended && has_unfinished_todos()) {
-                budget_extended = true;
+            if (budget_extensions < 2 && has_unfinished_todos()) {
+                ++budget_extensions;
                 total_steps += state_.max_steps;
                 this->push_event_(AgentEvent::Status,
                     "Бюджет шагов исчерпан, но план задачи не закрыт — "
                     "продлеваю на " + std::to_string(state_.max_steps) +
-                    " шагов и продолжаю.");
+                    " шагов и продолжаю (продление " +
+                    std::to_string(budget_extensions) + " из 2).");
                 append_note(
                     "[reminder] The step budget was extended because the "
                     "task plan still has unfinished items. Do NOT re-read "

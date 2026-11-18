@@ -1903,8 +1903,8 @@ TEST(agent_settings_defaults_on_missing) {
 
     {
         std::lock_guard<std::mutex> lk(eng.state().mtx);
-        ASSERT_EQ(eng.state().max_steps, 12);
-        ASSERT_EQ(eng.state().session_budget, (size_t)60000);
+        ASSERT_EQ(eng.state().max_steps, 20);
+        ASSERT_EQ(eng.state().session_budget, (size_t)120000);
     }
 }
 
