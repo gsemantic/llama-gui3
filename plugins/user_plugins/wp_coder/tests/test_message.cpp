@@ -927,6 +927,33 @@ TEST(turn_verdict_distinguishes_a_json_report_array_from_a_tool_array) {
     ASSERT_TRUE(turn_completes_task(r, turn, kUser));
 }
 
+TEST(turn_verdict_does_not_show_an_unclosed_json_tool_call_in_chat) {
+    /* ses_000000000514: модель печатала `{"path":…, "content":…}` как
+ * финальный ответ, но JSON был ОБРЫВАН (нет финальной `}`), а последний
+ * символ — кавычка. Ни `looks_like_tool_args_json` (требует баланса
+ * скобок), ни `answer_looks_truncated` (смотрел только на последний
+ * символ) его не ловили → JSON уезжал в чат вместо отчёта.
+ * Теперь незакрытый JSON, начинающийся с `{`/`[`, считается обрывом
+ * (Truncated), и цикл просит продолжить/дожать, а не закрывает задачу. */
+    const std::string kUser = "msg_000000000001";
+    /* Ровно как в логе: начинается с {, внутри path+content, НЕТ закрывающей }. */
+    const std::string unclosed =
+        R"({"path": "agness/ai/client.py", "content": "class AIHttpClient: )"
+        + std::string(320, 'x') + R"(")";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(unclosed));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    /* Это НЕ готовый отчёт. */
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+    /* И это НЕ «вызов с валидными аргументами» — он оборван, а не завершён. */
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::Truncated);
+}
+
 TEST(turn_verdict_respects_runtime_min_len) {
     /* Порог итога — runtime-настройка (limit_min_final_answer_len).
      * Раньше здесь была константа, и профиль не мог её менять. */

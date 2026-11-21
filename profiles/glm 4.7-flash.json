@@ -66,19 +66,29 @@
     },
     "cloud_provider": {
         "auto_price": false,
-        "context_length": 1024000,
+        "context_length": 0,
         "enabled": true,
-        "endpoint_url": "https://api.kilo.ai/api/gateway",
+        "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 1024,
-        "model_id": "baidu/ernie-5.5-flash-preview:free",
+        "model_id": "qwen3-coder-flash",
         "price_input_per_1m": 0.0,
         "price_output_per_1m": 0.0,
-        "provider_name": "kilo gateway",
+        "provider_name": "Qwen (DashScope)",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
+            {
+                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "id": "qwen3-coder-flash",
+                "provider_name": "Qwen (DashScope)"
+            },
+            {
+                "endpoint_url": "https://api.yenisei.ru/v1",
+                "id": "yenisei-max",
+                "provider_name": "yenisei"
+            },
             {
                 "endpoint_url": "https://api.kilo.ai/api/gateway",
                 "id": "baidu/ernie-5.5-flash-preview:free",
@@ -118,16 +128,6 @@
                 "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                 "id": "qwen-flash",
                 "provider_name": "Qwen (DashScope)"
-            },
-            {
-                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "kimi-k3.1-pro",
-                "provider_name": "Qwen (DashScope)"
-            },
-            {
-                "endpoint_url": "https://api.kilo.ai/api/gateway",
-                "id": "reflection/beam-free",
-                "provider_name": "kilo gateway"
             }
         ],
         "saved_providers": [
@@ -215,7 +215,7 @@
         "wp_coder.max_output_tokens": "\"8192\"",
         "wp_coder.max_steps": "\"30\"",
         "wp_coder.php_bin": "\"php\"",
-        "wp_coder.project_dir": "\"/home/alex/projects/reader2\"",
+        "wp_coder.project_dir": "\"/home/alex/projects/agness\"",
         "wp_coder.prompt_override_mode": "\"append\"",
         "wp_coder.session_budget": "\"240000\"",
         "wp_coder.site_url": "\"\"",
@@ -309,8 +309,8 @@
             "avg_response_time_ms": 658.07,
             "avg_tokens_generated": 70,
             "avg_tokens_per_second": 265.09,
-            "first_used": "Fri Nov 20 22:49:18 2026",
-            "last_used": "Fri Nov 20 22:49:18 2026",
+            "first_used": "Sat Nov 21 22:18:40 2026",
+            "last_used": "Sat Nov 21 22:18:40 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
