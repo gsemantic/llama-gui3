@@ -341,3 +341,84 @@ TEST(read_tool_rejects_offset_beyond_eof_with_a_line_hint) {
     ASSERT_TRUE(r.find("НОМЕР СТРОКИ") != std::string::npos || r.find("номер строки") != std::string::npos);
     fs::remove_all(t);
 }
+
+/* ======================================================================
+ * Б1 / BEHAVIOR_PARITY_PLAN И14.1: номера строк в выводе read_file
+ *
+ * Зачем: `edit_file` заменяет ДИАПАЗОН СТРОК `k..query`, а модель без
+ * номеров считала строки на глаз и промахивалась (ses_000000000131: шесть
+ * правок из 13 сломали файл). Проверяется не «есть ли префикс», а три
+ * вещи, которые ломаются молча:
+ *   1. номер соответствует СТРОКЕ (a не просто «что-то напечатано»);
+ *   2. номер 1-based и начинается с `first_line` при offset;
+ *   3. номер НЕ попадает в байтовый бюджет дважды (иначе лимит вырос бы
+ *      незаметно) — проверяется тем, что файл на границе режется там же,
+ *      где и раньше, с поправкой на префикс.
+ * ====================================================================== */
+
+TEST(read_tool_prints_line_numbers_for_edit_file) {
+    fs::path t = make_tmp_tree();
+    write_bytes(t / "n.txt", "alpha\nbeta\ngamma\n");
+    init_tools(t);
+    const std::string r = read_tool("n.txt");
+    /* Номер + табуляция + текст: ровно та форма, из которой edit_file берёт
+     * k..query. Проверяем «строка начинается с номера», а не «где-то есть
+     * цифра»: иначе префикс мог бы быть в конце и не helping. */
+    ASSERT_TRUE(r.find("     1\talpha") != std::string::npos);
+    ASSERT_TRUE(r.find("     2\tbeta") != std::string::npos);
+    ASSERT_TRUE(r.find("     3\tgamma") != std::string::npos);
+    fs::remove_all(t);
+}
+
+TEST(read_tool_line_numbers_respect_offset_and_are_one_based) {
+    fs::path t = make_tmp_tree();
+    write_bytes(t / "n.txt", "1\n2\n3\n4\n5\n");
+    init_tools(t);
+    /* offset=3, limit=2 → строки 3 и 4, с НОМЕРАМИ 3 и 4 (1-based). */
+    const std::string r = read_tool("n.txt", 3, 2);
+    ASSERT_TRUE(r.find("     3\t3") != std::string::npos);
+    ASSERT_TRUE(r.find("     4\t4") != std::string::npos);
+    ASSERT_TRUE(r.find("     2\t2") == std::string::npos);
+    fs::remove_all(t);
+}
+
+TEST(read_tool_numbers_count_toward_the_byte_budget) {
+    /* Бюджет считает и ПРЕФИКС: иначе добавление номеров молча увеличило бы
+     * объём, который уходит модели. Материал подобран так, что текст БЕЗ
+     * префикса влезал бы целиком, а С префиксом — нет:
+     *   400 строк × 46 байт (45 символов + \n) = 18 400 < 20 000  → без
+     *     префикса влезло бы;
+     *   400 строк × 54 байта (8 префикс + 45 + \n) = 21 600 > 20 000 → с
+     *     префиксом обязано обрезаться.
+     * Если бюджет НЕ считает префикс, чтение вернёт все 400 строк и тест
+     * упадёт — это и есть проверка, а не «должно работать». */
+    fs::path t = make_tmp_tree();
+    std::string body;
+    for (int i = 0; i < 400; ++i) body += std::string(45, 'x') + "\n";
+    write_bytes(t / "big.txt", body);
+    init_tools(t);
+    /* База: без префикса объём меньше бюджета. */
+    ASSERT_TRUE(body.size() < limits::kReadFileChars);
+    ToolOutput o = ToolsRegistry::instance().run_output("read_file", read_args("big.txt"));
+    ASSERT_TRUE(o.metadata.is_object());
+    ASSERT_TRUE(o.metadata.get_bool("more", false));
+    /* И сказано, сколько строк прочитано: молчаливое «прочитано всё» при
+     * обрезке было бы ложью. */
+    ASSERT_TRUE(o.metadata.get_int("lines", 0) < 400);
+    fs::remove_all(t);
+}
+
+TEST(read_tool_numbers_do_not_break_search_replace) {
+    /* Номера — только в ВЫВОДЕ read_file. search_replace ищет ТЕКСТ, и
+     * префикс не должен попасть в файл: иначе первая же правка по тексту
+     * вставила бы «     1\t» в код. */
+    fs::path t = make_tmp_tree();
+    write_bytes(t / "n.txt", "hello\nworld\n");
+    init_tools(t);
+    (void)read_tool("n.txt");  /* читаем — ничего не пишет */
+    std::ifstream f(t / "n.txt", std::ios::binary);
+    const std::string got((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+    ASSERT_EQ(got, std::string("hello\nworld\n"));
+    fs::remove_all(t);
+}

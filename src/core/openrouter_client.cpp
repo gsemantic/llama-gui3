@@ -650,6 +650,11 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
                         if (u.contains("completion_tokens")) acc_usage.completion_tokens = u.value("completion_tokens", 0);
                         if (u.contains("total_tokens"))      acc_usage.total_tokens      = u.value("total_tokens", 0);
                     }
+                    // И12.x: фактическая модель из ответа. У роутеров
+                    // (kilo-auto/free) ID запроса не говорит, какая модель
+                    // ответила; поле model в чанке — говорит.
+                    if (json_chunk.contains("model") && json_chunk["model"].is_string())
+                        acc_usage.model = json_chunk["model"].get<std::string>();
                 } catch (const std::exception&) {
                     // Пропускаем повреждённый чанк
                 }
@@ -718,6 +723,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
             acc_usage.completion_tokens = fallback.completion_tokens;
             acc_usage.total_tokens = fallback.total_tokens;
             acc_usage.finish_reason = fallback.finish_reason;
+            acc_usage.model = fallback.model;
             on_reasoning(fallback.content);
             callback("", true);
             if (out_response) *out_response = acc_usage;
@@ -729,6 +735,7 @@ bool OpenRouterClient::complete_streaming_async(const OpenRouterRequestParams& p
             acc_usage.completion_tokens = fallback.completion_tokens;
             acc_usage.total_tokens = fallback.total_tokens;
             acc_usage.finish_reason = fallback.finish_reason;
+            acc_usage.model = fallback.model;
             if (has_native_calls) {
                 for (const auto& call : fallback.tool_calls) {
                     on_tool(call.index, call.name, call.arguments);

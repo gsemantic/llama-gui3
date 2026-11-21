@@ -66,23 +66,68 @@
     },
     "cloud_provider": {
         "auto_price": false,
-        "context_length": 0,
+        "context_length": 1024000,
         "enabled": true,
-        "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "endpoint_url": "https://api.kilo.ai/api/gateway",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 1024,
-        "model_id": "qwen-flash",
+        "model_id": "baidu/ernie-5.5-flash-preview:free",
         "price_input_per_1m": 0.0,
         "price_output_per_1m": 0.0,
-        "provider_name": "Qwen (DashScope)",
+        "provider_name": "kilo gateway",
         "reasoning_budget": 0,
-        "reasoning_enabled": true,
+        "reasoning_enabled": false,
         "recent_models": [
+            {
+                "endpoint_url": "https://api.kilo.ai/api/gateway",
+                "id": "baidu/ernie-5.5-flash-preview:free",
+                "provider_name": "kilo gateway"
+            },
+            {
+                "endpoint_url": "https://api.kilo.ai/api/gateway",
+                "id": "dots-studio/dots-3-note-preview:free",
+                "provider_name": "kilo gateway"
+            },
+            {
+                "endpoint_url": "https://api.kilo.ai/api/gateway",
+                "id": "particle-ai/particle-1:free",
+                "provider_name": "kilo gateway"
+            },
+            {
+                "endpoint_url": "https://api.yenisei.ru/v1",
+                "id": "yenisei-100",
+                "provider_name": "yenisei"
+            },
+            {
+                "endpoint_url": "https://api.yenisei.ru/v1",
+                "id": "yenisei-code",
+                "provider_name": "yenisei"
+            },
+            {
+                "endpoint_url": "https://api.kilo.ai/api/gateway",
+                "id": "kilo-auto/free",
+                "provider_name": "kilo gateway"
+            },
+            {
+                "endpoint_url": "https://api.yenisei.ru/v1",
+                "id": "yenisei",
+                "provider_name": "yenisei"
+            },
             {
                 "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                 "id": "qwen-flash",
                 "provider_name": "Qwen (DashScope)"
+            },
+            {
+                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "id": "kimi-k3.1-pro",
+                "provider_name": "Qwen (DashScope)"
+            },
+            {
+                "endpoint_url": "https://api.kilo.ai/api/gateway",
+                "id": "reflection/beam-free",
+                "provider_name": "kilo gateway"
             }
         ],
         "saved_providers": [
@@ -112,10 +157,37 @@
                 "socks5_proxy_host": "127.0.0.1:9050",
                 "timeout_ms": 120000,
                 "use_tor": false
+            },
+            {
+                "endpoint_url": "https://goldbean-api.xyz/v1",
+                "max_output_tokens": 1024,
+                "model_id": "",
+                "name": "goldbean",
+                "socks5_proxy_host": "127.0.0.1:9050",
+                "timeout_ms": 120000,
+                "use_tor": false
+            },
+            {
+                "endpoint_url": "https://freemodel.in/v1/",
+                "max_output_tokens": 1024,
+                "model_id": "qwen-flash",
+                "name": "freemodel",
+                "socks5_proxy_host": "127.0.0.1:9050",
+                "timeout_ms": 120000,
+                "use_tor": false
+            },
+            {
+                "endpoint_url": "https://api.yenisei.ru/v1",
+                "max_output_tokens": 1024,
+                "model_id": "yenisei",
+                "name": "yenisei",
+                "socks5_proxy_host": "127.0.0.1:9050",
+                "timeout_ms": 300000,
+                "use_tor": false
             }
         ],
         "socks5_proxy_host": "127.0.0.1:9050",
-        "timeout_ms": 120000,
+        "timeout_ms": 300000,
         "use_tor": false
     },
     "control_vector_layer_end": -1,
@@ -124,25 +196,30 @@
     "custom": {
         "model_path": "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
         "news_rewriter.config": "{\"max_age_hours\":10,\"max_items_per_source\":3,\"max_retries\":3,\"network\":{\"extra_headers\":\"\",\"proxy\":\"\",\"timeout_seconds\":20,\"user_agent\":\"news_rewriter/1.0\"},\"rewrite\":{\"language\":\"ru\",\"max_input_chars\":12000,\"max_words\":0,\"prompt_template\":\"Тебе дана РОВНО ОДНА новость (один материал). Перепиши её своими словами, сохранив все факты. НЕ делай обзор, сводку или дайджест и НЕ объединяй с другими материалами. Язык: {language}. Тон: {tone}.\\n\\nПравила:\\n- На входе — одна статья, на выходе — тоже РОВНО ОДНА переписанная статья (число рерайтов всегда равно числу оригиналов).\\n- Сохрани относящиеся к ЭТОЙ новости заголовок, дату и фото: они передаются отдельно и не входят в текст.\\n- Формат ответа: первая строка — переписанный заголовок, затем пустая строка, затем переписанный текст новости.\\n\\nЗаголовок: {title}\\nТекст: {body}\",\"seo\":{\"combine_with_rewrite\":true,\"enabled\":true,\"prompt_template\":\"Ты — SEO-редактор. По переписанной новости верни ТОЛЬКО валидный JSON без пояснений и без markdown-разметки, в точности такого вида:\\n{\\\"focus_keyword\\\":\\\"...\\\",\\\"meta_description\\\":\\\"...\\\",\\\"seo_title\\\":\\\"...\\\"}\\nПравила:\\n- focus_keyword — ключевая фраза из текста, 2-4 слова, строго в нижнем регистре, на языке статьи;\\n- meta_description — одно предложение, 150-160 символов, без кавычек по краям, описывает суть новости;\\n- seo_title — до 60 символов, привлекательный, с ключевым словом в начале (может совпадать с заголовком).\\nОтвет строго JSON.\\n\\nЯзык: {language}\\nЗаголовок: {title}\\nТекст: {body}\"},\"tone\":\"нейтральный\"},\"schedule_minutes\":0,\"sink\":{\"output_dir\":\"/home/alex/Desktop/rerait/\",\"params\":{\"api_key\":\"\",\"app_password\":\"\",\"author\":0,\"categories\":[1],\"excerpt\":\"\",\"featured_image\":\"\",\"max_retries\":5,\"post_type\":\"posts\",\"retry_delay_ms\":1000,\"site_url\":\"https://gsemantic.ru/\",\"slug\":\"\",\"status\":\"draft\",\"tags\":[],\"timeout_seconds\":20,\"url\":\"\",\"username\":\"\",\"verify_site_state\":true},\"type\":\"wordpress\"},\"sources\":[{\"enabled\":true,\"extract\":{\"body_marker\":\"\",\"title_marker\":\"\"},\"preview\":true,\"type\":\"page\",\"url\":\"https://zebra-tv.ru/\"}]}",
-        "wp_coder.active_module": "\"wordpress\"",
-        "wp_coder.agent_system_prompt": "\"Ты — AI-ассистент для работы с файлами и кодом.\n\n## ПРОТОКОЛ ВЫЗОВА ИНСТРУМЕНТОВ\n\nУ тебя есть инструменты. Чтобы вызвать инструмент — выведи блок:\n\n```\nwp_action\nTOOL: имя\nPARAM: значение\n```\n\nПриложение выполнит команду и вернёт RESULT. Ты НЕ выполняешь сам.\n\nПРИМЕРЫ:\n\nПользователь: «Покажи содержимое wp-config.php»\nТвой ответ:\n```\nwp_action\nTOOL: read_file\nPATH: wp-config.php\n```\n\nПользователь: «Проверь зависимости»\nТвой ответ:\n```\nwp_action\nTOOL: wp_check_deps\n```\n\nПользователь: «Покажи структуру /home/user/project»\nТвой ответ:\n```\nwp_action\nTOOL: repo_map\nROOT: /home/user/project\n```\n\nПРАВИЛА:\n- РОВНО ОДИН wp_action блок за сообщение\n- После получения RESULT — анализируй и продолжай\n- Когда готово — текстовый ответ БЕЗ wp_action\n\n## ИНСТРУМЕНТЫ\n\nread_file     — чтение файла              PATH: <абс. путь или относ. корня>\nwrite_file    — запись файла              PATH: <путь> CONTENT_BEGIN ... CONTENT_END\ngrep_hooks    — поиск по файлам           ROOT: <каталог> PATTERN: <regex>\nphp_lint      — проверка синтаксиса PHP   PATH: <путь>\nwp_cli        — команда wp-cli            CLI: <аргументы>\nrepo_map      — обзор структуры каталога  ROOT: <каталог>\nvalidate      — php -l по всему проекту\nverify        — проверка (php -l + HTTP + рендер)\ngit_status    — статус git\ngit_diff      — разница с HEAD            PATH: <путь>\ngit_log       — история коммитов          K: <число>\ngit_commit    — коммит                    QUERY: <сообщение>\nwp_db         — SQL-запрос                QUERY: <SQL>\nwp_media      — список медиа              K: <число>\nwp_option     — опция WordPress           QUERY: <имя опции>\nwp_check_deps — проверка зависимостей (системная команда)\nwp_create_site — создание WP-сайта        QUERY: <имя_сайта>\nwp_rest       — REST API                  QUERY: <эндпоинт>\nrag_index     — индексация в RAG          ROOT: <каталог>\nrag_query     — поиск в RAG               QUERY: <запрос> K: <число>\ndeploy        — деплой на хостер\nlist_skills   — список навыков\n\n## РАБОТА С ПУТЯМИ\n\nТы МОЖЕСЬ работать с файлами в ЛЮБОМ каталоге на диске.\nИспользуй АБСОЛЮТНЫЕ пути (/home/user/..., /var/www/..., /tmp/...).\nВАЖНО: Доступ к файлам ЗА ПРЕДЕЛАМИ корня проекта (см. [КОРНЕВОЙ КАТАЛОГ]) требует ЯВНОГО разрешения пользователя через диалог в интерфейсе.\nЕсли инструмент вернул ошибку «Доступ запрещён» — НЕ повторяй вызов, сообщи пользователю что нужно нажать «Разрешить» в окне WP Coder — Проект.\nПосле получения разрешения — повтори вызов инструмента с тем же путём.\nПри работе с Git соблюдай правила из навыка wp_git.\"",
-        "wp_coder.allowed_external_paths": "\"[\"/home/alex/Desktop/\",\"/var/www/html/.\"\"",
+        "wp_coder.active_module": "\"python\"",
+        "wp_coder.active_skills": "\"__none__\"",
+        "wp_coder.agent_system_prompt": "\"\"",
+        "wp_coder.allowed_external_paths": "[\"/home/alex/Desktop/\",\"/var/www/html/.\",\"/home/alex/projects/reader2;\",\"/usr/lib/python3/dist-packages\",\"/usr/bin/python*\"",
         "wp_coder.app_password": "\"\"",
         "wp_coder.app_user": "\"\"",
-        "wp_coder.continue_conversation": "\"false\"",
+        "wp_coder.context_limit": "\"128000\"",
+        "wp_coder.continue_conversation": "\"true\"",
         "wp_coder.deploy_host": "\"\"",
         "wp_coder.deploy_pass": "\"\"",
         "wp_coder.deploy_port": "\"\"",
         "wp_coder.deploy_proto": "\"rsync\"",
         "wp_coder.deploy_remote_dir": "\"\"",
         "wp_coder.deploy_user": "\"\"",
-        "wp_coder.llm_timeout_ms": "\"120000\"",
+        "wp_coder.llm_timeout_ms": "\"300000\"",
         "wp_coder.local_url": "\"\"",
-        "wp_coder.max_steps": "\"20\"",
+        "wp_coder.max_output_tokens": "\"8192\"",
+        "wp_coder.max_steps": "\"30\"",
         "wp_coder.php_bin": "\"php\"",
-        "wp_coder.project_dir": "\"/home/alex/projects/calc\"",
-        "wp_coder.session_budget": "\"102400\"",
-        "wp_coder.site_url": "\"\""
+        "wp_coder.project_dir": "\"/home/alex/projects/reader2\"",
+        "wp_coder.prompt_override_mode": "\"append\"",
+        "wp_coder.session_budget": "\"240000\"",
+        "wp_coder.site_url": "\"\"",
+        "wp_coder.skills_module": "\"python\""
     },
     "display": {
         "auto_resize": true,
@@ -228,16 +305,16 @@
     },
     "model_performance": {
         "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 207,
-            "avg_response_time_ms": 1171.98,
-            "avg_tokens_generated": 43,
-            "avg_tokens_per_second": 48.08,
-            "first_used": "Tue Nov 10 20:22:17 2026",
-            "last_used": "Tue Nov 10 20:22:17 2026",
+            "avg_context_used": 160,
+            "avg_response_time_ms": 658.07,
+            "avg_tokens_generated": 70,
+            "avg_tokens_per_second": 265.09,
+            "first_used": "Fri Nov 20 22:49:18 2026",
+            "last_used": "Fri Nov 20 22:49:18 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 65
+            "total_generations": 72
         }
     },
     "output": {

@@ -99,6 +99,54 @@ TEST(usable_is_zero_when_the_window_is_unknown) {
     ASSERT_EQ(usable(limits_of(0, 8192, 20000), cfg), 0);
 }
 
+/* ======================================================================
+ * Б3 / BEHAVIOR_PARITY_PLAN И14.3: бюджеты относительно окна модели
+ *
+ * Проверяется не «функция что-то умножает», а четыре свойства, которые
+ * ломаются молча:
+ *   1. при неизвестном окне (0) — ПРЕЖНИЕ значения (обратная совместимость);
+ *   2. при типичном локальном окне (32768) — тоже прежние (scale=1);
+ *   3. при большом окне — больше, но не более чем вчетверо (потолок);
+ *   4. один и тот же scale у всех четырёх бюджетов (иначе они разъедутся).
+ * ====================================================================== */
+
+TEST(budgets_scale_from_the_model_window_and_never_shrink) {
+    /* (1) Окно неизвестно → все бюджеты равны базовым константам. */
+    ASSERT_EQ(limits::result_budget_for(0), limits::kResultBudget);
+    ASSERT_EQ(limits::max_tool_output_for(0), limits::kMaxToolOutput);
+    ASSERT_EQ(limits::read_file_chars_for(0), limits::kReadFileChars);
+    ASSERT_EQ(limits::session_budget_for(0, 120000), size_t(120000));
+
+    /* (2) Типичное локальное окно → scale=1, поведение не меняется. */
+    ASSERT_EQ(limits::scale_for_context(32768), size_t(1));
+    ASSERT_EQ(limits::result_budget_for(32768), limits::kResultBudget);
+
+    /* (3) Большое окно → бюджеты растут, но с потолком ×4. */
+    ASSERT_EQ(limits::scale_for_context(128000), size_t(3));   /* 128000/32768 */
+    ASSERT_EQ(limits::scale_for_context(131072), size_t(4));   /* ровно 4 */
+    ASSERT_EQ(limits::scale_for_context(1000000), size_t(4));  /* потолок */
+    ASSERT_TRUE(limits::result_budget_for(128000) > limits::kResultBudget);
+    ASSERT_EQ(limits::result_budget_for(1000000),
+              limits::kResultBudget * 4);
+
+    /* (4) Один scale на все бюджеты: иначе они разъедутся по значениям. */
+    const size_t s = limits::scale_for_context(128000);
+    ASSERT_EQ(limits::result_budget_for(128000), limits::kResultBudget * s);
+    ASSERT_EQ(limits::max_tool_output_for(128000), limits::kMaxToolOutput * s);
+    ASSERT_EQ(limits::read_file_chars_for(128000), limits::kReadFileChars * s);
+    ASSERT_EQ(limits::session_budget_for(128000, 120000), size_t(120000) * s);
+}
+
+TEST(budgets_never_shrink_below_the_base_constants) {
+    /* Маленькое окно (например, 4096) НЕ уменьшает бюджеты: иначе агент
+     * на слабой модели получал бы ещё меньше места, и это обратная
+     * поломка. scale = max(1, …) гарантирует это. */
+    ASSERT_EQ(limits::scale_for_context(4096), size_t(1));
+    ASSERT_EQ(limits::scale_for_context(1), size_t(1));
+    ASSERT_EQ(limits::result_budget_for(4096), limits::kResultBudget);
+    ASSERT_EQ(limits::read_file_chars_for(4096), limits::kReadFileChars);
+}
+
 TEST(reserve_is_the_buffer_capped_by_the_output_limit) {
     const CompactionConfig cfg;
     ModelLimits m;

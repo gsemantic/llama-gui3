@@ -227,6 +227,25 @@ void ChatInterface::render_input_area() {
 
     ImGui::SameLine();
 
+    /* Навигация по беседе. Кнопки ставят ЗАПРОС (pending_scroll_), а
+     * выполняет его render_message_list() внутри MessagesScroll: прямой
+     * SetScrollY() здесь прокрутил бы поле ввода, а не ленту. */
+    if (ImGui::SmallButton(TRF("chat.scroll_top", "↑ В начало"))) {
+        scroll_to_top();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", TRF("chat.scroll_top_tip", "Jump to the beginning of the conversation (Home)"));
+
+    ImGui::SameLine();
+
+    if (ImGui::SmallButton(TRF("chat.scroll_bottom", "↓ В конец"))) {
+        scroll_to_bottom();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", TRF("chat.scroll_bottom_tip", "Jump to the end of the conversation (End)"));
+
+    ImGui::SameLine();
+
     float remaining_width = ImGui::GetContentRegionAvail().x;
     if (remaining_width > 120) {
         ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 120);

@@ -56,6 +56,11 @@ void StreamBridge::set_finish_reason(const std::string& reason) {
     closed_ = true;
 }
 
+void StreamBridge::set_model(const std::string& model) {
+    if (model.empty()) return;
+    model_ = model;
+}
+
 void StreamBridge::set_error(const std::string& error) {
     if (error.empty()) return;
     error_ = error;
@@ -194,6 +199,8 @@ std::string StreamBridge::done_json(const std::string& error) const {
     out["finish_reason"] = finish_reason_.empty() ? "stop" : finish_reason_;
     out["prompt_tokens"] = prompt_tokens_;
     out["completion_tokens"] = completion_tokens_;
+    /* И12.x: фактическая модель ответа (для роутеров). */
+    if (!model_.empty()) out["model"] = model_;
     if (skipped_chunks_ > 0) out["skipped_chunks"] = skipped_chunks_;
     /* И12.2: отказ виден плагину ТОЛЬКО когда tools действительно слались.
      * Безусловно выставленный ключ выключил бы нативный вызов у

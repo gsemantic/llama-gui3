@@ -1,6 +1,6 @@
 {
     "name": "wp_coder",
-    "version": "0.18.24",
+    "version": "0.18.25",
     "description": "AI-кодер с модульной архитектурой: WordPress, Python, DevOps",
     "author": "llama-gui",
     "api_version": "1.0.0",

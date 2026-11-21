@@ -47,8 +47,14 @@ inline const char* kPromptHead =
     "2. After every tool result, immediately make the next tool call.\n"
     "3. NEVER print a plan, a todo list, chain-of-thought, or a description "
     "of what you are about to do. The user does not need it.\n"
-    "4. If a file must be changed, call write_file/edit_file/apply_patch. "
-    "Describing the change in chat is NOT doing the task.\n"
+    "4. If a file must be changed, call a tool. write_file rewrites the WHOLE "
+    "file (path+content only — never offset/query/line numbers). To change "
+    "PART of an existing file use search_replace (query/content) or "
+    "edit_file (line range k..query). Prefer search_replace: read_file shows "
+    "each line with its number (e.g. `   42\\tcode`), so edit_file's k..query "
+    "can be taken straight from read output — but text replacement is safer "
+    "than counting lines. Describing the change in chat is NOT doing the "
+    "task.\n"
     "5. Only when the task is actually complete, send the final report with "
     "no tool call. Start it with the result, not with a plan.\n"
     "6. Never output XML tags, safety labels, tool syntax of another "
@@ -174,12 +180,22 @@ inline const char* kToolCatalogueSection =
 inline const char* kPromptTail =
     "## ПОВЕДЕНИЕ\n\n"
     "- Отвечай кратко и по делу. Весь текст вне вызовов инструментов показывается пользователю.\n"
+    "- Не исследуй проект целиком: прочитай файлы, названные в задаче или в\n"
+    "  ошибке, и правь. 3–4 ключевых файла достаточно; когда причина ясна —\n"
+    "  делай правку, а не читай дальше.\n"
     "- Не выдумывай URL, пути и факты: проверяй через инструменты.\n"
     "- Проверяй решение выполнением или тестами, когда это возможно и разумно.\n"
     "- Проверка — ЧАСТЬ ЗАДАЧИ, а не работа пользователя. Запускай тесты и\n"
     "  скрипты сам (pytest_run, python_lint, python_run, bash). Не пиши в\n"
     "  отчёте «запустите у себя»: если разрешения не хватает, назови, какое\n"
     "  именно правило нужно разрешить.\n"
+    "- Не заканчивай задачу передачей работы пользователю: «исправьте\n"
+    "  вручную», «проверьте у себя», «остальное сделайте сами» — НЕДОПУСТИМО.\n"
+    "  Не сделано — скажи прямо, что не сделано и почему; если дело в\n"
+    "  разрешении — назови нужное правило. Правку выполняешь ТЫ, а не человек.\n"
+    "- Один и тот же вызов с теми же аргументами второй раз не повторяй:\n"
+    "  если инструмент ответил «[no-op]» или «содержимое совпадает»,\n"
+    "  результат уже в истории. Меняй content/аргументы или давай итог.\n"
     "- После изменения кода ОБЯЗАТЕЛЬНО проверь его: запусти тесты\n"
     "  (pytest_run, при отсутствии pytest — unittest discover) или smoke-"
     "скрипт через bash. py_compile — только проверка синтаксиса, а не "
@@ -196,7 +212,9 @@ inline const char* kPromptTail =
     "  как обычный текст. Вызывай инструмент штатно; итоговый ответ — это\n"
     "  отчёт пользователю: что сделано, где файл, как запустить.\n"
     "- Помни активные коррекции и ограничения пользователя до их явной отмены.\n"
-    "- Используй специализированные инструменты вместо bash, когда они есть.\n"
+    "- Осмотр файлов — ТОЛЬКО через list/glob/read_file/grep_search. `ls`,\n"
+    "  `find`, `cat`, `head`, `tail`, `pwd` через bash НЕ используй: bash —\n"
+    "  лишь для реального выполнения (запуск, сборка, тесты, git).\n"
     "- Комментарии в коде краткие; длинные рассуждения — в reasoning, не в коде.\n\n"
     "## РАБОТА С ПУТЯМИ\n\n"
     "Используй АБСОЛЮТНЫЕ пути (/home/user/..., /var/www/..., /tmp/...).\n"
@@ -302,7 +320,7 @@ namespace SystemPrompt {
 
 /* Семейство модели. Default — семейство не узнано или имя не задано:
  * базовый промпт уходит как есть. */
-enum class Family { Default, Local, Gpt, Deepseek };
+enum class Family { Default, Local, Gpt, Deepseek, Ernie };
 
 /* И12.2: по какому протоколу модель вызывает инструменты.
  *
@@ -410,6 +428,22 @@ inline const char* kDeepseekFamilyPrompt =
     "- Закончил рассуждать — вызови инструмент, а не останавливайся.\n"
     "- JSON-объект — без обрамления и без слов вокруг.\n";
 
+/* Акцент для ernie (baidu/ernie-*): модель охотно вызывает инструменты, но
+ * под непривычными именами параметров скатывается к заученным схемам чужих
+ * агентов (command вместо cli, offset/query вместо k) и иногда печатает вызов
+ * текстом. Наблюдение ses_000000000496: так write_file с offset/query снёс
+ * файл на 22 КБ. Акцент называет, ЧЕМ отличаются инструменты записи. */
+inline const char* kErnieFamilyPrompt =
+    "\n\n## ПРАВИЛА ОТВЕТА ДЛЯ ERNIE\n\n"
+    "Протокол тот же: РОВНО ОДИН вызов инструмента на сообщение.\n"
+    "- Не печатай JSON с аргументами и не описывай вызов словами: вызови "
+    "инструмент нативно, его параметры описаны в схеме.\n"
+    "- write_file заменяет файл ЦЕЛИКОМ (только path и content). Частичная "
+    "правка — search_replace (query/content) или edit_file (k..query); номера "
+    "строк для edit_file видны в выводе read_file. Не передавай write_file "
+    "offset/query/номера строк.\n"
+    "- Команда для bash — ключ cli (или command).\n";
+
 
 /* --- Акценты при НАТИВНОМ вызове (И12.2) ---
  *
@@ -446,6 +480,17 @@ inline const char* kDeepseekFamilyNativePrompt =
     "  рассуждение без вызова — это шаг, на котором инструмент не позвали.\n"
     "- Закончил рассуждать — вызови инструмент, а не останавливайся.\n";
 
+inline const char* kErnieFamilyNativePrompt =
+    "\n\n## ПРАВИЛА ОТВЕТА ДЛЯ ERNIE\n\n"
+    "Протокол тот же: РОВНО ОДИН вызов инструмента на сообщение.\n"
+    "- Не печатай вызов инструмента текстом и не описывай его словами: "
+    "инструмент вызывается нативно.\n"
+    "- write_file заменяет файл ЦЕЛИКОМ (только path и content). Частичная "
+    "правка — search_replace (query/content) или edit_file (k..query); номера "
+    "строк для edit_file видны в выводе read_file. Не передавай write_file "
+    "offset/query/номера строк.\n"
+    "- Команда для bash — ключ cli (или command).\n";
+
 namespace detail {
 
 /* Подстрока, семейство и его имя — ОДНИМ списком, по трём причинам.
@@ -463,10 +508,16 @@ struct FamilyDef {
     const char* name;
 };
 
-inline const std::array<FamilyDef, 6>& families() {
-    static const std::array<FamilyDef, 6> kTable = {{
+inline const std::array<FamilyDef, 8>& families() {
+    static const std::array<FamilyDef, 8> kTable = {{
         {"deepseek", Family::Deepseek, "deepseek"},
+        /* particle-1 (kilo) — клон deepseek v4-flash: ведёт себя как
+         * deepseek (рассуждение без вызова — потерянный шаг). Иначе
+         * resolved-модель «particle-ai/particle-1:free» уходила бы в
+         * Default без акцента. */
+        {"particle", Family::Deepseek, "deepseek"},
         {"gpt", Family::Gpt, "gpt"},
+        {"ernie", Family::Ernie, "ernie"},
         {"qwen", Family::Local, "local"},
         {"llama", Family::Local, "local"},
         {"gemma", Family::Local, "local"},
@@ -578,6 +629,9 @@ inline std::string provider(const std::string& model_id, Protocol protocol) {
             break;
         case Family::Deepseek:
             emphasis = text_protocol ? kDeepseekFamilyPrompt : kDeepseekFamilyNativePrompt;
+            break;
+        case Family::Ernie:
+            emphasis = text_protocol ? kErnieFamilyPrompt : kErnieFamilyNativePrompt;
             break;
         case Family::Default:
             break;

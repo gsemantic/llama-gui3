@@ -22,6 +22,7 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <cstdio>
 #include <filesystem>
 #include <regex>
 #include <algorithm>
@@ -192,12 +193,20 @@ std::string base_grep(const std::string& root, const std::string& pattern,
 
     std::string base = root.empty() ? project_dir : root;
     if (base.empty()) return "[ошибка] не задан ROOT и не задан project_dir";
-    if (!fs::exists(base) || !fs::is_directory(base))
-        return "[ошибка] каталог не существует: " + base;
+    if (!fs::exists(base))
+        return "[ошибка] путь не существует: " + base;
 
     std::vector<std::string> files;
-    const bool walk_done =
-        file_utils::walk_files(base, files, 2000, kSkipDirs, "", should_stop);
+    bool walk_done = true;
+    if (fs::is_regular_file(base)) {
+        /* root может быть ОДНИМ файлом: модель часто указывает файл, а не
+         * каталог (ses_000000000542: root="reader2/main_window.py"). Грепаем
+         * его напрямую, а не отказываем — иначе модель зацикливается. */
+        files.push_back(base);
+    } else {
+        walk_done =
+            file_utils::walk_files(base, files, 2000, kSkipDirs, "", should_stop);
+    }
 
     std::stringstream out;
     size_t found = 0;
@@ -835,7 +844,30 @@ void register_base_tools() {
 
             /* Читаем построчно и останавливаемся на limit или на лимите
              * байт: файл на сотни мегабайт не должен попадать в память
-             * целиком ради двух строк. */
+             * целиком ради двух строк.
+             *
+             * Б1 (BEHAVIOR_PARITY_PLAN И14.1): к каждой строке добавляется
+             * НОМЕР СТРОКИ (`%6d\t`). Причина — не удобство, а
+             * работоспособность `edit_file`: он заменяет ДИАПАЗОН СТРОК
+             * `k..query`, а модель, не видя номеров, считала строки на глаз
+             * и промахивалась (в ses_000000000131 шесть правок из 13 сломали
+             * файл и потребовали починки). Порядок именно такой, а не
+             * «сначала правка по тексту»: номера делают `edit_file`
+             * пригодным, а `search_replace` (правка по тексту) остаётся
+             * основным путём — так риск «скопировал номер в query» закрыт
+             * с двух сторон.
+             *
+             * Бюджет `kReadFileChars` теперь считает и ПРЕФИКС: это и есть
+             * фактический объём, который уйдёт модели. Раньше считался
+             * только текст, и после добавления номеров лимит вырос бы
+             * незаметно — ровно тот класс, что «лимит есть, а его никто не
+             * считает». */
+            /* Бюджет чтения — И14.3: масштабируется от реального окна модели.
+             * Окно неизвестно (0) → прежние 20 000 байт. Один источник —
+             * `Engine::model_context_limit()`, чтобы не завести вторую копию
+             * числа, от которого зависят все бюджеты. */
+            const size_t read_budget =
+                limits::read_file_chars_for(Engine::instance().model_context_limit());
             std::ifstream f(abs, std::ios::binary);
             std::stringstream body;
             std::string ln;
@@ -845,14 +877,21 @@ void register_base_tools() {
                 ++line_no;
                 if (line_no < first_line) continue;
                 if (taken >= limit) { more = true; break; }
-                if (bytes + ln.size() + 1 > kReadFileChars) {
+                /* Номер строки — 1-based, ширина 6, выравнивание вправо,
+                 * затем табуляция: так `edit_file` и человек читают один и
+                 * тот же столбец. */
+                char prefix[32];
+                const int prefix_len =
+                    std::snprintf(prefix, sizeof(prefix), "%6zu\t", line_no);
+                const size_t pl = static_cast<size_t>(prefix_len);
+                if (bytes + pl + ln.size() + 1 > read_budget) {
                     byte_capped = true;
                     more = true;
                     break;
                 }
-                bytes += ln.size() + 1;
+                bytes += pl + ln.size() + 1;
                 ++taken;
-                body << ln << "\n";
+                body << prefix << ln << "\n";
             }
 
             /* Offset — НОМЕР СТРОКИ, а не байт. В живой сессии модель
@@ -932,13 +971,26 @@ void register_base_tools() {
     {
         ToolDef def;
         def.name = "write_file";
-        def.description = "Запись текста в файл (создаёт или перезаписывает)";
+        def.description =
+            "ПОЛНАЯ перезапись файла: заменяет ВСЁ содержимое на content. "
+            "Для частичной правки существующего файла используй edit_file "
+            "(диапазон строк k..query) или search_replace (query/content) — "
+            "не write_file. Не передавай offset/query/номера строк.";
         def.flags = TF_WRITES_FILES;
         def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу относительно корня проекта")
-         .str("content", "полный новый содержимое файла")
+         .str("content", "полный новый содержимое файла (весь файл целиком)")
+         .boolean("full_rewrite",
+                  "true = подтверждённая полная перезапись (снимает защиту от "
+                  "случайного усечения большого файла)")
          .required("path").required("content");
+        /* Строгая схема: write_file пишет файл ЦЕЛИКОМ, и молча
+         * проигнорированный offset/query (которые модель присылает, приняв
+         * инструмент за точечную правку) в живой сессии уничтожил файл на
+         * 22 КБ (ses_000000000496). Неизвестный ключ теперь — отказ, а не
+         * тихое «сделаю как получится». */
+        b.strict();
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             const std::string rel = arg_str(a, "path");
@@ -970,6 +1022,55 @@ void register_base_tools() {
              * что уйдёт в файл (`body`, а не `content`): diff, посчитанный
              * не по тому, что записано, врал бы о числе правок. */
             const std::string before_raw = read_existing(abs);
+            /* И11.3: запись, которая ничего не меняет, — это no-op, и
+             * сказать об этом надо ПРЯМО.
+             *
+             * Живая сессия ses_000000000006, шаг 9: модель десять раз
+             * подряд вызывала write_file с ОДНИМ И ТЕМ ЖЕ содержимым
+             * (в нём была опечатка KisFileIconProvider). Каждый вызов
+             * отвечал «[записано] … (261 байт)» — то есть успехом, — и
+             * модель читала это как «правка не применилась, попробую
+             * ещё раз». Так ушли все 30 шагов, а отчёт закончился словами
+             * «исправьте вручную строку 12».
+             *
+             * У search_replace и edit_file такой маркер есть давно
+             * (`[no-op]`), и цикл на него реагирует. У write_file его не
+             * было: запись файла самого себя выглядела как успех, и
+             * защита от повторов (last_noop_sig в agent_components.cpp)
+             * не включалась ни разу. */
+            std::error_code no_ec;
+            const bool file_exists = fs::exists(abs, no_ec);
+            if (file_exists && before_raw == body) {
+                return out("write_file без изменений " + rel,
+                    "[no-op] содержимое совпадает — файл НЕ изменён (было "
+                    "и осталось " + std::to_string(body.size()) + " байт). "
+                    "Повторять этот вызов бессмысленно. Если ты хотел "
+                    "ЗАМЕНИТЬ текст — задай новый text в content (сейчас ты "
+                    "прислал ровно то, что уже лежит в файле); если нужен "
+                    "фрагмент — посмотри его через read_file; если нужна "
+                    "частичная правка — edit_file (k..query) или "
+                    "search_replace (query/content).");
+            }
+            /* Защита от усечения (ses_000000000496): write_file пишет ЦЕЛЫЙ
+             * файл, и модель, приняв его за точечный edit, присылала фрагмент
+             * — main_window.py на 22 КБ схлопнулся до 926 байт. Если старый
+             * файл велик, а новый подозрительно мал и это НЕ подтверждённая
+             * перезапись — ОТКАЗ, а не запись. Порог намеренно консервативен:
+             * он ловит «потеряно больше половины и осталось меньше 2 КБ»,
+             * то есть именно обрыв на фрагменте, а не обычную правку. */
+            const bool full_rewrite = a.get_bool("full_rewrite", false);
+            if (!full_rewrite && before_raw.size() > 4096 &&
+                body.size() < before_raw.size() / 2 && body.size() < 2048) {
+                return out("write_file отменён (защита от усечения)",
+                    "[защита] write_file заменяет файл ЦЕЛИКОМ: было "
+                    + std::to_string(before_raw.size()) + " байт, станет "
+                    + std::to_string(body.size()) + ". Это похоже на частичную "
+                    "правку, отправленную не тем инструментом. Для правки "
+                    "диапазона строк используй edit_file (k..query), для замены "
+                    "текста — search_replace (query/content). Если это "
+                    "действительно полная перезапись — повтори с "
+                    "full_rewrite:true. Файл НЕ изменён.");
+            }
             const diff::FileDiff fd = diff::make_file_diff(rel, before_raw, body);
             /* И4.5: создаём родительские каталоги, если их нет. Без этого
              * запись в новые подкаталоги (например "src/new/file.php")
@@ -1017,7 +1118,7 @@ void register_base_tools() {
         def.flags = TF_READ_ONLY;
         def.permission_key = "read";
         SchemaBuilder b;
-        b.str("root", "каталог; пусто = корень проекта")
+        b.str("root", "каталог ИЛИ файл; пусто = корень проекта")
          .str("pattern", "регулярное выражение")
          .required("pattern");
         def.parameters = b.build();
@@ -1538,10 +1639,12 @@ void register_base_tools() {
         ToolDef def;
         def.name = "search_replace";
         def.description =
-            "Поиск и замена текста в файле. Совпадение не обязано быть"
-            " буквальным: отступы, пробелы в концах строк и лишние"
-            " переводы строк прощаются. Если фрагмент встречается"
-            " несколько раз, добавь контекст или поставь replace_all.";
+            "Поиск и замена ТЕКСТА в существующем файле (без номеров строк): "
+            "query — что искать, content — на что заменить. Совпадение не "
+            "обязано быть буквальным: отступы, пробелы в концах строк и лишние "
+            "переводы строк прощаются. Если фрагмент встречается несколько "
+            "раз, добавь контекст или поставь replace_all. Для замены диапазона "
+            "строк — edit_file; для полной перезаписи — write_file.";
         def.flags = TF_WRITES_FILES;
         def.permission_key = "write";
         SchemaBuilder b;
@@ -1651,13 +1754,19 @@ void register_base_tools() {
         def.permission_key = "bash";
         SchemaBuilder b;
         b.str("cli", "команда для выполнения в shell")
+         .str("command",
+              "псевдоним cli: некоторые модели называют команду command "
+              "(берётся, если cli пуст)")
          .integer_range("timeout", "таймаут в секундах (по умолчанию 120)",
-                        1, 3600)
-         .required("cli");
+                        1, 3600);
+        /* cli ИЛИ command (проверяет обработчик): модели, называющие команду
+         * command, иначе получали бы «missing required parameter 'cli'». */
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             std::string cmd = arg_str(a, "cli");
-            if (cmd.empty()) return out("[ошибка] пустая команда (cli)");
+            if (cmd.empty()) cmd = arg_str(a, "command");
+            if (cmd.empty())
+                return out("[ошибка] пустая команда (cli или command)");
             /* И3.6: allowlist вместо blocklist. Разбор команды снимает
              * кавычки и обходит конвейеры, поэтому «cat x | sh» —
              * это две команды, а не строка; программа сверх списка
@@ -1960,23 +2069,43 @@ void register_base_tools() {
     {
         ToolDef def;
         def.name = "edit_file";
-        def.description = "Замена диапазона строк файла";
+        def.description =
+            "Замена ДИАПАЗОНА СТРОК существующего файла: k — номер первой "
+            "заменяемой строки (с 1), query — номер последней (включительно; "
+            "пусто = только k), content — новые строки.";
         def.flags = TF_WRITES_FILES;
         def.permission_key = "write";
         SchemaBuilder b;
         b.str("path", "путь к файлу")
          .integer_range("k", "номер первой заменяемой строки (с 1)", 1, 10000000)
-         .str("query", "номер последней заменяемой строки; пусто = только k")
+         .integer_range("start_line",
+                        "псевдоним k: номер первой заменяемой строки", 1, 10000000)
+         .integer_range("offset",
+                        "псевдоним k: номер первой заменяемой строки", 1, 10000000)
+         .integer_range("query",
+                        "номер последней заменяемой строки (включительно); "
+                        "пусто = только k", 1, 10000000)
+         .integer_range("end_line",
+                        "псевдоним query: номер последней строки", 1, 10000000)
          .str("content", "новые строки")
-         .required("path").required("k").required("content");
+         .required("path").required("content");
+        /* k обязателен по смыслу, но НЕ по схеме: его зовут также
+         * start_line/offset, и жёсткое .required("k") отклоняло бы валидный
+         * по смыслу вызов (например, с offset вместо k) до обработчика —
+         * ровно та путаница, что в ses_000000000496 ушла в write_file.
+         * Обработчик требует один из k/start_line/offset. */
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             const std::string rel = arg_str(a, "path");
             const std::string content_in = arg_str(a, "content");
             int k = arg_int(a, "k");
+            if (k <= 0) k = arg_int(a, "start_line");
+            if (k <= 0) k = arg_int(a, "offset");
             std::string abs = project_resolve(rel);
             file_lock::Guard file_guard(abs);
-            if (k <= 0) return out("[ошибка] укажи k: номер строки начала (1-based)");
+            if (k <= 0)
+                return out("[ошибка] укажи k (или start_line/offset): номер строки "
+                           "начала (1-based)");
             std::ifstream fin(abs, std::ios::binary);
             if (!fin) return out("[ошибка] не удалось открыть файл: " + abs);
             /* И4.5: чтение через split_text, а не getline. getline оставлял
@@ -1991,14 +2120,18 @@ void register_base_tools() {
 
             size_t start = static_cast<size_t>(k);
             size_t end = start;
-            std::string end_arg = arg_str(a, "query");
-            if (!end_arg.empty()) {
-                try { end = static_cast<size_t>(std::stoul(end_arg)); }
-                catch (...) { return out("[ошибка] невалидный query (строка конца): " + end_arg); }
-            }
+            /* query/end_line — номер последней строки (1-based, включительно).
+             * Пусто/0 = заменяем только строку k. Тип теперь целочисленный
+             * (as_int принимает и "3", и 3), поэтому модель со start_line/
+             * end_line или offset не упирается в «query must be string». */
+            long long end_line = a.has("query")
+                                     ? a.get_int("query", 0)
+                                     : (a.has("end_line") ? a.get_int("end_line", 0)
+                                                          : 0);
+            if (end_line > 0) end = static_cast<size_t>(end_line);
             if (start < 1 || start > lines.size() || end < start || end > lines.size())
                 return out("[ошибка] диапазон строк вне файла: k=" + std::to_string(k)
-                           + " query=" + end_arg + " (всего строк: "
+                           + " query=" + std::to_string(end_line) + " (всего строк: "
                            + std::to_string(lines.size()) + ")");
 
             /* Замена: start..end (1-based, включительно) на content. */

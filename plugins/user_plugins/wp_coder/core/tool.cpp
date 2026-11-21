@@ -392,9 +392,21 @@ bool validate_tool_args(const json::JsonValue& parameters,
 
 std::string invalid_arguments_message(const std::string& tool_name,
                                       const std::string& detail) {
-    return "The " + tool_name
+    std::string msg = "The " + tool_name
          + " tool was called with invalid arguments: " + detail
          + ". Please rewrite the input so it satisfies the expected schema.";
+    /* write_file пишет файл ЦЕЛИКОМ: если модель передала offset/query/k/
+     * номера строк, это почти всегда попытка точечной правки не тем
+     * инструментом (ses_000000000496). Называем правильный инструмент прямо,
+     * иначе модель повторит тот же вызов. */
+    if (tool_name == "write_file" &&
+        detail.find("unknown parameter") != std::string::npos) {
+        msg += " write_file replaces the WHOLE file (path + content only); "
+               "to change part of a file use edit_file (k..query) or "
+               "search_replace (query/content), or pass full_rewrite=true for "
+               "an intentional full rewrite.";
+    }
+    return msg;
 }
 
 /* ======================================================================
@@ -500,6 +512,39 @@ std::vector<std::string> substitute_patch_editors(
             if (name == r) { replaced = true; break; }
         }
         if (!replaced) out.push_back(name);
+    }
+    return out;
+}
+
+/* И15.2 (BEHAVIOR_PARITY_PLAN): базовый набор для профиля "basic".
+ *
+ * 15 инструментов, покрывающих обычную работу агента. Набор назван
+ * здесь, а не у вызывающего, потому что и каталог промпта, и нативные
+ * спецификации (`tools`) обязаны показывать ОДИН набор — иначе модель
+ * читает одно, а звать может другое (тот же класс, что D2). */
+std::vector<std::string> basic_tool_set() {
+    return {
+        "read_file", "write_file", "edit_file", "search_replace",
+        "apply_patch", "bash", "grep_search", "glob", "list",
+        "repo_map", "todowrite", "todoread", "task", "skill_detail",
+        "web_fetch",
+    };
+}
+
+std::vector<std::string> apply_tool_profile(
+        const std::vector<std::string>& visible, const std::string& profile) {
+    /* "basic" оставляет только базовый набор; всё остальное (включая
+     * "extended", пустое и неизвестное) — без изменений. Неизвестный
+     * профиль не сужает набор: сужение по опечатке молча спрятало бы
+     * инструменты, и это было бы хуже, чем «как раньше». */
+    if (profile != "basic") return visible;
+    const std::vector<std::string> basic = basic_tool_set();
+    std::vector<std::string> out;
+    out.reserve(visible.size());
+    for (const std::string& name : visible) {
+        for (const std::string& b : basic) {
+            if (name == b) { out.push_back(name); break; }
+        }
     }
     return out;
 }

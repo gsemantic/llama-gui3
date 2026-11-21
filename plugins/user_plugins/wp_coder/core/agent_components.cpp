@@ -15,6 +15,8 @@
 
 #include <sstream>
 #include <vector>
+#include <set>
+#include <map>
 #include <cstring>
 #include <algorithm>
 #include <chrono>
@@ -35,6 +37,13 @@ using limits::kResultBudget;
  * тоже слишком короткий для продуктивного шага агента. */
 constexpr int kStuckThreshold = 3;
 constexpr size_t kShortResponseLen = 200;
+/* Порог серии read-only ходов без изменений: после него цикл
+ * напоминает модели перейти к действию (ses_496: 25 чтений подряд). */
+constexpr int kExploreRemindAt = 8;
+/* Сколько раз можно прочитать ОДИН файл, прежде чем цикл потребует
+ * перейти к делу. В ses_000000000006 модель читала library.py шесть раз
+ * с разными offset/limit, и каждый раз это был шаг, а не работа. */
+constexpr int kMaxReadsPerFile = 4;
 
 namespace {
 
@@ -64,6 +73,18 @@ std::string canonical_args(const json::JsonValue& args,
     }
     out += "}";
     return out;
+}
+
+/* Путь из аргументов вызова — так, как его видит модель (относительный).
+ * Отдельно от canonical_args: там подпись нужна ПОЛНАЯ (все параметры),
+ * а здесь — только путь, чтобы считать чтения одного файла. Пустая
+ * строка = вызова без path (например, list), и такой вызов в счёт
+ * чтений не попадает. */
+std::string canonical_args_path(const json::JsonValue& args) {
+    if (!args.is_object()) return std::string();
+    std::string path = args.get_string("path");
+    if (path.empty()) path = args.get_string("file");
+    return path;
 }
 
 } // namespace
@@ -646,13 +667,22 @@ namespace {
  * ToolOutput.truncated здесь НЕ ставится: этот флаг означает «инструмент
  * усек вывод, остаток в файле» (И4.10), а у нас остатка нигде нет. О том,
  * что вывод обрезан, говорит сам текст. */
-ToolOutput cap_result(ToolOutput out) {
-    if (out.output.size() <= kResultBudget) return out;
+ToolOutput cap_result(ToolOutput out, size_t budget) {
+    if (budget == 0) budget = limits::kResultBudget;
+    if (out.output.size() <= budget) return out;
     const size_t full = out.output.size();
-    out.output = text::utf8_prefix(out.output, kResultBudget);
+    out.output = text::utf8_prefix(out.output, budget);
     out.output += "\n[...обрезано, всего " + std::to_string(full) +
                   " символов. Вызови инструмент повторно, если нужно больше.]";
     return out;
+}
+
+/* Бюджет RESULT для текущего состояния — И14.3. Читает лимит окна модели
+ * через `Engine::model_context_limit()` (короткий лок внутри) и масштабирует
+ * `kResultBudget` от него. Если окно не задано (0) — прежнее значение. */
+size_t result_budget_for() {
+    return limits::result_budget_for(
+        Engine::instance().model_context_limit());
 }
 
 /* Хвостовое напоминание (И5.9, порт prompt.ts:1281).
@@ -667,8 +697,12 @@ ToolOutput cap_result(ToolOutput out) {
 const char* kLastStepReminder =
     "This is the LAST step. You may NOT call tools any more: the step budget "
     "is exhausted and your next message goes directly to the user. Write the "
-    "final report now: what was done, what was not done, and what you need "
-    "from the user. Do not write a plan.";
+    "final report now: what was done, what was NOT done, and why. Do not "
+    "write a plan.\n"
+    "Do NOT hand the work back to the user. \"Please fix it manually\", "
+    "\"check it yourself\", \"the rest is up to you\" are forbidden: the "
+    "task is yours. If something is blocked, name the exact permission or "
+    "rule you need; if something was not done, say plainly what and why.";
 
 /* Пустой JSON-объект (`{}`), который модель иногда присылает вместо
  * вызова инструмента. Это не ответ и не пустой ход провайдера: нативные
@@ -765,6 +799,65 @@ Message* attach_patch_part(std::vector<Message>& history,
     return target;
 }
 
+namespace {
+
+/* Первый сбалансированный {…} из начала текста, без хвоста (</rfl:parameter>). */
+std::string first_json_object(const std::string& text) {
+    const size_t b = text.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos || text[b] != '{') return std::string();
+    size_t i = b + 1;
+    int depth = 1;
+    bool in_str = false;
+    while (i < text.size() && depth > 0) {
+        const char c = text[i];
+        if (in_str) {
+            if (c == '\\' && i + 1 < text.size()) { i += 2; continue; }
+            if (c == '"') in_str = false;
+        } else {
+            if (c == '"') in_str = true;
+            else if (c == '{') ++depth;
+            else if (c == '}') --depth;
+        }
+        ++i;
+    }
+    if (depth != 0) return std::string();
+    return text.substr(b, i - b);
+}
+
+/* Если текст — JSON-аргументы READ-ONLY инструмента (grep_search/read_file),
+ * выполняем его за модель и кладём результат в out_note. Лечит зацикливание
+ * «модель печатает вызов текстом» (ses_000000000542): вместо «позови
+ * инструмент» модель получает готовый результат и идёт дальше. */
+bool try_infer_readonly_call(const std::string& text, std::string& out_note) {
+    const std::string body = first_json_object(text);
+    if (body.empty()) return false;
+    json::JsonValue j;
+    std::string perr;
+    if (!json::JsonValue::parse(body, j, &perr) || !j.is_object()) return false;
+
+    const auto has = [&j](const char* k) { return j.has(k); };
+    std::string tool;
+    json::JsonValue args = json::JsonValue::object();
+    if (has("pattern") && (has("root") || has("path")) && !has("content")) {
+        tool = "grep_search";
+        args.set("pattern", j.get("pattern"));
+        args.set("root", has("root") ? j.get("root") : j.get("path"));
+    } else if (has("path") && !has("content") && !has("query")) {
+        tool = "read_file";
+        args.set("path", j.get("path"));
+        if (has("offset")) args.set("offset", j.get("offset"));
+        if (has("limit")) args.set("limit", j.get("limit"));
+    }
+    if (tool.empty()) return false;
+
+    const ToolOutput r = ToolsRegistry::instance().run_output(tool, args);
+    out_note = "[выполнил за тебя " + tool + "] " +
+               text::utf8_prefix(r.output, 800);
+    return true;
+}
+
+} // namespace
+
 bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     bool final_given = false;
     int stuck_counter = 0;  // последовательных коротких ответов
@@ -776,6 +869,19 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
     int truncated_streak = 0;
     int planning_streak = 0;
     int tool_args_streak = 0;
+    /* Подряд идущие read-only ходы без единой правки/выполнения. */
+    int read_only_streak = 0;
+    /* Гейт проверки: просили ли уже запустить тесты (один раз). */
+    bool verification_reminded = false;
+    /* Гейт передачи работы пользователю: просили ли уже сделать её
+     * самому (один раз). Второй такой отчёт принимаем, иначе цикл
+     * вымогал бы невозможное и жёг бюджет. */
+    bool handoff_reminded = false;
+    /* И15.4: были ли в этой задаче успешные ПИШУЩИЕ вызовы. Отличается от
+     * `has_unfinished_todos()`: todowrite зовут не все модели, и «правки
+     * есть, а итога нет» — это тоже повод продлить бюджет, а не закрывать
+     * задачу. Флаг ставится при первом успешном write/edit/apply_patch. */
+    bool made_write = false;
     /* Отпечаток последнего выполненного read-only вызова. Нужен, чтобы
      * НЕ выполнять повторное чтение того же файла с теми же аргументами:
      * в сессии 0.18.16 один и тот же read_file вызывался 6–9 раз подряд,
@@ -784,11 +890,24 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
      * или исполняющий вызов сбрасывает отпечаток: после правки файл мог
      * измениться, и повторное чтение законно. */
     std::string last_read_sig;
-    /* Подпись последнего вызова, который инструмент признал no-op
-     * (`[no-op]` в результате). Если модель повторит его — не выполняем
+    /* Подписи вызовов, которые инструмент признал no-op (`[no-op]` в
+     * результате). Если модель повторит любую из них — не выполняем
      * второй раз: в сессии 0.18.18 так зацикливались search_replace и
-     * edit_file с query == content. */
-    std::string last_noop_sig;
+     * edit_file с query == content, а в ses_000000000006 модель
+     * ЧЕРЕДОВАЛА no-op вызовы (search_replace ↔ write_file), и одиночный
+     * last_noop_sig каждый раз забывал предыдущий.
+     *
+     * Набор чистится при первой НАСТОЯЩЕЙ правке: после неё повтор
+     * любого из старых вызовов может быть осмысленным. */
+    std::set<std::string> nooped_calls;
+    /* Сколько раз модель прочитала ОДИН файл. В ses_000000000006 она
+     * читала library.py шесть раз с разными offset/limit, ища нужный
+     * фрагмент, который уже был в истории: защита от повторов ловит
+     * только СОВПАДАЮЩИЕ аргументы, а смена offset её обходит.
+     *
+     * Ключ — канонический путь, значение — число чтений. Сбрасывается
+     * записью в этот же файл: после правки перечитать его законно. */
+    std::map<std::string, int> reads_per_file;
     /* Системный промпт пересобирается на каждом шаге: note_tools_rejected
      * меняет протокол вызова, и старый снимок заставил бы модель писать
      * блок, которого приложение уже не ждёт. */
@@ -894,22 +1013,31 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         if (is_last_step && step > 0) {
             /* План не закрыт — даём ещё один бюджет вместо принудительного
              * итога. Продление сообщается модели явно: иначе она увидит
-             * «продолжай» без причины и снова начнёт с осмотра проекта. */
-            if (budget_extensions < 2 && has_unfinished_todos()) {
+             * «продолжай» без причины и снова начнёт с осмотра проекта.
+             *
+             * И15.4: условие расширено с «есть незакрытые todos» на «есть
+             * незакрытые todos ИЛИ были правки». Причина: todowrite зовут
+             * не все модели, и задача «сделано 3 файла из 5» без плана
+             * раньше упиралась в жёсткий итог. `made_write` — факт, что
+             * работа шла, а не догадка. */
+            if (budget_extensions < 2 &&
+                (has_unfinished_todos() || made_write)) {
                 ++budget_extensions;
                 total_steps += state_.max_steps;
                 this->push_event_(AgentEvent::Status,
-                    "Бюджет шагов исчерпан, но план задачи не закрыт — "
-                    "продлеваю на " + std::to_string(state_.max_steps) +
+                    "Бюджет шагов исчерпан, но работа ещё идёт (правки есть"
+                    "/план не закрыт) — продлеваю на " +
+                    std::to_string(state_.max_steps) +
                     " шагов и продолжаю (продление " +
                     std::to_string(budget_extensions) + " из 2).");
                 append_note(
                     "[reminder] The step budget was extended because the "
-                    "task plan still has unfinished items. Do NOT re-read "
+                    "task is not finished yet (there are already edits, or "
+                    "the plan still has unfinished items). Do NOT re-read "
                     "files you have already read and do NOT repeat the plan. "
                     "Continue with the NEXT tool call needed to finish the "
-                    "remaining todos. Send the final report only after every "
-                    "todo is completed or cancelled.");
+                    "task. Send the final report only after every todo is "
+                    "completed or cancelled.");
             } else {
                 append_note(kLastStepReminder);
             }
@@ -1222,8 +1350,14 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * строке»: раньше короткий вызов инструмента (< 200 символов)
          * ошибочно считался застреванием, и после трёх таких вызовов агент
          * падал с ошибкой «LLM: не ответил». */
+        /* Tool-args JSON / XML-разметка — это НЕ «застревание»: такой ход
+         * разбирает ветка ToolArgsJson со своим напоминанием. Считать его
+         * коротким ответом — значит форсировать отчёт раньше, чем модель
+         * успеет понять, что звать надо инструментом (ses_000000000542). */
         if (response.text().size() < kShortResponseLen &&
-            response.tool_calls().empty()) {
+            response.tool_calls().empty() &&
+            !looks_like_tool_args_json(response.text()) &&
+            !looks_like_tool_call_markup(response.text())) {
             ++stuck_counter;
             if (stuck_counter >= kStuckThreshold) {
                 this->push_event_(AgentEvent::Status,
@@ -1257,7 +1391,8 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         /* JSON с аргументами инструмента не попадает в full_response:
          * иначе он уехал бы пользователю как «финальный ответ», если
          * бюджет кончится или цикл решит, что это итог. */
-        if (!turn_text.empty() && !looks_like_tool_args_json(turn_text)) {
+        if (!turn_text.empty() && !looks_like_tool_args_json(turn_text) &&
+            !looks_like_tool_call_markup(turn_text)) {
             if (!full_response.empty()) full_response += "\n\n";
             full_response += turn_text;
         }
@@ -1285,6 +1420,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
          * поэтому ни parse_action, ни проекция в 8 слотов здесь не нужны:
          * новый параметр инструмента доходит до обработчика сам. */
         const size_t call_count = response.tool_calls().size();
+        bool turn_mutated = false;  /* был ли в этом ходе write/exec */
         for (size_t i = 0; i < call_count; ++i) {
             /* Копия, а не ссылка: reduce() меняет сам вектор вызовов, и
              * ссылка на его элемент повисла бы. */
@@ -1307,15 +1443,31 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
              * между которыми не было ни одной правки. */
             const ToolDef* call_def =
                 ToolsRegistry::instance().find(call.name);
+            /* Признак «ход что-то изменил» ставится ПОСЛЕ выполнения и
+             * только если вызов действительно изменил файл (см. ниже).
+             * Раньше он ставился здесь, по одному флагу инструмента: write_file
+             * с тем же содержимым считался правкой, сбрасывал серию
+             * read-only и разрешал модели дальше «улучшать» файл, не меняя в
+             * нём ни байта (ses_000000000006: 8 одинаковых write_file подряд). */
             const bool read_only_call =
                 call_def && (call_def->flags & TF_READ_ONLY) != 0;
+            const bool mutating_call =
+                call_def &&
+                (call_def->flags & (TF_WRITES_FILES | TF_EXECUTES)) != 0;
             const std::string call_sig = call.name + "\n" +
                 canonical_args(call.arguments, call_def ? &call_def->parameters : nullptr);
             /* Повтор вызова, который инструмент уже признал no-op.
              * В сессии 0.18.18 так зацикливались search_replace/edit_file:
              * модель получала «[no-op] …» и всё равно повторяла тот же
-             * вызов. Второй раз не выполняем — сразу называем выход. */
-            if (!last_noop_sig.empty() && call_sig == last_noop_sig) {
+             * вызов. Второй раз не выполняем — сразу называем выход.
+             *
+             * Список, а не ОДНА подпись: в ses_000000000006 модель
+             * чередовала search_replace и write_file, каждый по второму
+             * разу, и одиночный last_noop_sig каждый раз забывал предыдущий
+             * no-op. Подписи, признанные no-op, копятся до первой настоящей
+             * правки; любая из них, встреченная снова, останавливает ход. */
+            const auto noop_it = nooped_calls.find(call_sig);
+            if (noop_it != nooped_calls.end()) {
                 ToolOutput dup;
                 dup.title = "повтор no-op " + call.name;
                 dup.output =
@@ -1354,6 +1506,45 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 sync_tool_parts(turn, response);
                 continue;
             }
+            /* Анти-перебор чтения ОДНОГО И ТОГО ЖЕ файла.
+             *
+             * Защита выше ловит только СОВПАДАЮЩИЕ аргументы. В
+             * ses_000000000006 модель прочитала library.py шесть раз с
+             * РАЗНЫМИ offset/limit (60/50/53/55/9/10), каждый раз «ища
+             * нужный фрагмент», который уже лежал в истории. Каждый шаг
+             * стоил обращения к модели и уводил от правки.
+             *
+             * Считаем чтения по каноническому пути. Ключ — путь из
+             * аргументов (read_file), счётчик — сколько раз файл прочитан
+             * ПОСЛЕ последней записи в него. После N-го чтения без правки
+             * не выполняем вызов, а называем выход: содержимое уже в
+             * истории, и дальше — либо правка, либо итог. */
+            std::string read_path;
+            if (call_def && call.name == "read_file") {
+                read_path = canonical_args_path(call.arguments);
+            }
+            if (!read_path.empty()) {
+                const int seen = reads_per_file[read_path];
+                if (seen >= kMaxReadsPerFile) {
+                    ToolOutput dup;
+                    dup.title = "хватит читать " + read_path;
+                    dup.output =
+                        "[хватит-читать] " + read_path + " уже прочитан "
+                        + std::to_string(seen) + " раза, и с последней правки "
+                        "он не менялся. Всё прочитанное — в истории выше.\n"
+                        "Не читай этот файл снова (даже с другим offset/"
+                        "limit). Сделай ОДИН из двух шагов: правку (edit_file/"
+                        "search_replace/write_file) или итоговый отчёт.";
+                    this->push_event_(AgentEvent::Status,
+                        "Файл " + read_path + " уже прочитан "
+                        + std::to_string(seen) + " раза — не читаю снова.");
+                    LlmResponse::reduce(response, LlmEvent::tool_result(
+                        call.call_id, std::move(dup)));
+                    sync_tool_parts(turn, response);
+                    continue;
+                }
+                reads_per_file[read_path] = seen + 1;
+            }
             /* Пишущий/исполняющий вызов мог изменить прочитанное —
              * сбрасываем отпечаток. Read-only вызов запоминаем. */
             last_read_sig = read_only_call ? call_sig : std::string();
@@ -1363,16 +1554,39 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 tool_runner.run(call.name, call.arguments);
             if (outcome.ok) {
                 /* Запоминаем no-op: следующий такой же вызов будет
-                 * остановлен выше, не тратя шаг и не спрашивая doom_loop. */
+                 * остановлен выше, не тратя шаг и не спрашивая doom_loop.
+                 *
+                 * Список, а не одна подпись: модель чередует вызовы
+                 * (search_replace ↔ write_file), и одиночный отпечаток
+                 * забывал предыдущий no-op (ses_000000000006). */
                 if (outcome.output.output.find("[no-op]") != std::string::npos) {
-                    last_noop_sig = call_sig;
+                    nooped_calls.insert(call_sig);
                 } else if (!read_only_call) {
-                    last_noop_sig.clear();
+                    /* Настоящая правка/выполнение — все прошлые no-op
+                     * больше не актуальны: файл изменился, и повтор
+                     * любого из них может быть уже осмысленным. */
+                    nooped_calls.clear();
+                    if (mutating_call) turn_mutated = true;
+                    /* Файл, в который записали, можно читать заново —
+     * он изменился. Счётчик чтений именно этого файла сбрасываем. */
+                    if (!read_only_call &&
+                        (call.name == "write_file" ||
+                         call.name == "edit_file" ||
+                         call.name == "search_replace" ||
+                         call.name == "apply_patch")) {
+                        const std::string written =
+                            canonical_args_path(call.arguments);
+                        if (!written.empty()) reads_per_file.erase(written);
+                    }
                 }
                 LlmResponse::reduce(response, LlmEvent::tool_result(
-                    call.call_id, cap_result(std::move(outcome.output))));
+                    call.call_id, cap_result(std::move(outcome.output),
+                                             result_budget_for())));
             } else {
-                if (!read_only_call) last_noop_sig.clear();
+                /* Отказ инструмента — это не правка: файл не изменился.
+                 * Раньше здесь стоял last_noop_sig.clear(), то есть отказ
+                 * стирал память о прошлых no-op, и модель, получив
+                 * «текст не найден», шла по тому же кругу заново. */
                 LlmResponse::reduce(response, LlmEvent::tool_error(
                     call.call_id, outcome.error));
             }
@@ -1474,6 +1688,38 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         if (closed) sync_tool_parts(turn, response);
         commit_turn();
 
+        /* Анти-перебор: серия read-only ходов без изменений — модель
+         * застревает в чтении (ses_496 и живой прогон). Напоминаем
+         * перейти к действию, а не собирать факты бесконечно. */
+        /* Сбрасываем серию ТОЛЬКО на правке/выполнении. Грep-текст (JSON,
+     * авто-выполненный ниже) — это тоже осмотр, и он НЕ должен обнулять
+     * серию, иначе анти-перебор не срабатывает (ses_000000000612). */
+        if (turn_mutated)
+            read_only_streak = 0;
+        else if (call_count > 0 ||
+                 looks_like_tool_args_json(response.text()) ||
+                 looks_like_tool_call_markup(response.text()))
+            ++read_only_streak;
+        /* И15.4: успешная правка/выполнение в этом ходе — «работа идёт».
+ * Отличаем write/edit/apply_patch (меняют файл) от bash (исполнение): для
+ * продления бюджета важен именно факт, что задача продвигается, а не
+ * тип. `turn_mutated` ставится и на bash, поэтому этого достаточно. */
+        if (turn_mutated) made_write = true;
+        if (read_only_streak >= kExploreRemindAt &&
+            (read_only_streak == kExploreRemindAt || read_only_streak % 4 == 0)) {
+            this->push_event_(AgentEvent::Status,
+                "Серия read-only вызовов: " + std::to_string(read_only_streak) +
+                " — напоминаю перейти к действию.");
+            append_note(
+                "[reminder] You have made " + std::to_string(read_only_streak) +
+                " read-only tool calls in a row without changing anything. Do not "
+                "keep exploring out of habit: if you already know the cause, make "
+                "the change now (edit_file/search_replace, or write_file for a full "
+                "rewrite) and verify it. For listing/searching use list/glob/"
+                "grep_search, not bash ls/find/cat. If this is an analysis task, "
+                "finish it and summarize.");
+        }
+
         /* Условие завершения — ПОСЛЕ выполнения вызовов (И5.8). Проверять его
          * раньше нельзя: незакрытая часть-вызов означает, что результат ещё
          * не пришёл, и задача закрылась бы, потеряв его. */
@@ -1492,6 +1738,61 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         const TurnVerdict verdict =
             turn_verdict(response, turn, current_user_id, min_final_len);
         if (verdict == TurnVerdict::Completed) {
+            /* Гейт проверки: если в сессии есть правки файлов, но НИ ОДНОГО
+             * запуска тестов/проверки — не принимаем итог, просим проверить
+             * (ses_000000000582: «обе проблемы исправлены» без единого запуска). */
+            {
+                /* Только КОД требует проверки: правка .md/.txt/.json — не
+                 * повод гонять тесты (иначе гейт срабатывал бы на документах). */
+                const auto is_code_path = [](const std::string& p) {
+                    static const char* const kExts[] = {
+                        ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".php",
+                        ".java", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs",
+                        ".go", ".rs", ".rb", ".swift", ".kt", ".scala", ".sh",
+                        ".pl", ".lua", ".r", ".m", ".sql", ".html", ".css",
+                        ".vue", ".svelte"};
+                    for (const char* e : kExts) {
+                        const size_t n = std::char_traits<char>::length(e);
+                        if (p.size() >= n && p.compare(p.size() - n, n, e) == 0)
+                            return true;
+                    }
+                    return false;
+                };
+                bool has_write = false, has_verify = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_.mtx);
+                    for (const Message& m : state_.session) {
+                        for (const MessagePart& p : m.parts) {
+                            if (!p.is(PartKind::Tool)) continue;
+                            const std::string& n = p.tool_name();
+                            if (n == "write_file" || n == "edit_file" ||
+                                n == "search_replace") {
+                                if (is_code_path(p.args().get_string("path")))
+                                    has_write = true;
+                            } else if (n == "apply_patch") {
+                                /* Патч — как правило, по коду. */
+                                has_write = true;
+                            }
+                            if (n == "bash" || n == "pytest_run" ||
+                                n == "python_lint" || n == "python_run")
+                                has_verify = true;
+                        }
+                    }
+                }
+                if (has_write && !has_verify && !verification_reminded) {
+                    verification_reminded = true;
+                    this->push_event_(AgentEvent::Status,
+                        "Изменения есть, но проверки не было — прошу запустить тесты.");
+                    append_note(
+                        "[reminder] You changed files but did NOT run any verification. "
+                        "Run the project's tests or a smoke test (pytest_run, python_lint, "
+                        "python_run, or bash) and check the result BEFORE the final report. "
+                        "Do not repeat the plan; run the check now.");
+                    if (!turn_text.empty())
+                        this->push_event_(AgentEvent::Status, turn_text);
+                    continue;
+                }
+            }
             final_given = true;
             /* Заголовок отделяет итог от прогресса. Сам ответ уходит
              * Assistant-сообщением и рендерится как markdown; всё, что
@@ -1535,12 +1836,17 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             std::string example;
             if (engine().native_tools_blocked()) {
                 if (read_something) {
+                    /* НЕ write_file по умолчанию: частичная правка — это
+                     * edit_file/search_replace, а write_file снёс бы файл
+                     * (ses_000000000496). write_file — только для полной
+                     * перезаписи, и это сказано явно. */
                     example =
-                        "The files are already read — the next step is a "
-                        "WRITE. Reply EXACTLY like this:\n"
-                        "```\nwp_action\nTOOL: write_file\nPATH: <file>\n"
-                        "CONTENT_BEGIN\n...complete new content...\n"
-                        "CONTENT_END\n```";
+                        "The files are already read — change the PART you need. "
+                        "Reply EXACTLY like this:\n"
+                        "```\nwp_action\nTOOL: edit_file\nPATH: <file>\n"
+                        "K: <first line>\nQUERY: <last line>\n"
+                        "CONTENT_BEGIN\n...new lines...\nCONTENT_END\n```\n"
+                        "(write_file only to replace the WHOLE file.)";
                 } else {
                     example =
                         "Reply EXACTLY like this:\n"
@@ -1550,8 +1856,9 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 }
             } else {
                 example = read_something
-                    ? "For example, call the write_file tool with path and the "
-                      "complete content."
+                    ? "For example, call edit_file (path, k, query, content) or "
+                      "search_replace (path, query, content) to change part of "
+                      "the file. Use write_file ONLY to replace the whole file."
                     : "For example, call the repo_map tool with root='" +
                           (root.empty() ? std::string("<project root>") : root) +
                           "'.";
@@ -1646,45 +1953,99 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                       "edit_file/apply_patch). No text without a wp_action "
                       "block. If the file is corrupted, rewrite it whole; do "
                       "not re-read it.");
-        } else if (verdict == TurnVerdict::ToolArgsJson) {
-            /* JSON-аргументы инструмента, выведенные текстом. Это не
-             * отчёт: его нельзя показывать пользователю как итог и нельзя
-             * молча выполнять — модель обязана позвать инструмент сама. */
-            ++tool_args_streak;
-            if (tool_args_streak >= 3) {
-                ask_for_summary(sys,
-                    "You printed tool arguments as JSON three times instead "
-                    "of calling the tool. You may NOT call tools any more. "
-                    "Write the final report for the user: what was done, "
-                    "where the file is, how to run it.",
-                    full_response);
+        } else if (verdict == TurnVerdict::HandedOff) {
+            /* Отчёт перекладывает работу на пользователя («исправьте
+             * вручную строку 12»). Принять его — значит закрыть задачу
+             * невыполненной: в ses_000000000006 именно так ушёл итог,
+             * хотя файл остался с опечаткой. Просим ОДИН раз сделать
+             * работу самому; второй такой отчёт уже принимаем — иначе
+             * цикл будет вымогать невозможное. */
+            if (!handoff_reminded) {
+                handoff_reminded = true;
+                this->push_event_(AgentEvent::Status,
+                    "Отчёт перекладывает работу на пользователя — прошу "
+                    "сделать её самому.");
+                append_note(
+                    "[reminder] Your report hands the work back to the user "
+                    "(\"fix it manually\", \"check it yourself\"). That is not "
+                    "a result. You are the one who must do it. If a call "
+                    "failed, use the tool's message: for a partial edit call "
+                    "edit_file (path, k, query, content) or search_replace "
+                    "(path, query, content); to replace the whole file call "
+                    "write_file with the FULL corrected content. Then verify "
+                    "it yourself (pytest_run, python_lint, python_run, bash) "
+                    "and only then write the final report. Do NOT ask the "
+                    "user to finish the task.");
+            } else {
+                /* Второй раз — принимаем: дальше только сожжём бюджет. */
+                final_given = true;
+                this->push_event_(AgentEvent::Status, "=== Итоговый ответ ===");
+                this->push_event_(AgentEvent::Assistant, turn_text);
+                this->push_event_(AgentEvent::Status, "Готово (финальный ответ).");
                 return true;
             }
-            this->push_event_(AgentEvent::Status,
-                "Это JSON-аргументы инструмента, а не итоговый отчёт — "
-                "прошу вызвать инструмент и дать отчёт.");
-            /* Аргументы task (prompt/description) — самая частая форма
-             * такой ошибки: модель «запускает субагента» текстом. Называем
-             * инструмент и обязательные поля прямо, иначе она повторяет
-             * тот же JSON и он снова уходит в чат. */
+        } else if (verdict == TurnVerdict::ToolArgsJson) {
             const std::string& printed = response.text();
-            const bool looks_like_task =
-                printed.find("\"prompt\"") != std::string::npos &&
-                (printed.find("\"description\"") != std::string::npos ||
-                 printed.find("\"subagent_type\"") != std::string::npos);
-            append_note(
-                looks_like_task
-                    ? "[reminder] These are task tool arguments, not a final "
-                      "report. Do not print JSON. Call the task tool with "
-                      "subagent_type (see the task description in the tool "
-                      "catalogue), description, and prompt. The task tool "
-                      "requires subagent_type; without it the call is invalid."
-                    : "[reminder] You printed tool arguments as JSON text "
-                      "instead of calling the tool. Do not print JSON. Call "
-                      "write_file (or the appropriate tool) with those "
-                      "arguments; after the RESULT give the user a final "
-                      "report: what was done, where the file is, how to run "
-                      "it.");
+            /* СНАЧАЛА: read-only вызов (grep_search/read_file) выполняем за
+             * модель. Это ПРОДУКТИВНЫЙ ход, а не «модель 3 раза печатает
+             * JSON»: не считаем его в tool_args_streak и не ноем «не печатай
+             * JSON» — иначе серия авто-выполненных grep'ов ложно закрывала бы
+             * задачу (ses_000000000612). */
+            std::string inferred_note;
+            if (try_infer_readonly_call(printed, inferred_note)) {
+                tool_args_streak = 0;
+                this->push_event_(AgentEvent::Status,
+                    "JSON-вызов read-only распознан и выполнен за модель.");
+                append_note(inferred_note);
+            } else {
+                ++tool_args_streak;
+                if (tool_args_streak >= 3) {
+                    ask_for_summary(sys,
+                        "You printed tool arguments as JSON three times instead "
+                        "of calling the tool. You may NOT call tools any more. "
+                        "Write the final report for the user: what was done, "
+                        "where the file is, how to run it.",
+                        full_response);
+                    return true;
+                }
+                this->push_event_(AgentEvent::Status,
+                    "Это JSON-аргументы инструмента, а не итоговый отчёт — "
+                    "прошу вызвать инструмент и дать отчёт.");
+                /* task (prompt/description) — «запускает субагента» текстом. */
+                const bool looks_like_task =
+                    printed.find("\"prompt\"") != std::string::npos &&
+                    (printed.find("\"description\"") != std::string::npos ||
+                     printed.find("\"subagent_type\"") != std::string::npos);
+                /* bash: ключ command/cli (ses_000000000496, шаг 26). */
+                const bool looks_like_bash =
+                    !looks_like_task &&
+                    (printed.find("\"command\"") != std::string::npos ||
+                     printed.find("\"cli\"") != std::string::npos);
+                std::string reminder;
+                if (looks_like_task) {
+                    reminder =
+                        "[reminder] These are task tool arguments, not a final "
+                        "report. Do not print JSON. Call the task tool with "
+                        "subagent_type (see the tool catalogue), description, "
+                        "and prompt. The task tool requires subagent_type.";
+                } else if (looks_like_bash) {
+                    reminder =
+                        "[reminder] This is a bash call printed as JSON text, not "
+                        "an executed command. Do not print JSON. Call the bash tool "
+                        "with cli=\"<command>\" (the key is cli; command is accepted "
+                        "as an alias). After the RESULT, continue or give the final "
+                        "report.";
+                } else {
+                    reminder =
+                        "[reminder] You printed tool arguments as JSON text "
+                        "instead of calling the tool. Do not print JSON. Call the "
+                        "appropriate tool (for a partial file edit use edit_file or "
+                        "search_replace; write_file replaces the whole file) with "
+                        "those arguments; after the RESULT give the user a final "
+                        "report: what was done, where the file is, how to run it.";
+                }
+                append_note(reminder);
+            }
         }
 
         /* Не итог: текст хода — это прогресс/рассуждение, а не ответ
@@ -1860,7 +2221,20 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
      * файле сессии оказались бы два разговора. */
     const std::string root_id = history.front().id;
 
-    for (int step = 0; step < max_steps; ++step) {
+    /* И15.1 (BEHAVIOR_PARITY_PLAN): тот же мягкий бюджет, что у
+     * основного цикла. Раньше субагент сдавался ровно на `max_steps`, и
+     * «утыкается в лимит даже с субагентами» было верно: ребёнок, который
+     * на последнем шаге ещё звал инструмент (то есть работал), обрывался
+     * без итога. Правило простое и то же, что у родителя: reached-конец
+     * цикла без break означает «модель хочет продолжать» — если это
+     * происходит на последнем шаге, продлеваем бюджет (дважды, как у
+     * родителя), а не сдаёмся. Если модель действительно закончила, она
+     * вышла через break выше, и продление не нужно. */
+    const int base_steps = max_steps;
+    int total_steps = max_steps;
+    int budget_extensions = 0;
+
+    for (int step = 0; step < total_steps; ++step) {
         if (state.abort_requested.load()) {
             result.error = "[прервано пользователем] субагент остановлен";
             break;
@@ -1954,7 +2328,8 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
             const ToolOutcome outcome = runner.run(call.name, call.arguments);
             if (outcome.ok) {
                 LlmResponse::reduce(response, LlmEvent::tool_result(
-                    call.call_id, cap_result(std::move(outcome.output))));
+                    call.call_id, cap_result(std::move(outcome.output),
+                                             result_budget_for())));
             } else {
                 LlmResponse::reduce(response,
                     LlmEvent::tool_error(call.call_id, outcome.error));
@@ -2004,11 +2379,27 @@ SubagentResult run_subagent_turn(EngineState& state, HostCallbacks& cb,
             result.text = turn.task_answer();
             break;
         }
+
+        /* И15.1: reached-конец бюджета без break означает «модель ещё
+         * работает» — на этом шаге был вызов, и она хочет продолжать.
+         * Продлеваем один раз ( twice ), а не сдаёмся. Условие то же, что
+         * у родителя: незакрытые `todos` (план ребёнка) — но у субагента
+         * их обычно нет, поэтому судим по факту «был вызов и finish=tool-calls»,
+         * то есть по тому, что цикл дошёл до конца, а не вышел. */
+        if (step + 1 >= total_steps && budget_extensions < 2) {
+            ++budget_extensions;
+            total_steps += base_steps;
+            push_event(AgentEvent::Status,
+                "Субагент " + state.scope.agent +
+                " исчерпал бюджет шагов, но ещё работает — продлеваю на " +
+                std::to_string(base_steps) + " (продление " +
+                std::to_string(budget_extensions) + " из 2).");
+        }
     }
     if (!result.ok && result.error.empty()) {
         result.error =
             "[ошибка] субагент " + state.scope.agent +
-            " не закончил задачу за " + std::to_string(max_steps) +
+            " не закончил задачу за " + std::to_string(total_steps) +
             " шагов и не дал итога. Попроси его о конкретном "
             "результате или сделай работу сам.";
     }

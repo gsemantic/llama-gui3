@@ -1219,6 +1219,9 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
                 bridge->push_reasoning(text);
             });
 
+        /* И12.x: фактическая модель ответа — в done_json (для роутеров). */
+        bridge->set_model(usage.model);
+
         if (!ok) {
             /* Есть конкретный текст от клиента — он и доходит в done_json
              * (bridge уже держит его в error_); общего текста хватает только

@@ -877,6 +877,56 @@ TEST(turn_verdict_does_not_close_task_on_tool_args_json) {
         R"({"answer": "готово", "summary": "файл записан"})"));
 }
 
+TEST(turn_verdict_does_not_close_task_on_a_json_array_of_tool_calls) {
+    /* Б3 / BEHAVIOR_PARITY_PLAN И14.2: модель печатает МАССИВ вызовов
+     * `[{"name":…,"arguments":{…}}]` текстом. Раньше детектор смотрел только
+     * на `{`, массив проходил как `Completed` и уезжал в чат сырым JSON —
+     * вместо отчёта пользователь видел неудобный массив. Массив — это вызов
+     * (или их список), а не отчёт, и вести себя должен как одиночный объект. */
+    const std::string kUser = "msg_000000000001";
+    const std::string json_array =
+        R"([{"name": "read_file", "arguments": {"path": "main.py"}}])";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(json_array));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(looks_like_tool_args_json(json_array));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+    /* Обычный JSON-массив-ОТЧЁТ (ключи ответа) массивом вызовов не считается. */
+    ASSERT_FALSE(looks_like_tool_args_json(
+        R"([{"summary": "готово"}, {"report": "файл записан"}])"));
+}
+
+TEST(turn_verdict_distinguishes_a_json_report_array_from_a_tool_array) {
+    /* И15.3 / BEHAVIOR_PARITY_PLAN: массив — это вызов, только если внутри
+ * ключи инструмента. Массив-ОТЧЁТ (ключи answer/summary/report/message)
+ * обязан закрывать задачу как Completed, а не уходить в ToolArgsJson.
+ * Иначе модель, которая честно оформила отчёт массивом, зациклится на
+ * «это вызов, вызови инструмент». */
+    const std::string kUser = "msg_000000000001";
+    /* Достаточно длинный, чтобы пройти порог итога (300 символов): иначе
+ * verdict = TooShort, и проверка падала бы не по своей причине.
+ * Свой разделитель JSON: в тексте есть `)"`, которое закрыло бы R"(...)". */
+    const std::string report_array =
+        R"JSON([{"summary": "Работа выполнена полностью. Все файлы записаны, собраны и проверены — компиляция прошла, smoke-тесты зелёные, ошибок в консоли нет. Дополнительно проверены крайние случаи и совместимость с соседним кодом."}, {"report": "Подробности и список изменённых файлов приведены в журнале изменений."}])JSON";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(report_array));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_FALSE(looks_like_tool_args_json(report_array));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::Completed);
+    ASSERT_TRUE(turn_completes_task(r, turn, kUser));
+}
+
 TEST(turn_verdict_respects_runtime_min_len) {
     /* Порог итога — runtime-настройка (limit_min_final_answer_len).
      * Раньше здесь была константа, и профиль не мог её менять. */
@@ -1247,4 +1297,107 @@ TEST(a_duration_that_came_from_the_file_is_a_value_and_not_a_measurement) {
     MessagePart bad = MessagePart::tool("call_5", "read_file");
     bad.restore_duration_ms(-7);
     ASSERT_FALSE(bad.has_duration());
+}
+
+/* Короткий JSON-вызов инструмента (например, bash `{"command":...}`) РАНЬШЕ
+ * уходил в TooShort: длина < порога итога, а ToolArgsJson проверялся после.
+ * В ses_000000000496 это привело к тому, что reminder советовал write_file
+ * вместо нужного bash. Теперь ToolArgsJson проверяется ДО TooShort. */
+TEST(turn_verdict_tool_args_json_beats_too_short_for_command) {
+    const std::string kUser = "msg_000000000001";
+    const std::string json_cmd =
+        R"({"command": "cd /tmp && python3 -c \"import PyQt5\" 2>&1 | head -5"})";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(json_cmd));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    /* Короче порога итога (300), но это аргументы инструмента, а не ответ. */
+    ASSERT_TRUE(json_cmd.size() < 300);
+    ASSERT_TRUE(looks_like_tool_args_json(json_cmd));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+
+    /* Короткий обычный текст по-прежнему TooShort, а не ToolArgsJson. */
+    const std::string plain = "ещё думаю";
+    LlmResponse r2;
+    LlmResponse::reduce(r2, LlmEvent::text_start());
+    LlmResponse::reduce(r2, LlmEvent::text_delta(plain));
+    LlmResponse::reduce(r2, LlmEvent::text_end());
+    LlmResponse::reduce(r2, LlmEvent::finish("stop"));
+    const Message turn2 = turn_of(r2, kUser);
+    ASSERT_EQ((int)turn_verdict(r2, turn2, kUser), (int)TurnVerdict::TooShort);
+}
+
+/* ses_000000000514: провайдер (kilo-auto) дописал к JSON вызова хвост
+ * </rfl:parameter>, из-за чего текст не оканчивался на '}' и old-guard
+ * считал его «финальным отчётом». Новый разбор берёт первый сбалансированный
+ * {…} и игнорирует хвост. */
+TEST(tool_args_json_with_trailing_markup_is_still_a_call) {
+    const std::string kUser = "msg_000000000001";
+    const std::string text =
+        R"({"path": "reader2/main_window.py", "query": "    def on_recent(self):\n            menu.setOptions(QInputDialog.UseListViewForAlternatives)\n"})"
+        "\n</rfl:parameter>";
+    ASSERT_TRUE(looks_like_tool_args_json(text));
+    ASSERT_TRUE(looks_like_tool_call_markup(text));
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(text));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+}
+
+TEST(tool_call_markup_is_detected_but_prose_is_not) {
+    ASSERT_TRUE(looks_like_tool_call_markup(
+        "<rfl:parameter name=\"path\">x</rfl:parameter>"));
+    ASSERT_TRUE(looks_like_tool_call_markup("<tool_call>foo</tool_call>"));
+    ASSERT_TRUE(looks_like_tool_call_markup("<function_call>bar"));
+    ASSERT_FALSE(looks_like_tool_call_markup("Обычный текстовый отчёт без тегов."));
+    /* JSON-отчёт с явными ключами ответа — НЕ аргументы инструмента. */
+    ASSERT_FALSE(looks_like_tool_args_json(
+        R"({"summary": "готово", "files": ["a.py"]})"));
+}
+
+/* ses_000000000006: агент сжёг все шаги и закончил отчётом «исправьте
+ * вручную строку 12». Такой текст — не итог, а передача работы
+ * пользователю. Детектор называет маркеры, а не «упоминает ли текст
+ * пользователя вообще»: обычный отчёт («запустите программу командой …»)
+ * передачей не считается. */
+TEST(looks_like_user_handoff_catches_delegation_not_mentions) {
+    ASSERT_TRUE(looks_like_user_handoff(
+        "В library.py нужно исправить вручную строку 12."));
+    ASSERT_TRUE(looks_like_user_handoff("Остальное сделайте сами."));
+    ASSERT_TRUE(looks_like_user_handoff("Проверьте у себя перед запуском."));
+    ASSERT_TRUE(looks_like_user_handoff("Please fix it manually."));
+    /* Обыenciones отчёт: как запустить — это инструкция, а не передача. */
+    ASSERT_FALSE(looks_like_user_handoff(
+        "Готово. Запустить: venv/bin/python main.py. Тесты зелёные."));
+    ASSERT_FALSE(looks_like_user_handoff(
+        "Файл settings_dialog.py изменён, тема теперь применяется."));
+}
+
+/* Ход с передачей работы пользователю не должен закрывать задачу. */
+TEST(turn_verdict_rejects_a_report_that_hands_work_to_the_user) {
+    const std::string kUser = "msg_000000000001";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    /* Текст обязан быть ДЛИННЕ порога итога: иначе сработает TooShort
+ * (он проверяется раньше), и проверка не увидела бы передачу работы. */
+    LlmResponse::reduce(r, LlmEvent::text_delta(
+        "Правки в меню настроек внесены, тема и макет теперь применяются. "
+        "Но в library.py нужно исправить вручную строку 12 — я не успел, "
+        "и пагинацию по страницам тоже не сделал. Проверьте у себя перед "
+        "запуском: запустите smoke-тесты и посмотрите, всё ли работает. "
+        "Остальное доделайте сами, у меня кончился бюджет шагов."));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::HandedOff);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
 }

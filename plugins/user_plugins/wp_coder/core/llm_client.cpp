@@ -195,6 +195,8 @@ LlmReply reply_from_result(const std::string& json_text)
     reply.tools_reported =
         json_text.find("\"tools_rejected\"") != std::string::npos;
     reply.tools_rejected = json::int_(json_text, "tools_rejected") == 1;
+    /* И12.x: фактическая модель из ответа (для роутеров). */
+    reply.resolved_model = json::str(json_text, "model");
     return reply;
 }
 
@@ -556,6 +558,10 @@ int timeout_ms,
      * который мы намеренно вели текстом, снова включил бы tools. */
     if (reply.tools_reported) {
         engine().note_tools_rejected(reply.tools_rejected);
+    }
+    /* И12.x: реальная модель из ответа → семейство для следующих ходов. */
+    if (!reply.resolved_model.empty()) {
+        engine().note_resolved_model(reply.resolved_model);
     }
 
     /* И12.2: подтверждение нативного вызова.

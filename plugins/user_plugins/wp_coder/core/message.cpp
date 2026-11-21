@@ -609,6 +609,7 @@ const char* turn_verdict_name(TurnVerdict v) {
         case TurnVerdict::CodeAnswer:    return "code_answer";
         case TurnVerdict::PlanningText:  return "planning_text";
         case TurnVerdict::ToolArgsJson:  return "tool_args_json";
+        case TurnVerdict::HandedOff:     return "handed_off";
     }
     return "unknown";
 }
@@ -733,12 +734,40 @@ bool looks_like_planning_text(const std::string& text) {
 
 bool looks_like_tool_args_json(const std::string& text) {
     const size_t b = text.find_first_not_of(" \t\r\n");
-    const size_t e = text.find_last_not_of(" \t\r\n");
-    if (b == std::string::npos || e == std::string::npos ||
-        text[b] != '{' || text[e] != '}') {
-        return false;
+    if (b == std::string::npos) return false;
+    /* Б3 (BEHAVIOR_PARITY_PLAN И14.2): массив `[…]` распознаётся так же,
+     * как объект `{…}`. Раньше проверялся только `{`, и модель, напечатавшая
+     * массив вызовов `[{"name":…,"arguments":{…}}]`, отдавала его
+     * пользователю как «финальный отчёт»: вместо отчёта в чат уезжал JSON,
+     * неудобный для чтения. Массив — это не отчёт, а вызов (или их список),
+     * и относиться к нему надо так же, как к одиночному объекту. */
+    const char open = text[b];
+    if (open != '{' && open != '[') return false;
+
+    /* Выделяем ПЕРВЫЙ сбалансированный {…}/[…] и ИГНОРИРУЕМ хвост после него.
+     * Некоторые провайдеры (kilo-auto и подобные) дописывают к JSON мусор —
+     * например, XML-тег </rfl:parameter>. Раньше такой вызов, напечатанный
+     * текстом, требовал, чтобы последний символ был '}', и уходил
+     * пользователю как «финальный отчёт» (ses_000000000514). Баланс скобок
+     * считаем с учётом строк и escape-последовательностей. */
+    size_t i = b + 1;
+    int depth = 1;
+    bool in_str = false;
+    while (i < text.size() && depth > 0) {
+        const char c = text[i];
+        if (in_str) {
+            if (c == '\\' && i + 1 < text.size()) { i += 2; continue; }
+            if (c == '"') in_str = false;
+        } else {
+            if (c == '"') in_str = true;
+            else if (c == '{' || c == '[') ++depth;
+            else if (c == '}' || c == ']') --depth;
+        }
+        ++i;
     }
-    const std::string body = text.substr(b, e - b + 1);
+    if (depth != 0) return false;  /* незакрытая скобка — не наш случай */
+    /* i — на один символ ЗА закрывающей скобкой, поэтому длина включает её. */
+    const std::string body = text.substr(b, i - b);
     /* Отчёт-JSON с явными ключами ответа не трогаем. */
     if (body.find("\"summary\"") != std::string::npos ||
         body.find("\"report\"") != std::string::npos ||
@@ -765,7 +794,115 @@ bool looks_like_tool_args_json(const std::string& text) {
         body.find("\"query\"") != std::string::npos ||
         body.find("\"command\"") != std::string::npos ||
         body.find("\"prompt\"") != std::string::npos;
-    return hits >= 2 || command_key;
+    if (hits >= 2 || command_key) return true;
+    /* Б3 / И14.2: массив вызовов `[{"name":…,"arguments":{…}}]` — это
+     * нативный формат, и его ключи (name/arguments) в kKeys не входят,
+     * потому что одиночный объект так не выглядит. Ловим массив отдельно:
+     * name + arguments/args — это вызов, а не отчёт. Проверка на «массив»
+     * обязательна: объект с name/arguments — это чей-то отчёт о вызове, и
+     * трогать его нельзя (его и так отсекли бы summary/report/answer/message
+     * выше, но массив — отдельный случай, и полагаться на это нельзя). */
+    if (open == '[') {
+        const bool has_name = body.find("\"name\"") != std::string::npos;
+        const bool has_args = body.find("\"arguments\"") != std::string::npos ||
+                             body.find("\"args\"") != std::string::npos;
+        if (has_name && has_args) return true;
+    }
+    return false;
+}
+
+/* Строка в НИЖНЕМ регистре: ASCII + кириллица (UTF-8).
+ *
+ * Нужна, потому что маркеры ниже написаны строчными, а текст — обычная
+ * проза с заглавными буквами: «Проверьте у себя…» не находило
+ * «проверьте у себя». Сравнение без регистра — единственный способ
+ * поймать фразу в любом падеже и с любой заглавной, не перечисляя
+ * варианты.
+ *
+ * Кириллица в UTF-8: А–П = D0 90..D0 9F → а–п = D0 B0..D0 BF;
+ * Р–Я = D0 A0..D0 AF → р–я = D1 80..D1 8F; Ё = D0 81 → ё = D1 91. */
+std::string to_lower_utf8(const std::string& s) {
+    std::string out = s;
+    for (size_t i = 0; i + 1 < out.size();) {
+        const unsigned char c0 = static_cast<unsigned char>(out[i]);
+        if (c0 == 0xD0) {
+            const unsigned char c1 = static_cast<unsigned char>(out[i + 1]);
+            if (c1 >= 0x90 && c1 <= 0x9F) { out[i+1] = static_cast<char>(c1 + 0x20); i += 2; continue; }
+            if (c1 >= 0xA0 && c1 <= 0xAF) { out[i] = 0xD1; out[i+1] = static_cast<char>(c1 - 0x20); i += 2; continue; }
+            if (c1 == 0x81) { out[i] = 0xD1; out[i+1] = 0x91; i += 2; continue; }  /* Ё → ё */
+            i += 2; continue;
+        }
+        if (c0 >= 'A' && c0 <= 'Z') { out[i] = static_cast<char>(c0 - 'A' + 'a'); i += 1; continue; }
+        ++i;
+    }
+    return out;
+}
+
+bool contains_ci(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) return false;
+    return to_lower_utf8(haystack).find(to_lower_utf8(needle)) != std::string::npos;
+}
+
+/* Похож ли финальный отчёт на ПЕРЕДАЧУ работы пользователю.
+ *
+ * Зачем: в ses_000000000006 агент потратил все 30 шагов и закончил
+ * отчётом «рекомендую перепроверить… исправьте вручную строку 12». Это
+ * не отчёт о работе, а отписка: задача не выполнена, но закрывается как
+ * выполненная. Промпт такое запрещает (kAgentBuildPrompt), но на слов
+ * полагаться нельзя — модель под давлением бюджета всё равно сдаётся.
+ *
+ * Правило консервативное: маркер должен ОБОЗНАЧАТЬ передачу работы, а не
+ * просто упоминать пользователя. Фразы вроде «запустите приложение
+ * командой …» (это как раз инструкция, а не передача) не совпадают,
+ * потому что в списке нет «запустите» вообще. */
+bool looks_like_user_handoff(const std::string& text) {
+    static const char* kMarkers[] = {
+        /* прямая передача правки (любые формы: повелительное и
+         * инфинитив — «нужно исправить вручную» тоже передача) */
+        "исправьте вручную", "исправь вручную", "исправить вручную",
+        "поправьте вручную", "поправь вручную", "поправить вручную",
+        "внесите правки вручную", "внеси правки вручную",
+        "внести правки вручную",
+        "доделайте вручную", "доделай вручную", "доделать вручную",
+        "сделайте сами", "сделай сам", "сделать сами", "сделать сам",
+        "сделайте это сами", "сделай это сам",
+        "остальное сделайте", "остальное сделай",
+        "продолжите сами", "продолжи сам",
+        /* передача проверки */
+        "проверьте у себя", "проверь у себя", "проверить у себя",
+        "запустите у себя", "запусти у себя", "запустить у себя",
+        "проверьте сами", "проверь сам", "проверить самим",
+        "протестируйте у себя", "протестировать у себя",
+        /* английские эквиваленты (модели часто отвечают по-английски) */
+        "fix it yourself", "fix it manually",
+        "do it yourself", "the rest is up to you",
+        "please fix", "please verify it yourself",
+        "run it yourself", "test it yourself",
+    };
+    /* Сравнение БЕЗ регистра: маркеры написаны строчными, а текст —
+     * обычная проза с заглавными буквами. */
+    for (const char* m : kMarkers) {
+        if (contains_ci(text, m)) return true;
+    }
+    return false;
+}
+
+/* XML-подобная разметка вызова инструмента (некоторые провайдеры отдают
+ * tool-call тегами, а не нативным полем): <rfl:parameter>, <tool_call>,
+ * <function_call> и т.п. Отличаем от JSON-аргументов: это отдельный, более
+ * общий признак «текст — это вызов, а не проза». */
+bool looks_like_tool_call_markup(const std::string& text) {
+    static const char* kTags[] = {
+        "<rfl:parameter", "</rfl:parameter>",
+        "<tool_call", "</tool_call>",
+        "<function_call", "</function_call>",
+        "<tool_use", "</tool_use>",
+        "<|tool_call", "<tool_call>",
+    };
+    for (const char* t : kTags) {
+        if (text.find(t) != std::string::npos) return true;
+    }
+    return false;
 }
 
 TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
@@ -800,7 +937,16 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
     /* 3. Ход отвечает на не самое свежее сообщение пользователя: значит, пока
      * он шёл, человек написал ещё одно, и закрывать нечего. */
     if (turn.parent_id != last_user_id) return TurnVerdict::NotLastUser;
-    /* 4. Слишком короткий текст — это «начало работы», а не итог. */
+    /* 4. JSON-аргументы инструмента, напечатанные текстом, — не отчёт, даже
+     * если они короче порога итога. Проверяется ДО TooShort: в сессии
+     * ses_000000000496 короткий `{"command":...}` уходил в TooShort, и
+     * reminder советовал write_file вместо нужного bash. */
+    if (response.tool_calls().empty() &&
+        (looks_like_tool_args_json(response.text()) ||
+         looks_like_tool_call_markup(response.text()))) {
+        return TurnVerdict::ToolArgsJson;
+    }
+    /* 5. Слишком короткий текст — это «начало работы», а не итог. */
     if (response.text().size() < min_len) {
         return TurnVerdict::TooShort;
     }
@@ -813,7 +959,7 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
         looks_like_code_answer(response.text())) {
         return TurnVerdict::CodeAnswer;
     }
-    /* 6. «Итог» — это план на будущее, а не выполненная работа. Модель
+    /* 7. «Итог» — это план на будущее, а не выполненная работа. Модель
      * после осмотра проекта писала «Plan: … Let me write…» без вызова
      * инструмента; длина проходила порог, и задача закрывалась, хотя
      * файл не менялся. */
@@ -821,11 +967,15 @@ TurnVerdict turn_verdict(const LlmResponse& response, const Message& turn,
         looks_like_planning_text(response.text())) {
         return TurnVerdict::PlanningText;
     }
-    /* 7. JSON-аргументы инструмента текстом — не отчёт пользователю. */
+    /* 8. «Итог» — это передача работы пользователю. В ses_000000000006
+     * агент сжёг все 30 шагов и закончил «исправьте вручную строку 12».
+     * Такой отчёт нельзя принимать: задача не выполнена, но выглядит
+     * закрытой. */
     if (response.tool_calls().empty() &&
-        looks_like_tool_args_json(response.text())) {
-        return TurnVerdict::ToolArgsJson;
+        looks_like_user_handoff(response.text())) {
+        return TurnVerdict::HandedOff;
     }
+    /* JSON-аргументы инструмента текстом проверены выше (п. 4), до TooShort. */
     return TurnVerdict::Completed;
 }
 

@@ -583,6 +583,38 @@ void Engine::note_native_tool_seen() {
     if (changed) invalidate_prompt_cache();
 }
 
+/* И12.x: узнать реальное семейство из ответа провайдера.
+ *
+ * Зачем: у роутеров (kilo-auto/free) model_id запроса — это псевдоним,
+ * который провайдер сам маршрутизирует к одной из нескольких моделей.
+ * family_of(псевдонима) → Default, и модель не получает ни акцента
+ * семейства, ни подмены инструментов. Ответ же несёт фактическую модель
+ * (response.model), и по ней семейство определяется точно.
+ *
+ * Меняем host_model_id и host_model_family (имя семейства, как в
+ * model_current) и сбрасываем кэш промпта — иначе следующий ход собер
+ * промпт по старому семейству. */
+void Engine::note_resolved_model(const std::string& resolved) {
+    if (resolved.empty()) return;
+    const std::string family =
+        SystemPrompt::family_name(SystemPrompt::family_of(resolved));
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        if (state_.host_model_id != resolved ||
+            state_.host_model_family != family) {
+            state_.host_model_id = resolved;
+            state_.host_model_family = family;
+            changed = true;
+        }
+    }
+    if (changed) {
+        std::cout << "[wp_coder] resolved model: " << resolved
+                  << " (family " << family << ")" << std::endl;
+        invalidate_prompt_cache();
+    }
+}
+
 NativeToolSupport Engine::native_tool_support() const {
     std::lock_guard<std::mutex> lk(state_.mtx);
     return state_.native_tools;
@@ -601,10 +633,12 @@ std::vector<std::string> Engine::visible_tools() const {
      * visible_tool_names на оба ответа. */
     std::shared_ptr<agent::Info> info;
     std::string active_module;
+    std::string tool_profile;
     {
         std::lock_guard<std::mutex> lk(state_.mtx);
         info = state_.scope.info;
         active_module = state_.active_module;
+        tool_profile = state_.tool_profile;
     }
     std::vector<ToolDef> all = ToolsRegistry::instance().defs();
     /* Инструменты ЧУЖОГО модуля не показываются.
@@ -638,20 +672,25 @@ std::vector<std::string> Engine::visible_tools() const {
      * ровно тот класс расхождения, ради которого этот список вообще
      * существует (И12.2). */
     const std::string model = info ? info->model() : std::string();
-    if (SystemPrompt::prefers_patch_editing(model)) {
-        const std::vector<std::string> visible = info
-            ? visible_tool_names(all, [&info](const std::string& key) {
-                  return info->denies_whole_key(key);
-              })
-            : permissions_.visible_tools(all);
-        return substitute_patch_editors(visible);
-    }
+    /* И15.2: профиль видимости применяется ПЕРВЫМ, до подмены и до
+ * правил агента. Смысл: "basic" сужает каталог, а всё остальное
+ * (подмена gpt-*, правила) работает уже над сужённым набором. Порядок
+ * важен: если бы профиль применялся последним, он мог бы вернуть
+ * инструмент, убранный правилом, — то есть скрытие перестало бы быть
+ * скрытием. */
+    std::vector<std::string> visible;
     if (info) {
-        return visible_tool_names(all, [&info](const std::string& key) {
+        visible = visible_tool_names(all, [&info](const std::string& key) {
             return info->denies_whole_key(key);
         });
+    } else {
+        visible = permissions_.visible_tools(all);
     }
-    return permissions_.visible_tools(all);
+    visible = apply_tool_profile(visible, tool_profile);
+    if (SystemPrompt::prefers_patch_editing(model)) {
+        return substitute_patch_editors(visible);
+    }
+    return visible;
 }
 
 std::string Engine::build_system_prompt() const {
@@ -1466,6 +1505,17 @@ void Engine::load_settings() {
         }
         state_.max_steps = steps > 0 ? steps : 20;
     }
+    /* И15.2: профиль видимости инструментов. "basic" сужает каталог до
+ * базового набора; "extended"/пусто/неизвестно — все инструменты.
+ * Читается здесь, вместе с остальными настройками, и по той же причине:
+ * это единственное место, где плагин ходит к хосту за настройками. */
+    {
+        std::string tp = setting_get(cb_, "wp_coder.tool_profile", "extended");
+        for (char& c : tp) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        state_.tool_profile = tp;
+    }
     /* И8.8: предел вложенности субагентов. Рядом с max_steps, потому что
      * это тоже предел хода, а не отдельная подсистема.
      *
@@ -2273,7 +2323,11 @@ void Engine::trim_history_if_needed() {
         state_.max_steps > 0
             ? static_cast<size_t>(state_.max_steps) * 2 + 4
             : 44;
-    compress_history(state_.session, state_.session_budget, keep_recent);
+    /* Бюджет сессии — И14.3: масштабируется от реального окна модели.
+     * Окно неизвестно (0) → прежнее значение (state_.session_budget). */
+    const size_t budget = limits::session_budget_for(
+        state_.model_limits.context, state_.session_budget);
+    compress_history(state_.session, budget, keep_recent);
 }
 
 /* ======================================================================

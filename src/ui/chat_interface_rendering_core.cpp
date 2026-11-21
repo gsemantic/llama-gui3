@@ -22,6 +22,29 @@ void ChatInterface::render(bool* visible) {
     ImGuiWindowFlags flags = ImGuiWindowFlags_None;
     flags |= ImGuiWindowFlags_NoCollapse;  // Запретить сворачивание
 
+    // Сворачивание ОКНА ПРИЛОЖЕНИЯ (не ImGui-окна): SDL при
+    // SDL_WINDOW_MINIMIZED отдаёт DisplaySize 0×0, и ImGui пересчитывает
+    // размеры с нулевой областью. На первом же кадре после разворачивания
+    // ползунок прокрутки зажимается в самый верх (CalcNextScrollFromScrollTargetAndClamp
+    // ограничивает Scroll значением ScrollMax, а он в этот момент нулевой).
+    // Сохраняем позицию САМИ и восстанавливаем её, когда окно снова видно.
+    {
+        static bool was_minimized = false;
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        const bool minimized = (display.x < 1.0f || display.y < 1.0f);
+        if (minimized && !was_minimized) {
+            /* Позиция уже сохранена в конце render_message_list(); здесь
+             * только отмечаем, что её надо будет вернуть. */
+            scroll_restore_pending_ = true;
+        }
+        was_minimized = minimized;
+        if (minimized) {
+            /* Ничего не рисуем: окно невидимо, а любой BeginChild с
+             * нулевой высотой схлопнул бы ленту и потерял прокрутку. */
+            return;
+        }
+    }
+
     // Стандартное окно ImGui с заголовком и кнопками управления
     // Кнопка закрытия (×) и сворачивания (─) рисуются автоматически ImGui
     if (!ImGui::Begin("Chat", visible, flags)) {
@@ -88,6 +111,47 @@ void ChatInterface::render_message_list() {
     if (available_height < 150.0f) available_height = 150.0f;
 
     ImGui::BeginChild("MessagesScroll", ImVec2(0, available_height), true);
+
+    /* Прокрутка, заказанная кнопками «В начало»/«В конец» или
+     * восстановлением после сворачивания. Выполняется ЗДЕСЬ, потому что
+     * SetScrollY() действует на ТЕКУЩЕЕ окно, а кнопки живут в InputArea —
+   * там это прокрутило бы поле ввода. */
+    if (pending_scroll_ == 1) {
+        ImGui::SetScrollY(0.0f);
+        pending_scroll_ = 0;
+        auto_scroll_ = false;
+    } else if (pending_scroll_ == 2) {
+        ImGui::SetScrollY(ImGui::GetScrollMaxY());
+        pending_scroll_ = 0;
+        auto_scroll_ = true;
+    } else if (scroll_restore_pending_) {
+        /* Окно вернулось из свёрнутого состояния. Пока ImGui не
+         * пересчитал содержимое, ScrollMax может быть нулевым, и любая
+         * прокрутка зажмётся в 0 — то есть в тот самый «ползунок вверху»,
+         * ради которого всё это и написано. Поэтому ждём кадр, в котором
+         * прокручивать уже есть куда. */
+        const float max_y = ImGui::GetScrollMaxY();
+        const float target = (saved_scroll_y_ > max_y) ? max_y : saved_scroll_y_;
+        if (max_y > 0.0f || saved_scroll_y_ <= 0.0f) {
+            ImGui::SetScrollY(target);
+            scroll_restore_pending_ = false;
+        }
+    }
+
+    /* Home / End внутри ленты — «в начало / в конец беседы».
+     * Работает, когда фокус в дочернем окне MessagesScroll (клик по
+     * ленте, Tab-навигация), и не перехватывает клавиши у поля ввода:
+     * там Home/End двигают курсор, и InputTextMultiline их не отдаёт. */
+    if (!ImGui::IsAnyItemActive() &&
+        ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Home, true)) {
+            ImGui::SetScrollY(0.0f);
+            auto_scroll_ = false;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_End, true)) {
+            ImGui::SetScrollY(ImGui::GetScrollMaxY());
+            auto_scroll_ = true;
+        }
+    }
 
     // Скролл-детекция ВНУТРИ дочернего окна MessagesScroll
     {
@@ -391,6 +455,11 @@ void ChatInterface::render_message_list() {
         ImGui::SetScrollHereY(1.0f);
     }
 
+    /* Запоминаем позицию для восстановления после сворачивания окна.
+     * Делается ПОСЛЕДНИМ, чтобы в saved_scroll_y_ попало то, что
+     * человек видит сейчас, а не промежуточное значение. */
+    saved_scroll_y_ = ImGui::GetScrollY();
+
     ImGui::EndChild();
 }
 
@@ -580,8 +649,20 @@ void ChatInterface::render_rag_mini_indicator() {
 }
 
 void ChatInterface::scroll_to_bottom() {
-    ImGui::SetScrollHereY(1.0f);
-    ImGui::SetScrollHereY(1.0f);
+    /* Запрос, а не прямой вызов ImGui: этот метод зовут из
+     * process_pending_responses() и из потока стриминга, где текущее окно —
+     * InputArea или вообще не окно чата. SetScrollHereY() там прокрутил бы
+     * поле ввода (или ничего), а не ленту сообщений. Запрос забирает
+     * render_message_list(), у которого MessagesScroll — текущее окно. */
+    pending_scroll_ = 2;
+    auto_scroll_ = true;
+}
+
+void ChatInterface::scroll_to_top() {
+    pending_scroll_ = 1;
+    auto_scroll_ = false;
+    /* Пока пользователь читает начало, автопрокрутка не должна его
+     * возвращать вниз на следующем же кадре. */
 }
 
 } // namespace ui

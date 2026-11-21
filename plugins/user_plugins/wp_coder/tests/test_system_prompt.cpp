@@ -658,3 +658,34 @@ TEST(инструмент_подмены_остаётся_рабочим_в_ре
         "write_file", json::JsonValue::object());
     ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
 }
+
+/* Семейство ernie (baidu/ernie-*): модель охотно зовёт инструменты, но
+ * путает write_file с точечной правкой. Проверяем, что семейство узнано,
+ * получает свой акцент и НЕ подменяется на apply_patch (это не gpt). */
+TEST(ernie_семейство_распознаётся_и_получает_свой_акцент) {
+    const std::string model = "baidu/ernie-5.5-flash-preview:free";
+    ASSERT_EQ((int)SystemPrompt::family_of(model),
+              (int)SystemPrompt::Family::Ernie);
+    ASSERT_EQ(std::string(SystemPrompt::family_name(SystemPrompt::Family::Ernie)),
+              std::string("ernie"));
+    /* Не gpt — подмены write/search_replace на apply_patch у ernie нет. */
+    ASSERT_FALSE(SystemPrompt::prefers_patch_editing(model));
+    /* Оба протокола получают акцент с правилом про write_file. */
+    for (SystemPrompt::Protocol p :
+         {SystemPrompt::Protocol::Text, SystemPrompt::Protocol::Native}) {
+        const std::string prompt = SystemPrompt::provider(model, p);
+        ASSERT_TRUE(prompt.find("## ПРАВИЛА ОТВЕТА ДЛЯ ERNIE") != std::string::npos);
+        ASSERT_TRUE(prompt.find("write_file") != std::string::npos);
+        ASSERT_TRUE(prompt.find("edit_file") != std::string::npos);
+    }
+}
+
+/* particle-1 (kilo) — клон deepseek v4-flash: должен получать акцент
+ * deepseek, а не Default (иначе resolved-модель роутера без акцента). */
+TEST(particle_is_treated_as_deepseek) {
+    ASSERT_EQ((int)SystemPrompt::family_of("particle-ai/particle-1:free"),
+              (int)SystemPrompt::Family::Deepseek);
+    const std::string prompt = SystemPrompt::provider(
+        "particle-ai/particle-1:free", SystemPrompt::Protocol::Native);
+    ASSERT_TRUE(prompt.find("DEEPSEEK") != std::string::npos);
+}

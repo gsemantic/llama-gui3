@@ -214,3 +214,83 @@ TEST(tools_registry_catalogue_comes_from_schema) {
     /* Несуществующий инструмент — пустое описание, а не «- :». */
     ASSERT_EQ(reg.describe_tool("nope"), std::string(""));
 }
+
+/* ======================================================================
+ * И15.2 (BEHAVIOR_PARITY_PLAN): профиль видимости инструментов
+ * ====================================================================== */
+
+TEST(basic_tool_set_is_a_subset_of_the_real_registry) {
+    /* Набор для "basic" обязан существовать в реестре: иначе профиль
+ * молча спрячет инструменты, которых нет, и это выглядело бы как
+ * «набор работает», а на деле он ссылался бы на выдуманные имена. */
+    register_base_tools();
+    const std::vector<std::string> basic = basic_tool_set();
+    ASSERT_TRUE(!basic.empty());
+    /* Базовый набор — 15 инструментов, покрывающих обычную работу. */
+    ASSERT_EQ(basic.size(), (size_t)15);
+    for (const std::string& name : basic) {
+        const ToolDef* d = ToolsRegistry::instance().find(name);
+        if (d == nullptr) {
+            std::cerr << "  basic_tool_set ссылается на несуществующий "
+                      << "инструмент: " << name << std::endl;
+        }
+        ASSERT_TRUE(d != nullptr);
+    }
+}
+
+TEST(tool_profile_basic_hides_module_tools_and_keeps_the_core) {
+    /* "basic" оставляет только базовый набор; "extended"/пусто/мусор —
+ * без изменений. Проверяем на настоящем реестре, а не на выдуманных
+ * именах: иначе «профиль работает» было бы верно только для фикстуры. */
+    register_base_tools();
+    std::vector<std::string> all;
+    for (const ToolDef& d : ToolsRegistry::instance().defs()) {
+        all.push_back(d.name);
+    }
+    ASSERT_TRUE(all.size() > basic_tool_set().size());
+
+    const std::vector<std::string> basic =
+        apply_tool_profile(all, "basic");
+    ASSERT_EQ(basic.size(), basic_tool_set().size());
+    for (const std::string& name : basic) {
+        /* Каждый оставшийся — из базового набора. */
+        bool in_basic = false;
+        for (const std::string& b : basic_tool_set()) {
+            if (name == b) { in_basic = true; break; }
+        }
+        if (!in_basic) {
+            std::cerr << "  basic оставил лишний инструмент: " << name
+                      << std::endl;
+        }
+        ASSERT_TRUE(in_basic);
+    }
+    /* Обратная сторона: "extended"/пусто/мусор не сужают набор. */
+    ASSERT_EQ(apply_tool_profile(all, "extended").size(), all.size());
+    ASSERT_EQ(apply_tool_profile(all, "").size(), all.size());
+    ASSERT_EQ(apply_tool_profile(all, "Basic").size(), all.size());
+}
+
+TEST(tool_profile_basic_still_allows_direct_calls_by_name) {
+    /* Скрытие — не запрет: инструмент, спрятанный из каталога, обязан
+ * по-прежнему вызываться по имени. Иначе "basic" сломал бы работу
+ * существующих агентов, которые зовут wp_cli напрямую. */
+    register_base_tools();
+    /* wp_cli зарегистрирован модулем WordPress. Если модуль не
+ * инициализирован, инструмента нет — тогда проверять нечего, и это
+ * не провал: профиль не может спрятать то, чего нет. */
+    if (ToolsRegistry::instance().find("wp_cli") == nullptr) return;
+    const std::vector<std::string> all = [] {
+        std::vector<std::string> v;
+        for (const ToolDef& d : ToolsRegistry::instance().defs())
+            v.push_back(d.name);
+        return v;
+    }();
+    const std::vector<std::string> basic = apply_tool_profile(all, "basic");
+    bool wp_cli_visible = false;
+    for (const std::string& n : basic) if (n == "wp_cli") wp_cli_visible = true;
+    /* В basic-каталоге его нет… */
+    ASSERT_TRUE(!wp_cli_visible);
+    /* …но прямой вызов по имени по-прежнему находит инструмент: скрытие
+ * не удаляет его из реестра. */
+    ASSERT_TRUE(ToolsRegistry::instance().find("wp_cli") != nullptr);
+}

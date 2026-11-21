@@ -137,6 +137,10 @@ struct LlmReply {
      * выключение нативного вызова обратно в Unknown — то есть следующий
      * шаг снова слал бы tools провайдеру, который на них отвечает пустотой. */
     bool tools_reported = false;
+    /* И12.x: фактическая (resolved) модель из ответа провайдера. Для
+     * роутеров (kilo-auto/free и подобных) ID запроса не говорит, какая
+     * модель ответила; это поле — что ответило на самом деле. */
+    std::string resolved_model;
 };
 
 /* Общее состояние движка (защищается mtx, кроме атомарных флагов). */
@@ -463,6 +467,17 @@ struct EngineState {
      * нужен; теперь он есть. */
     bool has_max_steps_setting = false;
     bool has_session_budget_setting = false;
+
+    /* И15.2 (BEHAVIOR_PARITY_PLAN): профиль видимости инструментов.
+     *
+     * "extended" (по умолчанию) — все инструменты, как раньше.
+     * "basic" — только базовый набор (~15): модель не платит 55 схемами
+     * на каждом ходу и не путается в выборе. Прямой вызов по имени
+     * работает и в basic (скрытие ≠ запрет), поэтому это безопасно.
+     *
+     * Профиль — свойство ХОДА, а не безопасности: он не может разрешить
+     * запрещённое, только сузить видимый каталог. */
+    std::string tool_profile = "extended";
 
     /* И8.8: насколько глубоко можно вкладывать `task`.
      *
@@ -911,6 +926,12 @@ public:
      * «вызова не было» нельзя — см. note_tools_rejected. */
     void note_tools_rejected(bool rejected);
     void note_native_tool_seen();
+    /* И12.x: провайдер вернул фактическую модель (response.model). Для
+     * роутеров это единственный способ узнать реальное семейство: ID
+     * запроса («kilo-auto/free») его не содержит. Обновляет
+     * host_model_id/host_model_family для СЛЕДУЮЩИХ ходов и сбрасывает
+     * кэш промпта. Пустая строка — ничего не меняет. */
+    void note_resolved_model(const std::string& resolved);
 
     /* Текущее состояние: нужно сборщику request_json, который решает,
      * слать ли tools в этом ходе. */
@@ -1039,6 +1060,14 @@ public:
         max_bytes = static_cast<size_t>(state_.limit_max_output_bytes);
         max_lines = static_cast<size_t>(state_.limit_max_output_lines);
         tool_cap = static_cast<size_t>(state_.limit_max_tool_output_bytes);
+    }
+
+    /* И14.3: реальный лимит окна модели (0 = не задан). Единственное место,
+     * откуда его читают и цикл (cap_result), и инструменты (read_file), —
+     * чтобы бюджеты масштабировались от ОДНОГО числа, а не от двух копий. */
+    long long model_context_limit() const {
+        std::lock_guard<std::mutex> lk(state_.mtx);
+        return state_.model_limits.context;
     }
 
     /* Применение/отклонение предложенных правок. */

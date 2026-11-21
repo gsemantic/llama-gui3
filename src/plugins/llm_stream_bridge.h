@@ -83,6 +83,11 @@ public:
     /* Ответ закрыт провайдером. */
     void set_finish_reason(const std::string& reason);
 
+    /* И12.x: фактическая (resolved) модель из ответа провайдера. Для
+     * роутеров (kilo-auto/free) она и есть настоящая модель; уходит в
+     * done_json, чтобы плагин знал реальное семейство. */
+    void set_model(const std::string& model);
+
     /* И12.2: что произошло с tools в этом ходе.
      *
      * rejected — НЕ «tools не сработали», а именно отказ провайдера:
@@ -136,6 +141,7 @@ private:
 
     std::string content_;
     std::string finish_reason_;
+    std::string model_;
     std::string error_;
     int prompt_tokens_ = 0;
     int completion_tokens_ = 0;

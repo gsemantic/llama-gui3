@@ -189,6 +189,7 @@ private:
     void send_message_to_agent(const std::string& message);
     void clear_input();
     void scroll_to_bottom();
+    void scroll_to_top();
     void process_pending_responses();
 
 public:
@@ -276,6 +277,27 @@ private:
     // Scroll position tracking
     bool auto_scroll_ = true;
     float scroll_to_message_id_ = -1.0f;
+
+    /* Запрос прокрутки, который выполняется ВНУТРИ дочернего окна
+     * MessagesScroll. 0 — ничего, 1 — в начало, 2 — в конец.
+     *
+     * Отдельная переменная, а не прямой вызов ImGui::SetScrollY() из
+     * обработчика кнопки: кнопки рисуются в InputArea (это ДРУГОЕ
+     * дочернее окно), и SetScrollY там прокрутил бы поле ввода, а не
+     * ленту сообщений. Запрос забирает render_message_list(), у которого
+     * MessagesScroll — текущее окно. */
+    int pending_scroll_ = 0;
+    /* Позиция прокрутки, сохранённая ДО сворачивания окна чата.
+     *
+     * Когда окно чата сворачивается (или приложение уходит в свёрнутое
+     * состояние), ImGui пересчитывает размеры с нулевой областью, и
+     * CalcNextScrollFromScrollTargetAndClamp() зажимает Scroll до
+     * ScrollMax (то есть до нуля). После разворачивания ползунок
+     * оказывался в самом верху. Своё значение переживает кадр с нулевым
+     * DisplaySize, потому что мы его сохраняем САМИ, а не полагаемся на
+     * состояние окна ImGui. */
+    float saved_scroll_y_ = 0.0f;
+    bool scroll_restore_pending_ = false;
 
     // Режим выделения части текста сообщения: сообщение selectable_message_index_
     // из беседы selectable_conversation_id_ рендерится как readonly

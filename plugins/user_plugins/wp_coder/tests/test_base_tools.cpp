@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <unistd.h>
 
@@ -74,27 +75,38 @@ TEST(bash_is_documented_in_prompt) {
     size_t end = cat.find("\n- ", at + 1);
     std::string block = cat.substr(at + 1, (end == std::string::npos
                                            ? cat.size() : end) - at - 1);
-    /* И имя инструмента, и имя параметра, и его назначение. */
+    /* И имя инструмента, и имя параметра, и его назначение. cli — основной
+     * ключ, command — принятый псевдоним: описаны оба, чтобы модель не гадала,
+     * какой из них слать. */
     ASSERT_TRUE(block.find("bash") != std::string::npos);
     ASSERT_TRUE(block.find("cli") != std::string::npos);
-    ASSERT_TRUE(block.find("обязательно") != std::string::npos);
+    ASSERT_TRUE(block.find("command") != std::string::npos);
 }
 
 /* --- И0.3: гейт на пути вне проекта --- */
 
 TEST(bash_empty_rejected) {
     init_engine_and_base();
-    /* И1.6: cli — обязательный параметр, и пустой вызов отсекается
-     * валидацией схемы, до входа в обработчик. */
+    /* Ни cli, ни command не сделаны обязательными по схеме (принимается
+     * любой из них), поэтому пустой вызов отсекает ОБРАБОТЧИК, а не
+     * валидация схемы. Раньше cli был обязательным и ловился схемой; теперь
+     * тот же отказ даёт обработчик — в обоих случаях пустая команда не
+     * выполняется. */
     std::string r = run_exec("");
-    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(r.find("пустая команда") != std::string::npos);
     ASSERT_TRUE(r.find("cli") != std::string::npos);
-    /* Явно переданный пустой cli проходит схему и отсекается уже
-     * самим инструментом — две разные защиты, обе нужны. */
+    /* Явно переданный пустой cli — тот же отказ. */
     json::JsonValue args = json::JsonValue::object();
     args.set("cli", "");
     std::string r2 = run_exec_json(args);
     ASSERT_TRUE(r2.find("пустая команда") != std::string::npos);
+    /* Псевдоним command распознаётся: пустой command с пустым cli — тоже
+     * «пустая команда», а не «missing required cli». */
+    json::JsonValue cmd_args = json::JsonValue::object();
+    cmd_args.set("command", "");
+    std::string r3 = run_exec_json(cmd_args);
+    ASSERT_TRUE(r3.find("пустая команда") != std::string::npos);
+    ASSERT_TRUE(r3.find("missing required") == std::string::npos);
 }
 
 TEST(bash_blocklist_still_applies) {
@@ -375,5 +387,239 @@ TEST(определение_php_не_затирает_заданный_путь_
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
         engine_state().php_bin = saved;
+    }
+}
+
+/* ======================================================================
+ * Защита write_file (ses_000000000496): полная перезапись не должна
+ * молча уничтожать файл из-за того, что модель приняла её за точечную
+ * правку и прислала offset/query/фрагмент.
+ * ====================================================================== */
+
+static std::string read_all(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+}
+
+TEST(write_file_rejects_edit_style_args_without_touching_file) {
+    init_engine_and_base();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_write_strict_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    { std::ofstream f(t / "a.txt"); f << "original line\n"; }
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+    }
+
+    /* Модель хотела edit_file (заменить строки), но позвала write_file и
+     * добавила offset/query. Строгая схема обязана ОТКАЗАТЬ, а не записать
+     * фрагмент вместо всего файла. */
+    json::JsonValue args = json::JsonValue::object();
+    args.set("path", "a.txt");
+    args.set("offset", 2);
+    args.set("query", 3);
+    args.set("content", "replacement\n");
+    std::string r = ToolsRegistry::instance().run("write_file", args);
+    ASSERT_TRUE(r.find("invalid arguments") != std::string::npos);
+    ASSERT_TRUE(r.find("unknown parameter 'offset'") != std::string::npos);
+    /* Подсказка называет правильный инструмент. */
+    ASSERT_TRUE(r.find("edit_file") != std::string::npos);
+
+    /* Файл не тронут. */
+    ASSERT_EQ(read_all(t / "a.txt"), std::string("original line\n"));
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
+
+TEST(write_file_guard_blocks_suspicious_truncation_unless_full_rewrite) {
+    init_engine_and_base();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_write_guard_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    std::string big;
+    for (int i = 0; i < 400; ++i) big += "строка набивки padding padding\n";
+    { std::ofstream f(t / "big.txt"); f << big; }
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+    }
+
+    /* Корректный по схеме вызов (path+content), но файл огромный, а content —
+     * крошечный фрагмент: это НЕ полная перезапись, а обрезка. */
+    json::JsonValue small = json::JsonValue::object();
+    small.set("path", "big.txt");
+    small.set("content", "tiny\n");
+    std::string r = ToolsRegistry::instance().run("write_file", small);
+    ASSERT_TRUE(r.find("[защита]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "big.txt"), big);  // не изменился
+
+    /* Явная полная перезапись — проходит. */
+    json::JsonValue force = json::JsonValue::object();
+    force.set("path", "big.txt");
+    force.set("content", "tiny\n");
+    force.set("full_rewrite", true);
+    std::string r2 = ToolsRegistry::instance().run("write_file", force);
+    ASSERT_TRUE(r2.find("[записано]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "big.txt"), std::string("tiny\n"));
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
+
+/* ses_000000000006, шаг 9: write_file с ТЕМ ЖЕ содержимым, что уже лежит
+ * в файле, отвечал «[записано] … (261 байт)» — то есть успехом. Модель
+ * читала это как «правка не применилась» и повторяла вызов десять раз
+ * подряд, пока не кончился бюджет шагов. Итог — «исправьте вручную
+ * строку 12». Запись без изменений обязана отвечать `[no-op]`, как
+ * search_replace и edit_file: тогда цикл останавливает повтор. */
+TEST(write_file_with_identical_content_is_a_noop) {
+    init_engine_and_base();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_write_noop_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    const std::string body = "import x\nprint(x)\n";
+    { std::ofstream f(t / "a.py"); f << body; }
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+    }
+
+    json::JsonValue args = json::JsonValue::object();
+    args.set("path", "a.py");
+    args.set("content", body);
+    const std::string r = ToolsRegistry::instance().run("write_file", args);
+    /* Признак no-op — тот же, по которому цикл останавливает повторы. */
+    ASSERT_TRUE(r.find("[no-op]") != std::string::npos);
+    /* И это НЕ мнимое «[записано]»: старая строка-успех исчезла. */
+    ASSERT_TRUE(r.find("[записано]") == std::string::npos);
+    /* Файл не тронут. */
+    ASSERT_EQ(read_all(t / "a.py"), body);
+
+    /* Другой контент — по-прежнему настоящая запись. */
+    json::JsonValue other = json::JsonValue::object();
+    other.set("path", "a.py");
+    other.set("content", "import y\n");
+    const std::string r2 = ToolsRegistry::instance().run("write_file", other);
+    ASSERT_TRUE(r2.find("[записано]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "a.py"), std::string("import y\n"));
+
+    /* Новый файл (файла не было) — это запись, а не no-op. */
+    json::JsonValue fresh = json::JsonValue::object();
+    fresh.set("path", "new.py");
+    fresh.set("content", "x = 1\n");
+    const std::string r3 = ToolsRegistry::instance().run("write_file", fresh);
+    ASSERT_TRUE(r3.find("[записано]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "new.py"), std::string("x = 1\n"));
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
+
+/* edit_file: k/query — целые, и принимаются псевдонимы start_line/offset и
+ * end_line. Раньше query был строкой, и числовой query от модели падал на
+ * валидации («must be string»), а offset/start_line не принимались вовсе —
+ * и модель уходила в write_file (ses_000000000496). */
+TEST(edit_file_accepts_integer_query_and_aliases) {
+    init_engine_and_base();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_edit_aliases_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+    }
+    auto write = [&](const std::string& name, const std::string& body) {
+        std::ofstream f(t / name, std::ios::binary);
+        f << body;
+    };
+
+    /* Канонический вызов: k=2, query=3 (ЦЕЛОЕ), заменить строки 2-3. */
+    write("a.txt", "L1\nL2\nL3\nL4\n");
+    json::JsonValue a1 = json::JsonValue::object();
+    a1.set("path", "a.txt");
+    a1.set("k", 2);
+    a1.set("query", 3);
+    a1.set("content", "X\nY");
+    std::string r1 = ToolsRegistry::instance().run("edit_file", a1);
+    ASSERT_TRUE(r1.find("[edit_file]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "a.txt"), std::string("L1\nX\nY\nL4\n"));
+
+    /* Псевдонимы offset/end_line вместо k/query. */
+    write("b.txt", "L1\nL2\nL3\nL4\n");
+    json::JsonValue a2 = json::JsonValue::object();
+    a2.set("path", "b.txt");
+    a2.set("offset", 2);
+    a2.set("end_line", 3);
+    a2.set("content", "X\nY");
+    std::string r2 = ToolsRegistry::instance().run("edit_file", a2);
+    ASSERT_TRUE(r2.find("[edit_file]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "b.txt"), std::string("L1\nX\nY\nL4\n"));
+
+    /* Только k (start_line), без конца — заменяется одна строка. */
+    write("c.txt", "L1\nL2\nL3\n");
+    json::JsonValue a3 = json::JsonValue::object();
+    a3.set("path", "c.txt");
+    a3.set("start_line", 2);
+    a3.set("content", "ONLY");
+    std::string r3 = ToolsRegistry::instance().run("edit_file", a3);
+    ASSERT_TRUE(r3.find("[edit_file]") != std::string::npos);
+    ASSERT_EQ(read_all(t / "c.txt"), std::string("L1\nONLY\nL3\n"));
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
+
+/* ses_000000000542: модель указала root=файл (main_window.py), а не каталог.
+ * Раньше grep_search отказывал «каталог не существует», и модель
+ * зацикливалась на JSON-тексте. Теперь файл как root — валиден. */
+TEST(grep_search_accepts_a_single_file_as_root) {
+    init_engine_and_base();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_grepfile_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    {
+        std::ofstream f(t / "a.py");
+        f << "x = 1\nmenu.setOptions(QInputDialog.UseListViewForAlternatives)\n";
+    }
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+    }
+    json::JsonValue args = json::JsonValue::object();
+    args.set("pattern", "UseListViewForAlternatives");
+    args.set("root", "a.py");
+    std::string r = ToolsRegistry::instance().run("grep_search", args);
+    ASSERT_TRUE(r.find("a.py") != std::string::npos);
+    ASSERT_TRUE(r.find("UseListViewForAlternatives") != std::string::npos);
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
     }
 }

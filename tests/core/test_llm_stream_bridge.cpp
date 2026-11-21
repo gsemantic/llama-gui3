@@ -409,6 +409,28 @@ void test_tools_rejection_is_a_number_not_a_boolean() {
     TEST_ASSERT_EQUAL(ok_out["tools_rejected"].get<int>(), 0);
 }
 
+/* И12.x: фактическая модель из ответа (для роутеров вроде kilo-auto/free)
+ * доезжает до плагина в done_json. Без неё плагин не может узнать реальное
+ * семейство, когда ID запроса — псевдоним. */
+void test_resolved_model_is_reported_in_done_json() {
+    Recorder rec;
+    StreamBridge bridge(&rec, Recorder::on_delta, Recorder::on_tool_delta);
+    bridge.push_text("ответ");
+    bridge.set_finish_reason("stop");
+    bridge.set_model("deepseek/deepseek-v4-flash");
+    const json out = json::parse(bridge.done_json(""));
+    TEST_ASSERT(out.contains("model"));
+    TEST_ASSERT_EQUAL(out["model"].get<std::string>(),
+                      std::string("deepseek/deepseek-v4-flash"));
+
+    /* Без set_model ключа model нет — плагин не должен выдумывать модель. */
+    StreamBridge plain(&rec, Recorder::on_delta, Recorder::on_tool_delta);
+    plain.push_text("ответ");
+    plain.set_finish_reason("stop");
+    const json plain_out = json::parse(plain.done_json(""));
+    TEST_ASSERT(!plain_out.contains("model"));
+}
+
 int main() {
     REGISTER_TEST(test_no_tools_no_rejection_field);
     REGISTER_TEST(test_tools_rejection_is_a_number_not_a_boolean);
@@ -428,6 +450,7 @@ int main() {
     REGISTER_TEST(test_empty_finish_reason_does_not_close_the_stream);
     REGISTER_TEST(test_call_id_for_index);
     REGISTER_TEST(test_new_host_api_fields_are_append_only);
+    REGISTER_TEST(test_resolved_model_is_reported_in_done_json);
 
     return test::TestRunner::instance().run();
 }

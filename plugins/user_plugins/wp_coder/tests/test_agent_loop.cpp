@@ -510,6 +510,42 @@ TEST(agent_loop_extends_the_budget_when_the_plan_is_unfinished) {
     ASSERT_TRUE(second.find("This is the LAST step") == std::string::npos);
 }
 
+TEST(agent_loop_extends_the_budget_when_edits_exist_without_a_plan) {
+    /* И15.4 / BEHAVIOR_PARITY_PLAN: продление не должно зависеть ТОЛЬКО от
+     * todowrite. Модель, которая не зовёт todowrite, но уже сделала правки,
+     * тоже должна получить продолжение, а не «последний шаг». Иначе задача
+     * на несколько файлов закрывалась без единого «продолжай», и это
+     * выглядело как «утыкается в лимит шагов». */
+    LoopFixture fx;
+    fx.host.replies = {call_block("write_file",
+                                  ",\n \"path\": \"a.txt\""
+                                  ",\n \"content\": \"раз\""),
+                       call_block("write_file",
+                                  ",\n \"path\": \"b.txt\""
+                                  ",\n \"content\": \"два\""),
+                       long_answer("Готово, оба файла записаны.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(2);   /* без todowrite: todos пуст */
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().todos.clear();   /* плана нет вовсе */
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    /* Второй запрос (transcript(1)) — начало второго шага, где цикл и
+ * решает, продлевать ли. Правки уже есть, плана нет → продление. */
+    const std::string second = fx.host.transcript(1);
+    ASSERT_TRUE(second.find("step budget was extended") != std::string::npos);
+    ASSERT_TRUE(second.find("This is the LAST step") == std::string::npos);
+    /* И задача дошла до третьего шага (продление), а не закрылась на втором. */
+    ASSERT_TRUE(fx.host.calls() >= (size_t)3);
+}
+
 TEST(agent_loop_reports_an_unknown_tool_as_a_result_not_a_refusal) {
     LoopFixture fx;
     /* И12.3: неизвестное имя — это РЕЗУЛЬТАТ ВЫЗОВА, а не отказ.
@@ -1527,4 +1563,242 @@ TEST(agent_loop_does_not_spend_steps_on_empty_json_object) {
             ASSERT_TRUE(t != "{}");
         }
     }
+}
+
+/* Анти-перебор (ses_496): после серии read-only ходов без изменений цикл
+ * напоминает модели перейти к действию. Серия — 8 ходов с РАЗНЫМ offset
+ * (чтобы не сработал дедуп повторного чтения), затем write сбрасывает серию. */
+TEST(agent_loop_reminds_after_a_streak_of_read_only_calls) {
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "f.txt");
+        f << "a\nb\nc\nd\ne\nf\ng\nh\ni\n";
+    }
+    std::vector<std::string> replies;
+    for (int i = 1; i <= 8; ++i) {
+        const std::string a =
+            ",\n \"path\": \"f.txt\", \"offset\": " + std::to_string(i) +
+            ", \"limit\": 1";
+        replies.push_back(call_block("read_file", a.c_str()));
+    }
+    replies.push_back(call_block("write_file",
+                                 ",\n \"path\": \"f.txt\", \"content\": \"x\""));
+    replies.push_back(long_answer("Готово."));
+    fx.host.replies = replies;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(20);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb, [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    bool reminded = false;
+    for (size_t i = 0; i < fx.host.requests.size(); ++i) {
+        if (fx.host.transcript(i).find("[reminder] You have made") != std::string::npos)
+            reminded = true;
+    }
+    if (!reminded) std::cerr << "  напоминание о серии read-only не появилось\n";
+    ASSERT_TRUE(reminded);
+}
+
+/* Гейт проверки: код изменён, но тесты не запускались → первый финал
+ * отклоняется, модель просят проверить. После python_lint финал принимается. */
+TEST(verification_gate_forces_a_check_after_code_write) {
+    LoopFixture fx;
+    fx.host.replies = {
+        call_block("write_file",
+                   ",\n \"path\": \"a.py\", \"content\": \"x = 1\\n\""),
+        long_answer("Готово, файл записан."),
+        call_block("python_lint", ",\n \"path\": \"a.py\""),
+        long_answer("Готово, проверено тестами."),
+    };
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(10);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb, [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    bool saw_lint = false;
+    for (const Message& m : fx.history())
+        for (const MessagePart& p : m.parts)
+            if (p.is(PartKind::Tool) && p.tool_name() == "python_lint")
+                saw_lint = true;
+    if (!saw_lint)
+        std::cerr << "  python_lint не был вызван — гейт проверки не сработал\n";
+    ASSERT_TRUE(saw_lint);
+}
+
+/* Авто-выполненный read-only grep из JSON-текста — продуктивный ход, а не
+ * «модель 3 раза печатает JSON». Серия не должна форсировать отчёт
+ * (ses_000000000612: 4 grep-текста подряд, все выполнены). */
+TEST(auto_executed_grep_json_is_productive_not_a_three_strike) {
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "a.py");
+        f << "x = 1\n";
+    }
+    std::vector<std::string> replies;
+    for (int i = 0; i < 4; ++i)
+        replies.push_back("{\"pattern\": \"x\", \"root\": \"a.py\"}");
+    replies.push_back(long_answer("Готово."));
+    fx.host.replies = replies;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(10);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb, [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    /* Авто-выполнение приходит НЕ как часть-инструмент, а как заметка
+     * пользователю с результатом grep. Проверяем по транскрипту запросов. */
+    bool saw_inferred = false;
+    for (size_t i = 0; i < fx.host.requests.size(); ++i)
+        if (fx.host.transcript(i).find("выполнил за тебя") != std::string::npos)
+            saw_inferred = true;
+    if (!saw_inferred)
+        std::cerr << "  нет авто-выполнения grep-текста\n";
+    ASSERT_TRUE(saw_inferred);
+    /* Дошли до НАСТОЯЩЕГО финала, а не до форсированного отчёта на 3-м. */
+    ASSERT_TRUE(response.find("Готово.") != std::string::npos);
+}
+
+/* ======================================================================
+ * ses_000000000006 — «агент зацикливается и отдаёт работу пользователю»
+ * ====================================================================== */
+
+/* Два РАЗНЫХ no-op вызова подряд (write_file с тем же содержимым и
+ * search_replace с query == content). Раньше цикл помнил только ОДНУ
+ * подпись (last_noop_sig), и чередование A→B→A сбрасывало защиту:
+ * каждый второй вызов снова выполнялся. Теперь подписи копятся, и
+ * повтор ЛЮБОГО из них останавливается. */
+TEST(agent_loop_stops_a_repeated_noop_even_when_calls_alternate) {
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "a.txt");
+        f << "x\n";
+    }
+    const std::string noop_write =
+        "Правлю.\n```json\n{\"tool\":\"write_file\",\"path\":\"a.txt\","
+        "\"content\":\"x\\n\"}\n```";
+    const std::string noop_replace =
+        "Правлю.\n```json\n{\"tool\":\"search_replace\",\"path\":\"a.txt\","
+        "\"query\":\"x\",\"content\":\"x\"}\n```";
+    fx.host.replies = {noop_write, noop_replace, noop_write,
+                       long_answer("Готово.")};
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(6);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb, [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    const std::vector<Message> h = fx.history();
+    /* Первый write_file — no-op, второй search_replace — тоже no-op,
+ * третий write_file (повтор ПЕРВОГО) — уже [repeat-noop]. */
+    ASSERT_TRUE(first_tool_part(h[1]) != nullptr);
+    ASSERT_TRUE(first_tool_part(h[2]) != nullptr);
+    ASSERT_TRUE(first_tool_part(h[3]) != nullptr);
+    ASSERT_TRUE(first_tool_part(h[1])->output().output.find("[no-op]") !=
+                std::string::npos);
+    ASSERT_TRUE(first_tool_part(h[2])->output().output.find("[no-op]") !=
+                std::string::npos);
+    ASSERT_TRUE(first_tool_part(h[3])->output().output.find("[repeat-noop]") !=
+                std::string::npos);
+}
+
+/* write_file с тем же содержимым — это no-op, и он НЕ должен считаться
+ * «правкой» (иначе серия read-only сбрасывается и анти-перебор молчит). */
+TEST(write_file_noop_does_not_reset_the_read_only_streak) {
+    LoopFixture fx;
+    /* Файл на 20 строк; write_file присылает РОВНО его содержимое —
+     * это no-op, и он НЕ должен считаться правкой. */
+    std::string body;
+    for (int i = 0; i < 20; ++i) body += "line " + std::to_string(i) + "\n";
+    {
+        std::ofstream f(fx.project / "a.py");
+        f << body;
+    }
+    /* Восемь read-only ходов с РАЗНЫМИ offset (чтобы не сработала
+     * защита от точного повтора), перемежаемых no-op write_file. Раньше
+     * каждый write_file сбрасывал серию, и напоминание не приходило. */
+    std::string escaped;
+    for (char c : body) {
+        if (c == '\n') escaped += "\\n";
+        else if (c == '"') escaped += "\\\"";
+        else if (c == '\\') escaped += "\\\\";
+        else escaped += c;
+    }
+    const std::string write_json =
+        "{\"tool\":\"write_file\",\"path\":\"a.py\",\"content\":\"" +
+        escaped + "\"}";
+    std::vector<std::string> replies;
+    for (int i = 1; i <= 8; ++i) {
+        const std::string a =
+            ",\n \"path\": \"a.py\", \"offset\": " + std::to_string(i) +
+            ", \"limit\": 2";
+        replies.push_back(call_block("read_file", a.c_str()));
+        replies.push_back("Правлю.\n```json\n" + write_json + "\n```");
+    }
+    /* Проверка нужна гейту: без неё итог отклоняется, и тест мерил бы
+     * не серию, а гейт проверки. */
+    replies.push_back(call_block("python_lint", ",\n \"path\": \"a.py\""));
+    replies.push_back(long_answer("Готово."));
+    fx.host.replies = replies;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(40);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb, [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    bool reminded = false;
+    for (size_t i = 0; i < fx.host.requests.size(); ++i)
+        if (fx.host.transcript(i).find("[reminder] You have made") != std::string::npos)
+            reminded = true;
+    if (!reminded)
+        std::cerr << "  no-op write_file сбросил серию read-only\n";
+    ASSERT_TRUE(reminded);
+}
+
+/* Один и тот же файл, прочитанный 4+ раза с РАЗНЫМИ offset, — это
+ * зацикливание на чтении (ses_000000000006: library.py читался 6 раз).
+ * После kMaxReadsPerFile чтений вызов не выполняется, а модель получает
+ * прямое указание перейти к правке или к отчёту. */
+TEST(agent_loop_stops_reading_the_same_file_over_and_over) {
+    LoopFixture fx;
+    {
+        std::ofstream f(fx.project / "big.py");
+        for (int i = 0; i < 200; ++i) f << "line " << i << "\n";
+    }
+    std::vector<std::string> replies;
+    /* Пять чтений одного файла с разными offset/limit. */
+    for (int i = 0; i < 5; ++i) {
+        const std::string a =
+            ",\n \"path\": \"big.py\", \"offset\": " + std::to_string(1 + i * 20) +
+            ", \"limit\": 5";
+        replies.push_back(call_block("read_file", a.c_str()));
+    }
+    replies.push_back(long_answer("Готово."));
+    fx.host.replies = replies;
+    HostCallbacks cb = fx.callbacks();
+    engine().init(cb);
+    fx.prepare(12);
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb, [&](AgentEvent::Kind, const std::string&) {});
+    ASSERT_TRUE(fx.run(loop, response));
+
+    bool stopped = false;
+    for (size_t i = 0; i < fx.host.requests.size(); ++i)
+        if (fx.host.transcript(i).find("[хватит-читать]") != std::string::npos)
+            stopped = true;
+    if (!stopped)
+        std::cerr << "  чтение одного файла не остановлено\n";
+    ASSERT_TRUE(stopped);
 }

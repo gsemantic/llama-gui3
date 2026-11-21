@@ -24,6 +24,52 @@ inline constexpr size_t kMaxSymFile = 40;         // символов в фай�
 inline constexpr int kMaxSteps = 20;              // шагов на задачу
 inline constexpr size_t kSessionBudget = 120000;  // бюджет символов истории сессии
 inline constexpr size_t kResultBudget = 12000;    // обрезка одного RESULT в сессии
+
+/* --- Б3 / BEHAVIOR_PARITY_PLAN И14.3: бюджеты относительно окна модели ---
+ *
+ * Что было: `kResultBudget`, `kMaxToolOutput`, `kReadFileChars` и
+ * `kSessionBudget` — АБСОЛЮТНЫЕ числа в символах/байтах. Модель с окном
+ * 128 000 токенов получала тот же бюджет, что модель с окном 4 096: агент
+ * сжимал историю по 120 000 символов (≈30 000 токенов) и реза́л вывод
+ * инструмента по 20 КБ, хотя место было. Это и есть «агент сам себе режет
+ * окно» из diagnosed-таблицы (Б4).
+ *
+ * Что стало: бюджеты масштабируются ОТ РЕАЛЬНОГО ОКНА, когда оно известно.
+ * Правило намеренно консервативное и ОДНО:
+ *
+ *     scale = clamp(context / 32768, 1, 4),   context <= 0 → 1
+ *
+ * 32768 — типичное локальное окно, точка, при которой поведение НЕ
+ * меняется (scale=1). Больше — бюджеты растут пропорционально, но не более
+ * чем вчетверо: предел защищает от «放款аipped» ситуации, когда одно
+ * окно в 1M токенов раздуло бы один RESULT до 80 КБ и он снова начал бы
+ * съедать контекст, ради экономии которого всё и делалось.
+ *
+ * Почему только ВВЕРХ: при неизвестном окне (context=0) scale=1, то есть
+ * поведение ровно прежнее. Это делает изменение обратно совместимым: все
+ * существующие тесты и слабые/локальные модели видят прежние числа, а
+ * выигрыш получают только модели с заведомо большим окном.
+ *
+ * Функции — чистые и в limits.h, а не в Engine: их можно проверить без
+ * движка, и они не тянут за собойstate_.mtx. */
+inline size_t scale_for_context(long long context) noexcept {
+    if (context <= 32768) return 1;
+    long long s = context / 32768;
+    if (s > 4) s = 4;
+    return static_cast<size_t>(s);
+}
+inline size_t result_budget_for(long long context) noexcept {
+    return kResultBudget * scale_for_context(context);
+}
+inline size_t max_tool_output_for(long long context) noexcept {
+    return kMaxToolOutput * scale_for_context(context);
+}
+inline size_t read_file_chars_for(long long context) noexcept {
+    return kReadFileChars * scale_for_context(context);
+}
+inline size_t session_budget_for(long long context, size_t base) noexcept {
+    return base * scale_for_context(context);
+}
 /* Минимальная длина текста, который цикл считает ИТОГОМ (И5.8).
  *
  * Четвёртое условие завершения, добавленное к трём портовым: у opencode
