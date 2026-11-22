@@ -1574,9 +1574,15 @@ void Engine::load_settings() {
         if (!raw.empty() && json::JsonValue::parse(raw, j)) {
             state_.host_model_id = j.get_string("model_id");
             state_.host_model_family = j.get_string("family");
+            /* context/max_output читаем ВСЕГДА, а не только при found: хост
+             * отдаёт их и для модели вне каталога — фолбэком на профиль
+             * облачного провайдера (И14.6). Раньше модель вроде yenisei-max,
+             * которой нет в models.dev, выглядела как «окно неизвестно»:
+             * бюджеты оставались минимальными (И14.3, scale=1), и агент сам
+             * себе резал контекст длиннооконной модели. */
+            catalog_context = j.get_int("context");
+            catalog_max_output = j.get_int("max_output");
             if (j.get_bool("found")) {
-                catalog_context = j.get_int("context");
-                catalog_max_output = j.get_int("max_output");
                 catalog_price_in = j.get_double("price_in");
                 catalog_price_out = j.get_double("price_out");
                 /* Только явное «знаю, что не умеет». Иначе — проба. */

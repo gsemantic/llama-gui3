@@ -1426,8 +1426,32 @@ char* host_model_current(LlamaPluginHost* host) {
     std::string local_path;
     const bool cloud = host_is_cloud_model(settings, endpoint, model_id, local_path);
 
-    const std::string json =
+    std::string json =
         catalog.current_json(cloud, endpoint, model_id, local_path);
+    /* Фолбэк на профиль облачного провайдера (BEHAVIOR_PARITY_PLAN И14.6).
+     *
+     * Каталог models.dev знает не каждую модель: для yenisei-max он
+     * возвращает found=false и context=0. Но человек мог указать окно в
+     * профиле провайдера (cloud_provider.context_length) — это и есть
+     * «сколько модель выдаёт по умолчанию». Без фолбэка плагин считал окно
+     * неизвестным и оставлял бюджеты минимальными (И14.3, scale=1), то
+     * есть сам себе резал контекст длиннооконной модели. Подставляем
+     * профиль только там, где каталог молчит (0): каталог точнее. */
+    if (cloud && settings) {
+        try {
+            nlohmann::json j = nlohmann::json::parse(json, nullptr, false);
+            if (j.is_object()) {
+                const auto& cp = settings->cloud_provider();
+                if (j.value("context", 0) <= 0 && cp.context_length > 0)
+                    j["context"] = cp.context_length;
+                if (j.value("max_output", 0) <= 0 && cp.max_output_tokens > 0)
+                    j["max_output"] = cp.max_output_tokens;
+                json = j.dump();
+            }
+        } catch (...) {
+            /* Лучше отдать каталог как есть (context=0), чем уронить хост. */
+        }
+    }
     return strdup(json.c_str());
 }
 

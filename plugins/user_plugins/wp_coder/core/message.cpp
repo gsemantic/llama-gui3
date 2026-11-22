@@ -782,16 +782,84 @@ bool looks_like_tool_args_json(const std::string& text) {
      * писала «19 тестов зелёные…\n\n{"todos": […]}» — текст начинался с
      * прозы, а `{` был в середине. Старая проверка смотрела только на
      * ПЕРВЫЙ символ и молчала → JSON-массив уезжал в чат как «отчёт».
-     * Теперь ищем первый сбалансированный {…}/[…] В ЛЮБОМ месте, но
-     * требуем, чтобы он был «доминирующим»: либо начинает текст (после
-     * пробелов), либо текст ДО него не длиннее самого блока и не больше
- * 200 символов. Иначе отчёт с JSON-примером в середине считался бы вызовом. */
+     *
+     * Б3.3 (ses_000000000161): JSON-вызов может стоять в КОНЦЕ длинного
+     * отчёта. Правило «доминирующего блока» (текст до него ≤200 символов)
+     * ловило короткое вступление, но длинный отчёт + короткий `{"todos":…}`
+     * в конце проходил: `before` большой → блок не «доминирующий» → JSON
+     * снова уезжал в чат. Теперь блок считается вызовом, если он либо
+     * доминирующий, либо стоит в ХВОСТЕ (после него только пробелы и
+     * известная разметка). Это ловит «отчёт + todos в конце», но не
+     * считает вызовом JSON-пример в середине прозы. */
 
-    /* Найдём первый сбалансированный JSON-объект/массив в любом месте. */
-    size_t block_start = std::string::npos;
-    size_t block_end = std::string::npos;
-    for (size_t pos = text.find_first_of("{["); pos != std::string::npos;
-         pos = text.find_first_of("{[", pos + 1)) {
+    /* Тело JSON — аргументы инструмента? Ключи ответа (summary/report/
+     * answer/message) → отчёт, не трогаем. Иначе: ≥2 ключа инструмента или
+     * командный ключ. Массив `[{"name":…,"arguments":…}]` — отдельный
+     * случай: name/arguments в kKeys не входят. */
+    static const char* kKeys[] = {
+        "\"path\"", "\"content\"", "\"cli\"", "\"query\"", "\"pattern\"",
+        "\"root\"", "\"url\"", "\"command\"", "\"file\"", "\"patch\"",
+        /* Инструмент task: его аргументы не содержат path/cli, и без
+         * этих ключей JSON уходил в чат как «финальный ответ». */
+        "\"prompt\"", "\"background\"", "\"description\"",
+        "\"subagent_type\"", "\"task_id\"",
+        /* todowrite: аргументы — только `{"todos": [...]}`. Без этого
+         * ключа сбалансированный JSON плана уходил в чат как «итоговый
+         * ответ» (ses_000000000032). */
+        "\"todos\"",
+    };
+    const auto body_is_tool_args = [](const std::string& body) -> bool {
+        if (body.find("\"summary\"") != std::string::npos ||
+            body.find("\"report\"") != std::string::npos ||
+            body.find("\"answer\"") != std::string::npos ||
+            body.find("\"message\"") != std::string::npos) {
+            return false;
+        }
+        int hits = 0;
+        for (const char* k : kKeys) {
+            if (body.find(k) != std::string::npos) ++hits;
+        }
+        const bool command_key =
+            body.find("\"cli\"") != std::string::npos ||
+            body.find("\"query\"") != std::string::npos ||
+            body.find("\"command\"") != std::string::npos ||
+            body.find("\"prompt\"") != std::string::npos ||
+            body.find("\"todos\"") != std::string::npos;
+        if (hits >= 2 || command_key) return true;
+        /* Б3 / И14.2: массив вызовов `[{"name":…,"arguments":{…}}]` —
+         * name + arguments/args. Проверка на «массив» обязательна:
+         * объект с name/arguments — это чей-то отчёт о вызове. */
+        if (!body.empty() && body[0] == '[') {
+            const bool has_name = body.find("\"name\"") != std::string::npos;
+            const bool has_args = body.find("\"arguments\"") != std::string::npos ||
+                                 body.find("\"args\"") != std::string::npos;
+            if (has_name && has_args) return true;
+        }
+        return false;
+    };
+
+    /* Хвост после блока — только пробелы и известная XML-разметка
+     * (`</rfl:parameter>`, `</function>`, …)? Это признак, что вызов
+     * стоит в конце хода, а не в середине прозаического отчёта. */
+    const auto only_markup_after = [&text](size_t from) -> bool {
+        size_t i = from;
+        while (i < text.size()) {
+            const char c = text[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }
+            if (c == '<') {
+                const size_t gt = text.find('>', i);
+                if (gt == std::string::npos) return false;
+                i = gt + 1;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    };
+
+    /* Перебираем ВЕРХНЕУРОВНЕВЫЕ сбалансированные блоки `{…}`/`[…]`. */
+    size_t pos = text.find_first_of("{[");
+    while (pos != std::string::npos) {
         size_t i = pos + 1;
         int depth = 1;
         bool in_str = false;
@@ -807,69 +875,22 @@ bool looks_like_tool_args_json(const std::string& text) {
             }
             ++i;
         }
-        if (depth == 0) {
-            block_start = pos;
-            block_end = i;  /* на один символ за закрывающей */
-            break;
+        /* Незакрытая скобка: остаток текста — внутри неё, новых
+         * верхнеуровневых блоков уже не будет. */
+        if (depth != 0) return false;
+
+        const size_t block_end = i;  /* на один символ за закрывающей */
+        const std::string body = text.substr(pos, block_end - pos);
+        if (body_is_tool_args(body)) {
+            const size_t before = pos - b;
+            const size_t block_len = block_end - pos;
+            /* Доминирующий (у начала) ИЛИ в хвосте (после — только
+             * разметка). Ровно эти два случая дают «JSON вместо отчёта»;
+             * JSON-пример в середине прозы не трогаем. */
+            const bool dominant = before <= 200 || before <= block_len;
+            if (dominant || only_markup_after(block_end)) return true;
         }
-        /* Незакрытая скобка — пробуем следующий открывающий. */
-    }
-    if (block_start == std::string::npos) return false;
-
-    /* Доминирующий блок: либо с начала (после пробелов), либо текст до
- * него не длиннее 200 символов И не длиннее самого блока. Это отсекает
- * отчёты с JSON-примером в середине, но пропускает «текст + todos/вызов»
- * в конце. */
-    const size_t before = block_start - b;
-    const size_t block_len = block_end - block_start;
-    if (before > 200 && before > block_len) return false;
-
-    const std::string body = text.substr(block_start, block_len);
-    /* Отчёт-JSON с явными ключами ответа не трогаем. */
-    if (body.find("\"summary\"") != std::string::npos ||
-        body.find("\"report\"") != std::string::npos ||
-        body.find("\"answer\"") != std::string::npos ||
-        body.find("\"message\"") != std::string::npos) {
-        return false;
-    }
-    static const char* kKeys[] = {
-        "\"path\"", "\"content\"", "\"cli\"", "\"query\"", "\"pattern\"",
-        "\"root\"", "\"url\"", "\"command\"", "\"file\"", "\"patch\"",
-        /* Инструмент task: его аргументы не содержат path/cli, и без
-         * этих ключей JSON уходил в чат как «финальный ответ». */
-        "\"prompt\"", "\"background\"", "\"description\"",
-        "\"subagent_type\"", "\"task_id\"",
-        /* todowrite: аргументы — только `{"todos": [...]}`. Без этого
-         * ключа сбалансированный JSON плана уходил в чат как «итоговый
-         * ответ» (ses_000000000032): content/id/priority/status давали
-         * одно совпадение, а command_key не срабатывал. */
-        "\"todos\"",
-    };
-    int hits = 0;
-    for (const char* k : kKeys) {
-        if (body.find(k) != std::string::npos) ++hits;
-    }
-    /* Для итогового «вот файл» мало одного совпадения: требуем хотя бы
-     * два ключа инструмента или командный ключ. */
-    const bool command_key =
-        body.find("\"cli\"") != std::string::npos ||
-        body.find("\"query\"") != std::string::npos ||
-        body.find("\"command\"") != std::string::npos ||
-        body.find("\"prompt\"") != std::string::npos ||
-        body.find("\"todos\"") != std::string::npos;
-    if (hits >= 2 || command_key) return true;
-    /* Б3 / И14.2: массив вызовов `[{"name":…,"arguments":{…}}]` — это
-     * нативный формат, и его ключи (name/arguments) в kKeys не входят,
-     * потому что одиночный объект так не выглядит. Ловим массив отдельно:
-     * name + arguments/args — это вызов, а не отчёт. Проверка на «массив»
-     * обязательна: объект с name/arguments — это чей-то отчёт о вызове, и
-     * трогать его нельзя (его и так отсекли бы summary/report/answer/message
-     * выше, но массив — отдельный случай, и полагаться на это нельзя). */
-    if (text[block_start] == '[') {
-        const bool has_name = body.find("\"name\"") != std::string::npos;
-        const bool has_args = body.find("\"arguments\"") != std::string::npos ||
-                             body.find("\"args\"") != std::string::npos;
-        if (has_name && has_args) return true;
+        pos = text.find_first_of("{[", block_end);
     }
     return false;
 }

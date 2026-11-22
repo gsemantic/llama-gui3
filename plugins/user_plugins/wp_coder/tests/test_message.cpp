@@ -1001,6 +1001,54 @@ TEST(turn_verdict_detects_tool_args_json_after_leading_text) {
     ASSERT_FALSE(turn_completes_task(r, turn, kUser));
 }
 
+TEST(turn_verdict_detects_tool_args_json_at_the_tail_of_a_long_report) {
+    /* ses_000000000161: модель писала длинный отчёт, а в САМОМ КОНЦЕ
+ * печатала `{"todos": [...]}`. Правило «доминирующего блока» (текст до
+ * JSON ≤200 символов) считало такой блок не вызовом: `before` большой →
+ * JSON снова уезжал в чат как «финальный отчёт». Теперь блок ловится и в
+ * хвосте (после него только пробелы/разметка). */
+    const std::string kUser = "msg_000000000001";
+    /* Длинное вступление заведомо больше 200 символов. */
+    std::string preamble = "Готово. За этот заход сделано: ";
+    for (int i = 0; i < 12; ++i)
+        preamble += "прочитаны файлы, переписаны модули, прогнаны тесты; ";
+    const std::string with_text =
+        preamble + "\n\n" +
+        R"({"todos": [{"content": "Осталось", "id": "9", "status": "pending"}]})";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(with_text));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(looks_like_tool_args_json(with_text));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+}
+
+TEST(turn_verdict_keeps_a_json_example_in_the_middle_of_a_report) {
+    /* Отчёт с JSON-примером ПО СЕРЕДИНЕ (после него ещё много прозы) —
+     * это отчёт, а не вызов: иначе модель, которая честно объясняет
+     * формат, зациклилась бы на «это вызов, вызови инструмент». */
+    const std::string kUser = "msg_000000000001";
+    const std::string report =
+        std::string(400, 'п') +
+        R"( — формат такой: {"path": "a.py", "content": "..."} — )" +
+        std::string(400, 'z');
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(report));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    /* JSON-пример в середине, после него ещё текст → не хвост и не начало. */
+    ASSERT_FALSE(looks_like_tool_args_json(report));
+    ASSERT_TRUE(turn_completes_task(r, turn, kUser));
+}
+
 TEST(turn_verdict_respects_runtime_min_len) {
     /* Порог итога — runtime-настройка (limit_min_final_answer_len).
      * Раньше здесь была константа, и профиль не мог её менять. */
