@@ -14,8 +14,49 @@ std::string messages_to_json(const std::vector<ModelMessage>& messages)
     std::string json = "[";
     for (size_t i = 0; i < messages.size(); ++i) {
         if (i) json += ",";
-        json += "{\"role\":\"" + json::escape(messages[i].role) +
-                "\",\"content\":\"" + json::escape(messages[i].content) + "\"}";
+        const ModelMessage& m = messages[i];
+        json += "{\"role\":\"" + json::escape(m.role) + "\",\"content\":";
+        if (m.images.empty()) {
+            /* Текстовая реплика — СТРОКОЙ, как было до мультимодальности.
+             * Ветка стоит на непустом списке, а не на «умеет ли модель»:
+             * иначе каждый обычный запрос уезжал бы массивом из одной
+             * части, и половина локальных сборок llama-server отвергла бы
+             * его (строка и массив — разные типы). */
+            json += "\"" + json::escape(m.content) + "\"";
+        } else {
+            /* Массив частей OpenAI-формата. Текстовая часть первой:
+             * провайдеры читают изображение как иллюстрацию к вопросу, а не
+             * наоборот, — тот же порядок, что в примерах OpenAI.
+             *
+             * Пустой текст не добавляется: часть с пустым text половина
+             * шлюзов считает ошибкой разбора (то же правило, что у пустых
+             * кусков в core/message.h). */
+            json += "[";
+            bool first_part = true;
+            if (!m.content.empty()) {
+                json += "{\"type\":\"text\",\"text\":\"" +
+                        json::escape(m.content) + "\"}";
+                first_part = false;
+            }
+            for (const ImagePart& img : m.images) {
+                if (img.url.empty()) continue;
+                if (!first_part) json += ",";
+                first_part = false;
+                json += "{\"type\":\"image_url\",\"image_url\":{\"url\":\"" +
+                        json::escape(img.url) + "\"";
+                if (!img.media_type.empty()) {
+                    json += ",\"media_type\":\"" +
+                            json::escape(img.media_type) + "\"";
+                }
+                json += "}}";
+            }
+            /* Массив не может кончиться пустым: реплика без текста и без
+             * картинок сюда не попадает (flush в to_model_messages), а если
+             * бы попала — лучше пустая строка, чем «content: []», которую
+             * провайдер считает ошибкой. */
+            json += first_part ? "\"\"" : "]";
+        }
+        json += "}";
     }
     json += "]";
     return json;

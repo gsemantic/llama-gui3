@@ -465,6 +465,78 @@ int host_llm_is_connected(LlamaPluginHost* host) {
 
 namespace {
 
+/* Разбор одной части контента OpenAI-формата: текстовая или изображение.
+ *
+ * Нераспознанный тип — ОШИБКА, а не пропуск. Соблазн «выбросить непонятную
+ * часть и продолжить» выглядит терпимостью, но даёт худший из возможных
+ * исходов: ход уходит модели без картинки, провайдер отвечает «не вижу
+ * изображения», и причину ищут в модели — а она тут исправна. Отказ же
+ * виден вызывающему сразу и называет роль и тип.
+ *
+ * Поддерживаются ровно два вида, потому что ровно два умеет OpenAI-формат
+ * в реплике пользователя: {"type":"text","text":…} и
+ * {"type":"image_url","image_url":{"url":…}}. */
+bool parse_content_part(const nlohmann::json& part,
+                        std::string& text_out,
+                        std::vector<core::ImagePart>& images_out,
+                        std::string& error) {
+    using nlohmann::json;
+    if (!part.is_object()) {
+        error = "content part is not an object";
+        return false;
+    }
+    const std::string type = part.value("type", "");
+    if (type == "text") {
+        if (!part.contains("text") || !part["text"].is_string()) {
+            error = "text part without text";
+            return false;
+        }
+        /* Склейка, а не присваивание: реплика может содержать НЕСКОЛЬКО
+         * текстовых частей (провайдеры, разбивающие ответ на куски, так и
+         * делают), и `=` тихо выбросил бы все, кроме последней. Потеря при
+         * этом не видна нигде: запрос уходит, модель отвечает, и только
+         * сравнение с исходником показало бы, что половина текста пропала. */
+        if (!text_out.empty()) text_out += "\n";
+        text_out += part["text"].get<std::string>();
+        return true;
+    }
+    if (type == "image_url") {
+        /* Проверка «есть image_url» — ДО проверки на объект: иначе вторая
+         * поддерживаемая форма (строка) отбраковывалась бы первой, и
+         * проверка на is_string() ниже была бы мёртвой. Это и был дефект,
+         * найденный тестом: страж стоял до, а не после. */
+        if (!part.contains("image_url")) {
+            error = "image_url part without image_url";
+            return false;
+        }
+        /* Две формы, и обе приходят от живых провайдеров: {"url": "…"} —
+         * OpenAI, и просто строка — так пишут некоторые шлюзы. Принимаем
+         * обе, потому что отвергнутая картинка не «откажет в поддержке», а
+         * молча доедет до модели как её отсутствие. */
+        const json& iu = part["image_url"];
+        core::ImagePart img;
+        if (iu.is_object() && iu.contains("url") && iu["url"].is_string()) {
+            img.url = iu["url"].get<std::string>();
+        } else if (iu.is_string()) {
+            img.url = iu.get<std::string>();
+        } else {
+            error = "image_url part without url";
+            return false;
+        }
+        if (img.url.empty()) {
+            error = "image_url part without url";
+            return false;
+        }
+        if (iu.contains("media_type") && iu["media_type"].is_string()) {
+            img.media_type = iu["media_type"].get<std::string>();
+        }
+        images_out.push_back(std::move(img));
+        return true;
+    }
+    error = "unknown content part type: " + type;
+    return false;
+}
+
 /* Разбор messages_json в сообщения для провайдера.
  *
  * Один разбор на оба вызова хоста (llm_chat_messages и llm_chat_stream):
@@ -472,9 +544,9 @@ namespace {
  * первом же новом поле — то есть один и тот же ход агента ушёл бы в
  * модель с разной историей в зависимости от того, блокирующий путь или
  * стриминговый. */
-bool parse_messages_json(const char* messages_json,
-                         std::vector<core::ChatMessage>& out,
-                         std::string& error) {
+bool parse_messages_json_impl(const char* messages_json,
+                              std::vector<core::ChatMessage>& out,
+                              std::string& error) {
     using nlohmann::json;
     if (!messages_json) {
         error = "messages_json is null";
@@ -489,12 +561,34 @@ bool parse_messages_json(const char* messages_json,
         for (const auto& m : parsed) {
             if (!m.is_object()) continue;
             const std::string role = m.value("role", "");
-            const std::string content = m.value("content", "");
             core::MessageRole mr;
             if (role == "assistant")      mr = core::MessageRole::Assistant;
             else if (role == "system")    mr = core::MessageRole::System;
             else                          mr = core::MessageRole::User;
-            out.push_back(core::ChatMessage(mr, content));
+
+            core::ChatMessage msg(mr, "");
+            const json& content = m.contains("content") ? m["content"] : json();
+
+            /* Строка — исторический формат и сегодняшний для всего, кроме
+             * вложений. Массив — OpenAI-формат с частями. */
+            if (content.is_string()) {
+                msg.content = content.get<std::string>();
+            } else if (content.is_array()) {
+                for (const auto& part : content) {
+                    if (!parse_content_part(part, msg.content, msg.images,
+                                            error)) {
+                        /* Ошибка называет роль: без неё «unknown content
+                         * part type» не говорит, чей это ход, а ходов в
+                         * запросе десятки. */
+                        error = "role=" + role + ": " + error;
+                        return false;
+                    }
+                }
+            } else if (!content.is_null()) {
+                error = "content is neither a string nor an array";
+                return false;
+            }
+            out.push_back(std::move(msg));
         }
     } catch (const std::exception& e) {
         error = e.what();
@@ -509,6 +603,10 @@ bool parse_messages_json(const char* messages_json,
     }
     return true;
 }
+
+} // namespace
+
+namespace {
 
 /*
  * Реестр живых потоков стриминга: user_data плагина → флаг отмены (И6.6).
@@ -868,7 +966,7 @@ char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
 
     std::vector<core::ChatMessage> msgs;
     std::string parse_error;
-    if (!parse_messages_json(messages_json, msgs, parse_error)) {
+    if (!parse_messages_json_impl(messages_json, msgs, parse_error)) {
         std::cerr << "[llm_chat_messages] JSON parse error: " << parse_error << std::endl;
         return nullptr;
     }
@@ -945,6 +1043,11 @@ char* host_llm_chat_messages(LlamaPluginHost* host, const char* system_prompt,
                         default:                          out.role = "user";     break;
                     }
                     out.content = m.content;
+                    /* Изображения переезжают вместе с репликой: без них
+                     * облачный путь молча терял бы то, что локальный уже
+                     * умеет, — и один и тот же ход агента выглядел бы
+                     * рабочим на локальной модели и «слепым» в облаке. */
+                    out.images = m.images;
                     params.messages.push_back(std::move(out));
                 }
 
@@ -1022,7 +1125,7 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
 
     std::vector<core::ChatMessage> msgs;
     std::string error;
-    if (!parse_messages_json(messages_json, msgs, error)) {
+    if (!parse_messages_json_impl(messages_json, msgs, error)) {
         std::cerr << "[llm_chat_stream] JSON parse error: " << error << std::endl;
         return 0;
     }
@@ -1178,6 +1281,7 @@ int host_llm_chat_stream(LlamaPluginHost* host, const char* system_prompt,
                 default:                          out.role = "user";     break;
             }
             out.content = m.content;
+            out.images = m.images;
             params.messages.push_back(std::move(out));
         }
         params.tools = cloud_tools;
@@ -1998,6 +2102,22 @@ std::vector<PluginManager::AgentModeInfo> PluginManager::get_agent_modes() const
         result.push_back({&am.mode, am.host});
     }
     return result;
+}
+
+/* Публичная точка входа разбора messages_json (объявлена в
+ * plugin_manager.h).
+ *
+ * Обёртка, а не переименование внутренней: та — деталь, и её помощник
+ * parse_content_part тоже. Наружу отдаётся ровно то, что нужно границе ABI,
+ * и ровно с той подписью, что объявлена в заголовке.
+ *
+ * Зачем вообще наружу: это ГРАНИЦА между хостом и плагином, и именно на ней
+ * терялись вложения — молча, потому что непроверяемая граница возвращается
+ * к состоянию «картинка не доехала, и никто не знает, где». */
+bool parse_messages_json(const char* messages_json,
+                         std::vector<core::ChatMessage>& out,
+                         std::string& error) {
+    return parse_messages_json_impl(messages_json, out, error);
 }
 
 } // namespace plugin

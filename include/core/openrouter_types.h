@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include "image_part.h"
+
 namespace llama_gui {
 namespace core {
 
@@ -119,6 +121,10 @@ struct OpenRouterRequestParams {
     struct Message {
         std::string role;  // "system", "user", "assistant"
         std::string content;
+        /* Изображения реплики. Пустой список — реплика текстовая, и тело
+         * запроса собирается как прежде. Непустой — content уходит
+         * массивом частей OpenAI-формата (см. build_completion_body). */
+        std::vector<ImagePart> images;
     };
     std::vector<Message> messages;
 };

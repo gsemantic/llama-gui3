@@ -12,6 +12,8 @@
  */
 
 #include "../../include/core/llama_interface.h"
+#include "../../include/core/base64.h"
+#include "../../include/core/image_mime.h"
 
 #include "../test_framework.h"
 
@@ -325,6 +327,197 @@ void test_garbage_input_yields_no_calls() {
     TEST_ASSERT(parse_tool_calls(json::object()).empty());
 }
 
+/* --- Изображения (мультимодальность) --- */
+
+/* Текстовая реплика уезжает СТРОКОЙ, даже когда рядом есть картинки у
+ * ДРУГОЙ реплики.
+ *
+ * Проверяется именно это, а не «картинка уехала»: соблазн написать
+ * сборку «если в запросе есть хоть одно изображение, все реплики
+ * становятся массивами» велик, и он сломал бы ровно то, что работало, —
+ * текстовые сообщения. Строка и массив в одном поле JSON — разные типы, и
+ * половина серверов отвергла бы массив из одной текстовой части.
+ */
+void test_text_message_stays_a_string_when_another_message_has_images() {
+    ChatCompletionRequest req = minimal_request();
+    req.messages.emplace_back(MessageRole::User, "посмотри на это");
+    ChatMessage with_image(MessageRole::User, "что здесь не так?");
+    ImagePart img;
+    img.url = "data:image/png;base64,AAAA";
+    img.media_type = "image/png";
+    with_image.images.push_back(img);
+    req.messages.push_back(with_image);
+
+    const json body = build_chat_body(req, false);
+    TEST_ASSERT_EQUAL(body["messages"].size(), size_t(3));
+    /* Первая реплика (минимальная, из minimal_request) — строка. */
+    TEST_ASSERT_TRUE(body["messages"][0]["content"].is_string());
+    /* Вторая — тоже строка: картинка не её. */
+    TEST_ASSERT_TRUE(body["messages"][1]["content"].is_string());
+    /* Третья — массив частей. */
+    TEST_ASSERT_TRUE(body["messages"][2]["content"].is_array());
+}
+
+/* Реплика с картинкой и текстом уезжает массивом, где текста часть ПЕРВАЯ.
+ *
+ * Порядок не косметика: провайдеры читают изображение как иллюстрацию к
+ * вопросу, а не наоборот, — тот же порядок, что в примерах OpenAI. */
+void test_image_and_text_become_a_parts_array_in_openai_shape() {
+    ChatCompletionRequest req = minimal_request();
+    ChatMessage msg(MessageRole::User, "что здесь не так?");
+    ImagePart img;
+    img.url = "data:image/png;base64,AAAA";
+    img.media_type = "image/png";
+    msg.images.push_back(img);
+    req.messages.push_back(msg);
+
+    const json body = build_chat_body(req, false);
+    const json& parts = body["messages"][1]["content"];
+    TEST_ASSERT_TRUE(parts.is_array());
+    TEST_ASSERT_EQUAL(parts.size(), size_t(2));
+    TEST_ASSERT_EQUAL(parts[0]["type"].get<std::string>(), std::string("text"));
+    TEST_ASSERT_EQUAL(parts[0]["text"].get<std::string>(), std::string("что здесь не так?"));
+    TEST_ASSERT_EQUAL(parts[1]["type"].get<std::string>(), std::string("image_url"));
+    TEST_ASSERT_EQUAL(parts[1]["image_url"]["url"].get<std::string>(),
+              std::string("data:image/png;base64,AAAA"));
+}
+
+/* Реплика из ОДНОЙ картинки, без текста, — законный формат.
+ *
+ * Ровно тот случай, на котором всё ломалось: человек присылает скриншот
+ * без подписи, и «пустой текст» не должен ни съедать реплику, ни
+ * превращаться в `"content": ""` (модель ответила бы «не вижу картинки»).
+ */
+void test_image_without_text_sends_only_the_image_part() {
+    ChatCompletionRequest req = minimal_request();
+    ChatMessage msg(MessageRole::User, "");
+    ImagePart img;
+    img.url = "data:image/jpeg;base64,BBBB";
+    msg.images.push_back(img);
+    req.messages.push_back(msg);
+
+    const json body = build_chat_body(req, false);
+    const json& parts = body["messages"][1]["content"];
+    TEST_ASSERT_TRUE(parts.is_array());
+    /* Ровно одна часть: пустая текстовая не добавляется. */
+    TEST_ASSERT_EQUAL(parts.size(), size_t(1));
+    TEST_ASSERT_EQUAL(parts[0]["type"].get<std::string>(), std::string("image_url"));
+}
+
+/* Две картинки сохраняют порядок: порядок вложений человек видит в списке
+ * под полем ввода, и он же определяет порядок частей в запросе. */
+void test_multiple_images_keep_their_order() {
+    ChatCompletionRequest req = minimal_request();
+    ChatMessage msg(MessageRole::User, "оба скриншота");
+    for (const char* u : {"data:image/png;base64,AAA",
+                          "data:image/png;base64,BBB"}) {
+        ImagePart img;
+        img.url = u;
+        msg.images.push_back(img);
+    }
+    req.messages.push_back(msg);
+
+    /* Тело — в ИМЕНОВАННУЮ переменную, а не сразу в ссылку: `build_chat_body`
+     * возвращает временный объект, и `const json&` к его подолу — висячая
+     * ссылка. Проверка при этом не падала бы предсказуемо: читалась бы
+     * освобождённая память, и «2 части вместо 3» — как раз её случайный
+     * отсвет. Тест, который ловит не то, что написано в его имени, хуже
+     * отсутствующего. */
+    const json body = build_chat_body(req, false);
+    const json& parts = body["messages"][1]["content"];
+    TEST_ASSERT_EQUAL(parts.size(), size_t(3));
+    TEST_ASSERT_TRUE(parts[1]["image_url"]["url"].get<std::string>().find("AAA") !=
+                std::string::npos);
+    TEST_ASSERT_TRUE(parts[2]["image_url"]["url"].get<std::string>().find("BBB") !=
+                std::string::npos);
+}
+
+/* Запрос без картинок вообще не меняет форму: это регрессионный страж на
+ * «сломали текстовый путь, доехав до мультимодальности». */
+void test_request_without_images_is_byte_identical_to_before() {
+    ChatCompletionRequest req = minimal_request();
+    req.tools.push_back(probe_tool());
+
+    /* Тело с картинками и без них сравнивать нельзя (они разные по
+     * смыслу), поэтому проверяется отсутствие массивов: ни одна реплика
+     * не должна стать массивом сама по себе. */
+    const json body = build_chat_body(req, false);
+    for (const auto& m : body["messages"]) {
+        TEST_ASSERT_TRUE(m["content"].is_string());
+    }
+}
+
+/* --- base64 --- */
+
+/* Round-trip на всех трёх длинах хвоста: 3k, 3k+1, 3k+2.
+ *
+ * Хвост — единственное место, где кодец может ошибиться молча: тройки
+ * байтов кодируются одинаково при любой длине, а вот остаток 1 или 2
+ * требует «=» и сдвигов, и ошибка там даёт не отказ, а ИСПОРЧЕННЫЕ
+ * байты — то есть картинку, которую модель «увидела» неправильно.
+ */
+void test_base64_round_trips_every_tail_length() {
+    for (size_t n = 0; n <= 9; ++n) {
+        std::string in;
+        /* Байты, а не символы: 0x00 и 0xFF обязаны переживать кодирование,
+         * иначе «текстовый» тест был бы зелёным на двоичных данных. */
+        for (size_t i = 0; i < n; ++i) {
+            in += static_cast<char>((i * 37 + 11) & 0xFF);
+        }
+        std::string dec;
+        TEST_ASSERT_TRUE(base64_decode(base64_encode(in), dec));
+        TEST_ASSERT_EQUAL(dec.size(), in.size());
+        TEST_ASSERT_TRUE(dec == in);
+    }
+}
+
+/* Известная строка из RFC 4648: "hello" → "aGVsbG8=".
+ *
+ * Проверка не «сам с собою», а с внешним эталоном: round-trip был бы
+ * зелёным и на кодеке, который кодирует в ROT13, а сам с собой
+ * декодирует обратно.
+ */
+void test_base64_matches_a_known_vector() {
+    TEST_ASSERT_EQUAL(base64_encode("hello"), std::string("aGVsbG8="));
+    TEST_ASSERT_EQUAL(base64_encode(""), std::string(""));
+    TEST_ASSERT_EQUAL(base64_encode("f"), std::string("Zg=="));
+    TEST_ASSERT_EQUAL(base64_encode("fo"), std::string("Zm8="));
+}
+
+/* Мусор в base64 — отказ, а не «разобрали как получилось».
+ *
+ * Тело приходит от посторонних (вложение), и «достать что-нибудь» здесь
+ * означало бы отдать модели произвольные байты. */
+void test_base64_rejects_garbage() {
+    std::string out;
+    TEST_ASSERT_FALSE(base64_decode("!!!!", out));
+    TEST_ASSERT_FALSE(base64_decode("abc", out));   /* обрезанная quadruple */
+    TEST_ASSERT_FALSE(base64_decode("ab=c", out));  /* «=» в середине */
+}
+
+/* --- Определение типа по содержимому --- */
+
+/* Тип берётся из МАГИЧЕСКИХ БАЙТОВ, а не из расширения: файл `.png`, внутри
+ * которого HTML, — это не картинка, и поверив расширению, мы отдали бы
+ * модели base64 от страницы с `"type":"image_url"`. */
+void test_image_mime_is_detected_from_content_not_extension() {
+    TEST_ASSERT_EQUAL(detect_image_mime(std::string("\x89PNG\r\n\x1A\n", 8)),
+              std::string("image/png"));
+    TEST_ASSERT_EQUAL(detect_image_mime(std::string("\xFF\xD8\xFF\xE0", 4)),
+              std::string("image/jpeg"));
+    TEST_ASSERT_EQUAL(detect_image_mime(std::string("GIF89a......", 12)),
+              std::string("image/gif"));
+    TEST_ASSERT_EQUAL(detect_image_mime(std::string("RIFF\x00\x00\x00\x00WEBP", 16)),
+              std::string("image/webp"));
+
+    /* HTML и текст — НЕ картинки, как бы они ни назывались. */
+    TEST_ASSERT_TRUE(detect_image_mime("<!DOCTYPE html><html></html>").empty());
+    TEST_ASSERT_TRUE(detect_image_mime("{\"a\": 1}").empty());
+    TEST_ASSERT_TRUE(detect_image_mime("").empty());
+    /* Обрезанный заголовок (меньше сигнатуры) — не картинка. */
+    TEST_ASSERT_TRUE(detect_image_mime(std::string("\x89PNG", 4)).empty());
+}
+
 int main() {
     REGISTER_TEST(test_no_tools_means_no_tools_fields);
     REGISTER_TEST(test_tools_are_serialized_in_openai_shape);
@@ -347,6 +540,15 @@ int main() {
     REGISTER_TEST(test_calls_without_ids_keep_their_order);
     REGISTER_TEST(test_call_without_name_is_dropped);
     REGISTER_TEST(test_garbage_input_yields_no_calls);
+    REGISTER_TEST(test_text_message_stays_a_string_when_another_message_has_images);
+    REGISTER_TEST(test_image_and_text_become_a_parts_array_in_openai_shape);
+    REGISTER_TEST(test_image_without_text_sends_only_the_image_part);
+    REGISTER_TEST(test_multiple_images_keep_their_order);
+    REGISTER_TEST(test_request_without_images_is_byte_identical_to_before);
+    REGISTER_TEST(test_base64_round_trips_every_tail_length);
+    REGISTER_TEST(test_base64_matches_a_known_vector);
+    REGISTER_TEST(test_base64_rejects_garbage);
+    REGISTER_TEST(test_image_mime_is_detected_from_content_not_extension);
 
     return test::TestRunner::instance().run();
 }

@@ -8,6 +8,8 @@
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 
+#include "image_part.h"
+
 namespace llama_gui {
 namespace core {
 
@@ -55,6 +57,20 @@ struct ChatMessage {
      * tools; тогда вызов приходит текстом и разбирает плагин.
      */
     std::vector<ToolCall> tool_calls;
+    /*
+     * Изображения реплики (OpenAI-формат `image_url`).
+     *
+     * Пустой список — реплика текстовая, и тело запроса собирается ровно
+     * как до этой правки (`"content": "строка"`). Непустой — `content`
+     * становится МАССИВОМ частей, потому что смешать нельзя: строка и
+     * массив в одном поле JSON — два разных типа, и провайдер, ждущий
+     * строку, отверг бы массив (а ждущий массив — строку).
+     *
+     * Изображения есть только у реплик пользователя: у ассистента их
+     * берутся из ответа модели, и обратная пересылка «я видел картинку»
+     * в реплике ассистента — не формат OpenAI, а выдумка.
+     */
+    std::vector<ImagePart> images;
 
     ChatMessage() = default;
     ChatMessage(MessageRole r, const std::string& c) : role(r), content(c) {}

@@ -366,6 +366,15 @@ void ChatInterface::send_message() {
         if (has_attachments) {
             attachments_ctx = build_attachments_context();
         }
+        /* Изображения снимаются КОПИЕЙ до запуска потока, как и текст
+         * вложений: поток живёт дольше вызова, и читать из this после
+         * clear_input() значило бы взять уже опустошённый список.
+         *
+         * Копия — это N байт на картинку, и она нужна: без неё в поток
+         * ушёл бы указатель на вектор, который владелец окна меняет на
+         * следующем же кадре. */
+        const std::vector<llama_gui::core::ImagePart> images_ctx =
+            get_attachment_images();
         // Copy settings that the background thread needs
         auto* settings_ptr = &settings_;
         auto* rag_mgr = rag_manager_;
@@ -376,7 +385,7 @@ void ChatInterface::send_message() {
         auto* self = this;
 
         std::thread([self, msg_copy, conv_id, rag_enabled, use_cache, use_documents, has_attachments, attachments_ctx,
-                     settings_ptr, rag_mgr, compressor, monitor, llama, state]() mutable {
+                     images_ctx, settings_ptr, rag_mgr, compressor, monitor, llama, state]() mutable {
             try {
                 // --- RAG processing (SLOW - runs in background) ---
                 std::string final_content = msg_copy;
@@ -448,6 +457,23 @@ void ChatInterface::send_message() {
                     if (has_rag_context && is_last) content = final_content;
                     else if (has_attachments && !has_rag_context && is_last) content = final_content;
                     messages.push_back(llama_gui::core::ChatMessage(all_messages[i].role, content));
+                    /* Изображения — только ПОСЛЕДНЕЙ реплике пользователя и
+                     * только если она вообще есть.
+                     *
+                     * Почему последней: вложение относится к тому вопросу,
+                     * который человек задал сейчас, а не ко всей истории.
+                     * Прицепить картинку к каждому ходу значило бы платить
+                     * за неё в каждом запросе и, что хуже, отвечать на
+                     * вопрос «что на картинке?» спустя десять реплик так,
+                     * будто её прислали только что.
+                     *
+                     * Почему только пользователю: у реплики ассистента
+                     * изображений не бывает — их присылает человек, и
+                     * обратная пересылка «я видел картинку» не формат
+                     * OpenAI, а выдумка (см. ChatMessage::images). */
+                    if (is_last && !images_ctx.empty()) {
+                        messages.back().images = images_ctx;
+                    }
                 }
 
                 // --- Build request ---
@@ -707,12 +733,33 @@ void ChatInterface::send_message_via_openrouter() {
         params.messages.push_back(sys_msg);
     }
 
+    /* Изображения-вложения: снимаются ОДИН раз и прицепляются к последней
+     * реплике пользователя — той, на которую отвечает этот запрос.
+     *
+     * Список уже содержит только текст (картинки в него не попадают, см.
+     * add_file_attachment), поэтому здесь ничего не дублируется: имя файла
+     * уезжает текстом, а байты — структурой. */
+    const std::vector<llama_gui::core::ImagePart> cloud_images =
+        get_attachment_images();
+
     // Получаем историю диалога из active_conv (объявлена выше)
     if (active_conv) {
+        /* Индекс последней реплики пользователя: картинка относится к
+         * текущему вопросу, а не ко всей переписке. Если пользовательских
+         * реплик нет вовсе (запрос из плагина), вложения не прицепляются
+         * никуда — прицепить их к ассистенту значило бы отправить
+         * «изображение» в роли, где его никто не ждёт. */
+        int last_user_idx = -1;
+        for (int k = 0; k < static_cast<int>(active_conv->messages.size()); ++k) {
+            if (active_conv->messages[k].role == "user") last_user_idx = k;
+        }
+        int idx = -1;
         for (const auto& msg : active_conv->messages) {
+            ++idx;
             llama_gui::core::OpenRouterRequestParams::Message orch_msg;
             orch_msg.role = msg.role;
             orch_msg.content = msg.content;
+            if (idx == last_user_idx) orch_msg.images = cloud_images;
             params.messages.push_back(orch_msg);
         }
     }

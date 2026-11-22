@@ -4,6 +4,8 @@
 #include "../include/ui/file_dialog_helper.h"
 #include "../include/ui/file_dialog_manager.h"
 #include "../include/plugins/plugin_manager.h"
+
+#include <nlohmann/json.hpp>
 #include "imgui.h"
 #include <iostream>
 #include <algorithm>
@@ -368,6 +370,37 @@ void ChatInterface::send_message_to_agent(const std::string& message) {
     // Добавляем сообщение пользователя в чат
     add_user_message(message);
 
+    /* Вложения-изображения — JSON-массивом OpenAI-формата.
+     *
+     * Собирается ЗДЕСЬ, а не внутри плагина, по двум причинам:
+     *   - байты уже закодированы при прикреплении (add_file_attachment),
+     *     и плагин получил бы вторую копию base64 на каждое сообщение;
+     *   - плагин не знает ни путей, ни того, что человек прикрепил: он
+     *     видит только аргумент on_message, и без этого канала вложение
+     *     для него не существует вовсе (ровно тот дефект, из-за которого
+     *     агент «не видел картинку» при исправной модели).
+     *
+     * Пустая строка, а не nullptr, когда картинок нет: плагин проверяет
+     * указатель, и nullptr читался бы как «вложения не поддерживаются». */
+    std::string attachments_json = "[]";
+    {
+        const std::vector<llama_gui::core::ImagePart> imgs = get_attachment_images();
+        if (!imgs.empty()) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& img : imgs) {
+                if (img.url.empty()) continue;
+                nlohmann::json part;
+                part["type"] = "image_url";
+                part["image_url"]["url"] = img.url;
+                if (!img.media_type.empty()) {
+                    part["image_url"]["media_type"] = img.media_type;
+                }
+                arr.push_back(std::move(part));
+            }
+            if (!arr.empty()) attachments_json = arr.dump();
+        }
+    }
+
     // Получаем ID активной конверсации для доставки ответа агента
     std::string conv_id;
     if (auto* active = state_manager_.get_active_conversation()) {
@@ -382,8 +415,51 @@ void ChatInterface::send_message_to_agent(const std::string& message) {
     // но здесь используем простой free(), т.к. host_free_string = free(str)
     auto free_fn = [](char* p) { if (p) free(p); };
 
-    std::thread([this, host, on_msg, user_data, message, free_fn, conv_id]() {
-        char* response = on_msg(host, message.c_str(), user_data);
+    /* Обработчик с вложениями выбирается по НАЛИЧИЮ, а не по версии
+     * хоста: плагин, собранный до этой правки, оставляет on_message_ex
+     * нулевым (структура `= {}`), и тогда зовётся on_message, как зовётся
+     * сегодня. Проверка та же, что у llm_chat_stream: несуществующее поле
+     * на старом плагине — вызов по мусорному указателю. */
+    std::function<char*(LlamaPluginHost*, const char*, const char*, void*)> on_msg_ex =
+        m.mode->on_message_ex;
+
+    /* Плагин БЕЗ on_message_ex (собранный до правки) картинок не увидит:
+     * его точка входа принимает только текст, и передать ей байты нечем.
+     * Молчать об этом нельзя — иначе человек прикрепил скриншот, агент
+     * ответил «не вижу картинки», и причина выглядела бы как слепота
+     * модели. Поэтому вложения дописываются К ТЕКСТУ задачи: агент,
+     * который умеет ходить в файл, по этому пути хотя бы прочитает файл
+     * сам, а человек увидит, что картинка доехала не как картинка.
+     *
+     * Это не «решение» проблемы, а честная деградация: настоящее — в
+     * on_message_ex, и путь остаётся только для старых плагинов. */
+    const bool has_images = !attachments_json.empty() && attachments_json != "[]";
+    /* Текст для старого плагина собирается ЗДЕСЬ, а не в потоке: имя файла
+     * и путь, а не base64 (base64 в промпте — мусор, который модель не
+     * прочитает и за который заплатит). Путь даёт агенту шанс открыть файл
+     * сам.
+     *
+     * Именно до запуска потока, а не внутри: поток отсоединён и живёт
+     * дольше вызова, а attachments_ принадлежит окну и меняется на
+     * следующем кадре — чтение оттуда было бы гонкой. */
+    std::string legacy_text = message;
+    if (!on_msg_ex && has_images) {
+        std::cerr << "[Chat] плагин не поддерживает вложения "
+                  << "(on_message_ex == nullptr): картинки уедут путём"
+                  << std::endl;
+        const std::vector<std::string>& paths = get_attachments();
+        for (const auto& p : paths) {
+            const size_t slash = p.find_last_of("/\\");
+            legacy_text += "\n[приложено изображение: " +
+                (slash == std::string::npos ? p : p.substr(slash + 1)) + "]";
+        }
+    }
+
+    std::thread([this, host, on_msg, on_msg_ex, user_data, message,
+                 legacy_text, attachments_json, free_fn, conv_id]() {
+        char* response = on_msg_ex
+            ? on_msg_ex(host, message.c_str(), attachments_json.c_str(), user_data)
+            : on_msg(host, legacy_text.c_str(), user_data);
         if (response) {
             std::string resp_str = response;
             free_fn(response);

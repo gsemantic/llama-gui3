@@ -98,6 +98,17 @@ enum class PartKind {
      * там `[User]` — это человек, а это реплика плагина. */
     CompactionContinue,
     Subtask,
+    /* Изображение, присланное человеком (мультимодальность).
+     *
+     * Вид, а не поле в Text: у текстовой части есть ОДНО представление для
+     * модели (строка внутри content), а у изображения — структура
+     * OpenAI-формата, и склеить их значило бы кодировать байты в текст
+     * (ровно то, из-за чего агент «не видел картинку»: канала для байтов
+     * не было вовсе, и PNG уезжал модели бинарным дампом внутри промпта).
+     *
+     * В транскрипт (to_model_string) НЕ попадает — там собирается текст, и
+     * base64 в нём был бы мусором. */
+    Image,
 };
 
 const char* part_kind_name(PartKind k);
@@ -126,6 +137,14 @@ public:
      * и копия в двух местах разъехалась бы при первой же правке. */
     static MessagePart compaction_continue();
     static MessagePart subtask(std::string task_id, std::string subagent);
+    /* Изображение. url — готовый data-URL (`data:image/png;base64,…`) либо
+     * http(s)-ссылка, в том виде, в каком он уйдёт провайдеру.
+     *
+     * media_type хранится ОТДЕЛЬНО от url, хотя url его уже содержит:
+     * локальному llama-server тип нужен отдельным полем, а разбирать
+     * data-URL, чтобы его достать, значило бы помнить префикс в каждом
+     * потребителе. Пустой — провайдер определит сам. */
+    static MessagePart image(std::string url, std::string media_type);
 
     PartKind kind() const { return kind_; }
     const char* kind_name() const { return part_kind_name(kind_); }
@@ -212,6 +231,9 @@ public:
     const std::string& subagent() const;
     /* Compaction: какие части сообщений свёрнуты в сводку. */
     const std::vector<std::string>& replaced_ids() const;
+    /* Image: готовый data-URL (или ссылка) и MIME. */
+    const std::string& image_url() const;
+    const std::string& image_media_type() const;
 
     /* Перевод состояния части-вызова: Pending → Running → Completed /
      * Error. Вынесено в метод, потому что «пометить результатом» из
@@ -265,6 +287,9 @@ private:
     std::string snapshot_hash_;
     std::string task_id_;
     std::string subagent_;
+    /* Image: готовый data-URL и MIME (см. фабрику image()). */
+    std::string image_url_;
+    std::string image_media_type_;
     std::vector<std::string> replaced_ids_;
     int attempt_ = 0;
     int next_attempt_in_ms_ = 0;
@@ -280,6 +305,18 @@ private:
  * parent_id — идентификатор сообщения, инициировавшего ход. По нему
  * цикл отвечает на вопрос «на какое сообщение отвечает этот ход» (это
  * и есть условие завершения в И5.8), а UI — «что было до этого». */
+/* Одно изображение реплики в форме, которую понимает провайдер.
+ *
+ * Живёт здесь, а не рядом с MessagePart::image, потому что это РАЗНЫЕ
+ * вещи: MessagePart — часть истории (её пишут в файл сессии и показывают в
+ * окне), а ImagePart — то, что уходит в запросе. Текстовую часть и её
+ * представление для модели соединяет to_model_messages; у изображения та
+ * же пара ролей, и по той же причине она разведена. */
+struct ImagePart {
+    std::string url;         /* data-URL или http(s)-ссылка */
+    std::string media_type;  /* может быть пустым */
+};
+
 struct Message {
     std::string id;
     std::string role;            // kRoleUser / kRoleAssistant / kRoleSystem
@@ -296,6 +333,19 @@ struct Message {
      * неё путь, которым никто не ходит, — значило бы записать в файл
      * сессии сообщение, которое при загрузке уедет в никуда. */
     static Message user(std::string text);
+    /* Реплика человека с вложениями-изображениями.
+     *
+     * Отдельная фабрика, а не параметр у user(): у user() сегодня
+     * четырнадцать вызовов в пяти файлах, и все они — текст без картинок.
+     * Необязательный параметр со значением по умолчанию выглядел бы
+     * безобидно, но заставлял бы помнить про него в каждом месте, где
+     * реплика создаётся, — и первое же новое место про него забыло бы.
+     *
+     * Порядок частей: изображения идут ПЕРЕД текстом, потому что вопрос
+     * обычно ссылается на присланное («что здесь не так?»), и модель,
+     * прочитавшая сначала текст, ищет ответ на вопрос, которого ещё не
+     * видела. */
+    static Message user(std::string text, std::vector<ImagePart> images);
     static Message assistant(std::string parent_id);
     /* Реплика «продолжай» после сжатия (И7.7): роль пользователя и
      * синтетическая часть compaction_continue.
@@ -570,6 +620,10 @@ void compress_history(std::vector<Message>& history, size_t budget,
 struct ModelMessage {
     std::string role;
     std::string content;
+    /* Непустой список превращает content в МАССИВ частей OpenAI-формата
+     * (см. host_bridge/llm_stream_shim.cpp). Пустой — реплика текстовая,
+     * и запрос собирается ровно как до мультимодальности. */
+    std::vector<ImagePart> images;
 };
 
 /* Текст вызова инструмента так, как его написала модель; если блока нет

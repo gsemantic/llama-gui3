@@ -308,3 +308,108 @@ TEST(messages_json_escapes_content) {
 TEST(empty_history_is_an_empty_array) {
     ASSERT_EQ(host::messages_to_json({}), std::string("[]"));
 }
+
+/* --- Изображения в сборке истории (мультимодальность) --- */
+
+/* Текстовая реплика остаётся СТРОКОЙ: это главный регрессионный страж.
+ *
+ * Соблазн написать «если у запроса есть картинка, все реплики становятся
+ * массивами» велик, и он сломал бы ровно то, что работало. Строка и
+ * массив в одном поле JSON — разные типы, и половина локальных сборок
+ * llama-server отвергла бы массив из одной текстовой части. */
+TEST(text_message_stays_a_string) {
+    const std::string json = host::messages_to_json({{"user", "привет"}});
+    ASSERT_TRUE(json.find("\"content\":\"привет\"") != std::string::npos);
+    ASSERT_TRUE(json.find("\"content\":[") == std::string::npos);
+}
+
+/* Реплика с картинкой и текстом — массив частей, текст ПЕРВЫЙ.
+ *
+ * Порядок не косметика: провайдеры читают изображение как иллюстрацию к
+ * вопросу, а не наоборот, — тот же порядок, что в примерах OpenAI. */
+TEST(image_message_becomes_a_parts_array_with_text_first) {
+    ModelMessage m;
+    m.role = "user";
+    m.content = "что здесь не так?";
+    m.images.push_back({"data:image/png;base64,AAAA", "image/png"});
+
+    const std::string json = host::messages_to_json({m});
+    ASSERT_TRUE(json.find("\"content\":[{") != std::string::npos);
+    /* Текстовая часть — первая. */
+    ASSERT_TRUE(json.find("{\"type\":\"text\",\"text\":\"что здесь не так?\"}") !=
+                std::string::npos);
+    ASSERT_TRUE(json.find("{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AAAA\"") !=
+                std::string::npos);
+}
+
+/* Реплика из ОДНОЙ картинки, без текста, — законный формат.
+ *
+ * Ровно тот случай, на котором всё ломалось: человек присылает скриншот
+ * без подписи, и «пустой текст» не должен ни съедать реплику, ни
+ * превращаться в `"content": ""` (модель ответила бы «не вижу картинки»). */
+TEST(image_without_text_sends_only_the_image_part) {
+    ModelMessage m;
+    m.role = "user";
+    m.images.push_back({"data:image/jpeg;base64,BBBB", "image/jpeg"});
+
+    const std::string json = host::messages_to_json({m});
+    /* Ровно одна часть: пустая текстовая не добавляется. */
+    ASSERT_TRUE(json.find("\"content\":[{\"type\":\"image_url\"") !=
+                std::string::npos);
+    ASSERT_TRUE(json.find("\"type\":\"text\"") == std::string::npos);
+}
+
+/* Пустой media_type не уезжает: провайдер определит тип сам, а
+ * `"media_type":""` — это заявленный пустой тип, то есть ошибка разбора. */
+TEST(empty_media_type_is_not_sent) {
+    ModelMessage m;
+    m.role = "user";
+    m.images.push_back({"data:image/png;base64,AAAA", ""});
+
+    const std::string json = host::messages_to_json({m});
+    ASSERT_TRUE(json.find("media_type") == std::string::npos);
+}
+
+/* Две картинки сохраняют порядок: порядок вложений человек видит в списке
+ * под полем ввода, и он же определяет порядок частей в запросе. */
+TEST(images_keep_their_order) {
+    ModelMessage m;
+    m.role = "user";
+    m.content = "оба";
+    m.images.push_back({"data:image/png;base64,AAA", "image/png"});
+    m.images.push_back({"data:image/png;base64,BBB", "image/png"});
+
+    const std::string json = host::messages_to_json({m});
+    const size_t a = json.find("AAA");
+    const size_t b = json.find("BBB");
+    ASSERT_TRUE(a != std::string::npos);
+    ASSERT_TRUE(b != std::string::npos);
+    ASSERT_TRUE(a < b);
+}
+
+/* Собранное изображение — ВАЛИДНЫЙ JSON, а не «строка, похожая на него».
+ *
+ * Проверяется разбором: склейка `"url":"…" + "}}"` руками — ровно то
+ * место, где лишняя или недостающая скоба даёт не отказ, а «модель
+ * ответила не то». Свой парсер плагина (core/json.h) для этого не годится
+ * — он проверял бы склейку тем же кодом, который её сделал. */
+TEST(image_message_is_valid_json) {
+    ModelMessage m;
+    m.role = "user";
+    m.content = "вопрос";
+    m.images.push_back({"data:image/png;base64,AAA", "image/png"});
+    m.images.push_back({"data:image/png;base64,BBB", ""});
+
+    const std::string json = host::messages_to_json({m});
+    json::JsonValue root;
+    std::string err;
+    /* Причина печатается ДО проверки: ASSERT_TRUE здесь не поддерживает
+     * `<<`, и падение «ASSERT_TRUE failed» не сказало бы, ЧТО не
+     * разобралось. */
+    if (!json::JsonValue::parse(json, root, &err)) {
+        std::cerr << "  собранный JSON не разбирается: " << err << std::endl;
+    }
+    ASSERT_TRUE(err.empty());
+    ASSERT_TRUE(root.is_array());
+    ASSERT_EQ(root.size(), size_t(1));
+}

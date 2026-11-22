@@ -1,6 +1,8 @@
 #include "../include/ui/chat_interface.h"
 #include "../include/ui/file_dialog_helper.h"
 #include "../include/core/rag_manager.h"
+#include "../include/core/base64.h"
+#include "../include/core/image_mime.h"
 #include "../include/core/rag_settings.h"
 #include <cstring>
 #include <algorithm>
@@ -88,13 +90,17 @@ void ChatInterface::add_file_attachment(const std::string& file_path) {
     // Check if file already exists in attachments
     auto it = std::find(attachments_.begin(), attachments_.end(), file_path);
     if (it == attachments_.end()) {
-        // === ЧТЕНИЕ СОДЕРЖИМОГО ФАЙЛА (всегда, независимо от RAG) ===
+        // === ЧТЕНИЕ СОДЕРЖИМОГО ФАЙЛА ===
         std::string file_content;
         bool file_read_success = false;
-        
+
         try {
             if (std::filesystem::is_regular_file(file_path)) {
-                std::ifstream file(file_path);
+                /* std::ios::binary — не косметика. На Windows чтение без
+                 * него превращает CRLF в LF, то есть МЕНЯЕТ БАЙТЫ: для
+                 * текста незаметно, для PNG это порча файла, и модель
+                 * получила бы картинку с испорченными пикселями. */
+                std::ifstream file(file_path, std::ios::binary);
                 if (file.is_open()) {
                     file_content = std::string((std::istreambuf_iterator<char>(file)),
                                                std::istreambuf_iterator<char>());
@@ -110,13 +116,59 @@ void ChatInterface::add_file_attachment(const std::string& file_path) {
         // ================================================================
 
         attachments_.push_back(file_path);
-        
-        // Сохраняем содержимое файла для последующей передачи модели
-        if (file_read_success) {
+
+        /* === ИЗОБРАЖЕНИЕ ИЛИ ТЕКСТ? ===
+         *
+         * До этой развилки ЛЮБОЙ файл читался как текст и уезжал модели
+         * внутри промпта. Для .txt это верно, для .png — нет: модель
+         * получала бинарный дамп, который не изображение и не текст, и
+         * отвечала «не вижу картинки» на совершенно исправном вложении.
+         * Мультимодальность модели тут была ни при чём: канала для байтов
+         * не существовало вовсе.
+         *
+         * Тип определяется ПО СОДЕРЖИМОМУ, а не по расширению: файл
+         * `.png`, внутри которого HTML, — это не картинка, и поверив
+         * расширению, мы отдали бы модели base64 от страницы с
+         * `"type":"image_url"`. И наоборот: файл без расширения (так
+         * приходят вложения из некоторых мессенджеров) должен
+         * распознаться. */
+        /* llama_gui::core::, а не просто detect_image_mime: файл живёт в
+         * llama_gui::ui, и короткое имя искалось бы в ui, а не в core. */
+        const std::string mime = file_read_success
+            ? llama_gui::core::detect_image_mime(file_content) : std::string();
+
+        if (!mime.empty()) {
+            /* Картинка: ТЕЛОМ в текст не идёт, уходит структурой реплики.
+             *
+             * base64 без переносов строк: с CRLF внутри JSON-строки
+             * data-URL содержал бы перенос, и тот стал бы частью данных —
+             * провайдер декодировал бы мусор. */
+            llama_gui::core::ImagePart img;
+            img.media_type = mime;
+            img.url = "data:" + mime + ";base64," +
+                      llama_gui::core::base64_encode(file_content);
+            attachment_images_[file_path] = std::move(img);
+
+            /* Имя файла — в текстовый контекст, а не тело: модели нужно
+             * знать, ЧТО она видит («на скриншоте ошибка установки»), и
+             * имя файла дешевле и полезнее любого описания байтов. Заодно
+             * эта запись доезжает до модели, не умеющей изображения, и до
+             * RAG-индекса — то есть вложение не пропадает даже там, где
+             * картинку показать нечем. */
+            std::string filename = file_path;
+            const size_t slash = filename.find_last_of("/\\");
+            if (slash != std::string::npos) filename = filename.substr(slash + 1);
+            attachment_contents_[file_path] =
+                "[изображение: " + filename + " — " + mime + "]";
+            std::cout << "[ATTACHMENT] Image attached: " << file_path
+                      << " (" << mime << ", " << file_content.size() << " bytes)"
+                      << std::endl;
+        } else if (file_read_success) {
+            // Не картинка: прежнее поведение — содержимое текстом.
             attachment_contents_[file_path] = file_content;
             std::cout << "[ATTACHMENT] Content stored for: " << file_path << std::endl;
         }
-        
+
         std::cout << "ChatInterface: Added attachment: " << file_path << std::endl;
 
         // === ОТЛАДКА: Проверка состояния RAG ===
@@ -152,16 +204,60 @@ void ChatInterface::remove_attachment(size_t index) {
         std::string removed_path = attachments_[index];
         std::cout << "ChatInterface: Removed attachment: " << removed_path << std::endl;
         attachments_.erase(attachments_.begin() + index);
-        
+
         // Также удаляем содержимое файла
         attachment_contents_.erase(removed_path);
+        /* Изображение убирается по ТОМУ ЖЕ ключу: картинка и её текстовое
+         * имя живут в двух картах (см. add_file_attachment), и удалив
+         * только текстовую запись, мы оставили бы вложение уезжать в
+         * следующий запрос — то есть «×» убирал бы подпись, но не
+         * картинку. */
+        attachment_images_.erase(removed_path);
         std::cout << "[ATTACHMENT] Content removed for: " << removed_path << std::endl;
     }
 }
 
 void ChatInterface::set_attachments(const std::vector<std::string>& attachments) {
     attachments_ = attachments;
+    /* Карта изображений ФИЛЬТРУЕТСЯ по новому списку, а не чистится.
+     *
+     * Чистка была бы хуже, чем кажется: этот метод зовёт FileManager на
+     * КАЖДОЕ изменение своего списка, а список FileManager и список,
+     * набранный кнопкой «Прикрепить» в чате, — два разных источника. При
+     * расхождении (человек прикрепил картинку в чате, а FileManager
+     * синхронизирует свой список без неё) `clear()` выбросил бы вложение,
+     * которого никто не снимал, — и «×» человек не нажимал, а картинка
+     * перестала уходить.
+     *
+     * Фильтрация по путям решает это без второго списка: записи, которых
+     * нет в новом списке, действительно устарели и удаляются; записи,
+     * которые в нём есть, остаются. Расхождение источников при этом не
+     * ломает ни то, ни другое — ровно как attachment_contents_, который
+     * тоже хранится по пути и никем не чистится. */
+    for (auto it = attachment_images_.begin(); it != attachment_images_.end();) {
+        if (std::find(attachments_.begin(), attachments_.end(), it->first) ==
+            attachments_.end()) {
+            it = attachment_images_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     std::cout << "ChatInterface: Set " << attachments_.size() << " attachments" << std::endl;
+}
+
+std::vector<llama_gui::core::ImagePart> ChatInterface::get_attachment_images() const {
+    std::vector<llama_gui::core::ImagePart> out;
+    /* Обход по attachments_, а не по карте: карта не хранит порядок, а
+     * порядок вложений виден человеку в списке под полем ввода и модели
+     * в реплике. Запись, которой нет в attachments_, пропускается — это
+     * «вложение сняли, а картинка осталась», и молча послать её значило
+     * бы отправить то, что человек убрал. */
+    out.reserve(attachment_images_.size());
+    for (const auto& path : attachments_) {
+        const auto it = attachment_images_.find(path);
+        if (it != attachment_images_.end()) out.push_back(it->second);
+    }
+    return out;
 }
 
 std::string ChatInterface::build_attachments_context() const {

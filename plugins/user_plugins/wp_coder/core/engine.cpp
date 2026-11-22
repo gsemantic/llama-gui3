@@ -189,6 +189,18 @@ void Engine::stop() {
 }
 
 void Engine::submit(const std::string& prompt) {
+    /* Перегрузка без картинок — ТОНКАЯ обёртка, а не второй набор правил:
+     * вся логика живёт в версии с images (см. ниже). Иначе «отправить
+     * задачу» и «отправить задачу с картинкой» разошлись бы по поведению, и
+     * расхождение было бы видно только на живом агенте. */
+    submit(prompt, std::vector<ImagePart>());
+}
+
+/* Реализация ОДНА, и она здесь, а не в перегрузке: тело делает примерно
+ * шестьдесят строк (снимок отмены, лок, ветки continue/new, очередь), и
+ * две копии разъехались бы на первой же правке — ровно тот класс дефекта,
+ * на котором стоит половина разбора в AGENT_PARITY_PLAN (D12). */
+void Engine::submit(const std::string& prompt, std::vector<ImagePart> images) {
     /* Новая задача — снимаем отмену разрешений от прошлой. Иначе после
      * «стоп» движок задавал бы мгновенные отказы на любой вопрос до
      * конца сессии. Вне лока: cancel_all/clear_cancel берут свой mtx_,
@@ -207,13 +219,13 @@ void Engine::submit(const std::string& prompt) {
              * явному запросу (clear_session / новая сессия при выключенном
              * continue_conversation), иначе агент «забывает» предыдущие шаги
              * и результаты инструментов. */
-            state_.session.push_back(Message::user(prompt));
+            state_.session.push_back(Message::user(prompt, std::move(images)));
             std::cerr << "[wp_coder] submit: continue session, msgs="
                       << state_.session.size() << std::endl;
         } else {
             /* Новая задача: очищаем сессию и начинаем заново. */
             state_.session.clear();
-            state_.session.push_back(Message::user(prompt));
+            state_.session.push_back(Message::user(prompt, std::move(images)));
             /* И4.6: план прошлой задачи в промпте новой только сбивает —
              * модель сверялась бы с чужими пунктами. */
             state_.todos.clear();

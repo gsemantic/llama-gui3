@@ -82,6 +82,28 @@ typedef struct LlamaPluginAgentMode {
      */
     char* (*on_message)(LlamaPluginHost* host, const char* user_message, void* user_data);
     /*
+     * То же, но с вложениями (мультимодальность).
+     *
+     * Зачем второй обработчик, а не расширение on_message: on_message —
+     * СИГНАТУРА, и её изменение сломало бы все уже собранные плагины. Все
+     * остальные расширения ABI в этом файле сделаны добавлением поля в
+     * КОНЕЦ структуры, и здесь то же правило: старый плагин оставляет
+     * указатель нулевым (структура инициализируется `= {}`), и хост
+     * зовёт on_message, как звал.
+     *
+     * attachments_json — JSON-массив OpenAI-формата:
+     *   [{"type":"image_url","image_url":{"url":"data:image/png;base64,…"}}]
+     * или nullptr, если вложений нет. Хост зовёт on_message_ex, когда
+     * указатель непуст; тот же контракт, что у llm_chat_stream (проверка
+     * наличия ДО вызова), и по той же причине: вызов несуществующего поля
+     * на старом хосте — это вызов по мусорному указателю.
+     *
+     * Возвращает то же, что on_message: malloc'd строку, освобождается
+     * хостом через free_string().
+     */
+    char* (*on_message_ex)(LlamaPluginHost* host, const char* user_message,
+                           const char* attachments_json, void* user_data);
+    /*
      * Рендер дополнительного UI под лентой сообщений.
      * Вызывается каждый кадр из render() чата когда режим активен.
      * Рисовать ImGui внутри.

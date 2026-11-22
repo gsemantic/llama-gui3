@@ -104,6 +104,25 @@ json::JsonValue part_to_json(const MessagePart& p) {
             v.set("task_id", p.task_id());
             v.set("subagent", p.subagent());
             break;
+        /* Изображение пишется ЦЕЛИКОМ, вместе с data-URL. Это дорого
+         * (картинка на 2 МБ — 2.7 МБ base64) и сделано сознательно:
+         * альтернатива — не сохранять вложение вовсе, и тогда сессия,
+         * пережившая перезапуск, теряла бы картинку, на которую
+         * пользователь ссылался («исправь по скриншоту»), а модель
+         * отвечала бы «не вижу изображения» на задаче, которая полчаса
+         * назад была понятной.
+         *
+         * Пустой url не пишется: часть без url — это не «изображение», а
+         * ошибка разбора, и записать её значило бы вернуть при загрузке
+         * пустую картинку. */
+        case PartKind::Image:
+            if (!p.image_url().empty()) {
+                v.set("url", p.image_url());
+                if (!p.image_media_type().empty()) {
+                    v.set("media_type", p.image_media_type());
+                }
+            }
+            break;
     }
     return v;
 }
@@ -185,6 +204,16 @@ bool append_part_from_json(const json::JsonValue& v,
     if (kind == "subtask") {
         out.push_back(MessagePart::subtask(v.get_string("task_id", ""),
                                             v.get_string("subagent", "")));
+        return true;
+    }
+    if (kind == "image") {
+        const std::string url = v.get_string("url", "");
+        /* Путь без url — не часть: см. парную запись в part_to_json. */
+        if (url.empty()) {
+            warn("часть-изображение без url пропущена");
+            return false;
+        }
+        out.push_back(MessagePart::image(url, v.get_string("media_type", "")));
         return true;
     }
     if (kind == "tool") {

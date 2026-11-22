@@ -66,6 +66,10 @@ const char* part_kind_name(PartKind k) {
          * перестанет читаться, а читается она этим же кодом. */
         case PartKind::CompactionContinue: return "compaction_continue";
         case PartKind::Subtask:    return "subtask";
+        /* Имя вида — тег в файле сессии и в JSON для UI. «image» короткое
+         * и совпадает с природой вида; отдельного маркера в промпте у него
+         * нет (см. правило в message.h: служебные виды не имеют формата). */
+        case PartKind::Image:      return "image";
     }
     return "unknown";
 }
@@ -145,6 +149,13 @@ MessagePart MessagePart::compaction(std::string summary,
 MessagePart MessagePart::compaction_continue() {
     MessagePart p(PartKind::CompactionContinue);
     p.text_ = kCompactionContinueText;
+    return p;
+}
+
+MessagePart MessagePart::image(std::string url, std::string media_type) {
+    MessagePart p(PartKind::Image);
+    p.image_url_ = std::move(url);
+    p.image_media_type_ = std::move(media_type);
     return p;
 }
 
@@ -237,6 +248,21 @@ const std::vector<std::string>& MessagePart::replaced_ids() const {
     return replaced_ids_;
 }
 
+/* Геттеры изображения отвечают ПУСТОЙ СТРОКОЙ на части других видов, а не
+ * значением поля: иначе чтение `image_url()` у текстовой части отдавало бы
+ * случайные байты, и «у картинки нет url» стало бы неотличимо от «это не
+ * картинка» — то есть от молчаливой ошибки. То же правило, что у
+ * step_name/snapshot_hash/task_id выше. */
+const std::string& MessagePart::image_url() const {
+    if (kind_ != PartKind::Image) return empty_string();
+    return image_url_;
+}
+
+const std::string& MessagePart::image_media_type() const {
+    if (kind_ != PartKind::Image) return empty_string();
+    return image_media_type_;
+}
+
 /* --- Переходы состояния вызова --- */
 
 void MessagePart::begin_timing() {
@@ -311,6 +337,20 @@ Message Message::user(std::string text) {
     Message m;
     m.id = ids().next_msg();
     m.role = kRoleUser;
+    if (!text.empty()) m.parts.push_back(MessagePart::text(std::move(text)));
+    return m;
+}
+
+Message Message::user(std::string text, std::vector<ImagePart> images) {
+    Message m = Message::user(std::string());
+    /* Картинки — ДО текста (см. объявление в message.h). Часть без текста
+     * не создаётся: пустая текстовая часть у половины провайдеров считается
+     * ошибкой разбора, а реплика из одних изображений — законный формат. */
+    for (auto& img : images) {
+        if (img.url.empty()) continue;
+        m.parts.push_back(MessagePart::image(std::move(img.url),
+                                             std::move(img.media_type)));
+    }
     if (!text.empty()) m.parts.push_back(MessagePart::text(std::move(text)));
     return m;
 }
@@ -449,13 +489,36 @@ std::vector<ModelMessage> to_model_messages(const std::vector<Message>& history)
          * один план — с теми же пунктами, что и первый. */
         if (message_is_plan(m)) continue;
         std::string pending;      /* накопитель текущей реплики */
+        /* Изображения, НАКОПЛЕННЫЕ для следующей реплики.
+         *
+         * Прицепляются к реплике ПОЛЬЗОВАТЕЛЯ и только к ней: картинку
+         * присылает человек, и «я видел изображение» в реплике ассистента —
+         * не формат OpenAI, а выдумка (в отличие от текста, где у ассистента
+         * есть свои накопления — вызовы и сводки).
+         *
+         * Копия, а не ссылка: накопитель живёт до конца сообщения, и
+         * ссылаться на него после flush() значило бы отдать модели
+         * содержимое следующего хода. */
+        std::vector<ImagePart> pending_images;
         const std::string role =
             m.role.empty() ? std::string(kRoleUser) : m.role;
 
         const auto flush = [&](void) {
-            if (pending.empty()) return;
-            out.push_back({role, pending});
+            /* Пустой текст при непустых картинках — НЕ повод выбросить
+             * реплику: это ровно случай «человек прислал одну картинку без
+             * подписи». Отправить `"content": [{"type":"image_url",…}]` —
+             * законный формат, и именно он и есть смысл мультимодальности. */
+            if (pending.empty() && pending_images.empty()) return;
+            ModelMessage msg;
+            msg.role = role;
+            msg.content = pending;
+            /* Картинки — только пользователю: у ассистента их не бывает, и
+             * отправка изображения в его роли дала бы провайдеру реплику,
+             * которой он не ждёт (ошибка разбора вместо ответа). */
+            if (role == kRoleUser) msg.images = pending_images;
+            out.push_back(std::move(msg));
             pending.clear();
+            pending_images.clear();
         };
         const auto append = [&](const std::string& t) {
             if (t.empty()) return;
@@ -476,6 +539,17 @@ std::vector<ModelMessage> to_model_messages(const std::vector<Message>& history)
                     out.push_back({std::string(kRoleUser),
                                    tool_result_text(p)});
                 }
+                continue;
+            }
+            if (p.is(PartKind::Image)) {
+                /* Накопление, а не text: картинка приходит в общей
+                 * последовательности с текстом («вот скриншот: …»), и
+                 * разнести их по репликам значило бы потерять порядок —
+                 * то есть ответ на вопрос «что на картинке?» приехал бы
+                 * раньше самой картинки. */
+                if (p.image_url().empty()) continue;
+                pending_images.push_back(
+                    {p.image_url(), p.image_media_type()});
                 continue;
             }
             if (p.is(PartKind::Compaction)) {

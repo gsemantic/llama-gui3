@@ -83,6 +83,82 @@ static char* agent_mode_on_message(LlamaPluginHost* host, const char* user_messa
     return out;
 }
 
+/* Разбор attachments_json хоста в изображения.
+ *
+ * Формат — OpenAI-часть: [{"type":"image_url","image_url":{"url":"…"}}].
+ * Разбирается СВОИМ парсером (core/json.h), а не nlohmann: плагин не
+ * линкуется с хостом и не имеет доступа к его библиотекам (см. шапку
+ * core/json.h, решение D-2).
+ *
+ * Мусор и неизвестные типы частей','"'"' НЕ ошибка:'"'"' плагин, получивший битую строку,
+ * должен отправить задачу текстом, а не потерять её целиком. Но и молча
+ * проглотить — нельзя: об этом пишется в лог, иначе «картинка не дошла»
+ * осталось бы без причины. */
+static std::vector<coder::ImagePart> parse_attachments(const char* json) {
+    std::vector<coder::ImagePart> out;
+    if (!json || !*json) return out;
+
+    coder::json::JsonValue root;
+    std::string err;
+    if (!coder::json::JsonValue::parse(json, root, &err) || !root.is_array()) {
+        std::cerr << "[wp_coder] attachments: не разобран JSON (" << err << ")"
+                  << std::endl;
+        return out;
+    }
+    for (size_t i = 0; i < root.size(); ++i) {
+        const coder::json::JsonValue& part = root.at(i);
+        if (!part.is_object()) continue;
+        if (part.get_string("type", "") != "image_url") continue;
+
+        coder::ImagePart img;
+        /* Две формы url: вложенный объект (OpenAI) и просто строка (так
+         * пишут некоторые шлюзы). Принимаются обе — отвергнутая картинка
+         * выглядела бы как «модель не разглядела», и причину пришлось бы
+         * искать в модели. */
+        if (part.has("image_url")) {
+            const coder::json::JsonValue& iu = part.get("image_url");
+            if (iu.is_object()) {
+                img.url = iu.get_string("url", "");
+                img.media_type = iu.get_string("media_type", "");
+            } else if (iu.is_string()) {
+                img.url = iu.as_string();
+            }
+        }
+        if (img.url.empty()) {
+            std::cerr << "[wp_coder] attachments: часть без url пропущена"
+                      << std::endl;
+            continue;
+        }
+        out.push_back(std::move(img));
+    }
+    return out;
+}
+
+/* Вторая точка входа: то же, что agent_mode_on_message, но с вложениями.
+ *
+ * Хост зовёт ЕЁ, когда указатель непуст (include/plugins/plugin_api.h);
+ * старая версия этой функции — agent_mode_on_message — остаётся на месте
+ * для плагинов и хостов, собранных до правки. Дублирования логики здесь
+ * нет: обе сводятся к одному eng.submit(). */
+static char* agent_mode_on_message_ex(LlamaPluginHost* host,
+                                      const char* user_message,
+                                      const char* attachments_json,
+                                      void* user_data) {
+    if (!user_message || !user_message[0]) return nullptr;
+    std::string message = coder::text::sanitize_utf8(user_message);
+    std::vector<coder::ImagePart> images = parse_attachments(attachments_json);
+    std::cerr << "[wp_coder] agent_mode_on_message_ex: " << message
+              << " (изображений: " << images.size() << ")" << std::endl;
+
+    auto& eng = coder::engine();
+    eng.submit(message, std::move(images));
+
+    std::string response = kPromptAck;
+    char* out = (char*)malloc(response.size() + 1);
+    if (out) memcpy(out, response.c_str(), response.size() + 1);
+    return out;
+}
+
 static void agent_mode_render_extras(LlamaPluginHost* host, void* user_data) {
     if (!g_api || !g_host) return;
     coder::ui::render_extras();
@@ -302,6 +378,11 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
     agent_mode.name = "ai_coder";
     agent_mode.display_name = "AI Coder";
     agent_mode.on_message = agent_mode_on_message;
+    /* Поле добавлено в КОНЕЦ структуры ABI (append-only): старый хост его
+     * не читает, новый — читает и зовёт при наличии вложений. Порядок
+     * именно такой, потому что структура инициализируется `= {}` и
+     * неинициализированных указателей в ней нет. */
+    agent_mode.on_message_ex = agent_mode_on_message_ex;
     agent_mode.render_extras = agent_mode_render_extras;
     agent_mode.user_data = nullptr;
     std::cerr << "[wp_coder] registering agent_mode: api=" << (void*)api

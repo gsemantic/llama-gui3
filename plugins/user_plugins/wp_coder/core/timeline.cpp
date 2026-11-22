@@ -78,6 +78,22 @@ Source timeline_source(const std::vector<Message>& history,
         const Message& m = history[i];
         if (m.is_user()) {
             std::string full = m.text();
+            /* Реплика БЕЗ текста — это присланное изображение (или
+             * изображение без подписи). Пустая подпись в дереве выглядела
+             * бы как «ход без задачи», и человек, прокручивающий дерево,
+             * не отличил бы её от сбоя.
+             *
+             * Считается по ЧАСТЯМ, а не по пустоте text(): текста может не
+             * быть и у реплики с одной картинкой, и у реплики, где текст
+             * не прошёл санитайзер, — вторая не «про картинку», и назвать
+             * её изображением было бы неправдой. */
+            size_t image_count = 0;
+            for (const MessagePart& p : m.parts) {
+                if (p.is(PartKind::Image)) ++image_count;
+            }
+            if (full.empty() && image_count > 0) {
+                full = "[изображение]";
+            }
             const size_t nl = full.find('\n');
             if (nl != std::string::npos) full = full.substr(0, nl);
             /* Обрез по СИМВОЛАМ, а не по байтам: кириллица занимает два

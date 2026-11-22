@@ -24,9 +24,12 @@
 #include "../core/json_utils.h"
 #include "../core/limits.h"
 #include "../core/message.h"
+#include "../core/session_store.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <unistd.h>
 #include <map>
 #include <ostream>
 #include <set>
@@ -98,6 +101,8 @@ std::vector<std::string> filled_accessors(const MessagePart& p) {
     if (p.files().type() != json::JsonValue::Type::Null) v.push_back("files");
     if (!p.task_id().empty()) v.push_back("task_id");
     if (!p.subagent().empty()) v.push_back("subagent");
+    if (!p.image_url().empty()) v.push_back("image_url");
+    if (!p.image_media_type().empty()) v.push_back("image_media_type");
     if (!p.replaced_ids().empty()) v.push_back("replaced_ids");
     if (p.attempt() != 0) v.push_back("attempt");
     if (p.next_attempt_in_ms() != 0) v.push_back("next_attempt_in_ms");
@@ -109,7 +114,7 @@ std::vector<PartKind> all_kinds() {
         PartKind::Text,      PartKind::Reasoning,   PartKind::Tool,
         PartKind::StepStart, PartKind::StepFinish,  PartKind::Patch,
         PartKind::Retry,     PartKind::Compaction,  PartKind::CompactionContinue,
-        PartKind::Subtask,
+        PartKind::Subtask,   PartKind::Image,
     };
 }
 
@@ -129,6 +134,8 @@ std::vector<MessagePart> sample_parts() {
         MessagePart::compaction("сводка", {"msg_1", "msg_2"}),
         MessagePart::compaction_continue(),
         MessagePart::subtask("ses_child", "wp_explore"),
+        MessagePart::image("data:image/png;base64,iVBORw0KGgo=",
+                           "image/png"),
     };
 }
 
@@ -146,6 +153,7 @@ std::map<std::string, std::vector<std::string>> expected_filled() {
         {"compaction", {"text", "replaced_ids"}},
         {"compaction_continue", {"text"}},
         {"subtask",    {"task_id", "subagent"}},
+        {"image",      {"image_url", "image_media_type"}},
     };
 }
 
@@ -174,12 +182,16 @@ TEST(message_part_kinds_are_named_and_closed) {
         ASSERT_TRUE(std::string(name) != "unknown");
         names.insert(name);
     }
-    /* Десять видов: шесть работают, четыре (Patch, Retry, Subtask и
+    /* Одиннадцать видов: шесть работают, четыре (Patch, Retry, Subtask и
      * запись сжатой истории) объявлены заранее под И10, И12.6, И8 и
      * 7.10 — чтобы файл сессии не пришлось менять по формату при их
-     * появлении. */
-    ASSERT_EQ(names.size(), size_t(10));
-    ASSERT_EQ(all_kinds().size(), size_t(10));
+     * появлении, — и Image, единственный, кто несёт НЕ текст, а байты.
+     *
+     * Число здесь и в every_part_kind_is_in_the_test_table — не одно и то
+     * же место: первое следит, что список не забыли расширить, второе — что
+     * ни один вид не остался без проверки полей. */
+    ASSERT_EQ(names.size(), size_t(11));
+    ASSERT_EQ(all_kinds().size(), size_t(11));
     ASSERT_EQ(std::string(part_kind_name(static_cast<PartKind>(99))),
               std::string("unknown"));
 }
@@ -209,7 +221,7 @@ TEST(every_part_kind_is_in_the_test_table) {
         }
         ASSERT_TRUE(listed.count(k) == 1);
     }
-    ASSERT_EQ(listed.size(), size_t(10));
+    ASSERT_EQ(listed.size(), size_t(11));
 }
 
 TEST(an_unfinished_call_hides_its_output_from_everyone) {
@@ -1522,4 +1534,130 @@ TEST(turn_verdict_rejects_a_report_that_hands_work_to_the_user) {
     const Message turn = turn_of(r, kUser);
     ASSERT_EQ((int)turn_verdict(r, turn, kUser), (int)TurnVerdict::HandedOff);
     ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+}
+
+/* --- Изображения (мультимодальность) --- */
+
+/* Реплика из одной картинки — ЗАКОННАЯ, и она обязана доехать до модели.
+ *
+ * Это ровно тот случай, на котором всё ломалось: человек присылает
+ * скриншот без подписи, и «пустой текст» не должен съедать реплику. До
+ * правки such реплика либо терялась (пустой pending не флашился), либо
+ * уезжала с `"content": ""` — то есть модель отвечала «не вижу картинки».
+ */
+TEST(to_model_messages_delivers_an_image_without_any_text) {
+    Message m = Message::user(std::string(),
+                              {ImagePart{"data:image/png;base64,AAAA", "image/png"}});
+    const std::vector<ModelMessage> msgs = to_model_messages({m});
+
+    ASSERT_EQ(msgs.size(), size_t(1));
+    ASSERT_EQ(msgs[0].role, std::string(kRoleUser));
+    ASSERT_TRUE(msgs[0].content.empty());
+    ASSERT_EQ(msgs[0].images.size(), size_t(1));
+    ASSERT_EQ(msgs[0].images[0].url, std::string("data:image/png;base64,AAAA"));
+    ASSERT_EQ(msgs[0].images[0].media_type, std::string("image/png"));
+}
+
+/* Картинка приезжает ВМЕСТЕ с текстом, в одной реплике: вопрос и
+ * присланное — это одна реплика человека, а не две. */
+TEST(to_model_messages_keeps_image_and_text_in_one_message) {
+    Message m = Message::user("что здесь не так?",
+                              {ImagePart{"data:image/jpeg;base64,BBBB", "image/jpeg"}});
+    const std::vector<ModelMessage> msgs = to_model_messages({m});
+
+    ASSERT_EQ(msgs.size(), size_t(1));
+    ASSERT_EQ(msgs[0].content, std::string("что здесь не так?"));
+    ASSERT_EQ(msgs[0].images.size(), size_t(1));
+    ASSERT_EQ(msgs[0].images[0].url, std::string("data:image/jpeg;base64,BBBB"));
+}
+
+/* Две картинки не теряются и сохраняют порядок: порядок вложений человек
+ * видит в списке под полем ввода, и он же определяет, в каком порядке
+ * изображения приходят модели. */
+TEST(to_model_messages_keeps_every_image_in_order) {
+    Message m = Message::user(std::string(), {
+        ImagePart{"data:image/png;base64,AAA", "image/png"},
+        ImagePart{"data:image/png;base64,BBB", "image/png"},
+    });
+    const std::vector<ModelMessage> msgs = to_model_messages({m});
+
+    ASSERT_EQ(msgs.size(), size_t(1));
+    ASSERT_EQ(msgs[0].images.size(), size_t(2));
+    ASSERT_TRUE(msgs[0].images[0].url.find("AAA") != std::string::npos);
+    ASSERT_TRUE(msgs[0].images[1].url.find("BBB") != std::string::npos);
+}
+
+/* Картинка НЕ приклеивается к реплике ассистента.
+ *
+ * Изображения присылает человек, и «я видел картинку» в реплике
+ * ассистента — не формат OpenAI, а выдумка: половина провайдеров ответит
+ * на такую реплику ошибкой разбора, и это выглядело бы как «модель
+ * сломалась», хотя сломалось бы прикрепление.
+ */
+TEST(to_model_messages_never_attaches_images_to_an_assistant_turn) {
+    Message a;
+    a.role = kRoleAssistant;
+    a.parts.push_back(MessagePart::image("data:image/png;base64,AAA",
+                                         "image/png"));
+    a.parts.push_back(MessagePart::text("Вижу скриншот."));
+
+    const std::vector<ModelMessage> msgs = to_model_messages({a});
+    ASSERT_EQ(msgs.size(), size_t(1));
+    ASSERT_EQ(msgs[0].role, std::string(kRoleAssistant));
+    ASSERT_TRUE(msgs[0].images.empty());
+}
+
+/* Пустой url — не изображение: такая часть пропускается, а не уезжает
+ * провайдеру как `{"type":"image_url","image_url":{"url":""}}`. */
+TEST(to_model_messages_drops_an_image_without_a_url) {
+    Message m = Message::user(std::string(), {ImagePart{"", "image/png"}});
+    const std::vector<ModelMessage> msgs = to_model_messages({m});
+    ASSERT_TRUE(msgs.empty());
+}
+
+/* Изображение переживает файл сессии.
+ *
+ * Проверяется не «часть записалась», а «вернулась РАБОЧЕЙ»: без обратного
+ * разбора round-trip был бы зелёным на записи, которая ничего не
+ * восстанавливает, — ровно тот класс дефекта, который в И11.3 стоил
+ * «длительность есть в файле, но её никто не читает».
+ */
+TEST(image_part_survives_the_session_file) {
+    Message m = Message::user("по скриншоту",
+                              {ImagePart{"data:image/png;base64,CCCC", "image/png"}});
+    SessionFile f;
+    f.messages.push_back(m);
+
+    /* Свой каталог, а не общий хелпер: tmp_dir() живёт в
+     * test_session_store.cpp и этому файлу не виден, а заводить общий
+     * ради одного вызова значило бы новую точку, которую надо помнить в
+     * двух местах. */
+    const std::string path =
+        std::string("/tmp/wp_coder_img_msg_") + std::to_string(::getpid()) +
+        ".json";
+    /* Причина печатается ДО проверки, а не после: ASSERT_TRUE в этом
+     * наборе не поддерживает `<<` (см. test_framework.h), и падение
+     * «ASSERT_TRUE failed» на ошибке сохранения не сказало бы, ЧТО именно
+     * не сохранилось. */
+    std::string save_err;
+    if (!SessionArchive::save(path, f, &save_err)) {
+        std::cerr << "  сессия не сохранилась: " << save_err << std::endl;
+    }
+    ASSERT_TRUE(save_err.empty());
+
+    SessionFile back;
+    std::string err;
+    if (!SessionArchive::load(path, back, &err)) {
+        std::cerr << "  сессия не прочиталась: " << err << std::endl;
+    }
+    ASSERT_TRUE(err.empty());
+
+    ASSERT_EQ(back.messages.size(), size_t(1));
+    const std::vector<MessagePart>& parts = back.messages[0].parts;
+    ASSERT_EQ(parts.size(), size_t(2));
+    ASSERT_TRUE(parts[0].is(PartKind::Image));
+    ASSERT_EQ(parts[0].image_url(), std::string("data:image/png;base64,CCCC"));
+    ASSERT_EQ(parts[0].image_media_type(), std::string("image/png"));
+    ASSERT_TRUE(parts[1].is(PartKind::Text));
+    std::remove(path.c_str());
 }

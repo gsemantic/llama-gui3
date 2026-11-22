@@ -267,7 +267,33 @@ std::string build_completion_body(const OpenRouterRequestParams& params) {
         for (const auto& msg : params.messages) {
             nlohmann::json message;
             message["role"] = msg.role;
-            message["content"] = sanitize_utf8(msg.content);
+            /* Изображения — как у локального пути: непустой список
+             * превращает content в массив частей OpenAI-формата. Тело
+             * собирается здесь, потому что это ЕДИНСТВЕННОЕ место, где
+             * облачный запрос уходит провайдеру; build_chat_body живёт в
+             * llama_interface_impl.cpp и про облако не знает.
+             *
+             * Условие и ветка те же, что там: пустой список — по-прежнему
+             * строка. Расхождение двух сборщиков было бы ровно тем классом
+             * дефекта, который в И6.2 стоил «вызов приходит текстом и
+             * разбирается эвристиками»: один и тот же ход уходил бы в
+             * облако и на локальный сервер в разных форматах. */
+            if (msg.images.empty()) {
+                message["content"] = sanitize_utf8(msg.content);
+            } else {
+                nlohmann::json parts = nlohmann::json::array();
+                if (!msg.content.empty()) {
+                    parts.push_back({{"type", "text"},
+                                     {"text", sanitize_utf8(msg.content)}});
+                }
+                for (const auto& img : msg.images) {
+                    if (img.url.empty()) continue;
+                    parts.push_back({{"type", "image_url"},
+                                     {"image_url", {{"url", img.url}}}});
+                }
+                if (!parts.empty()) message["content"] = std::move(parts);
+                else message["content"] = sanitize_utf8(msg.content);
+            }
             request_body["messages"].push_back(message);
         }
     } else if (!params.prompt.empty()) {
