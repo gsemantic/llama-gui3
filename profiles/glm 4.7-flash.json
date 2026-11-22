@@ -66,28 +66,28 @@
     },
     "cloud_provider": {
         "auto_price": false,
-        "context_length": 0,
+        "context_length": 1000000,
         "enabled": true,
-        "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "endpoint_url": "https://api.yenisei.ru/v1",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 1024,
-        "model_id": "qwen3-coder-flash",
+        "model_id": "yenisei-max",
         "price_input_per_1m": 0.0,
         "price_output_per_1m": 0.0,
-        "provider_name": "Qwen (DashScope)",
+        "provider_name": "yenisei",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
             {
-                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "qwen3-coder-flash",
-                "provider_name": "Qwen (DashScope)"
-            },
-            {
                 "endpoint_url": "https://api.yenisei.ru/v1",
                 "id": "yenisei-max",
                 "provider_name": "yenisei"
+            },
+            {
+                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "id": "qwen3-coder-flash",
+                "provider_name": "Qwen (DashScope)"
             },
             {
                 "endpoint_url": "https://api.kilo.ai/api/gateway",
@@ -309,8 +309,8 @@
             "avg_response_time_ms": 658.07,
             "avg_tokens_generated": 70,
             "avg_tokens_per_second": 265.09,
-            "first_used": "Sat Nov 21 22:18:40 2026",
-            "last_used": "Sat Nov 21 22:18:40 2026",
+            "first_used": "Sun Nov 22 03:35:37 2026",
+            "last_used": "Sun Nov 22 03:35:37 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,

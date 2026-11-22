@@ -53,6 +53,22 @@ static std::string run_exec_json(const json::JsonValue& args) {
     return ToolsRegistry::instance().run("bash", args);
 }
 
+/* Выставляет корень проекта в /tmp/wp-test И создаёт каталог.
+ *
+ * Раньше каталог создавал только bash_inside_path_not_gated, а остальные
+ * тесты полагались на его порядок. На чистом /tmp bash не мог войти в
+ * рабочий каталог, и bash_allowlist_covers_what_substrings_missed падал
+ * «не по своей причине»: `echo policy-alive` возвращал «не удалось
+ * перейти в рабочий каталог команды». Зависимость от порядка — это флак,
+ * а не проверка; теперь каждый тест готовит каталог сам. */
+static void set_project_dir_tmp() {
+    std::error_code ec;
+    fs::create_directories("/tmp/wp-test", ec);
+    std::lock_guard<std::mutex> lk(engine_state().mtx);
+    engine_state().project_dir = "/tmp/wp-test";
+    engine_state().allowed_external_paths.clear();
+}
+
 /* --- И0.3: инструмент описан для модели (без этого модель его не зовёт) ---
  *
  * И1.5: описание инструментов больше не живёт в ручном списке
@@ -111,10 +127,7 @@ TEST(bash_empty_rejected) {
 
 TEST(bash_blocklist_still_applies) {
     init_engine_and_base();
-    {
-        std::lock_guard<std::mutex> lk(engine_state().mtx);
-        engine_state().project_dir = "/tmp/wp-test";
-    }
+    set_project_dir_tmp();
     std::string r = run_exec("rm -rf /");
     ASSERT_TRUE(r.find("запрещено") != std::string::npos);
 }
@@ -127,11 +140,7 @@ TEST(bash_blocklist_still_applies) {
  * проходили при них. */
 TEST(bash_allowlist_covers_what_substrings_missed) {
     init_engine_and_base();
-    {
-        std::lock_guard<std::mutex> lk(engine_state().mtx);
-        engine_state().project_dir = "/tmp/wp-test";
-        engine_state().allowed_external_paths.clear();
-    }
+    set_project_dir_tmp();
     /* Подстроковый фильтр этих команд не ловил: «rm -rf /» в нём есть,
      * а «rm -rf ~» — нет. */
     ASSERT_TRUE(security::is_command_allowed("rm -rf ~"));
@@ -158,11 +167,7 @@ TEST(bash_allowlist_covers_what_substrings_missed) {
  * исполняющим произвольный код, и единственным без проверки пути. */
 TEST(bash_outside_path_requires_permission) {
     init_engine_and_base();
-    {
-        std::lock_guard<std::mutex> lk(engine_state().mtx);
-        engine_state().project_dir = "/tmp/wp-test";
-        engine_state().allowed_external_paths.clear();
-    }
+    set_project_dir_tmp();
     std::string r = run_exec("cat /etc/shadow");
     /* Либо отказ с требованием разрешения, либо (если движок не смог войти
      * в режим ожидания) явный запрет — но НЕ вывод файла. */
@@ -174,19 +179,7 @@ TEST(bash_outside_path_requires_permission) {
 /* Путь внутри проекта — гейт не должен срабатывать. */
 TEST(bash_inside_path_not_gated) {
     init_engine_and_base();
-    {
-        std::lock_guard<std::mutex> lk(engine_state().mtx);
-        engine_state().project_dir = "/tmp/wp-test";
-        engine_state().allowed_external_paths.clear();
-    }
-    /* Каталог проекта создаётся ЗДЕСЬ, а не остаётся на волю другому
-     * тесту: команда ниже пишет в него, и без каталога падал бы сам
-     * `sh`, а тест проверял бы не гейт, а наличие каталога. Раньше падение
-     * выглядело как «тест прошёл, а `probe.txt` не создался», то есть как
-     * успех: тот же класс, что у отклонения №30. */
-    std::error_code ec;
-    fs::create_directories("/tmp/wp-test", ec);
-    ASSERT_TRUE(!ec);
+    set_project_dir_tmp();
     /* Команда безобидная и не выходит за пределы проекта: её выполнение
      * допустимо, значит отказа в разрешении быть не должно. */
     std::string r = run_exec("echo hi > /tmp/wp-test/probe.txt");
@@ -194,17 +187,14 @@ TEST(bash_inside_path_not_gated) {
     /* И правда записала: иначе проверка «не сработал гейт» прошла бы и при
      * отказе, просто потому что команда не выполнилась. */
     ASSERT_TRUE(fs::exists("/tmp/wp-test/probe.txt"));
+    std::error_code ec;
     fs::remove("/tmp/wp-test/probe.txt", ec);
 }
 
 /* Аргумент вида --path=/outside тоже должен ловиться. */
 TEST(bash_flag_path_outside_gated) {
     init_engine_and_base();
-    {
-        std::lock_guard<std::mutex> lk(engine_state().mtx);
-        engine_state().project_dir = "/tmp/wp-test";
-        engine_state().allowed_external_paths.clear();
-    }
+    set_project_dir_tmp();
     std::string r = run_exec("wp --path=/var/www/html core version");
     ASSERT_TRUE(r.find("Доступ") != std::string::npos ||
                 r.find("разрешен") != std::string::npos);

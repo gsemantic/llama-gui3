@@ -877,6 +877,27 @@ TEST(turn_verdict_does_not_close_task_on_tool_args_json) {
         R"({"answer": "готово", "summary": "файл записан"})"));
 }
 
+TEST(turn_verdict_does_not_close_task_on_a_printed_todowrite) {
+    /* ses_000000000032: модель напечатала `{"todos": [...]}` как финальный
+     * ответ. JSON сбалансирован, ключи content/id/priority/status давали
+     * только одно совпадение, а command_key не срабатывал — план уезжал в
+     * чат сырым JSON. `todos` — это аргументы todowrite, а не отчёт. */
+    const std::string kUser = "msg_000000000001";
+    const std::string json_args =
+        R"({"todos": [{"content": "Убрать мусорные каталоги", "id": "1", "priority": "high", "status": "completed"}]})";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(json_args));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    ASSERT_TRUE(looks_like_tool_args_json(json_args));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
+}
+
 TEST(turn_verdict_does_not_close_task_on_a_json_array_of_tool_calls) {
     /* Б3 / BEHAVIOR_PARITY_PLAN И14.2: модель печатает МАССИВ вызовов
      * `[{"name":…,"arguments":{…}}]` текстом. Раньше детектор смотрел только
@@ -952,6 +973,32 @@ TEST(turn_verdict_does_not_show_an_unclosed_json_tool_call_in_chat) {
     /* И это НЕ «вызов с валидными аргументами» — он оборван, а не завершён. */
     ASSERT_EQ((int)turn_verdict(r, turn, kUser),
               (int)TurnVerdict::Truncated);
+}
+
+TEST(turn_verdict_detects_tool_args_json_after_leading_text) {
+    /* ses_000000000100, msg66: модель писала «19 тестов зелёные…» и ТОЛЬКО
+ * потом печатала `{"todos": [...]}`. Старый looks_like_tool_args_json
+ * смотрел на ПЕРВЫЙ символ текста — «1» из «19…» — и JSON в конце не
+ * видел, поэтому финальный ответ уезжал в чат вместе с массивом todos.
+ * Теперь ищем сбалансированный JSON-блок в любом месте и, если он
+ * «доминирующий» (текст до него короткий), считаем это вызовом. */
+    const std::string kUser = "msg_000000000001";
+    const std::string with_text =
+        "19 тестов зелёные. Пункт 6 закрыт — перехожу к браузеру.\n\n"
+        R"({"todos": [{"content": "Оценить состояние", "id": "1"}]})";
+    LlmResponse r;
+    LlmResponse::reduce(r, LlmEvent::text_start());
+    LlmResponse::reduce(r, LlmEvent::text_delta(with_text));
+    LlmResponse::reduce(r, LlmEvent::text_end());
+    LlmResponse::reduce(r, LlmEvent::finish("stop"));
+    const Message turn = turn_of(r, kUser);
+
+    /* JSON-блок с ключом todos — это вызов todowrite, а не финальный отчёт,
+ * даже если перед ним есть текст. */
+    ASSERT_TRUE(looks_like_tool_args_json(with_text));
+    ASSERT_EQ((int)turn_verdict(r, turn, kUser),
+              (int)TurnVerdict::ToolArgsJson);
+    ASSERT_FALSE(turn_completes_task(r, turn, kUser));
 }
 
 TEST(turn_verdict_respects_runtime_min_len) {

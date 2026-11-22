@@ -770,39 +770,61 @@ bool looks_like_planning_text(const std::string& text) {
 bool looks_like_tool_args_json(const std::string& text) {
     const size_t b = text.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return false;
+
     /* Б3 (BEHAVIOR_PARITY_PLAN И14.2): массив `[…]` распознаётся так же,
      * как объект `{…}`. Раньше проверялся только `{`, и модель, напечатавшая
      * массив вызовов `[{"name":…,"arguments":{…}}]`, отдавала его
      * пользователю как «финальный отчёт»: вместо отчёта в чат уезжал JSON,
      * неудобный для чтения. Массив — это не отчёт, а вызов (или их список),
-     * и относиться к нему надо так же, как к одиночному объекту. */
-    const char open = text[b];
-    if (open != '{' && open != '[') return false;
+     * и относиться к нему надо так же, как к одиночному объекту.
+     *
+     * Б3.2 (ses_000000000100): JSON-блок может НЕ начинать текст. Модель
+     * писала «19 тестов зелёные…\n\n{"todos": […]}» — текст начинался с
+     * прозы, а `{` был в середине. Старая проверка смотрела только на
+     * ПЕРВЫЙ символ и молчала → JSON-массив уезжал в чат как «отчёт».
+     * Теперь ищем первый сбалансированный {…}/[…] В ЛЮБОМ месте, но
+     * требуем, чтобы он был «доминирующим»: либо начинает текст (после
+     * пробелов), либо текст ДО него не длиннее самого блока и не больше
+ * 200 символов. Иначе отчёт с JSON-примером в середине считался бы вызовом. */
 
-    /* Выделяем ПЕРВЫЙ сбалансированный {…}/[…] и ИГНОРИРУЕМ хвост после него.
-     * Некоторые провайдеры (kilo-auto и подобные) дописывают к JSON мусор —
-     * например, XML-тег </rfl:parameter>. Раньше такой вызов, напечатанный
-     * текстом, требовал, чтобы последний символ был '}', и уходил
-     * пользователю как «финальный отчёт» (ses_000000000514). Баланс скобок
-     * считаем с учётом строк и escape-последовательностей. */
-    size_t i = b + 1;
-    int depth = 1;
-    bool in_str = false;
-    while (i < text.size() && depth > 0) {
-        const char c = text[i];
-        if (in_str) {
-            if (c == '\\' && i + 1 < text.size()) { i += 2; continue; }
-            if (c == '"') in_str = false;
-        } else {
-            if (c == '"') in_str = true;
-            else if (c == '{' || c == '[') ++depth;
-            else if (c == '}' || c == ']') --depth;
+    /* Найдём первый сбалансированный JSON-объект/массив в любом месте. */
+    size_t block_start = std::string::npos;
+    size_t block_end = std::string::npos;
+    for (size_t pos = text.find_first_of("{["); pos != std::string::npos;
+         pos = text.find_first_of("{[", pos + 1)) {
+        size_t i = pos + 1;
+        int depth = 1;
+        bool in_str = false;
+        while (i < text.size() && depth > 0) {
+            const char c = text[i];
+            if (in_str) {
+                if (c == '\\' && i + 1 < text.size()) { i += 2; continue; }
+                if (c == '"') in_str = false;
+            } else {
+                if (c == '"') in_str = true;
+                else if (c == '{' || c == '[') ++depth;
+                else if (c == '}' || c == ']') --depth;
+            }
+            ++i;
         }
-        ++i;
+        if (depth == 0) {
+            block_start = pos;
+            block_end = i;  /* на один символ за закрывающей */
+            break;
+        }
+        /* Незакрытая скобка — пробуем следующий открывающий. */
     }
-    if (depth != 0) return false;  /* незакрытая скобка — не наш случай */
-    /* i — на один символ ЗА закрывающей скобкой, поэтому длина включает её. */
-    const std::string body = text.substr(b, i - b);
+    if (block_start == std::string::npos) return false;
+
+    /* Доминирующий блок: либо с начала (после пробелов), либо текст до
+ * него не длиннее 200 символов И не длиннее самого блока. Это отсекает
+ * отчёты с JSON-примером в середине, но пропускает «текст + todos/вызов»
+ * в конце. */
+    const size_t before = block_start - b;
+    const size_t block_len = block_end - block_start;
+    if (before > 200 && before > block_len) return false;
+
+    const std::string body = text.substr(block_start, block_len);
     /* Отчёт-JSON с явными ключами ответа не трогаем. */
     if (body.find("\"summary\"") != std::string::npos ||
         body.find("\"report\"") != std::string::npos ||
@@ -817,6 +839,11 @@ bool looks_like_tool_args_json(const std::string& text) {
          * этих ключей JSON уходил в чат как «финальный ответ». */
         "\"prompt\"", "\"background\"", "\"description\"",
         "\"subagent_type\"", "\"task_id\"",
+        /* todowrite: аргументы — только `{"todos": [...]}`. Без этого
+         * ключа сбалансированный JSON плана уходил в чат как «итоговый
+         * ответ» (ses_000000000032): content/id/priority/status давали
+         * одно совпадение, а command_key не срабатывал. */
+        "\"todos\"",
     };
     int hits = 0;
     for (const char* k : kKeys) {
@@ -828,7 +855,8 @@ bool looks_like_tool_args_json(const std::string& text) {
         body.find("\"cli\"") != std::string::npos ||
         body.find("\"query\"") != std::string::npos ||
         body.find("\"command\"") != std::string::npos ||
-        body.find("\"prompt\"") != std::string::npos;
+        body.find("\"prompt\"") != std::string::npos ||
+        body.find("\"todos\"") != std::string::npos;
     if (hits >= 2 || command_key) return true;
     /* Б3 / И14.2: массив вызовов `[{"name":…,"arguments":{…}}]` — это
      * нативный формат, и его ключи (name/arguments) в kKeys не входят,
@@ -837,7 +865,7 @@ bool looks_like_tool_args_json(const std::string& text) {
      * обязательна: объект с name/arguments — это чей-то отчёт о вызове, и
      * трогать его нельзя (его и так отсекли бы summary/report/answer/message
      * выше, но массив — отдельный случай, и полагаться на это нельзя). */
-    if (open == '[') {
+    if (text[block_start] == '[') {
         const bool has_name = body.find("\"name\"") != std::string::npos;
         const bool has_args = body.find("\"arguments\"") != std::string::npos ||
                              body.find("\"args\"") != std::string::npos;
