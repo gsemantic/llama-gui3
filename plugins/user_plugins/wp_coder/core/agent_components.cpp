@@ -1074,6 +1074,16 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
         std::cerr << "[wp_coder] agent_loop: step " << (step+1) << " calling LLM..." << std::endl;
         auto t0 = std::chrono::steady_clock::now();
         std::vector<LlmEvent> events;
+        /* Живой шаг для панели скорости: время начала и счётчик
+         * символов. Ставится ДО запроса, а не на StepStart: провайдер
+         * может начать с размышления, и «скорость с начала запроса»
+         * честнее, чем «скорость с первого текста». */
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.stream_step_start = t0;
+            state_.stream_step_chars = 0;
+            state_.stream_step_timing = true;
+        }
         /* И11.14: ход агента идёт через LlmClient (D23). Именно этот зов
          * делал отмену фикцией: цикл проверял abort_requested только МЕЖДУ
          * шагами, и «стоп» посреди шага ждал ответа провайдера до конца —
@@ -1105,6 +1115,13 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                 return;
             }
             std::lock_guard<std::mutex> lk(state_.mtx);
+            /* Живая скорость: считаем символы, а не токены. chars/4 —
+             * оценка, и панель подписывает её оценкой; зато число
+             * появляется во время генерации, а не после неё. */
+            if (e.kind() == LlmEventKind::TextDelta ||
+                e.kind() == LlmEventKind::ReasoningDelta) {
+                state_.stream_step_chars += e.delta().size();
+            }
             stream_panel::feed(state_.stream, e);
         };
         const bool ok = LlmClient::fetch(cb_, sys, model_msgs, events,
@@ -1115,6 +1132,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
              * место, где он ещё виден. `finish_turn` только снимает признак
              * активности, содержимое переживает до следующего StepStart. */
             std::lock_guard<std::mutex> lk(state_.mtx);
+            state_.stream_step_timing = false;
             stream_panel::finish_turn(state_.stream);
         }
         auto t1 = std::chrono::steady_clock::now();

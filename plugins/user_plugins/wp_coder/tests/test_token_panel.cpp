@@ -324,6 +324,30 @@ TEST(оценка_скорости_помечает_себя_раньше_чем
     ASSERT_TRUE(line.find("оценка") < line.find("скорость") + 100);
 }
 
+TEST(живая_скорость_показывается_как_оценка) {
+    /* Пока модель печатает, usage ещё не пришёл. Раньше панель всю
+     * генерацию писала «нет данных», и скорость появлялась только
+     * после конца задачи. Живая оценка обязана называться оценкой. */
+    Snapshot s = measured_task();
+    s.live_tokens_per_second = 50.0;
+    s.live_seconds = 2.0;
+    const std::string line = speed_line(s);
+    ASSERT_TRUE(has(line, "~50.0 ток/с"));
+    ASSERT_TRUE(has(line, "оценка"));
+    ASSERT_TRUE(has(line, "по стриму"));
+    ASSERT_TRUE(has(line, "2.0 с"));
+}
+
+TEST(живая_скорость_не_выдаёт_себя_за_измерение) {
+    /* Рядом с «измерено» для контекста число без пометки читалось бы
+     * как измерение. Слово «оценка» стоит до числа. */
+    Snapshot s = measured_task();
+    s.live_tokens_per_second = 50.0;
+    s.live_seconds = 2.0;
+    const std::string line = speed_line(s);
+    ASSERT_TRUE(line.find("оценка") < line.find("50.0"));
+}
+
 TEST(без_скорости_названа_причина) {
     Snapshot s = measured_task();
     s.tokens_per_second = 0.0;
@@ -343,6 +367,35 @@ TEST(контекст_показывает_долю_от_окна) {
     ASSERT_TRUE(has(line, "29.7%"));
     ASSERT_TRUE(has(line, "измерено"));
     ASSERT_FALSE(tight);
+}
+
+TEST(контекст_показывает_окно_модели_а_не_порог_сжатия) {
+    /* У известной модели max_output 8192, поэтому порог сжатия меньше
+     * окна: 131072 - 8192 = 122880. В знаменателе должно быть 131072,
+     * иначе человек читает порог как размер окна. */
+    Snapshot s = measured_task();
+    s.context.tokens = 9500;
+    s.context_window = 131072;
+    s.context_room = 122880;
+    bool tight = false;
+    const std::string line = context_line(s, &tight);
+    ASSERT_TRUE(has(line, "131" + kSep + "072"));
+    ASSERT_FALSE(has(line, "122" + kSep + "880"));
+    /* 9500 / 131072 = 7.2% */
+    ASSERT_TRUE(has(line, "7.2%"));
+    ASSERT_FALSE(tight);
+}
+
+TEST(порог_сжатия_всё_ещё_красит_строку) {
+    /* Знаменатель — окно, но предупреждение — про порог: сжимать агент
+     * начинает раньше, чем кончится окно. */
+    Snapshot s = measured_task();
+    s.context_window = 131072;
+    s.context_room = 122880;
+    s.context.tokens = s.context_room;
+    bool tight = false;
+    context_line(s, &tight);
+    ASSERT_TRUE(tight);
 }
 
 TEST(незаданное_окно_называет_себя_а_не_показывает_ноль_процентов) {
@@ -453,6 +506,8 @@ TEST(сброс_метрик_задачи_обнуляет_и_новые_счё�
         st.total_cache_write_tokens = 10;
         st.tokens_estimated = true;
         st.last_tokens_per_second = 5.0;
+        st.stream_step_timing = true;
+        st.stream_step_chars = 123;
         reset_task_metrics(st);
     }
     std::lock_guard<std::mutex> lk(st.mtx);
@@ -461,6 +516,10 @@ TEST(сброс_метрик_задачи_обнуляет_и_новые_счё�
     ASSERT_EQ(st.total_cache_write_tokens, 0LL);
     ASSERT_FALSE(st.tokens_estimated);
     ASSERT_EQ(st.last_tokens_per_second, 0.0);
+    /* Живой шаг тоже сбрасывается: иначе панель следующей задачи
+     * показала бы «скорость по стриму» от предыдущей. */
+    ASSERT_FALSE(st.stream_step_timing);
+    ASSERT_EQ(st.stream_step_chars, static_cast<std::size_t>(0));
 }
 
 /* --- Скорость: единственный её писатель --- */

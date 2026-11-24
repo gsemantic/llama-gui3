@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <algorithm>
+#include <chrono>
 #include <sstream>
 
 /* Глобальные хендлы хоста (из plugin_main.cpp). */
@@ -1280,6 +1281,19 @@ static coder::token_panel::Panel take_token_panel() {
     snap.cache_write = st.total_cache_write_tokens;
     snap.tokens_per_second = st.last_tokens_per_second;
     snap.tokens_estimated = st.tokens_estimated;
+    /* Живая скорость текущего шага: usage ещё не пришёл, а человек уже
+     * смотрит на панель. Считается по chars/4 и подписывается оценкой. */
+    if (st.stream_step_timing && st.stream_step_chars > 0) {
+        const double live_seconds =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - st.stream_step_start)
+                .count();
+        if (live_seconds > 0.05) {
+            snap.live_seconds = live_seconds;
+            snap.live_tokens_per_second =
+                (static_cast<double>(st.stream_step_chars) / 4.0) / live_seconds;
+        }
+    }
     snap.response_seconds = st.last_response_time;
     snap.llm_seconds = st.llm_total_time;
     snap.steps = st.steps;
@@ -1291,6 +1305,9 @@ static coder::token_panel::Panel take_token_panel() {
      * историю (token_panel.h, п. 6). */
     snap.context = coder::compaction::context_usage(st.measured_input_tokens,
                                                     st.session);
+    /* Знаменатель панели — РАЗМЕР ОКНА, а не порог сжатия. Порог
+     * остаётся отдельным полем для пометки «упирается». */
+    snap.context_window = st.model_limits.context;
     snap.context_room = coder::compaction::usable(st.model_limits,
                                                   st.compaction_config);
     return coder::token_panel::build(snap);

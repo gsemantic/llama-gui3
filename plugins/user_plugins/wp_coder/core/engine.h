@@ -30,6 +30,8 @@
 #include <vector>
 #include <deque>
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <mutex>
 #include <condition_variable>
 #include <memory>
@@ -332,6 +334,13 @@ struct EngineState {
      * задачи — иначе флаг от прошлой задачи пометил бы оценкой скорость
      * следующей, измеренную по-настоящему. */
     bool tokens_estimated = false;
+    /* Живой шаг: сколько символов уже пришло и когда он начался. Нужен
+     * панели, чтобы скорость не появлялась только после конца задачи:
+     * usage приходит с закрытием хода, а человек смотрит на панель во
+     * время генерации. Оценка chars/4, и панель подписывает её оценкой. */
+    bool stream_step_timing = false;
+    std::size_t stream_step_chars = 0;
+    std::chrono::steady_clock::time_point stream_step_start;
     int steps = 0;                          // число шагов ReAct
 
     /* Проект. */

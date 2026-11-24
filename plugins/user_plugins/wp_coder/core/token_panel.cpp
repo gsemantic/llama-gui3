@@ -50,16 +50,6 @@ std::string speed_text(double tps) {
     return buf;
 }
 
-std::string share_text(const Snapshot& snap) {
-    if (snap.context_room <= 0) return std::string();
-    const double share =
-        100.0 * static_cast<double>(snap.context.tokens) /
-        static_cast<double>(snap.context_room);
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.1f%%", share);
-    return buf;
-}
-
 }  // namespace
 
 std::string format_count(long long value) {
@@ -118,6 +108,13 @@ std::string cost_line(const Snapshot& snap) {
 }
 
 std::string speed_line(const Snapshot& snap) {
+    /* Живой шаг важнее итога: пока модель печатает, usage ещё не пришёл,
+     * и без этой строки панель всю генерацию писала бы «нет данных».
+     * Число — оценка chars/4, и слово «оценка» стоит перед числом. */
+    if (snap.live_tokens_per_second > 0.0 && snap.live_seconds > 0.0) {
+        return "скорость: оценка ~" + speed_text(snap.live_tokens_per_second) +
+               " (по стриму, за " + seconds_text(snap.live_seconds) + ")";
+    }
     if (snap.tokens_estimated) {
         /* Оценка chars/4 не показывается числом: рядом с «измерено» для
          * контекста она читалась бы как измерение (п. 5 шапки). */
@@ -133,12 +130,25 @@ std::string speed_line(const Snapshot& snap) {
 std::string context_line(const Snapshot& snap, bool* tight) {
     if (tight) *tight = false;
     std::string out = "контекст: " + format_count(snap.context.tokens);
-    if (snap.context_room > 0) {
-        out += " / " + format_count(snap.context_room);
-        const std::string share = share_text(snap);
-        if (!share.empty()) out += " (" + share + ")";
+    /* Знаменатель — РАЗМЕР ОКНА, а не порог сжатия. У известной модели
+     * с max_output 8192 порог меньше окна на 8192, и «131072 / 122880»
+     * читалось как «окно 122880». Порог остаётся для tight ниже. */
+    const long long window =
+        snap.context_window > 0 ? snap.context_window : snap.context_room;
+    if (window > 0) {
+        out += " / " + format_count(window);
+        const double share =
+            100.0 * static_cast<double>(snap.context.tokens) /
+            static_cast<double>(window);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.1f%%", share);
+        out += " (" + std::string(buf) + ")";
+        /* «Упирается» — про ПОРОГ сжатия, а не про окно: сжимать агент
+         * начинает раньше, чем кончится окно, и предупреждение должно
+         * появляться тогда же. */
         if (tight) {
-            *tight = snap.context.tokens >= snap.context_room;
+            *tight = snap.context_room > 0 &&
+                     snap.context.tokens >= snap.context_room;
         }
     } else {
         /* Порог неизвестен — словами, а не нулём: ноль процентов выглядел
@@ -155,6 +165,7 @@ Panel build(const Snapshot& snap) {
      * потратила. Ноль всего — «задача не идёт» (п. 7 шапки). */
     const bool anything = snap.input > 0 || snap.output > 0 || snap.steps > 0 ||
                           snap.response_seconds > 0.0 || snap.llm_seconds > 0.0 ||
+                          snap.live_seconds > 0.0 ||
                           snap.context.tokens > 0;
     p.visible = anything;
     if (!p.visible) return p;

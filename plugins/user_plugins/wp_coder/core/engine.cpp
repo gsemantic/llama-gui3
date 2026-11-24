@@ -2086,6 +2086,11 @@ void reset_task_metrics(EngineState& state) {
      * прошлой задачи пометил бы оценкой скорость следующей, измеренную
      * по-настоящему (шапка engine.h, поле `tokens_estimated`). */
     state.tokens_estimated = false;
+    /* Живой шаг тоже сбрасывается: иначе панель следующей задачи
+     * показала бы «скорость по стриму» от предыдущей, ещё до первого
+     * запроса. */
+    state.stream_step_timing = false;
+    state.stream_step_chars = 0;
     state.steps = 0;
     state.measured_input_tokens = 0;
 }
