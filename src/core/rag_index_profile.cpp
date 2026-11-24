@@ -23,6 +23,16 @@ bool RagIndexProfileManager::initialize(const std::string& profiles_directory) {
         profiles_directory_ = std::string(home) + "/.llama-gui/rag_profiles/";
     } else {
         profiles_directory_ = profiles_directory;
+        /* R1.1: каталог может прийти без завершающего слэша (RagStore
+         * передаёт путь скоупа как есть). Раньше склейка давала
+         * `<scope>default_index.faiss` — файл индекса оказывался ВНЕ
+         * каталога стора, то есть рядом с ним, и один из двух сторов
+         * писал бы в каталог другого. Нормализуем здесь, потому что это
+         * единственное место, где путь превращается в имя файла. */
+        if (!profiles_directory_.empty() && profiles_directory_.back() != '/' &&
+            profiles_directory_.back() != '\\') {
+            profiles_directory_ += '/';
+        }
     }
 
     std::cout << "[RAG PROFILE] Initializing with directory: " << profiles_directory_ << std::endl;

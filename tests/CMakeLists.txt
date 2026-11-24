@@ -33,6 +33,21 @@ target_link_libraries(test_rag_chunking PRIVATE core)
 target_include_directories(test_rag_chunking PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagChunking COMMAND test_rag_chunking)
 
+# RAG registry: скоупы, пути, квоты (R1.2). Без FAISS и без эмбеддингов:
+# проверяются чистые функции и реестр (ленивое создание, изоляция,
+# LRU-вытеснение). Тест обязан падать на `../` в имени плагина.
+add_executable(test_rag_registry core/test_rag_registry.cpp)
+target_link_libraries(test_rag_registry PRIVATE core)
+target_include_directories(test_rag_registry PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RagRegistry COMMAND test_rag_registry)
+
+# RagStore: один изолированный индекс (R1.1).
+# Проверяет контракт стора без эмбеддингов: каталог, честный info(),
+# index_document=0 без эмбеддингов, clear() не трогает соседний стор.
+add_executable(test_rag_store core/test_rag_store.cpp)
+target_link_libraries(test_rag_store PRIVATE core)
+target_include_directories(test_rag_store PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RagStore COMMAND test_rag_store)
 
 # RAG embedding unavailability contract (R0.1).
 # Проверяет, что при отсутствии модели/сервера generate_embedding

@@ -118,6 +118,8 @@ set(CORE_SOURCES
     rag_manager_deep_analysis_synthesis.cpp
     rag_manager_utils.cpp
     rag_index_profile.cpp
+    rag_store.cpp
+    rag_registry.cpp
     stemmer.cpp
     chat_cache_manager.cpp
     chat_template_manager.cpp

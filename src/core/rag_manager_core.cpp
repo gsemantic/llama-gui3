@@ -28,6 +28,13 @@ RagManager::RagManager(const std::string& embedding_model_path,
     // Сохраняем путь модели для проверки совместимости индексов
     embedding_model_path_ = embedding_model_path;
 
+    /* R1.1: каталог профилей, если его задал владелец (RagStore).
+     * Хранится отдельно от profile_manager_ именно для того, чтобы
+     * отличить «каталог не задан» (легаси-поведение) от «каталог задан,
+     * но профиля нет» (ошибка, а не повод писать в домашний каталог
+     * пользователя). */
+    profile_dir_ = profile_dir;
+
     // Инициализируем генератор эмбеддингов
     embedding_generator_ = std::make_unique<EmbeddingGenerator>(embedding_model_path);
 

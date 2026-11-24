@@ -63,6 +63,11 @@ bool RagManager::has_persistent_index() const {
     
     // Если профиль не установлен или путь пустой, используем путь по умолчанию
     if (index_path.empty()) {
+        /* R1.1: явный каталог профилей (схема «один стор — один индекс»)
+         * без профиля — это не «посмотрим, нет ли индекса у пользователя»,
+         * а ошибка конфигурации. Иначе стор «находил» бы индекс
+         * пользователя и считал его своим. */
+        if (!profile_dir_.empty()) return false;
         index_path = get_default_index_path();
     }
     
@@ -81,6 +86,17 @@ bool RagManager::save_index(const std::string& index_path) {
     
     // Если профиль не установлен или путь пустой, используем путь по умолчанию
     if (path.empty()) {
+        /* R1.1: у стора (явный каталог профилей) дефолтного пути быть не
+         * должно. Раньше здесь молча выбирался `~/.llama-gui/rag_indexes/`,
+         * и каждый скоуп писал в индекс пользователя: изоляция
+         * существовала только в памяти процесса. Отказ с внятной причиной
+         * лучше «сохранил, но не туда, куда думал вызывающий». */
+        if (!profile_dir_.empty()) {
+            std::cerr << "[RAG PERSISTENCE] No profile in " << profile_dir_
+                      << " — refusing to save into the user's default index"
+                      << std::endl;
+            return false;
+        }
         path = get_default_index_path();
     }
     
