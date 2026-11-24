@@ -139,7 +139,8 @@ LLAMA_PLUGIN_EXPORT void ll_plugin_render(void) {
 | Состояние | `state_get`, `state_set` | In-memory хранилище плагинов |
 | Чат / LLM | `chat_send_message`, `chat_add_message`, `llm_is_connected`, `llm_complete`, `llm_chat_messages`, `llm_chat_stream` | Отправка сообщений, блокирующее и потоковое завершение |
 | Символы | `llm_ast_symbols` | Символы файла через tree-sitter хоста |
-| RAG | `rag_search`, `rag_process_document`, `rag_embedding`, `rag_index_count`, `rag_build_prompt` | Гибридный поиск, индексация, эмбеддинги |
+| RAG | `rag_search`, `rag_process_document`, `rag_embedding`, `rag_index_count`, `rag_build_prompt` | Гибридный поиск, индексация, эмбеддинги (скоуп `app`, легаси) |
+| RAG v2 | `rag_search_ex`, `rag_index_document_ex`, `rag_scope_info`, `rag_scope_remove_document`, `rag_scope_clear`, `rag_scope_flush`, `rag_index_cancel` | Скоупы: изолированный индекс на плагин (append-only, проверять `offsetof`) |
 | Пути | `path_config_dir`, `path_data_dir`, `path_plugins_dir` | Директории приложения |
 | Освобождение | `free_string`, `free_float_array` | Освобождение памяти хоста |
 
@@ -209,6 +210,67 @@ if (g_api->size >= offsetof(LlamaHostApi, llm_chat_stream) +
 - `rag_embedding(text, vec, max_dim, &dim)` — вектор эмбеддинга текста.
 - `rag_index_count()` — количество внешних чанков в индексе.
 - `rag_build_prompt(query, k, path_filter)` — собирает промпт с контекстом RAG.
+
+Эти функции работают в **скоупе `app`** — общем профиле пользователя. Они
+остаются: плагин, собранный под ABI 1.0.0, обязан работать на новом хосте
+без изменений. Всё, что умеет больше, — ниже.
+
+### RAG v2: скоупы
+
+Скоуп — **изолированный индекс**: имя, свой индекс, свои чанки, свои квоты,
+свой каталог на диске (`<cache>/rag_scopes/plugin_<name>[_<suffix>]/`). Плагин
+не выбирает ни путь, ни чужой индекс: **имя скоупа строит хост** из
+идентичности плагина (`plugin:<name>` или `plugin:<name>:<suffix>`), а плагин
+передаёт либо пустую строку (свой скоуп), либо полное имя — которое хост
+сверяет с именем плагина.
+
+```c
+/* Поля добавлены в КОНЕЦ LlamaHostApi: у старого хоста их нет. */
+if (g_api->size >= offsetof(LlamaHostApi, rag_search_ex) +
+                  sizeof(g_api->rag_search_ex) &&
+    g_api->rag_search_ex != nullptr) {
+    char* raw = g_api->rag_search_ex(g_host, "plugin:wp_coder", query, 5, "");
+    /* raw — malloc'd JSON, освободить free_string */
+    g_api->free_string(g_host, raw);
+}
+```
+
+| Функция | Возвращает |
+|---|---|
+| `rag_search_ex(scope, query, k, path_filter)` | `{"ok":true,"scope":"...","chunks":[{content, document_id, chunk_index, file_path, symbol_name, start_line, end_line}]}` |
+| `rag_index_document_ex(scope, path, opts_json)` | `{"ok":true,"scope":"...","chunks":N,"documents":M,"truncated":false,"reason":""}` |
+| `rag_scope_info(scope)` | `{"ok":true,"scope":"...","documents":N,"chunks":N,"bytes":N,"embeddings":bool,"model":"...","ready":bool,"reason":"..."}` |
+| `rag_scope_remove_document(scope, path)` | `{"ok":true,"scope":"...","removed":bool}` |
+| `rag_scope_clear(scope)` | `1` при успехе, `0` при отказе |
+| `rag_scope_flush(scope)` | `1`, если индекс записан на диск |
+| `rag_index_cancel(handle)` | `void`; до R4 отменять нечего |
+
+**Отказ — это `{"ok":false,"code":"...","error":"..."}`, а не пустая строка.**
+Код, который проверяет `raw[0] == '\0'`, не отличит «ничего не найдено» от
+«RAG выключен» — а это разные ответы и разные действия плагина.
+
+| `code` | Что значит | Что делать плагину |
+|---|---|---|
+| `disabled` | RAG выключен пользователем (`settings.rag().enable_rag=false`) | не индексировать, сказать пользователю |
+| `unavailable` | реестр скоупов не настроен (нет модели эмбеддингов или RAG не запущен) | работать без RAG, не повторять в цикле |
+| `bad_scope` | скоуп не принадлежит плагину или имя невалидно | исправить имя; это ошибка плагина |
+| `bad_request` | пустой запрос/путь, `k <= 0` | исправить аргументы |
+| `quota`, `bad_index` | исчерпана квота / индекс повреждён (R4) | сообщить причину |
+
+`opts_json` в `rag_index_document_ex` — `{"max_bytes":N,"max_chunks":N,
+"deadline_ms":N,"reindex":true}`, все поля необязательны. До R4 он
+принимается и игнорируется: плагин, написанный под R4, не получит
+`bad_request` от более старого хоста.
+
+**Утечек и «правдоподобного мусора» нет.** При отсутствии эмбеддингов
+`chunks` пуст, `ready:false`, а `reason` называет причину — вектор-пустышка
+в индекс не попадает (R0.1). Удаление документа идемпотентно: `removed:false`
+означает «этого документа в индексе и не было», а не ошибку.
+
+**Легаси и v2 — разные индексы.** `rag_search` ищет в профиле пользователя,
+`rag_search_ex` — в скоупе плагина. Переключение на v2 (R5) — это не «то же
+самое, но с суффиксом»: после него плагин перестаёт видеть документы,
+проиндексированные через легаси-путь, и наоборот.
 
 ## Манифест plugin.json
 

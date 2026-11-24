@@ -521,8 +521,14 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       и `probe_rag_null_field_is_not_enough` в `test_llm_stream_abi`:
       старый хост (size на `model_current`), заполненный хост, поле есть по
       размеру но nullptr, `nullptr` вместо api. Плагин: 1551/0.
-- [ ] **R2.4** Обновить `docs/PLUGIN_SYSTEM.md`: таблица RAG v2, коды
+- [x] **R2.4** Обновить `docs/PLUGIN_SYSTEM.md`: таблица RAG v2, коды
       ошибок, владение памятью, пример вызова.
+      **Сделано (2026-11-24):** раздел «RAG v2: скоупы» — таблица функций и
+      ответов, таблица кодов (`disabled`/`unavailable`/`bad_scope`/
+      `bad_request`/`quota`/`bad_index`) с действием плагина на каждый,
+      пример с `offsetof`, оговорка про легаси-скоуп `app` («другие индексы,
+      а не то же самое с суффиксом») и про отсутствие «правдоподобного
+      мусора».
 - [ ] **R2.5** Обновить `plugins/plugin.schema.json`: `permissions`
       включает `rag_write`; блок `rag` (optional, roots, max_docs).
 
@@ -614,7 +620,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R2.2 host-функции | `[x]` | JSON-контракт | `test_plugin_rag_api` (11/11) |
 | R2.6 реестр в хосте | `[x]` | `ok:true` в приложении | `main_window` + `embedding_backend()` |
 | R2.3 has_* | `[x]` | старый хост | `test_llm_stream_abi` (1551/0) |
-| R2.4 PLUGIN_SYSTEM | `[ ]` | документ | — |
+| R2.4 PLUGIN_SYSTEM | `[x]` | документ | — |
 | R2.5 schema | `[ ]` | валидный JSON | `test_plugin_manifest` |
 | R3.1 права | `[ ]` | denied | `test_plugin_rag_permissions` |
 | R3.2 namespace | `[ ]` | чужая запись отклонена | `test_plugin_rag_permissions` |
