@@ -37,6 +37,41 @@ static std::string rtrim(const std::string& s) {
 
 static std::string trim_str(const std::string& s) { return rtrim(ltrim(s)); }
 
+/* Кусок строки для инлайн-раскладки: обычный текст или `код`.
+ *
+ * Раскладка нужна потому, что ImGui::TextWrapped переносит курсор на
+ * следующую строку после КАЖДОГО вызова. Если инлайн-код рисовать
+ * отдельным TextUnformatted, то даже `}` между двумя словами начинался
+ * с новой строки: «фрагмент за фрагментом, лесенкой». Поэтому весь
+ * текст блока размещается вручную, по словам, а код встраивается в ту
+ * же строку фоном. */
+struct InlineRun {
+    std::string text;
+    bool code;
+};
+
+static std::vector<InlineRun> split_inline_runs(const std::string& text) {
+    std::vector<InlineRun> runs;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t tick = text.find('`', pos);
+        if (tick == std::string::npos) {
+            runs.push_back({text.substr(pos), false});
+            break;
+        }
+        if (tick > pos) runs.push_back({text.substr(pos, tick - pos), false});
+        const size_t close = text.find('`', tick + 1);
+        if (close == std::string::npos) {
+            /* Одиночный backtick — обычный символ, а не начало кода. */
+            runs.push_back({text.substr(tick), false});
+            break;
+        }
+        runs.push_back({text.substr(tick + 1, close - tick - 1), true});
+        pos = close + 1;
+    }
+    return runs;
+}
+
 static bool starts_with(const std::string& s, const char* prefix) {
     return s.compare(0, std::strlen(prefix), prefix) == 0;
 }
@@ -214,61 +249,149 @@ std::vector<MarkdownRenderer::Block> MarkdownRenderer::parse_blocks(const std::s
  * ====================================================================== */
 
 void MarkdownRenderer::render_text_block(const std::string& text, const ImVec4& base_color) {
-    /* Для текста с wrapping используем ImGui::TextWrapped.
-     * Инлайн-код рендерим через ImDrawList на той же строке. */
-    ImGui::PushTextWrapPos(0.0f);
+    /* Инлайн-раскладка: слова и `код` идут в одну строку, перенос — по
+     * словам. ImGui::TextWrapped здесь не подходит: он после каждого
+     * вызова ставит курсор на новую строку, и любой `code` между словами
+     * начинал новую строку — ответ выглядел «лесенкой». */
+    const std::vector<InlineRun> runs = split_inline_runs(text);
+    if (runs.empty()) return;
 
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t backtick = text.find('`', pos);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float font_size = ImGui::GetFontSize();
+    const float line_h = ImGui::GetTextLineHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float max_x = origin.x + (avail > 1.0f ? avail : 1.0f);
+    float x = origin.x;
+    float y = origin.y;
+    float max_line_w = 0.0f;
+    bool line_has_content = false;
+    bool at_line_start = true;
 
-        if (backtick == std::string::npos) {
-            /* Весь оставшийся текст — обычный, рендерим через TextWrapped. */
-            std::string rest = text.substr(pos);
-            ImGui::PushStyleColor(ImGuiCol_Text, base_color);
-            ImGui::TextWrapped("%s", rest.c_str());
-            ImGui::PopStyleColor();
-            break;
+    const ImU32 text_col = ImGui::ColorConvertFloat4ToU32(base_color);
+    const ImU32 code_col = ImGui::ColorConvertFloat4ToU32(theme_.string);
+    const ImU32 code_bg = ImGui::ColorConvertFloat4ToU32(theme_.inline_code_bg);
+
+    auto newline = [&]() {
+        x = origin.x;
+        y += line_h;
+        line_has_content = false;
+        at_line_start = true;
+    };
+
+    auto draw_text = [&](const std::string& s) {
+        if (s.empty()) return;
+        const float w = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f,
+                                            s.c_str(), s.c_str() + s.size()).x;
+        if (x > origin.x && x + w > max_x) newline();
+        dl->AddText(font, font_size, ImVec2(x, y), text_col,
+                    s.c_str(), s.c_str() + s.size());
+        x += w;
+        max_line_w = std::max(max_line_w, x - origin.x);
+        line_has_content = true;
+        at_line_start = false;
+    };
+
+    auto draw_code = [&](const std::string& s) {
+        /* Инлайн-код обычно однострочный, но провайдер может прислать
+         * перенос внутри `...`; AddText его не рисует, поэтому режем по
+         * строкам и каждую кладём со своим фоном. */
+        size_t start = 0;
+        while (true) {
+            const size_t nl = s.find('\n', start);
+            const std::string part =
+                (nl == std::string::npos) ? s.substr(start)
+                                          : s.substr(start, nl - start);
+            if (!part.empty()) {
+                const float w = font->CalcTextSizeA(
+                    font_size, FLT_MAX, 0.0f, part.c_str(),
+                    part.c_str() + part.size()).x;
+                const ImVec2 pad(4.0f, 1.0f);
+                const float need = w + pad.x * 2.0f;
+                if (x > origin.x && x + need > max_x) newline();
+                const ImVec2 p(x, y);
+                dl->AddRectFilled(ImVec2(p.x - pad.x, p.y - pad.y),
+                                  ImVec2(p.x + w + pad.x,
+                                         p.y + font_size + pad.y),
+                                  code_bg, 2.0f);
+                dl->AddText(font, font_size, p, code_col,
+                            part.c_str(), part.c_str() + part.size());
+                x += need;
+                max_line_w = std::max(max_line_w, x - origin.x);
+                line_has_content = true;
+                at_line_start = false;
+            }
+            if (nl == std::string::npos) break;
+            newline();
+            start = nl + 1;
         }
+    };
 
-        /* Текст до backtick — через TextWrapped. */
-        if (backtick > pos) {
-            std::string before = text.substr(pos, backtick - pos);
-            ImGui::PushStyleColor(ImGuiCol_Text, base_color);
-            ImGui::TextWrapped("%s", before.c_str());
-            ImGui::PopStyleColor();
+    auto draw_plain = [&](const std::string& s) {
+        size_t i = 0;
+        while (i < s.size()) {
+            const unsigned char c = static_cast<unsigned char>(s[i]);
+            if (c == '\n') {
+                newline();
+                ++i;
+                continue;
+            }
+            if (c == '\r') {
+                ++i;
+                continue;
+            }
+            if (c == ' ' || c == '\t') {
+                size_t j = i;
+                while (j < s.size() && (s[j] == ' ' || s[j] == '\t')) ++j;
+                /* Ведущие пробелы новой строки не рисуются: иначе каждый
+                 * перенос давал бы отступ, а список — «лесенку». */
+                if (!line_has_content) {
+                    i = j;
+                    continue;
+                }
+                std::string spaces;
+                for (size_t k = i; k < j; ++k)
+                    spaces.append(s[k] == '\t' ? "    " : " ");
+                const float w = font->CalcTextSizeA(
+                    font_size, FLT_MAX, 0.0f, spaces.c_str(),
+                    spaces.c_str() + spaces.size()).x;
+                if (x + w > max_x) {
+                    newline();
+                } else {
+                    dl->AddText(font, font_size, ImVec2(x, y), text_col,
+                                spaces.c_str(), spaces.c_str() + spaces.size());
+                    x += w;
+                    max_line_w = std::max(max_line_w, x - origin.x);
+                    at_line_start = false;
+                }
+                i = j;
+                continue;
+            }
+            size_t j = i;
+            while (j < s.size()) {
+                const unsigned char d = static_cast<unsigned char>(s[j]);
+                if (d == ' ' || d == '\t' || d == '\n' || d == '\r') break;
+                ++j;
+            }
+            draw_text(s.substr(i, j - i));
+            i = j;
         }
+    };
 
-        /* Ищем закрывающий backtick. */
-        size_t close = text.find('`', backtick + 1);
-        if (close == std::string::npos) {
-            /* Нет закрывающего — рендерим backtick как текст. */
-            std::string rest = text.substr(backtick);
-            ImGui::PushStyleColor(ImGuiCol_Text, base_color);
-            ImGui::TextWrapped("%s", rest.c_str());
-            ImGui::PopStyleColor();
-            break;
-        }
-
-        /* Инлайн-код — рисуем на новой строке с фоном. */
-        std::string code = text.substr(backtick + 1, close - backtick - 1);
-        {
-            ImVec2 code_size = ImGui::CalcTextSize(code.c_str());
-            ImVec2 padding = ImVec2(4, 1);
-            ImVec2 cursor = ImGui::GetCursorScreenPos();
-            ImVec2 bg_min = ImVec2(cursor.x - padding.x, cursor.y - padding.y);
-            ImVec2 bg_max = ImVec2(cursor.x + code_size.x + padding.x, cursor.y + code_size.y + padding.y);
-            ImGui::GetWindowDrawList()->AddRectFilled(bg_min, bg_max,
-                ImGui::ColorConvertFloat4ToU32(theme_.inline_code_bg), 2.0f);
-            ImGui::PushStyleColor(ImGuiCol_Text, theme_.string);
-            ImGui::TextUnformatted(code.c_str(), code.c_str() + code.size());
-            ImGui::PopStyleColor();
-        }
-
-        pos = close + 1;
+    for (const InlineRun& run : runs) {
+        if (run.code) draw_code(run.text);
+        else draw_plain(run.text);
     }
 
-    ImGui::PopTextWrapPos();
+    /* Регистрируем размер блока через Dummy: он сдвигает курсор и
+     * обновляет CursorMaxPos, то есть прокрутка и группа видят высоту
+     * текста. SetCursorScreenPos этого не делает — без Dummy сообщение
+     * могло обрезаться по старой высоте. */
+    const float total_h = (at_line_start ? y : y + line_h) - origin.y;
+    if (total_h > 0.0f || max_line_w > 0.0f) {
+        ImGui::Dummy(ImVec2(max_line_w, total_h));
+    }
 }
 
 /* ======================================================================
@@ -697,6 +820,10 @@ void MarkdownRenderer::render_code_line(const std::string& line, const std::stri
 
 void MarkdownRenderer::render_code_block(const std::string& code, const std::string& lang) {
     ImGuiStyle& style = ImGui::GetStyle();
+    /* Курсор до блока: InvisibleButton ниже двигает курсор по X, и без
+     * возврата следующий текстовый блок начинался бы от правого края —
+     * это и есть «лесенка» после каждого блока кода. */
+    const float base_x = ImGui::GetCursorPosX();
 
     /* Разбиваем на строки. */
     std::istringstream stream(code);
@@ -847,6 +974,10 @@ void MarkdownRenderer::render_code_block(const std::string& code, const std::str
     }
 
     ImGui::Spacing();
+    /* Возвращаем X на левый край: InvisibleButton сдвинул курсор вправо
+     * на ширину блока, и следующий текст иначе начинался бы с этого
+     * отступа (визуальная «лесенка»). */
+    ImGui::SetCursorPosX(base_x);
 }
 
 /* ======================================================================
