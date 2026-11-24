@@ -363,6 +363,26 @@ CatalogModelInfo match_local_model(const std::vector<CatalogModel>& models,
     return info;
 }
 
+int resolve_context_window(const CatalogModelInfo& info,
+                           int profile_context,
+                           int local_n_ctx) {
+    /* Совпадение endpoint + model_id — запись именно того провайдера,
+     * через которого идут запросы; ей верим больше профиля. */
+    if (info.source == "exact" && info.context > 0) return info.context;
+    /* Профиль провайдера: окно выбранной модели, присланное его /models.
+     * Точнее справочного совпадения по имени, потому что провайдер у нас
+     * один и тот же. */
+    if (profile_context > 0) return profile_context;
+    /* Справочное совпадение: лучше, чем «неизвестно», и это advertised
+     * окно модели — то, что человек и ожидает видеть в метриках. */
+    if (info.context > 0) return info.context;
+    /* Локальный n_ctx — фактически загруженное окно llama-server.
+     * Подставляется только когда каталог молчит: иначе у известной
+     * модели с n_ctx=4096 панель писала бы 4096 вместо её 131072. */
+    if (local_n_ctx > 0) return local_n_ctx;
+    return 0;
+}
+
 // ============================================================================
 // CatalogModelInfo::to_json
 // ============================================================================
@@ -608,11 +628,19 @@ size_t ModelCatalog::size() const {
     return models_.size();
 }
 
+CatalogModelInfo ModelCatalog::current_info(bool cloud,
+                                            const std::string& endpoint_url,
+                                            const std::string& model_id,
+                                            const std::string& local_path) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cloud ? match_model(models_, endpoint_url, model_id)
+                 : match_local_model(models_, local_path);
+}
+
 std::string ModelCatalog::current_json(bool cloud, const std::string& endpoint_url,
                                        const std::string& model_id,
                                        const std::string& local_path) const {
-    CatalogModelInfo info = cloud ? lookup(endpoint_url, model_id)
-                           : lookup_local(local_path);
+    CatalogModelInfo info = current_info(cloud, endpoint_url, model_id, local_path);
     json j = json::parse(info.to_json());
     j["kind"] = cloud ? "cloud" : "local";
     return j.dump();

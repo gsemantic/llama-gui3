@@ -173,6 +173,45 @@ void test_model_info_json_shape() {
     TEST_ASSERT(j.find("\"has_cost\":true") != std::string::npos);
 }
 
+/* Окно модели: профиль провайдера и локальный n_ctx важнее справочного
+ * совпадения по имени, но точное совпадение endpoint + model_id — важнее
+ * профиля. Иначе `glm-4.7-flash` у чужого провайдера подставлял бы окно
+ * первого попавшегося варианта (131072 вместо 200000). */
+void test_resolve_context_window_prefers_exact_then_profile() {
+    const auto models = parse_catalog(kCatalog);
+    const CatalogModelInfo exact = match_model(
+        models, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "qwen3-32b");
+    TEST_ASSERT_EQUAL(exact.source, std::string("exact"));
+    /* Точное совпадение: каталог (131072) важнее профиля (999999). */
+    TEST_ASSERT_EQUAL(resolve_context_window(exact, 999999, 0), 131072);
+
+    const CatalogModelInfo reference = match_model(
+        models, "https://example.invalid/v1", "qwen3-32b");
+    TEST_ASSERT_EQUAL(reference.source, std::string("reference"));
+    /* Совпадение только по имени: профиль провайдера точнее. */
+    TEST_ASSERT_EQUAL(resolve_context_window(reference, 200000, 0), 200000);
+    /* Профиля нет: справочный каталог всё же лучше «неизвестно». */
+    TEST_ASSERT_EQUAL(resolve_context_window(reference, 0, 0), 131072);
+}
+
+void test_resolve_context_window_local_uses_loaded_n_ctx() {
+    const auto models = parse_catalog(kCatalog);
+    const CatalogModelInfo local = match_local_model(
+        models, "/models/qwen3-32b.Q4_K_M.gguf");
+    TEST_ASSERT_EQUAL(local.source, std::string("local"));
+    /* Каталог знает модель: показываем advertised окно модели (131072),
+     * а не фактически загруженный n_ctx=4096. */
+    TEST_ASSERT_EQUAL(resolve_context_window(local, 0, 4096), 131072);
+    /* Каталог молчит: n_ctx — это лучше, чем «неизвестно». */
+    CatalogModelInfo unknown_local;
+    unknown_local.source = "local";
+    TEST_ASSERT_EQUAL(resolve_context_window(unknown_local, 0, 4096), 4096);
+    /* Ничего не известно — 0, а не выдуманное окно. */
+    const CatalogModelInfo unknown;
+    TEST_ASSERT_EQUAL(resolve_context_window(unknown, 0, 0), 0);
+}
+
 int main() {
     REGISTER_TEST(test_normalize_endpoint);
     REGISTER_TEST(test_normalize_model_name);
@@ -182,5 +221,7 @@ int main() {
     REGISTER_TEST(test_match_unknown);
     REGISTER_TEST(test_match_local_by_name);
     REGISTER_TEST(test_model_info_json_shape);
+    REGISTER_TEST(test_resolve_context_window_prefers_exact_then_profile);
+    REGISTER_TEST(test_resolve_context_window_local_uses_loaded_n_ctx);
     return test::TestRunner::instance().run();
 }

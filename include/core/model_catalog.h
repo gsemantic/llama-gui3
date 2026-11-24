@@ -106,6 +106,27 @@ CatalogModelInfo match_model(const std::vector<CatalogModel>& models,
 CatalogModelInfo match_local_model(const std::vector<CatalogModel>& models,
                             const std::string& model_path);
 
+/* Разрешить размер контекстного окна для текущей модели хоста.
+ *
+ * Каталог точен, когда его endpoint совпал с endpoint провайдера: это
+ * запись именно того провайдера, через которого идут запросы. Во всех
+ * остальных случаях приоритет у явного значения: профиль облачного
+ * провайдера знает окно выбранной модели (его отдаёт /models). Иначе
+ * совпадение только по имени («glm-4.7-flash» есть у десятка провайдеров)
+ * подставляло бы окно чужого варианта — 131072 вместо 200000 или наоборот.
+ *
+ * Локальный n_ctx — это фактически загруженное окно llama-server, а не
+ * размер окна модели. Пока каталог знает модель, показываем advertised
+ * окно модели (131072), иначе у локальной модели с n_ctx=4096 панель
+ * писала бы 4096 как «размер окна модели». n_ctx подставляется только
+ * когда каталог молчит: это лучше, чем «неизвестно».
+ *
+ * Порядок: exact-каталог → профиль провайдера → справочный каталог →
+ * локальный n_ctx → 0 («неизвестно»). */
+int resolve_context_window(const CatalogModelInfo& info,
+                           int profile_context,
+                           int local_n_ctx);
+
 class ModelCatalog {
 public:
     static ModelCatalog& instance();
@@ -126,6 +147,13 @@ public:
 
     /* Сопоставить локальную модель по пути. */
     CatalogModelInfo lookup_local(const std::string& model_path) const;
+
+    /* Снимок текущей модели без JSON: нужен хосту, чтобы применить
+     * resolve_context_window к found/source/context, а не разбирать
+     * собственный JSON. */
+    CatalogModelInfo current_info(bool cloud, const std::string& endpoint_url,
+                                  const std::string& model_id,
+                                  const std::string& local_path) const;
 
     /* Тариф для auto_price. Возвращает true, если модель найдена в каталоге
      * И у записи есть тариф (has_cost). Цены — USD за 1M токенов.

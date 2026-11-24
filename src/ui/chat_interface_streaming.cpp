@@ -1,6 +1,7 @@
 #include "../include/ui/chat_interface.h"
 #include "../include/core/state_manager.h"
 #include "../include/core/logger.h"
+#include "../include/core/model_catalog.h"
 #include "imgui.h"
 #include <iostream>
 #include <mutex>
@@ -171,11 +172,27 @@ void ChatInterface::update_performance_metrics(const std::string& content, bool 
 
         // Initialize context metrics
         // Для облачного провайдера показываем контекстное окно выбранной модели,
-        // а не локальный n_ctx llama-server (0 = окно неизвестно)
+        // а не локальный n_ctx llama-server (0 = окно неизвестно).
         const auto& cp = settings_.cloud_provider();
         const bool cloud_mode = cp.enabled && !cp.model_id.empty();
-        current_metrics_.total_context = cloud_mode ? cp.context_length
-                                                    : settings_.chat().n_ctx;
+        int total_context = cloud_mode ? cp.context_length
+                                       : settings_.chat().n_ctx;
+        if (cloud_mode) {
+            /* Профиль провайдера (cp.context_length) — окно выбранной
+             * модели из его /models. Когда провайдер его не прислал, окно
+             * подставляется из каталога, но только если endpoint совпал:
+             * совпадение по одному имени у десятка провайдеров уже давало
+             * чужое окно (131072 вместо 200000). Порядок тот же, что у
+             * host_model_current, — иначе плагин и метрики показывали бы
+             * разные числа для одной модели. */
+            auto& catalog = llama_gui::core::ModelCatalog::instance();
+            catalog.ensure_loaded();
+            const llama_gui::core::CatalogModelInfo info =
+                catalog.lookup(cp.endpoint_url, cp.model_id);
+            total_context = llama_gui::core::resolve_context_window(
+                info, cp.context_length, 0);
+        }
+        current_metrics_.total_context = total_context;
         
         // Calculate context used by conversation history
         int history_tokens = 0;

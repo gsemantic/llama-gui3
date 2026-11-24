@@ -1540,32 +1540,34 @@ char* host_model_current(LlamaPluginHost* host) {
     std::string local_path;
     const bool cloud = host_is_cloud_model(settings, endpoint, model_id, local_path);
 
-    std::string json =
-        catalog.current_json(cloud, endpoint, model_id, local_path);
-    /* Фолбэк на профиль облачного провайдера (BEHAVIOR_PARITY_PLAN И14.6).
+    /* Окно и лимит ответа — через общий с каталогом резолвер (И14.6 и
+     * правка «неверное окно у известных моделей»).
      *
-     * Каталог models.dev знает не каждую модель: для yenisei-max он
-     * возвращает found=false и context=0. Но человек мог указать окно в
-     * профиле провайдера (cloud_provider.context_length) — это и есть
-     * «сколько модель выдаёт по умолчанию». Без фолбэка плагин считал окно
-     * неизвестным и оставлял бюджеты минимальными (И14.3, scale=1), то
-     * есть сам себе резал контекст длиннооконной модели. Подставляем
-     * профиль только там, где каталог молчит (0): каталог точнее. */
-    if (cloud && settings) {
-        try {
-            nlohmann::json j = nlohmann::json::parse(json, nullptr, false);
-            if (j.is_object()) {
-                const auto& cp = settings->cloud_provider();
-                if (j.value("context", 0) <= 0 && cp.context_length > 0)
-                    j["context"] = cp.context_length;
-                if (j.value("max_output", 0) <= 0 && cp.max_output_tokens > 0)
-                    j["max_output"] = cp.max_output_tokens;
-                json = j.dump();
-            }
-        } catch (...) {
-            /* Лучше отдать каталог как есть (context=0), чем уронить хост. */
-        }
+     * Раньше здесь жил только фолбэк «каталог молчит → профиль», и
+     * совпадение по ОДНОМУ имени было бедой: `glm-4.7-flash` есть у
+     * десятка провайдеров, endpoint может не совпасть (свой шлюз), и
+     * каталог отдавал окно первого попавшегося варианта — 131072 вместо
+     * 200000 или 203000. Профиль провайдера знает окно выбранной модели
+     * точнее, а локальный n_ctx подставляется только когда каталог молчит.
+     * Порядок выбора теперь один на хост и метрики. */
+    const core::CatalogModelInfo info =
+        catalog.current_info(cloud, endpoint, model_id, local_path);
+    nlohmann::json j = nlohmann::json::parse(info.to_json(), nullptr, false);
+    if (!j.is_object()) j = nlohmann::json::object();
+    if (settings) {
+        const auto& cp = settings->cloud_provider();
+        const int profile_context = cloud ? cp.context_length : 0;
+        const int local_n_ctx = cloud ? 0 : settings->chat().n_ctx;
+        const int context =
+            core::resolve_context_window(info, profile_context, local_n_ctx);
+        if (context > 0) j["context"] = context;
+        /* Лимит ответа профиля подставляется только тогда, когда каталог
+         * молчит: это потолок ответа, а не окно модели. */
+        if (info.context <= 0 && cp.max_output_tokens > 0)
+            j["max_output"] = cp.max_output_tokens;
     }
+    j["kind"] = cloud ? "cloud" : "local";
+    const std::string json = j.dump();
     return strdup(json.c_str());
 }
 
