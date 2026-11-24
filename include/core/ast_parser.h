@@ -53,6 +53,22 @@ public:
     std::vector<AstNode> extract_top_level_nodes(const AstNode& root) const;
 
     /**
+     * @brief Semantic blocks for markup documents (HTML).
+     *
+     * У HTML верхний уровень — это `<html>`, то есть ОБЁРТКА: внутри неё
+     * `<head>`/`<body>`, а внутри них уже заголовки и абзацы. Если взять
+     * `root.children` как есть, получится один чанк на весь документ с
+     * именем "html" — искать по секциям станет невозможно, а RAG
+     * затевался именно ради этого.
+     *
+     * Поэтому здесь обёртки (`html`, `head`, `body`) пропускаются на
+     * один уровень вниз, и возвращаются их дети. Если внутри ничего нет
+     * (пустой `<body>`) — возвращается сама обёртка, чтобы документ не
+     * исчез из индекса целиком.
+     */
+    std::vector<AstNode> extract_markup_blocks(const AstNode& root) const;
+
+    /**
      * @brief Extract includes/imports as a preamble chunk
      */
     AstNode extract_preamble(const AstNode& root, const std::string& source, const std::string& language) const;

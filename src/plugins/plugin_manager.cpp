@@ -1,5 +1,6 @@
 #include "plugins/plugin_manager.h"
 #include "plugins/plugin_api.h"
+#include "plugins/plugin_identity.h"
 #include "ast_symbols.h"
 #include "llm_stream_bridge.h"
 
@@ -1374,13 +1375,22 @@ char* host_llm_ast_symbols(LlamaPluginHost* host, const char* path,
     return strdup(json.c_str());
 }
 
+/*
+ * plugin_rag_allowed — единственное место, где решается «отвечать ли на
+ * rag_*». Живёт в plugin_rag_gate.cpp, а не здесь: в этом файле host_*
+ * находятся внутри анонимного namespace, и функция, объявленная в
+ * заголовке, получила бы внутреннюю линковку и была бы недоступна тесту
+ * (проверено: `nm` показывал `(anonymous namespace)::plugin_rag_allowed`).
+ * Отдельный файл — та же причина, по которой разбор символов живёт в
+ * ast_symbols.cpp, а не в plugin_manager.cpp.
+ */
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
                       const char* path_filter) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !query) return nullptr;
-    auto* rm = pd->manager->subsystems.rag_manager;
-    if (!rm) return nullptr;
+    if (!plugin_rag_allowed(pd->manager->subsystems)) return nullptr;
 
+    auto* rm = pd->manager->subsystems.rag_manager;
     auto chunks = rm->search_hybrid(query, k > 0 ? k : 5, path_filter ? path_filter : "");
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& c : chunks) {
@@ -1400,8 +1410,8 @@ char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
 int host_rag_process_document(LlamaPluginHost* host, const char* path) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !path) return 0;
+    if (!plugin_rag_allowed(pd->manager->subsystems)) return 0;
     auto* rm = pd->manager->subsystems.rag_manager;
-    if (!rm) return 0;
     return rm->process_document(path) ? 1 : 0;
 }
 
@@ -1409,8 +1419,8 @@ int host_rag_embedding(LlamaPluginHost* host, const char* text,
                        float* out_vec, int max_dim, int* out_dim) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !text || !out_vec || !out_dim) return 0;
+    if (!plugin_rag_allowed(pd->manager->subsystems)) return 0;
     auto* rm = pd->manager->subsystems.rag_manager;
-    if (!rm) return 0;
     auto vec = rm->generate_embedding(text);
     if (vec.empty()) return 0;
     int n = static_cast<int>(vec.size());
@@ -1423,8 +1433,8 @@ int host_rag_embedding(LlamaPluginHost* host, const char* text,
 int host_rag_index_count(LlamaPluginHost* host) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager) return 0;
+    if (!plugin_rag_allowed(pd->manager->subsystems)) return 0;
     auto* rm = pd->manager->subsystems.rag_manager;
-    if (!rm) return 0;
     return static_cast<int>(rm->get_external_chunks_count());
 }
 
@@ -1432,8 +1442,8 @@ char* host_rag_build_prompt(LlamaPluginHost* host, const char* query, int k,
                             const char* path_filter) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !query) return nullptr;
+    if (!plugin_rag_allowed(pd->manager->subsystems)) return nullptr;
     auto* rm = pd->manager->subsystems.rag_manager;
-    if (!rm) return nullptr;
 
     auto chunks = rm->search_hybrid(query, k > 0 ? k : 5, path_filter ? path_filter : "");
     bool is_cloud = false;
@@ -1881,7 +1891,34 @@ bool PluginManager::load_plugin_file(const std::string& path) {
     }
 
     auto plugin = std::make_unique<LoadedPlugin>();
-    plugin->info.name = info->name;
+    /* R0.3: имя плагина — идентификатор, а не подпись. Проверяется и
+     * санитизируется ДО того, как оно попадёт в меню, `__plugin_sep__`,
+     * имена окон и (с R1) в путь RAG-скоупа. Кривое имя не повод
+     * отказать в загрузке: `WP Coder` обязан стать `wp_coder`, иначе
+     * пользователь увидит «плагин не загрузился» там, где дело в подписи.
+     * Оригинал сохраняется в declared_name — иначе вопрос «почему в меню
+     * не то имя, что в исходнике» через месяц некому будет задать. */
+    {
+        const std::string declared = info->name;
+        std::string safe = plugin_name_sanitize(declared);
+        if (!plugin_name_is_valid(safe)) {
+            /* sanitize не смог (не должен: он гарантирует валидность, а
+             * пустое имя подменяет на "plugin"). Выход — отказ, потому
+             * что дальше имя нужно как ключ. */
+            std::cerr << "[PluginManager] Cannot sanitize plugin name '"
+                      << declared << "' from " << path << " — REJECTED"
+                      << std::endl;
+            DL_CLOSE(handle);
+            return false;
+        }
+        plugin->info.name = safe;
+        if (safe != declared) {
+            plugin->info.declared_name = declared;
+            std::cerr << "[PluginManager] Plugin name '" << declared
+                      << "' is not a valid identifier — using '" << safe
+                      << "'" << std::endl;
+        }
+    }
     plugin->info.version = info->version ? info->version : "0.0.0";
     plugin->info.description = info->description ? info->description : "";
     plugin->info.author = info->author ? info->author : "";
@@ -1911,13 +1948,23 @@ bool PluginManager::load_plugin_file(const std::string& path) {
          *
          * Поэтому несоответствие имени — не предупреждение, а отказ:
          * манифест считается отсутствующим. */
+        /* R0.3: манифест сравнивается с ОБЪЯВЛЕННЫМ именем, а не с
+         * санитизированным. Плагин, назвавшийся `WP Coder` (и написавший
+         * такой же `name` в plugin.json), после санитизации зовётся
+         * `wp_coder-<hash>`, и сравнение с ним отвергло бы СВОЙ ЖЕ
+         * манифест как чужой — то есть санитизация отключила бы
+         * разрешения плагина. Если санитизации не было (declared_name
+         * пуст), сравнение идёт как раньше, по info.name. */
+        const std::string declared_for_manifest =
+            plugin->info.declared_name.empty() ? plugin->info.name
+                                               : plugin->info.declared_name;
         if (manifest.present && !manifest.name.empty() &&
-            manifest.name != plugin->info.name) {
+            manifest.name != declared_for_manifest) {
             std::cerr << "[PluginManager] Manifest '" << manifest.name
-                      << "' does not belong to plugin '" << plugin->info.name
+                      << "' does not belong to plugin '" << declared_for_manifest
                       << "' (" << manifest_path << ") — IGNORED"
                       << ". Expected a manifest named after the plugin"
-                      << " (" << plugin->info.name << ".json)." << std::endl;
+                      << " (" << declared_for_manifest << ".json)." << std::endl;
             manifest = PluginManifest{};
         }
         plugin->info.manifest = manifest;

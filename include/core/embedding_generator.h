@@ -18,6 +18,10 @@ public:
     std::vector<float> generate_embedding(const std::string& text);
     bool is_loaded() const { return model_loaded_; }
     int get_embedding_dimension() const { return embedding_dimension_; }
+    /* Путь к модели (basename в info). Нужен R1.1: стор обязан сообщать,
+     * какой моделью построен индекс, иначе «поиск не находит» не отличить
+     * от «индекс построен другой моделью». */
+    const std::string& get_model_path() const { return model_path_; }
     void set_embedding_dimension(int dim) {
         if (dim > 0) embedding_dimension_ = dim;
     }

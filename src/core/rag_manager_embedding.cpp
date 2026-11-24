@@ -30,42 +30,51 @@ std::vector<float> RagManager::generate_embedding(const std::string& text) {
         return cached;
     }
 
-    std::vector<float> embedding;
+    /* R1.3: общий генератор важнее собственного. Порядок не косметический:
+     * после set_shared_embedding_generator() собственный сброшен, но если
+     * передали nullptr — работает свой (прежнее поведение). */
+    EmbeddingGenerator* gen = active_generator();
 
-    // Генерируем новый эмбеддинг с помощью EmbeddingGenerator
-    if (embedding_generator_ && embedding_generator_->is_loaded()) {
-        embedding = embedding_generator_->generate_embedding(text);
+    // R0.1: без рабочего генератора возвращаем пустой вектор.
+    //
+    // Раньше здесь был «fallback на случайные значения» (rand()/RAND_MAX):
+    // он давал вектор с ненулевой нормой, который проходил нормализацию и
+    // добавлялся в индекс. Косинусное сходство между двумя случайными
+    // векторами большой размерности мало (≈ 1/√dim), но НЕ равно нулю,
+    // и при поиске по индексу, заполненному такими векторами, поиск
+    // возвращал результаты — правдоподобные и одновременно бесполезные.
+    // Это худший вид отказа: вызывающий видит «результат есть» и не
+    // понимает, что эмбеддингов нет.
+    //
+    // Пустой вектор — однозначный сигнал: вызывающие (search_*,
+    // process_text_chunk, host_rag_embedding) уже обрабатывают его
+    // правильно (возвращают пусто или 0). Причина отсутствия логируется
+    // один раз — в конструкторе RagManager, когда embedding_generator_
+    // сбрасывается после неудачного load_model().
+    if (!gen || !gen->is_loaded()) {
+        return {};
+    }
 
-        // Проверяем, что эмбеддинг был успешно сгенерирован
-        if (embedding.empty()) {
-            std::cerr << "Warning: Embedding generator returned empty vector" << std::endl;
+    std::vector<float> embedding = gen->generate_embedding(text);
+    if (embedding.empty()) {
+        // Генератор был загружен, но не смог выдать эмбеддинг (например,
+        // сервер вернул ошибку и локальный fallback тоже не сработал).
+        // Логируем только один раз на процесс, чтобы не засорять лог
+        // при массовой индексации.
+        static bool logged_once = false;
+        if (!logged_once) {
+            std::cerr << "[RAG] Embedding generator returned empty vector — "
+                         "embeddings will be unavailable until the generator recovers"
+                      << std::endl;
+            logged_once = true;
         }
-    } else {
-        // Если генератор недоступен, используем резервный метод (например, случайные значения)
-        std::cerr << "Warning: Embedding generator not available, using fallback" << std::endl;
-        int embedding_dim = EMBEDDING_DIMENSION;
-        if (embedding_generator_) {
-            embedding_dim = embedding_generator_->get_embedding_dimension();
-        }
-
-        if (embedding_dim <= 0) {
-            std::cerr << "Error: Invalid embedding dimension: " << embedding_dim << std::endl;
-            return std::vector<float>(); // Возвращаем пустой вектор
-        }
-
-        embedding.resize(embedding_dim, 0.0f);
-
-        // Заполняем случайными значениями для демонстрации
-        // В реальной ситуации это может быть заменено на другой метод генерации
-        for (size_t i = 0; i < embedding.size(); ++i) {
-            embedding[i] = static_cast<float>(rand()) / RAND_MAX;
-        }
+        return {};
     }
 
     // Нормализуем для косинусного сходства
     normalize_vector(embedding);
 
-    // Кэшируем
+    // Кэшируем (только непустые)
     cache_embedding(text, embedding);
 
     return embedding;
@@ -76,6 +85,14 @@ std::string RagManager::build_rag_prompt(const std::string& user_query,
                                        bool is_cloud_model) {
     // Формируем user-сообщение с контекстом и вопросом
     // Модель будет отвечать на этот вопрос
+
+    // R0.1 (попутно): без контекста просто формулируем вопрос. Раньше при
+    // пустых chunks строка `max_context_chars / chunks_to_use` давала
+    // деление на ноль; это баг, смежный с задачей «при пустом векторе
+    // возвращать пустой результат, а не мусор».
+    if (context_chunks.empty()) {
+        return "Вопрос: " + user_query + "\n";
+    }
 
     // === ОПТИМИЗАЦИЯ РАЗМЕРА КОНТЕКСТА ===
     // Для облачных моделей - большие лимиты (128K контекст)
@@ -178,18 +195,32 @@ std::string RagManager::cached_response_for_chunk(const RagChunk& chunk) {
 }
 
 void RagManager::cache_query_response(const std::string& query, const std::string& response) {
-    // Добавляем запрос и ответ в чат-историю
+    // R0.1: генерируем эмбеддинги ДО создания чанков, чтобы не записывать
+    // чанки с пустыми эмбеддингами в индекс. Пустой эмбеддинг означает
+    // «генератор недоступен»; индекс с такими чанками превращается в
+    // хранилище мусора, из которого search_chat_history никогда ничего
+    // не вернёт, но и не скажет, что причина — отсутствие эмбеддингов.
+    std::vector<float> query_embedding = generate_embedding(query);
+    std::vector<float> response_embedding = generate_embedding(response);
+
+    if (query_embedding.empty() || response_embedding.empty()) {
+        // Не пишем в индекс: без эмбеддингов чанк бесполезен для поиска,
+        // а его presence в chat_history_chunks_ создавало бы иллюзию,
+        // что кэш работает.
+        return;
+    }
+
     RagChunk query_chunk;
     query_chunk.content = query;
     query_chunk.document_id = "chat_history";
     query_chunk.chunk_index = static_cast<int>(chat_history_chunks_.size());
-    query_chunk.embedding = generate_embedding(query);
+    query_chunk.embedding = std::move(query_embedding);
 
     RagChunk response_chunk;
     response_chunk.content = response;
     response_chunk.document_id = "chat_history";
-    response_chunk.chunk_index = static_cast<int>(chat_history_chunks_.size() + 1);
-    response_chunk.embedding = generate_embedding(response);
+    response_chunk.chunk_index = static_cast<int>(chat_history_chunks_.size()) + 1;
+    response_chunk.embedding = std::move(response_embedding);
 
     // Добавляем в индекс чат-истории
 #ifdef USE_FAISS
@@ -199,16 +230,25 @@ void RagManager::cache_query_response(const std::string& query, const std::strin
         normalize_vector(query_vec);
         normalize_vector(response_vec);
 
-        long query_id = chat_history_chunks_.size();
-        long response_id = chat_history_chunks_.size() + 1;
-
-        chat_history_index_->add(1, query_vec.data());
-        chat_history_index_->add(1, response_vec.data());
+        // Размерность обязана совпадать с размерностью индекса. Иначе
+        // faiss::IndexFlat::add читает за пределами буфера (segfault) или
+        // портит индекс. Проверка не избыточна: размерность меняется при
+        // смене модели эмбеддингов, а chat_history_index_ создаётся один
+        // раз в конструкторе по размерности генератора.
+        if (static_cast<int>(query_vec.size()) == chat_history_index_->d &&
+            static_cast<int>(response_vec.size()) == chat_history_index_->d) {
+            chat_history_index_->add(1, query_vec.data());
+            chat_history_index_->add(1, response_vec.data());
+        } else {
+            std::cerr << "[RAG] Skipping chat_history index add: dimension mismatch ("
+                      << query_vec.size() << "/" << response_vec.size()
+                      << " vs " << chat_history_index_->d << ")" << std::endl;
+        }
     }
 #endif
 
-    chat_history_chunks_.push_back(query_chunk);
-    chat_history_chunks_.push_back(response_chunk);
+    chat_history_chunks_.push_back(std::move(query_chunk));
+    chat_history_chunks_.push_back(std::move(response_chunk));
 }
 
 } // namespace core

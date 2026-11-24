@@ -121,3 +121,54 @@ cd build && ctest --output-on-failure -R "PluginLoader|MenuRestore"
 - `src/plugins/plugin_manager.cpp:1837` — вызов `p->render_fn()`.
 - `plugins/user_plugins/wp_coder/src/plugin_main.cpp:288` — `ll_plugin_render`.
 - `src/ui/main_window.cpp:1628` — реальный цикл (кадр начат).
+
+---
+
+## OI-2. `MenuRestore` падает с SIGFPE (деление на ноль) при загрузке `calculator`
+
+**Статус:** открыт, не связан с RAG (предсуществующий).
+**Найден:** 2026-11-24, в ходе R0.1 (план RAG-SPEC).
+
+### Симптом
+
+`ctest` из `build/`:
+
+```
+94% tests passed, 1 tests failed out of 18
+	18 - MenuRestore (NUMERICAL)
+```
+
+Прямой запуск даёт `Исключение в операции с плавающей точкой`, rc=136
+(SIGFPE). Последняя строка вывода — `calculator: инициализация`, то есть
+падение происходит внутри `ll_plugin_init` плагина `calculator` или сразу
+после неё.
+
+### Воспроизведение
+
+```sh
+cd build && make test_menu_restore -j$(nproc)
+./tests/test_menu_restore; echo $?   # 136
+```
+
+### Что установлено
+
+* Воспроизводится на **чистом дереве** (проверено через
+  `git stash push src/core/rag_manager_embedding.cpp
+  src/core/embedding_generator.cpp tests/CMakeLists.txt` → пересборка →
+  тот же SIGFPE). Правки R0.1 к падению отношения не имеют.
+* OI-1 (SIGSEGV в `MenuRestore`) закрыт и к этому не относится: здесь
+  другой сигнал (SIGFPE, не SIGSEGV) и другой момент (init плагина
+  `calculator`, а не `render_plugins`).
+* `test_plugin_loader` с тем же плагином проходит (rc=0) — значит дело не
+  только в загрузке `calculator`, а в пути `MenuRestore`.
+
+### Корень
+
+Не установлен. Кандидаты: целочисленное деление на ноль в коде плагина
+`calculator` (`plugins/examples/calculator/`) или в восстановлении меню
+`MenuRestore`, куда загружается этот плагин.
+
+### Что дальше
+
+Не блокирует RAG-SPEC. При следующем касании `MenuRestore`/`calculator`
+добавить отладочный вывод или прогнать под gdb.

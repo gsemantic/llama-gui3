@@ -33,6 +33,41 @@ target_link_libraries(test_rag_chunking PRIVATE core)
 target_include_directories(test_rag_chunking PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagChunking COMMAND test_rag_chunking)
 
+
+# RAG embedding unavailability contract (R0.1).
+# Проверяет, что при отсутствии модели/сервера generate_embedding
+# возвращает ПУСТОЙ вектор, индекс чат-истории не растёт, а
+# build_rag_prompt не падает на пустых chunks (раньше там было деление
+# на ноль). Тест не требует FAISS: он проверяет именно контракт
+# «пусто вместо мусора».
+add_executable(test_rag_embedding_unavailable core/test_rag_embedding_unavailable.cpp)
+target_link_libraries(test_rag_embedding_unavailable PRIVATE core)
+target_include_directories(test_rag_embedding_unavailable PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RagEmbeddingUnavailable COMMAND test_rag_embedding_unavailable)
+
+# RAG gate for plugins (R0.2).
+# Проверяет единственное место решения «отвечать ли на rag_*»:
+# settings.rag().enable_rag должен гасить RAG и для плагинов, а не только
+# в собственном UI чата. Тест не грузит плагины: plugin_rag_allowed
+# читает только указатели subsystems.
+add_executable(test_plugin_rag_gate core/test_plugin_rag_gate.cpp)
+target_link_libraries(test_plugin_rag_gate PRIVATE plugin_core core)
+target_include_directories(test_plugin_rag_gate PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+add_test(NAME PluginRagGate COMMAND test_plugin_rag_gate)
+
+# Plugin identity: имя плагина как идентификатор (R0.3).
+# Проверяет plugin_name_is_valid / plugin_name_sanitize на десятках имён:
+# валидные, враждебные (`../etc/passwd`), не-ASCII, границы длины,
+# идемпотентность. Тест не грузит плагины и не читает манифесты.
+add_executable(test_plugin_identity core/test_plugin_identity.cpp)
+target_link_libraries(test_plugin_identity PRIVATE plugin_core core)
+target_include_directories(test_plugin_identity PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+add_test(NAME PluginIdentity COMMAND test_plugin_identity)
+
 # Document Parser tests (XML/Mallard/DocBook/HTML text extraction)
 add_executable(test_document_parser core/test_document_parser.cpp)
 target_link_libraries(test_document_parser PRIVATE core)

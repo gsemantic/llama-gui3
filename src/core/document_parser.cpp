@@ -1175,20 +1175,32 @@ std::string DocumentParser::get_file_extension(const std::string& file_path) {
 }
 
 DocumentParser::ContentType DocumentParser::detect_content_type(const std::string& file_path) {
-    std::string lang = get_language(file_path);
-    if (!lang.empty()) {
-        return ContentType::Code;
-    }
-
     std::string ext = get_file_extension(file_path);
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    // Text formats
+    /* R0.4: текстовые форматы проверяются ПЕРВЫМИ, до get_language().
+     *
+     * Порядок не косметический. `get_language()` теперь знает html/css
+     * (это нужно метаданным чанков и явному parse_code), и без этой
+     * проверки `.html` стал бы Code: RAG индексировал бы документацию
+     * кусками с сырыми тегами вместо чистого текста, а
+     * `test_parse_html_markup` (проверяет, что script/style/комментарии
+     * не попадают в текст) начал бы падать. Документация читается как
+     * документ — это и есть смысл "text formats".
+     *
+     * `.css` здесь СОЗНАТЕЛЬНО отсутствует: как документ он не читается
+     * (в нём нет прозы), а как код даёт правила с селекторами и
+     * номерами строк. Язык у него всё равно "css" — для метаданных. */
     if (ext == ".txt" || ext == ".md" || ext == ".pdf" || ext == ".docx" ||
         ext == ".html" || ext == ".htm" || ext == ".csv" || ext == ".json" ||
         ext == ".xml" || ext == ".page" || ext == ".docbook" ||
         ext == ".log" || ext == ".rst" || ext == ".adoc") {
         return ContentType::Text;
+    }
+
+    std::string lang = get_language(file_path);
+    if (!lang.empty()) {
+        return ContentType::Code;
     }
 
     return ContentType::Text;  // Default to text
@@ -1214,6 +1226,19 @@ std::string DocumentParser::get_language(const std::string& file_path) {
     if (ext == ".sh" || ext == ".bash") return "shell";
     if (ext == ".sql") return "sql";
     if (ext == ".r" || ext == ".R") return "r";
+    /* R0.4: HTML и CSS — тоже языки, и это нужно ДВУМ разным потребителям,
+     * а не одному:
+     *   - `rag_manager_documents` кладёт `language` в метаданные чанка, и
+     *     без этого у HTML/CSS чанков в индексе стоял пустой язык;
+     *   - `parse_code()` (явный вызов) строит по ним AST-чанки с
+     *     symbol_name и номерами строк.
+     * При этом `detect_content_type()` для `.html/.htm` намеренно
+     * возвращает Text (см. комментарий там): индексация документации
+     * читает HTML как документ, а не как код. Язык при этом всё равно
+     * "html" — это не противоречие, а разные вопросы: «чем читать» и
+     * «что это за язык». */
+    if (ext == ".html" || ext == ".htm") return "html";
+    if (ext == ".css") return "css";
 
     return "";
 }
@@ -1266,7 +1291,13 @@ std::vector<std::string> DocumentParser::parse_code_ast(const std::string& file_
         }
 
         // Extract top-level nodes
-        auto nodes = parser.extract_top_level_nodes(root);
+        /* R0.4: для HTML верхний уровень — обёртка (<html><body>…), и
+         * брать её как чанк значит получить один кусок на весь документ.
+         * extract_markup_blocks спускается в body и возвращает
+         * содержательные элементы. */
+        auto nodes = (language == "html")
+                         ? parser.extract_markup_blocks(root)
+                         : parser.extract_top_level_nodes(root);
 
         // Split large nodes
         std::vector<AstNode> final_nodes;

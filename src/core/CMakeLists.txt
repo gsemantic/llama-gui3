@@ -46,10 +46,44 @@ if(USE_FAISS)
 endif()
 
 # Link tree-sitter language modules (BEFORE tree-sitter for link order)
+#
+# ВАЖНО: грамматики declare в ast_parser.cpp как СЛАБЫЕ символы
+# (`__attribute__((weak))`), а weak-ссылка НЕ вытягивает член из
+# статического архива — компоновщик оставляет 0. Поэтому html/css
+# линкуются через --whole-archive: иначе `AstParser::is_available("html")`
+# был бы false при собранной и лежащей рядом библиотеке (проверено:
+# `nm` показывал `w tree_sitter_html`, а `grammars()` давал 4 языка из 8).
+# --whole-archive — расширение GNU ld; на其他 платформах флаг игнорируется
+# через $if, а без него поведение остаётся прежним (text-fallback).
 foreach(LANG c cpp python rust)
     string(TOUPPER ${LANG} LANG_UPPER)
     if(TREE_SITTER_${LANG_UPPER}_FOUND)
         target_link_libraries(core PUBLIC ${TREE_SITTER_${LANG_UPPER}_LIBRARY})
+        target_include_directories(core PUBLIC ${TREE_SITTER_${LANG_UPPER}_INCLUDE_DIR})
+    endif()
+endforeach()
+
+# Web-стек: только те грамматики, что прошли проверку версии (см. корневой
+# CMakeLists). html — v14 и совместим; css/php/js отсекаются там же.
+#
+# --whole-archive — расширение GNU ld. На macOS/MSVC такого флага нет,
+# поэтому он применяется только для GNU-совместимого компоновщика; на
+# остальных платформах поведение остаётся прежним (text-fallback).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(_ts_whole_archive "-Wl,--whole-archive")
+    set(_ts_no_whole_archive "-Wl,--no-whole-archive")
+else()
+    set(_ts_whole_archive "")
+    set(_ts_no_whole_archive "")
+endif()
+
+foreach(LANG html css php javascript)
+    string(TOUPPER ${LANG} LANG_UPPER)
+    if(TREE_SITTER_${LANG_UPPER}_FOUND AND TREE_SITTER_${LANG_UPPER}_LIBRARY)
+        target_link_libraries(core PUBLIC
+            ${_ts_whole_archive}
+            ${TREE_SITTER_${LANG_UPPER}_LIBRARY}
+            ${_ts_no_whole_archive})
         target_include_directories(core PUBLIC ${TREE_SITTER_${LANG_UPPER}_INCLUDE_DIR})
     endif()
 endforeach()

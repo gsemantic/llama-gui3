@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ============================================================================
 set(VERSION_MAJOR 0)
 set(VERSION_MINOR 1)
-set(VERSION_PATCH 103)
+set(VERSION_PATCH 104)
 set(VERSION_SUFFIX "alpha.2")
 set(VERSION_CODENAME "Archimedes")
 
@@ -98,6 +98,17 @@ if(TREE_SITTER_FOUND)
     # MVP: C/C++/Python/Rust + web-стек для разработки (WordPress и пр.).
     # php/javascript/css/html парсятся только если есть исходники грамматик
     # в deps/tree-sitter-<lang>-src (иначе WARNING и text-fallback в RAG).
+    #
+    # ВЕРСИЯ ЯЗЫКА ГРАММАТИКИ. Грамматика из deps/tree-sitter-<lang>-src
+    # может быть собрана более новым генератором, чем рантайм tree-sitter:
+    # css/php/js собраны с LANGUAGE_VERSION 15, а tree-sitter 0.22.6
+    # принимает максимум 14. Такую грамматику НЕЛЬЗЯ линковать:
+    # ts_parser_set_language вернёт 0, дерево не построится, и RAG молча
+    # уйдёт в эвристику. Раньше это было невидимо — библиотека
+    # собиралась и отбрасывалась только на этапе линковки (слабые
+    # символы), из-за чего `is_available("css")` был false без объяснения.
+    # Проверка здесь делает причину явной и оставляет рабочий text-fallback.
+    set(TS_MAX_LANGUAGE_VERSION 14)   # tree-sitter 0.22.x
     set(TS_LANGUAGES c cpp python rust php javascript css html)
     foreach(LANG ${TS_LANGUAGES})
         string(TOUPPER ${LANG} LANG_UPPER)
@@ -111,17 +122,32 @@ if(TREE_SITTER_FOUND)
         if(NOT TREE_SITTER_${LANG_UPPER}_FOUND)
             set(GRAMMAR_SRC_DIR ${CMAKE_SOURCE_DIR}/deps/tree-sitter-${LANG}-src)
             if(EXISTS ${GRAMMAR_SRC_DIR}/src/parser.c)
-                # Create static library from grammar sources
-                file(GLOB TS_${LANG_UPPER}_SRCS ${GRAMMAR_SRC_DIR}/src/*.c)
-                add_library(tree-sitter-grammar-${LANG} STATIC ${TS_${LANG_UPPER}_SRCS})
-                set_target_properties(tree-sitter-grammar-${LANG} PROPERTIES LINKER_LANGUAGE C)
-                target_include_directories(tree-sitter-grammar-${LANG} PUBLIC
-                    ${GRAMMAR_SRC_DIR}/src
-                )
-                set(TREE_SITTER_${LANG_UPPER}_FOUND TRUE)
-                set(TREE_SITTER_${LANG_UPPER}_INCLUDE_DIR ${GRAMMAR_SRC_DIR}/src)
-                set(TREE_SITTER_${LANG_UPPER}_LIBRARY tree-sitter-grammar-${LANG})
-                message(STATUS "tree-sitter-${LANG} grammar found at ${GRAMMAR_SRC_DIR}")
+                # Языковая версия грамматики против версии, которую понимает
+                # рантайм. Читаем из самого parser.c, а не из вики: это
+                # единственный источник истины, который лежит рядом.
+                file(READ ${GRAMMAR_SRC_DIR}/src/parser.c _ts_parser_src)
+                string(REGEX MATCH "#define LANGUAGE_VERSION ([0-9]+)" _ "${_ts_parser_src}")
+                set(_grammar_version ${CMAKE_MATCH_1})
+
+                if(_grammar_version AND _grammar_version GREATER ${TS_MAX_LANGUAGE_VERSION})
+                    message(WARNING
+                        "tree-sitter-${LANG} grammar uses LANGUAGE_VERSION ${_grammar_version} "
+                        "> supported ${TS_MAX_LANGUAGE_VERSION} by the tree-sitter runtime — "
+                        "AST disabled for ${LANG} (RAG will use text fallback)")
+                    set(TREE_SITTER_${LANG_UPPER}_FOUND FALSE)
+                else()
+                    # Create static library from grammar sources
+                    file(GLOB TS_${LANG_UPPER}_SRCS ${GRAMMAR_SRC_DIR}/src/*.c)
+                    add_library(tree-sitter-grammar-${LANG} STATIC ${TS_${LANG_UPPER}_SRCS})
+                    set_target_properties(tree-sitter-grammar-${LANG} PROPERTIES LINKER_LANGUAGE C)
+                    target_include_directories(tree-sitter-grammar-${LANG} PUBLIC
+                        ${GRAMMAR_SRC_DIR}/src
+                    )
+                    set(TREE_SITTER_${LANG_UPPER}_FOUND TRUE)
+                    set(TREE_SITTER_${LANG_UPPER}_INCLUDE_DIR ${GRAMMAR_SRC_DIR}/src)
+                    set(TREE_SITTER_${LANG_UPPER}_LIBRARY tree-sitter-grammar-${LANG})
+                    message(STATUS "tree-sitter-${LANG} grammar found at ${GRAMMAR_SRC_DIR}")
+                endif()
             else()
                 message(WARNING "tree-sitter-${LANG} grammar not found at ${GRAMMAR_SRC_DIR}")
                 message(STATUS "Tree-sitter ${LANG} parsing disabled")

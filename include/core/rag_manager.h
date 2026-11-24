@@ -5,13 +5,14 @@
 #include <memory>
 #include <unordered_map>
 #include <ctime>
+#include <mutex>
 #include "llama_interface.h"
 #include "rag_settings.h"
 #include "kv_cache_types.h"
 #include "rag_index_profile.h"
 #include <functional>
 
-// Предварительное объявление класса EmbeddingGenerator
+// Предварительное объявление классов
 namespace llama_gui {
 namespace core {
     class EmbeddingGenerator;
@@ -84,7 +85,8 @@ struct RagChunk {
 
 class RagManager {
 public:
-    RagManager(const std::string& embedding_model_path = "models/embedding_model.gguf");
+    RagManager(const std::string& embedding_model_path = "models/embedding_model.gguf",
+               const std::string& profile_dir = "");
     ~RagManager();
 
     // Инициализация индексов
@@ -120,6 +122,24 @@ public:
 
     // Генерация эмбеддинга
     std::vector<float> generate_embedding(const std::string& text);
+
+    /**
+     * @brief Разделить общий генератор эмбеддингов с другими RagManager.
+     *
+     * R1.3: по умолчанию каждый RagManager создаёт свой EmbeddingGenerator
+     * и загружает модель (117 МБ) — при N скоупах это N копий в памяти.
+     * Если у процесса уже есть загруженный генератор, его можно передать
+     * сюда: менеджер перестаёт владеть генератором и использует общий.
+     *
+     * Вызывать ДО первого generate_embedding/индексации: после того как
+     * менеджер построил индекс, смена генератора сделала бы его
+     * несовместимым (другая размерность/модель). При передаче пустого
+     * указателя восстанавливается собственный генератор (если он ещё жив).
+     */
+    void set_shared_embedding_generator(const std::shared_ptr<EmbeddingGenerator>& generator);
+
+    /** Есть ли у менеджера рабочий генератор (свой или общий). */
+    bool has_embedding_generator() const;
 
     // Формирование промпта с RAG-контекстом
     std::string build_rag_prompt(const std::string& user_query,
@@ -344,6 +364,11 @@ private:
 
     // GGUF модель для эмбеддингов
     std::unique_ptr<EmbeddingGenerator> embedding_generator_;
+    /* R1.3: общий генератор, если менеджеру его передали. Если непуст —
+     * generate_embedding использует ЕГО, а собственный embedding_generator_
+     * не создаётся (или освобождается). Владелец — реестр, живущий дольше
+     * менеджера. */
+    std::shared_ptr<EmbeddingGenerator> shared_embedding_generator_;
 
     // URL сервера эмбеддингов (используется прокси для форвардинга)
     std::string embedding_server_url_;
@@ -392,6 +417,11 @@ private:
     std::vector<float> get_cached_embedding(const std::string& text);
     void cache_embedding(const std::string& text, const std::vector<float>& embedding);
     void cleanup_embedding_cache();
+
+    /* R1.3: действующий генератор — общий, если его передали, иначе свой.
+     * Один accessor на все обращения: «где взять генератор» не должно
+     * решаться в пяти местах по-разному. */
+    EmbeddingGenerator* active_generator() const;
 
     // Методы для оптимизации
     void cleanup_old_chunks();

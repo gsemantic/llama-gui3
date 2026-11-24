@@ -175,12 +175,66 @@ struct SearchResult {
 | DOCX | .docx | Microsoft Word |
 
 ### Код
-| Язык | Расширения | Парсер |
-|------|------------|--------|
-| C | .c | tree-sitter-c |
-| C++ | .cpp, .cc, .h, .hpp | tree-sitter-cpp |
-| Python | .py | tree-sitter-python |
-| Rust | .rs | tree-sitter-rust |
+
+Чанкинг кода идёт через tree-sitter: файл разбирается в AST, и чанк = один
+смысловой блок (функция, класс, метод) с метаданными `symbol_name`,
+`parent_symbol`, `start_line`/`end_line`. Если грамматики для языка нет,
+`DocumentParser::parse_code()` деградирует к эвристике (скобки/отступы) —
+чанки остаются, но без `symbol_name`.
+
+| Язык | Расширения | tree-sitter | AST-чанкинг | Примечание |
+|------|------------|-------------|-------------|------------|
+| C | .c | `tree-sitter-c` | да | LANGUAGE_VERSION 14 |
+| C++ | .cpp, .cc, .cxx, .h, .hpp | `tree-sitter-cpp` | да | LANGUAGE_VERSION 14 |
+| Python | .py | `tree-sitter-python` | да | LANGUAGE_VERSION 14 |
+| Rust | .rs | `tree-sitter-rust` | да | LANGUAGE_VERSION 14 |
+| PHP | .php | `tree-sitter-php` | нет (v15) | грамматика новее рантайма, см. ниже |
+| JavaScript | .js | `tree-sitter-javascript` | нет (v15) | то же |
+| CSS | .css | `tree-sitter-css` | нет (v15) | то же |
+| HTML | .html, .htm | `tree-sitter-html` | да, через `parse_code()` | LANGUAGE_VERSION 14; в RAG читается как документ |
+
+Остальные расширения (`.go`, `.ts`, `.java`, `.cs`, `.rb`, `.swift`, `.kt`,
+`.sh`, `.sql`, `.r`) размечены как код, но грамматики для них не собраны —
+для них работает эвристический чанкинг.
+
+### Грамматики: версия языка и что это значит
+
+tree-sitter-грамматика и рантайм tree-sitter должны понимать одну версию
+языка грамматик. Грамматика из `deps/tree-sitter-<lang>-src` может быть
+собрана более новым генератором, чем рантайм:
+
+| Грамматика | LANGUAGE_VERSION | Рантайм 0.22.6 (до 14) | Что делает хост |
+|------------|------------------|------------------------|-----------------|
+| c, cpp, python, rust, html | 14 | совместима | линкуется, AST работает |
+| php, javascript, css | 15 | **несовместима** | CMake не линкует, RAG уходит в text-fallback |
+
+Проверка живёт в `CMakeLists.txt` (`TS_MAX_LANGUAGE_VERSION`) и в
+`AstParser::parse_source()`: `ts_parser_set_language` возвращает `false`
+при несовместимости, и это обрабатывается как «грамматики нет», а не как
+падение. Причина, по которой это важно: раньше результат
+`ts_parser_set_language` не проверялся, и `ts_tree_root_node(nullptr)` у
+падал с SIGSEGV.
+
+**Как включить css/php/js:** обновить системный tree-sitter до версии,
+которая понимает `LANGUAGE_VERSION 15` (0.23+), и поднять
+`TS_MAX_LANGUAGE_VERSION` в `CMakeLists.txt`. После этого тесты
+`test_ast_parser` начнут падать на проверке «css недоступен» — это
+намеренно: проверка называет причину, а не притворяется, что грамматика
+потерялась.
+
+### HTML: два разных режима
+
+Одно расширение — два вопроса, и ответы на них разные:
+
+| Вопрос | Ответ | Где |
+|--------|-------|-----|
+| «Чем читать `.html` при индексации?» | как документ (текст без тегов, без `script`/`style`/комментариев) | `detect_content_type` → Text, `parse_xml()` |
+| «Что это за язык?» | `html` | `get_language()` |
+| «Как получить блоки с номерами строк?» | AST-чанки по элементам (`h1`, `p`, `title`, …) с `symbol_name`/`parent_symbol` | явный `DocumentParser::parse_code()` |
+
+AST-чанкинг HTML разворачивает обёртки `html`/`head`/`body` и отдаёт
+содержательные элементы: `<html><body><h1>…</h1><p>…</p></body></html>`
+→ два чанка `h1` и `p`, а не один `html` на весь документ.
 
 ## Оптимальные настройки
 

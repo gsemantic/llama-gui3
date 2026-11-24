@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <climits>
+#include <functional>
 
 // Include tree-sitter API only in implementation
 #include <tree_sitter/api.h>
@@ -136,6 +137,24 @@ static bool is_code_node(const std::string& node_type) {
     }
     // Python decorated definitions
     if (node_type == "decorated_definition") return true;
+
+    /* R0.4: HTML и CSS. У этих грамматик нет функций и классов, зато
+     * есть элементы и правила — и без этой ветки AST для них возвращал
+     * пустой список, а `parse_code` молча уходил в эвристику (для CSS —
+     * в цикл по `class`/`def`, то есть в мусор).
+     *
+     * `element` через find() покрывает и `script_element`, и
+     * `style_element` — это всё элементы, и все должны попасть в чанки.
+     * `text` сюда НЕ попадает: содержимое элемента уже лежит в его
+     * `content` (см. get_node_source), отдельный чанк из текста дублировал
+     * бы его. */
+    if (node_type == "element") return true;
+    if (node_type == "script_element" || node_type == "style_element") return true;
+
+    if (node_type == "rule_set") return true;
+    if (node_type == "media_statement" || node_type == "supports_statement") return true;
+    if (node_type == "keyframes_statement") return true;
+
     return false;
 }
 
@@ -191,14 +210,65 @@ static std::string get_node_source(TSNode node, const std::string& source) {
 }
 
 static std::string get_node_name(TSNode node, const std::string& source) {
+    const char* node_type = ts_node_type(node);
+    std::string node_type_str(node_type);
+
+    /* R0.4: HTML/CSS. У этих грамматик нет поля `name`, поэтому
+     * стандартные ветки ниже не срабатывают и чанк получал пустой
+     * symbol_name — то есть в индексе RAG был кусок разметки без имени,
+     * по которому нельзя ни искать, ни ссылаться.
+     *
+     * HTML: element → start_tag → tag_name (само имя тега, без < >). */
+    if (node_type_str == "element") {
+        const uint32_t n = ts_node_child_count(node);
+        for (uint32_t i = 0; i < n; ++i) {
+            TSNode child = ts_node_child(node, i);
+            if (strcmp(ts_node_type(child), "start_tag") != 0) continue;
+            const uint32_t m = ts_node_child_count(child);
+            for (uint32_t j = 0; j < m; ++j) {
+                TSNode tag = ts_node_child(child, j);
+                if (strcmp(ts_node_type(tag), "tag_name") == 0) {
+                    return get_node_source(tag, source);
+                }
+            }
+        }
+        return "";
+    }
+
+    /* CSS: rule_set → первый ребёнок-селектор ("body", ".card",
+     * "#id"). selectors — контейнер, его содержимое и есть селектор. */
+    if (node_type_str == "rule_set" || node_type_str == "media_statement" ||
+        node_type_str == "supports_statement") {
+        const uint32_t n = ts_node_child_count(node);
+        for (uint32_t i = 0; i < n; ++i) {
+            TSNode child = ts_node_child(node, i);
+            const char* ct = ts_node_type(child);
+            /* У at-правил первый ребёнок — at-keyword/запрос, у rule_set —
+             * selectors. Берём первый непустой нетривиальный узел. */
+            if (strcmp(ct, "block") == 0) continue;
+            if (ts_node_child_count(child) == 0 && strcmp(ct, "{") == 0) continue;
+            std::string text = get_node_source(child, source);
+            if (!text.empty()) return text;
+        }
+        return "";
+    }
+
+    if (node_type_str == "keyframes_statement") {
+        const uint32_t n = ts_node_child_count(node);
+        for (uint32_t i = 0; i < n; ++i) {
+            TSNode child = ts_node_child(node, i);
+            if (strcmp(ts_node_type(child), "keyframes_name") == 0) {
+                return get_node_source(child, source);
+            }
+        }
+        return "";
+    }
+
     // Try to find a "name" child node
     TSNode name_node = ts_node_child_by_field_name(node, "name", 4);
     if (!ts_node_is_null(name_node)) {
         return get_node_source(name_node, source);
     }
-
-    const char* node_type = ts_node_type(node);
-    std::string node_type_str(node_type);
 
     // For function_definition, look inside function_declarator for identifier
     if (node_type_str.find("function_definition") != std::string::npos) {
@@ -264,6 +334,24 @@ static std::string get_parent_name(TSNode node, const std::string& source) {
     while (!ts_node_is_null(current)) {
         const char* parent_type = ts_node_type(current);
         std::string parent_type_str(parent_type);
+
+        /* R0.4: HTML/CSS. Родитель для элемента — имя охватывающего
+         * элемента ( `<div>` для `<p>` ), для CSS-правила — селектор
+         * охватывающего at-правила ( @media для .a ). Без этого
+         * `parent_symbol` в чанке пустой, и вложенный элемент в индексе
+         * выглядит как самостоятельный — то есть теряется ровно та
+         * структура, ради которой AST и нужен. */
+        if (parent_type_str == "element" || parent_type_str == "script_element" ||
+            parent_type_str == "style_element") {
+            std::string name = get_node_name(current, source);
+            if (!name.empty()) return name;
+        }
+        if (parent_type_str == "rule_set" || parent_type_str == "media_statement" ||
+            parent_type_str == "supports_statement" || parent_type_str == "keyframes_statement") {
+            std::string name = get_node_name(current, source);
+            if (!name.empty()) return name;
+        }
+
         for (const auto& ct : class_types) {
             if (parent_type_str.find(ct) != std::string::npos) {
                 return get_node_name(current, source);
@@ -337,7 +425,17 @@ AstNode AstParser::parse_source(const std::string& source, const std::string& la
         return root;
     }
 
-    ts_parser_set_language(impl_->parser, it->second());
+    /* set_language возвращает false, если язык грамматики несовместим с
+     * рантаймом (например, грамматика собрана с LANGUAGE_VERSION 15, а
+     * tree-sitter 0.22.6 понимает до 14). Раньше результат не проверялся,
+     * и ts_parser_parse_string возвращал nullptr — а вызов
+     * ts_tree_root_node(nullptr) в parse_source падал с SIGSEGV.
+     * Теперь это внятный отказ и text-fallback у вызывающего. */
+    if (!ts_parser_set_language(impl_->parser, it->second())) {
+        std::cerr << "[AST] tree-sitter runtime rejected grammar for language: "
+                  << language << " (language version mismatch)" << std::endl;
+        return root;
+    }
 
     TSTree* tree = ts_parser_parse_string(
         impl_->parser,
@@ -360,6 +458,44 @@ AstNode AstParser::parse_source(const std::string& source, const std::string& la
 
 std::vector<AstNode> AstParser::extract_top_level_nodes(const AstNode& root) const {
     return root.children;
+}
+
+std::vector<AstNode> AstParser::extract_markup_blocks(const AstNode& root) const {
+    std::vector<AstNode> out;
+
+    /* Обёртки, которые не являются смысловыми блоками: содержимое
+     * документа живёт внутри них. Список закрытый и совпадает с
+     * html-грамматикой; чужой язык сюда не попадёт (метод зовут только
+     * для html, см. DocumentParser::parse_code_ast). */
+    static const char* kWrappers[] = {"html", "head", "body"};
+
+    /* Рекурсивное разворачивание: `<html>` → `<head>`/`<body>` → их дети.
+     * Сравнение по ИМЕНИ, а не по типу: у html-грамматики и `<html>`,
+     * и `<h1>` имеют тип "element". */
+    std::function<void(const AstNode&)> visit = [&](const AstNode& node) {
+        for (const auto& child : node.children) {
+            bool is_wrapper = false;
+            for (const char* w : kWrappers) {
+                if (child.name == w) { is_wrapper = true; break; }
+            }
+            if (!is_wrapper) {
+                out.push_back(child);
+                continue;
+            }
+            if (child.children.empty()) {
+                /* Пустая обёртка (<body></body>): сама обёртка полезнее
+                 * пустоты — иначе документ исчез бы из индекса. */
+                out.push_back(child);
+            } else {
+                visit(child);
+            }
+        }
+    };
+    visit(root);
+
+    /* Совсем пустой документ: лучше один чанк с обёрткой, чем ничего. */
+    if (out.empty() && !root.children.empty()) out = root.children;
+    return out;
 }
 
 AstNode AstParser::extract_preamble(const AstNode& root, const std::string& source, const std::string& language) const {

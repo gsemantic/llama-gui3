@@ -39,6 +39,31 @@ void test_ast_parser_available() {
     TEST_ASSERT_FALSE(AstParser::is_available("unknown"));
 }
 
+// Test: html грамматика (R0.4)
+//
+// html — LANGUAGE_VERSION 14 и совместим с рантаймом tree-sitter 0.22.6,
+// поэтому он ЕСТЬ в grammars() и линкуется --whole-archive. Проверка
+// держит это свойство: если грамматику пересоберут более новым
+// генератором (как css/php/js, у которых v15), тест обязан упасть —
+// иначе RAG молча уйдёт в text-fallback и никто не узнает, почему
+//symbol_name пустой.
+void test_ast_parser_available_html() {
+    TEST_ASSERT_TRUE(AstParser::is_available("html"));
+}
+
+// Test: css грамматика (R0.4)
+//
+// css в deps/tree-sitter-css-src собран с LANGUAGE_VERSION 15, а
+// tree-sitter 0.22.6 принимает максимум 14. CMake отсекает такую
+// грамматику (не линкует), поэтому `is_available("css")` == false —
+// и это ПРАВИЛЬНОЕ поведение, а не «грамматика потерялась». Тест
+// фиксирует причину: если однажды tree-sitter обновят до 0.23+,
+// проверка покраснеет и её надо будет заменить на TRUE вместе с
+// CMake-порогом TS_MAX_LANGUAGE_VERSION.
+void test_ast_parser_unavailable_css_version_mismatch() {
+    TEST_ASSERT_FALSE(AstParser::is_available("css"));
+}
+
 // Test: supported_languages
 void test_ast_parser_supported_languages() {
     auto langs = AstParser::supported_languages();
@@ -550,6 +575,9 @@ int main() {
     REGISTER_TEST(test_ast_nodes_to_chunks_with_filepath);
     REGISTER_TEST(test_ast_nodes_to_chunks_no_filepath);
     REGISTER_TEST(test_ast_preamble_no_code);
+
+    REGISTER_TEST(test_ast_parser_available_html);
+    REGISTER_TEST(test_ast_parser_unavailable_css_version_mismatch);
 
     return test::TestRunner::instance().run();
 }

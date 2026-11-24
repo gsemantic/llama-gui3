@@ -303,8 +303,8 @@ bool RagManager::load_index(const std::string& index_path) {
 
         // Синхронизируем размерность генератора с загруженным индексом,
         // чтобы запросы эмбеддились в ту же размерность
-        if (embedding_generator_) {
-            embedding_generator_->set_embedding_dimension(static_cast<int>(external_docs_index_->d));
+        if (EmbeddingGenerator* gen = active_generator()) {
+            gen->set_embedding_dimension(static_cast<int>(external_docs_index_->d));
         }
 
         std::cout << "[RAG PERSISTENCE] FAISS index loaded successfully" << std::endl;
@@ -370,12 +370,12 @@ bool RagManager::load_index(const std::string& index_path) {
                 + "», а активная модель — «" + active_model
                 + "». Векторы разных моделей несопоставимы. Требуется переиндексация.";
             std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
-        } else if (embedding_generator_ &&
-                   static_cast<int>(external_docs_index_->d) != embedding_generator_->get_embedding_dimension()) {
+        } else if (EmbeddingGenerator* gen = active_generator();
+                   gen && static_cast<int>(external_docs_index_->d) != gen->get_embedding_dimension()) {
             index_needs_reindex_ = true;
             reindex_reason_ = "Индекс имеет размерность " + std::to_string(external_docs_index_->d)
                 + ", а текущая модель эмбеддингов — "
-                + std::to_string(embedding_generator_->get_embedding_dimension())
+                + std::to_string(gen->get_embedding_dimension())
                 + ". Требуется переиндексация.";
             std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
         }
@@ -433,8 +433,8 @@ bool RagManager::load_index(const std::string& index_path) {
             external_chunks_.push_back(std::move(chunk));
         }
 
-        if (embedding_generator_) {
-            embedding_generator_->set_embedding_dimension(embedding_dim);
+        if (EmbeddingGenerator* gen = active_generator()) {
+            gen->set_embedding_dimension(embedding_dim);
         }
 
         // Compatibility checks
@@ -449,9 +449,9 @@ bool RagManager::load_index(const std::string& index_path) {
             index_needs_reindex_ = true;
             reindex_reason_ = "Index built by model '" + index_model + "', active '" + active_model + "'";
             std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;
-        } else if (embedding_generator_ &&
-                   !external_chunks_.empty() &&
-                   static_cast<int>(external_chunks_[0].embedding.size()) != embedding_generator_->get_embedding_dimension()) {
+        } else if (EmbeddingGenerator* gen = active_generator();
+                   gen && !external_chunks_.empty() &&
+                   static_cast<int>(external_chunks_[0].embedding.size()) != gen->get_embedding_dimension()) {
             index_needs_reindex_ = true;
             reindex_reason_ = "Dimension mismatch";
             std::cerr << "[RAG PERSISTENCE] WARNING: " << reindex_reason_ << std::endl;

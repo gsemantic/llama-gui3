@@ -28,19 +28,28 @@ bool EmbeddingGenerator::load_model() {
         return true;
     }
 
-    std::cerr << "Warning: No embedding model path or server URL configured, using fallback" << std::endl;
-    model_loaded_ = true;
-    return true;
+    // R0.1: без источника эмбеддингов генератор не загружен. Раньше
+    // здесь возвращалось true и модель помечалась загруженной, из-за чего
+    // generate_embedding() выдавал «правдоподобный мусор» (n-gram hash
+    // или нулевой вектор) вместо явного отказа. Вызывающие теперь обязаны
+    // обрабатывать пустой результат, а не мусор, неотличимый от успеха.
+    std::cerr << "[EmbeddingGenerator] No embedding model path or server URL "
+                 "configured — embeddings unavailable" << std::endl;
+    model_loaded_ = false;
+    return false;
 }
 
 std::vector<float> EmbeddingGenerator::generate_embedding(const std::string& text) {
     if (!model_loaded_) {
-        std::cerr << "Error: EmbeddingGenerator not loaded" << std::endl;
-        return std::vector<float>(embedding_dimension_, 0.0f);
+        // Пустой вектор, а не нулевой: нулевой нормализуется в нулевой же,
+        // косинус с ним всегда 0 — выглядит как «ничего не найдено», но на
+        // деле поиск работает некорректно (все расстояния одинаковы).
+        // Пустой вектор — однозначный сигнал вызывающему.
+        return {};
     }
 
     if (text.empty()) {
-        return std::vector<float>(embedding_dimension_, 0.0f);
+        return {};
     }
 
     // Check cache first

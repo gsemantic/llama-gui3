@@ -23,7 +23,8 @@ namespace fs = std::filesystem;
 namespace llama_gui {
 namespace core {
 
-RagManager::RagManager(const std::string& embedding_model_path) {
+RagManager::RagManager(const std::string& embedding_model_path,
+                       const std::string& profile_dir) {
     // Сохраняем путь модели для проверки совместимости индексов
     embedding_model_path_ = embedding_model_path;
 
@@ -74,7 +75,9 @@ RagManager::RagManager(const std::string& embedding_model_path) {
     llama_interface_ = std::make_shared<LlamaInterface>("http://localhost:8081");
 
     // === ПРОФИЛИ ИНДЕКСОВ: Инициализируем менеджер профилей ===
-    initialize_profile_manager();
+    // R1.1: каталог профилей можно задать явно (RagStore передаёт
+    // каталог скоупа). Пустой — прежнее поведение: ~/.llama-gui/rag_profiles/.
+    initialize_profile_manager(profile_dir);
 
     // === ПЕРСИСТЕНТНОСТЬ: Пытаемся загрузить сохранённый индекс для текущего профиля ===
     if (load_index_for_current_profile()) {
@@ -82,6 +85,27 @@ RagManager::RagManager(const std::string& embedding_model_path) {
     } else {
         std::cout << "[RAG] No index found for current profile, will use empty index" << std::endl;
     }
+}
+
+void RagManager::set_shared_embedding_generator(
+    const std::shared_ptr<EmbeddingGenerator>& generator) {
+    /* R1.3: общий генератор требует ЕДИНСТВЕННОГО владельца, и это реестр.
+     * Свой генератор при этом освобождается: держать и свой, и общий — это
+     * две модели в памяти (117 МБ каждая) и два разных ответа на вопрос
+     * «какой моделью построен индекс». */
+    shared_embedding_generator_ = generator;
+    if (generator) {
+        embedding_generator_.reset();
+    }
+}
+
+bool RagManager::has_embedding_generator() const {
+    return active_generator() && active_generator()->is_loaded();
+}
+
+EmbeddingGenerator* RagManager::active_generator() const {
+    return shared_embedding_generator_ ? shared_embedding_generator_.get()
+                                       : embedding_generator_.get();
 }
 
 RagManager::~RagManager() {
