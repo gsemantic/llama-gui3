@@ -66,19 +66,34 @@
     },
     "cloud_provider": {
         "auto_price": false,
-        "context_length": 1000000,
+        "context_length": 512000,
         "enabled": true,
-        "endpoint_url": "https://api.yenisei.ru/v1",
+        "endpoint_url": "https://openrouter.ai/api/v1",
         "free_models_only": false,
         "last_search_query": "",
         "max_output_tokens": 1024,
-        "model_id": "yenisei-max",
+        "model_id": "dots-studio/dots-3-note-preview:free",
         "price_input_per_1m": 0.0,
         "price_output_per_1m": 0.0,
-        "provider_name": "yenisei",
+        "provider_name": "OpenRouter",
         "reasoning_budget": 0,
         "reasoning_enabled": false,
         "recent_models": [
+            {
+                "endpoint_url": "https://openrouter.ai/api/v1",
+                "id": "dots-studio/dots-3-note-preview:free",
+                "provider_name": "OpenRouter"
+            },
+            {
+                "endpoint_url": "https://api.yenisei.ru/v1",
+                "id": "deepseek-flash",
+                "provider_name": "yenisei"
+            },
+            {
+                "endpoint_url": "https://apihub.agnes-ai.com/v1",
+                "id": "agnes-2.5-flash",
+                "provider_name": "Custom"
+            },
             {
                 "endpoint_url": "https://api.yenisei.ru/v1",
                 "id": "yenisei-max",
@@ -92,11 +107,6 @@
             {
                 "endpoint_url": "https://api.kilo.ai/api/gateway",
                 "id": "baidu/ernie-5.5-flash-preview:free",
-                "provider_name": "kilo gateway"
-            },
-            {
-                "endpoint_url": "https://api.kilo.ai/api/gateway",
-                "id": "dots-studio/dots-3-note-preview:free",
                 "provider_name": "kilo gateway"
             },
             {
@@ -118,16 +128,6 @@
                 "endpoint_url": "https://api.kilo.ai/api/gateway",
                 "id": "kilo-auto/free",
                 "provider_name": "kilo gateway"
-            },
-            {
-                "endpoint_url": "https://api.yenisei.ru/v1",
-                "id": "yenisei",
-                "provider_name": "yenisei"
-            },
-            {
-                "endpoint_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                "id": "qwen-flash",
-                "provider_name": "Qwen (DashScope)"
             }
         ],
         "saved_providers": [
@@ -305,16 +305,16 @@
     },
     "model_performance": {
         "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf": {
-            "avg_context_used": 160,
-            "avg_response_time_ms": 658.07,
-            "avg_tokens_generated": 70,
-            "avg_tokens_per_second": 265.09,
-            "first_used": "Sun Nov 22 03:35:37 2026",
-            "last_used": "Sun Nov 22 03:35:37 2026",
+            "avg_context_used": 147,
+            "avg_response_time_ms": 594.46,
+            "avg_tokens_generated": 65,
+            "avg_tokens_per_second": 361.31,
+            "first_used": "Tue Nov 24 01:10:11 2026",
+            "last_used": "Tue Nov 24 01:10:11 2026",
             "model_name": "gemma-3-1b-it-UD-Q8_K_XL",
             "model_path": "/home/alex/projects/gguf/gemma-3-1b-it-UD-Q8_K_XL.gguf",
             "total_context": 4096,
-            "total_generations": 72
+            "total_generations": 73
         }
     },
     "output": {
