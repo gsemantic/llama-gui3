@@ -10,6 +10,7 @@
 #include "ui/window_coordinator.h"
 #include "imgui.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -97,6 +98,35 @@ int main() {
     if (!manager.is_plugin_loaded("hello_plugin")) {
         std::fprintf(stderr, "FAIL: is_plugin_loaded('hello_plugin') == false\n");
         return 1;
+    }
+
+    /* R2.1: таблица ABI, которую получают плагины, обязана вмещать новые
+     * поля RAG v2 (скоупы). Проверка не декоративная: хост пишет
+     * `size = sizeof(LlamaHostApi)` при СВОЕЙ компиляции, и если он собран
+     * с более старым plugin_api.h, размер окажется меньше — плагин с новым
+     * полем читал бы за пределами заполненной структуры. Именно так
+     * «разъезд»-ошибки так и выглядят: не падение, а мусор в указателе.
+     *
+     * Сравнение на РАВЕНСТВО, а не «>=»: тест и хост собираются из одного
+     * дерева, и расхождение означает stale-сборку (ровно как макрос версии
+     * плагина однажды остался от прошлой конфигурации). */
+    {
+        const LlamaHostApi& api = llama_gui::plugin::host_api_table();
+        if (api.size != static_cast<uint32_t>(sizeof(LlamaHostApi))) {
+            std::fprintf(stderr,
+                         "FAIL: api.size=%u, sizeof(LlamaHostApi)=%zu — "
+                         "хост собран с другим plugin_api.h\n",
+                         api.size, sizeof(LlamaHostApi));
+            return 1;
+        }
+        if (api.size < offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*)) {
+            std::fprintf(stderr,
+                         "FAIL: таблица ABI не вмещает поля RAG v2 "
+                         "(нужно %zu байт, есть %u)\n",
+                         offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*),
+                         api.size);
+            return 1;
+        }
     }
 
     /* Пустое состояние — должно отработать без ошибок.

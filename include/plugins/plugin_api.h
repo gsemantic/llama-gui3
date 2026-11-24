@@ -354,6 +354,63 @@ struct LlamaHostApi {
      */
     char* (*model_info)(LlamaPluginHost* host, const char* model_id);
     char* (*model_current)(LlamaPluginHost* host);
+
+    /* --- RAG v2: скоупы (append-only, проверка offsetof) ---
+     *
+     * Легаси-функции rag_* выше остаются и работают в скоупе `app` (профиль
+     * пользователя): плагин, собранный под 1.0.0, обязан работать на новом
+     * хосте без изменений. Это ДОПОЛНЕНИЕ, а не замена.
+     *
+     * Скоуп задаётся строкой, но построить его волен только ХОСТ: имя
+     * сверяется с идентичностью плагина (plugin:<name>[:<suffix>]),
+     * результат обязан лежать внутри `<data_dir>/rag_scopes/`, а плагин не
+     * может ни выбрать чужой индекс, ни выйти из этого каталога. Пустая
+     * строка или nullptr = скоуп плагина по умолчанию.
+     *
+     * Наличие определяется так же, как у llm_chat_stream/model_info:
+     * `api->size >= offsetof(LlamaHostApi, rag_search_ex) + sizeof(...)`.
+     * Версия LLAMA_PLUGIN_API_VERSION НЕ поднимается — проверка в
+     * plugin_manager.cpp строгая (равенство строк), и bump выключил бы все
+     * существующие плагины.
+     *
+     * Возвращаемые `char*` освобождаются `free_string`, как у остальных.
+     * Все функции возвращают JSON-объект с полем "ok" и, при отказе,
+     * "code": "denied" | "disabled" | "unavailable" | "quota" | "bad_scope" |
+     * "bad_index". Отказ — это значение "ok":false, а не пустая строка:
+     * «неfound» и «нет доступа» обязаны различаться (R0.2).
+     */
+
+    /* Поиск в скоупе. {"ok":true,"scope":"...","chunks":[{content,
+       document_id, chunk_index, file_path, symbol_name, start_line,
+       end_line, score}]} */
+    char* (*rag_search_ex)(LlamaPluginHost* host, const char* scope,
+                           const char* query, int k, const char* path_filter);
+
+    /* Индексация документа. opts_json: {"max_bytes":N,"max_chunks":N,
+       "deadline_ms":N,"reindex":true} — все поля необязательны.
+       {"ok":true,"chunks":N,"documents":M,"truncated":bool,"reason":"..."} */
+    char* (*rag_index_document_ex)(LlamaPluginHost* host, const char* scope,
+                                   const char* path, const char* opts_json);
+
+    /* Сведения о скоупе: {"ok":true,"scope":"...","documents":N,"chunks":N,
+       "bytes":N,"created_at":T,"model":"...","ready":bool,"reason":"..."} */
+    char* (*rag_scope_info)(LlamaPluginHost* host, const char* scope);
+
+    /* Удаление документа из скоупа. {"ok":true,...} */
+    char* (*rag_scope_remove_document)(LlamaPluginHost* host, const char* scope,
+                                       const char* path);
+
+    /* Полная очистка скоупа: 1 при успехе, 0 при отказе (причина — в логе
+     * хоста; JSON тут не нужен, вызывающему важно «сделано или нет»). */
+    int   (*rag_scope_clear)(LlamaPluginHost* host, const char* scope);
+
+    /* Немедленная запись индекса скоупа на диск: 1/0. */
+    int   (*rag_scope_flush)(LlamaPluginHost* host, const char* scope);
+
+    /* Отмена идущей индексации по хендлу. Хендл появится в R4 вместе с
+     * асинхронной парой rag_index_start/rag_index_wait; до R4 поле
+     * зарезервировано и возвращает 0. */
+    void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 };
 
 /* Информация о плагине (возвращается ll_plugin_info, статична) */

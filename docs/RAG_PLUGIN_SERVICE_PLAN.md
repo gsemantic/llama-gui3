@@ -467,9 +467,23 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 
 ### R2 — ABI `rag_*_ex` и тонкий слой хоста
 
-- [ ] **R2.1** Добавить поля в конец `LlamaHostApi` (`plugin_api.h`),
+- [x] **R2.1** Добавить поля в конец `LlamaHostApi` (`plugin_api.h`),
       **не меняя** `LLAMA_PLUGIN_API_VERSION`. Снабдить комментариями
       «append-only, проверка offsetof».
+      **Сделано (2026-11-24):** семь полей в конце структуры —
+      `rag_search_ex`, `rag_index_document_ex`, `rag_scope_info`,
+      `rag_scope_remove_document`, `rag_scope_clear`, `rag_scope_flush`,
+      `rag_index_cancel` (последнее зарезервировано до R4). Версия ABI
+      осталась `1.0.0`: проверка в `plugin_manager.cpp` строгая (равенство
+      строк), и bump выключил бы все существующие плагины.
+      **Тест:** `test_new_host_api_fields_are_append_only` в
+      `test_llm_stream_bridge` проверяет смещения всех семи полей и что
+      `rag_index_cancel` — хвост структуры; `test_plugin_loader` проверяет,
+      что `host_api_table().size == sizeof(LlamaHostApi)` и что таблица
+      вмещает `rag_index_cancel`.
+      **Попутно:** `host_api_table()` вынесен из анонимного namespace и
+      объявлен в `plugin_manager.h` — иначе тест проверял бы копию таблицы,
+      а не ту, которую реально получает `.so`.
 - [ ] **R2.2** Реализовать `host_rag_search_ex`,
       `host_rag_index_document_ex`, `host_rag_scope_info`,
       `host_rag_scope_remove_document`, `host_rag_scope_clear`,
@@ -567,7 +581,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R1.4 мьютексы | `[x]` | два потока | `test_rag_registry` |
 | R1.5 тест путей | `[x]` | `..` отклонён | `test_rag_registry` |
 | R1.6 изоляция | `[x]` | A не видно в B | `test_rag_scope_isolation` (3/3) |
-| R2.1 поля ABI | `[ ]` | `offsetof` | `test_plugin_loader` |
+| R2.1 поля ABI | `[x]` | `offsetof` | `test_plugin_loader`, `test_llm_stream_bridge` |
 | R2.2 host-функции | `[ ]` | JSON-контракт | `test_plugin_rag_api` |
 | R2.3 has_* | `[ ]` | старый хост | `test_plugin_rag_api` |
 | R2.4 PLUGIN_SYSTEM | `[ ]` | документ | — |
@@ -642,6 +656,9 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | 2026-11-24 | R1.6 | «Уже проиндексирован» → возврат 0 с записью в лог | тот же контракт, что «ноль новых чанков»; отдельный код ошибки потребовал бы менять ABI-контракт R2, а причина и так в логе |
 | 2026-11-24 | R1.6 | Эмбеддинги в тестах — n-gram фолбэк через мёртвый `server_url` | модель 117 МБ и сеть в тесте недоступны; фолбэк детерминирован, а качество «похожести» не проверяется — проверяется, лежит чанк в чужом индексе или нет |
 | 2026-11-24 | R1.6 | «Не находится в B» = «нет чужого file_path в выдаче» + `chunks == 1` | при пороге 0.7 поиск по тексту B в A законно возвращает чанк A (общие n-граммы), и «пустой результат» был бы проверкой порога, а не изоляции |
+| 2026-11-24 | R2.1 | `host_api_table()` вынесен из анонимного namespace и объявлен в `plugin_manager.h` | тест ABI обязан видеть ТУ таблицу, которую получает `.so`; проверка копии прошла бы и при разъезде хоста с тестом |
+| 2026-11-24 | R2.1 | `api.size == sizeof(LlamaHostApi)` строго, а не `>=` | тест и хост собираются из одного дерева; расхождение — это stale-сборка (класс «макрос версии отстал от plugin.json»), и «>=» её бы не поймало |
+| 2026-11-24 | R2.1 | `rag_index_cancel` зарезервирован и не реализован | асинхронная пара `rag_index_start`/`rag_index_wait` — R4; поле в конце структуры, поэтому зарезервировать его дешевле, чем добавлять потом (добавление в середину сдвинуло бы указатели) |
 
 ---
 

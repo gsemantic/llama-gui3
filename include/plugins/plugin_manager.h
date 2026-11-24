@@ -138,6 +138,17 @@ struct PluginInfo {
 /** Внутренняя реализация менеджера (определена в plugin_manager.cpp). */
 class PluginImpl;
 
+/**
+ * Таблица ABI, которую хост передаёт плагинам в ll_plugin_init.
+ *
+ * Единственный источник правды о размере структуры: плагин сверяет
+ * `api->size` с `offsetof` нового поля и по этому решает, можно ли его
+ * звать. Поэтому таблица обязана быть ОДНОЙ на процесс и доступной тесту
+ * ABI: проверка на копии проверяла бы не то, что реально уходит в .so
+ * (host_api_table() в plugin_manager.cpp).
+ */
+const LlamaHostApi& host_api_table();
+
 class PluginManager {
 public:
     PluginManager();

@@ -1616,6 +1616,14 @@ const char* host_app_version() {
     return version.c_str();
 }
 
+
+} // namespace (host impl)
+
+/* Таблица ABI, которую получает каждый плагин. Живёт ВНЕ анонимного
+ * namespace: это публичная точка (объявлена в plugin_manager.h), и
+ * тест ABI обязан видеть ту же таблицу, что и плагин, иначе проверка
+ * `api.size` проверяла бы копию, а не то, что реально уходит в .so. */
+
 const LlamaHostApi& host_api_table() {
     static const LlamaHostApi api = []() {
         LlamaHostApi a{};
@@ -1679,8 +1687,6 @@ const LlamaHostApi& host_api_table() {
     }();
     return api;
 }
-
-} // namespace (host impl)
 
 // ============================================================================
 // Внутренняя реализация менеджера

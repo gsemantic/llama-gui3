@@ -358,10 +358,28 @@ void test_new_host_api_fields_are_append_only() {
                       offsetof(LlamaHostApi, llm_chat_cancel) + sizeof(void*));
     TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, model_current),
                       offsetof(LlamaHostApi, model_info) + sizeof(void*));
+    /* RAG v2 (R2.1): поля скоупов идут следом за model_current, в порядке
+     * объявления. Порядок важен не сам по себе, а тем, что он
+     * единственный: вставка в середину сдвинула бы указатели, и старый .so
+     * читал бы вместо них чужое. */
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_search_ex),
+                      offsetof(LlamaHostApi, model_current) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_document_ex),
+                      offsetof(LlamaHostApi, rag_search_ex) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_scope_info),
+                      offsetof(LlamaHostApi, rag_index_document_ex) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_scope_remove_document),
+                      offsetof(LlamaHostApi, rag_scope_info) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_scope_clear),
+                      offsetof(LlamaHostApi, rag_scope_remove_document) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_scope_flush),
+                      offsetof(LlamaHostApi, rag_scope_clear) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_cancel),
+                      offsetof(LlamaHostApi, rag_scope_flush) + sizeof(void*));
     /* Хвост структуры — последнее добавленное поле. Сюда же добавляется
      * assert для следующего поля; суть проверки — «ничего не вставлено
      * в середину». */
-    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, model_current) + sizeof(void*),
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*),
                       sizeof(LlamaHostApi));
 }
 
