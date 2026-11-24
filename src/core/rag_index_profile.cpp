@@ -354,6 +354,31 @@ void RagIndexProfileManager::add_document_to_current_profile(const std::string& 
     save_profile(it->second);
 }
 
+bool RagIndexProfileManager::remove_document_from_current_profile(
+    const std::string& document_path) {
+    if (current_profile_.empty()) {
+        std::cerr << "[RAG PROFILE] Error: No current profile selected" << std::endl;
+        return false;
+    }
+
+    auto it = profiles_.find(current_profile_);
+    if (it == profiles_.end()) {
+        std::cerr << "[RAG PROFILE] Error: Current profile not found" << std::endl;
+        return false;
+    }
+
+    auto& docs = it->second.documents;
+    const size_t before = docs.size();
+    docs.erase(std::remove(docs.begin(), docs.end(), document_path), docs.end());
+    if (docs.size() == before) {
+        return false;   /* документа и не было — не ошибка */
+    }
+
+    it->second.modified_at = std::time(nullptr);
+    save_profile(it->second);
+    return true;
+}
+
 void RagIndexProfileManager::update_current_profile_chunk_count(int chunk_count) {
     if (current_profile_.empty()) {
         return;

@@ -484,11 +484,29 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       **Попутно:** `host_api_table()` вынесен из анонимного namespace и
       объявлен в `plugin_manager.h` — иначе тест проверял бы копию таблицы,
       а не ту, которую реально получает `.so`.
-- [ ] **R2.2** Реализовать `host_rag_search_ex`,
+- [x] **R2.2** Реализовать `host_rag_search_ex`,
       `host_rag_index_document_ex`, `host_rag_scope_info`,
       `host_rag_scope_remove_document`, `host_rag_scope_clear`,
       `host_rag_scope_flush` в `plugin_manager.cpp`: только валидация
       аргументов, вызов `RagRegistry`, сборка JSON. Никакой бизнес-логики.
+      **Сделано (2026-11-24):** логика — в `src/plugins/plugin_rag_api.cpp`
+      (чистые функции без `LlamaPluginHost*`), в `plugin_manager.cpp`
+      остались тонкие обёртки, которые собирают `RagCallContext` и зовут их.
+      Причина та же, что у R0.2: `host_*` в анонимном namespace, тест их не
+      видит.
+      **Правила:** имя скоупа строит реестр, плагин передаёт только суффикс
+      (`resolve_scope` возвращает суффикс, а не готовое имя); порядок
+      отказов — `disabled` → `unavailable` → `bad_scope` → `bad_request`
+      (выключенный RAG не должен выглядеть как «ты назвал чужой скоуп»).
+      **Попутно:** `RagStore::remove_document` + снятие документа из профиля
+      (`RagIndexProfileManager::remove_document_from_current_profile`) — без
+      второй части дедупликация R1.6 не дала бы вернуть документ в индекс.
+      **Тест:** `test_plugin_rag_api` — 11/11.
+- [ ] **R2.6** Хост создаёт реестр: `MainWindow` делит `EmbeddingGenerator` с
+      `RagManager` (R1.3), корень — `<cache>/rag_scopes`, поле уходит в
+      `PluginSubsystems.rag_registry`.
+      *Готово, когда:* в работающем приложении `rag_scope_info` отвечает
+      `ok:true`, а не `unavailable`.
 - [ ] **R2.3** Хелперы `has_rag_search_ex` и т.д. в
       `wp_coder/host_bridge/llm_stream_probe.{h,cpp}` (по образцу
       `has_model_info`).
@@ -582,7 +600,8 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R1.5 тест путей | `[x]` | `..` отклонён | `test_rag_registry` |
 | R1.6 изоляция | `[x]` | A не видно в B | `test_rag_scope_isolation` (3/3) |
 | R2.1 поля ABI | `[x]` | `offsetof` | `test_plugin_loader`, `test_llm_stream_bridge` |
-| R2.2 host-функции | `[ ]` | JSON-контракт | `test_plugin_rag_api` |
+| R2.2 host-функции | `[x]` | JSON-контракт | `test_plugin_rag_api` (11/11) |
+| R2.6 реестр в хосте | `[ ]` | `ok:true` в приложении | ручной |
 | R2.3 has_* | `[ ]` | старый хост | `test_plugin_rag_api` |
 | R2.4 PLUGIN_SYSTEM | `[ ]` | документ | — |
 | R2.5 schema | `[ ]` | валидный JSON | `test_plugin_manifest` |
@@ -659,6 +678,14 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | 2026-11-24 | R2.1 | `host_api_table()` вынесен из анонимного namespace и объявлен в `plugin_manager.h` | тест ABI обязан видеть ТУ таблицу, которую получает `.so`; проверка копии прошла бы и при разъезде хоста с тестом |
 | 2026-11-24 | R2.1 | `api.size == sizeof(LlamaHostApi)` строго, а не `>=` | тест и хост собираются из одного дерева; расхождение — это stale-сборка (класс «макрос версии отстал от plugin.json»), и «>=» её бы не поймало |
 | 2026-11-24 | R2.1 | `rag_index_cancel` зарезервирован и не реализован | асинхронная пара `rag_index_start`/`rag_index_wait` — R4; поле в конце структуры, поэтому зарезервировать его дешевле, чем добавлять потом (добавление в середину сдвинуло бы указатели) |
+| 2026-11-24 | R2.2 | Реализация — в `plugin_rag_api.cpp`, а не в `plugin_manager.cpp` | `host_*` в анонимном namespace не видны тесту; чистая функция проверяется без PluginManager и без `LlamaPluginHost*` (та же причина, что у `plugin_rag_gate.cpp`) |
+| 2026-11-24 | R2.2 | `resolve_scope` возвращает СУФФИКС, а полное имя строит реестр | имя, прошедшее проверку в одном месте и собранное в другом, — это две тропы; плагин передаёт «хвост», а имя целиком собирает хост |
+| 2026-11-24 | R2.2 | Порядок отказов: `disabled` → `unavailable` → `bad_scope` | на выключенном RAG чужой скоуп — не ошибка плагина, и `bad_scope` увёл бы поиск в имя вместо настроек |
+| 2026-11-24 | R2.2 | `score` убран из JSON чанка, `created_at` — из info | `search_hybrid()` сливает keyword- и векторную выдачу и релевантность не считает: ноль в `score` плагин принял бы за оценку и начал бы сортировать; `created_at` появится с R4 (`scope.json`) |
+| 2026-11-24 | R2.2 | `rag_scope_remove_document` идемпотентен (`removed:false` вместо ошибки) | плагин, узнавший о файле из старого лога, иначе не смог бы его убрать; «удалить то, чего нет» — не ошибка, как `rm -f` |
+| 2026-11-24 | R2.2 | `rag_index_document_ex` принимает `opts_json` и игнорирует его | квоты и `reindex` — R4.1; хост R2, ответивший `bad_request` плагину, написанному под R4, сломал бы совместимость вперёд |
+| 2026-11-24 | R2.2 | `rag_index_cancel` — пустая функция | отменять нечего до R4; поле занято, чтобы не сдвигать ABI |
+| 2026-11-24 | R2.2 | Удаление документа чистит и профиль, а не только чанки | иначе документ остаётся «проиндексированным», и дедупликация R1.6 молча отказывается индексировать его повторно |
 
 ---
 

@@ -14,6 +14,8 @@
 #include "core/settings.h"
 #include "core/llama_interface.h"
 #include "core/rag_manager.h"
+#include "core/rag_registry.h"
+#include "plugins/plugin_rag_api.h"
 #include "core/version.h"
 #include "core/openrouter_client.h"
 #include "core/env_manager.h"
@@ -1454,6 +1456,68 @@ char* host_rag_build_prompt(LlamaPluginHost* host, const char* query, int k,
     return strdup(prompt.c_str());
 }
 
+/* --- RAG v2: скоупы (R2.2) ---
+ *
+ * Тонкий слой: собрать контекст и позвать plugin_rag_api.cpp. Никакой
+ * бизнес-логики здесь нет — вся в файле выше, потому что отсюда её не
+ * увидеть тесту (анонимный namespace).
+ *
+ * Контекст собирается ДЛЯ КАЖДОГО вызова: плагин может быть выгружен и
+ * загружен снова, а имя и реестр — свойства текущего менеджера, а не
+ * процесса. */
+plugin::RagCallContext rag_call_context(PluginHostData* pd) {
+    plugin::RagCallContext ctx;
+    if (!pd || !pd->manager) return ctx;
+    ctx.registry = pd->manager->subsystems.rag_registry.get();
+    ctx.allowed = plugin_rag_allowed(pd->manager->subsystems);
+    if (pd->plugin) ctx.plugin_name = pd->plugin->info.name;
+    return ctx;
+}
+
+char* host_rag_search_ex(LlamaPluginHost* host, const char* scope,
+                         const char* query, int k, const char* path_filter) {
+    return plugin::rag_search_ex_impl(rag_call_context(to_pd(host)),
+                                      scope ? scope : "", query ? query : "", k,
+                                      path_filter ? path_filter : "");
+}
+
+char* host_rag_index_document_ex(LlamaPluginHost* host, const char* scope,
+                                 const char* path, const char* opts_json) {
+    return plugin::rag_index_document_ex_impl(rag_call_context(to_pd(host)),
+                                              scope ? scope : "",
+                                              path ? path : "",
+                                              opts_json ? opts_json : "");
+}
+
+char* host_rag_scope_info(LlamaPluginHost* host, const char* scope) {
+    return plugin::rag_scope_info_impl(rag_call_context(to_pd(host)),
+                                       scope ? scope : "");
+}
+
+char* host_rag_scope_remove_document(LlamaPluginHost* host, const char* scope,
+                                      const char* path) {
+    return plugin::rag_scope_remove_document_impl(rag_call_context(to_pd(host)),
+                                                  scope ? scope : "",
+                                                  path ? path : "");
+}
+
+int host_rag_scope_clear(LlamaPluginHost* host, const char* scope) {
+    return plugin::rag_scope_clear_impl(rag_call_context(to_pd(host)),
+                                        scope ? scope : "");
+}
+
+int host_rag_scope_flush(LlamaPluginHost* host, const char* scope) {
+    return plugin::rag_scope_flush_impl(rag_call_context(to_pd(host)),
+                                        scope ? scope : "");
+}
+
+void host_rag_index_cancel(LlamaPluginHost* host, void* handle) {
+    /* R4: асинхронная пара rag_index_start/rag_index_wait. До неё
+     * отменять нечего — поле зарезервировано, чтобы не сдвигать ABI. */
+    (void)host;
+    (void)handle;
+}
+
 const char* host_path_config_dir(LlamaPluginHost* host) {
     auto* pd = to_pd(host);
     return (pd && pd->manager) ? pd->manager->subsystems.config_dir.c_str() : "";
@@ -1683,6 +1747,16 @@ const LlamaHostApi& host_api_table() {
 
         a.model_info = host_model_info;
         a.model_current = host_model_current;
+
+        /* RAG v2 (R2.2). Поля в конце структуры: старый плагин их не
+         * читает, новый проверяет offsetof против size. */
+        a.rag_search_ex = host_rag_search_ex;
+        a.rag_index_document_ex = host_rag_index_document_ex;
+        a.rag_scope_info = host_rag_scope_info;
+        a.rag_scope_remove_document = host_rag_scope_remove_document;
+        a.rag_scope_clear = host_rag_scope_clear;
+        a.rag_scope_flush = host_rag_scope_flush;
+        a.rag_index_cancel = host_rag_index_cancel;
         return a;
     }();
     return api;

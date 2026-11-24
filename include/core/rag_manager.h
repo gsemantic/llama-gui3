@@ -98,6 +98,12 @@ public:
     bool process_text_chunk(const std::string& text, const std::string& doc_id, int chunk_index);
     bool reindex_document(const std::string& file_path);
     bool remove_document(const std::string& file_path);
+    /* R2.2: убрать документ из СПИСКА профиля (не из индекса).
+     * `remove_document` убирает чанки и перестраивает FAISS, но список
+     * документов профиля не трогал: после удаления документ оставался
+     * «проиндексированным», и повторная индексация (дедупликация по
+     * профилю, R1.6) молча ничего не делала. */
+    bool remove_document_from_current_profile(const std::string& file_path);
 
     // Кэширование чат-истории
     std::string find_cached_response(const std::string& query);

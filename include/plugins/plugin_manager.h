@@ -21,6 +21,7 @@ namespace core {
     class Settings;
     class LlamaInterface;
     class RagManager;
+    class RagRegistry;
 }
 namespace ui {
     class CommandManager;
@@ -71,6 +72,12 @@ struct PluginSubsystems {
     llama_gui::core::LlamaInterface* llama_interface = nullptr;
     llama_gui::ui::ChatInterface* chat_interface = nullptr;
     llama_gui::core::RagManager* rag_manager = nullptr;
+    /* R2.2: реестр скоупов RAG (R1.2). Владелец — хост (MainWindow), а не
+     * менеджер плагинов: реестр живёт дольше отдельного плагина, иначе
+     * выгрузка плагина уносила бы индексы остальных. nullptr = RAG v2
+     * недоступен, и все rag_*_ex отвечают {"ok":false,"code":"unavailable"}
+     * (легаси-функции это не задевает). */
+    std::shared_ptr<llama_gui::core::RagRegistry> rag_registry;
 
     std::string config_dir;   // директория конфигурации приложения
     std::string data_dir;     // директория данных приложения

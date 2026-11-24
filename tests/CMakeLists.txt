@@ -57,6 +57,16 @@ target_link_libraries(test_rag_scope_isolation PRIVATE core)
 target_include_directories(test_rag_scope_isolation PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagScopeIsolation COMMAND test_rag_scope_isolation)
 
+# ABI RAG v2 (R2.2): скоупы и JSON-контракт host_rag_*_ex. Тест зовёт
+# реализацию напрямую (plugin_rag_api.cpp), без PluginManager и без
+# LlamaPluginHost: слой ABI должен быть проверяемым.
+add_executable(test_plugin_rag_api core/test_plugin_rag_api.cpp)
+target_link_libraries(test_plugin_rag_api PRIVATE plugin_core core)
+target_include_directories(test_plugin_rag_api PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+add_test(NAME PluginRagApi COMMAND test_plugin_rag_api)
+
 # RAG embedding unavailability contract (R0.1).
 # Проверяет, что при отсутствии модели/сервера generate_embedding
 # возвращает ПУСТОЙ вектор, индекс чат-истории не растёт, а

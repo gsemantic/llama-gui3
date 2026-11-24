@@ -382,18 +382,23 @@ struct LlamaHostApi {
 
     /* Поиск в скоупе. {"ok":true,"scope":"...","chunks":[{content,
        document_id, chunk_index, file_path, symbol_name, start_line,
-       end_line, score}]} */
+       end_line}]}
+       Поля score пока нет: search_hybrid() сливает keyword- и векторную
+       выдачу и релевантность не считает, а ноль «потому что так надо»
+       хуже отсутствующего поля. Появится вместе с ранжированием. */
     char* (*rag_search_ex)(LlamaPluginHost* host, const char* scope,
                            const char* query, int k, const char* path_filter);
 
     /* Индексация документа. opts_json: {"max_bytes":N,"max_chunks":N,
-       "deadline_ms":N,"reindex":true} — все поля необязательны.
+       "deadline_ms":N,"reindex":true} — все поля необязательны (R4.1;
+       до R4 принимается и игнорируется).
        {"ok":true,"chunks":N,"documents":M,"truncated":bool,"reason":"..."} */
     char* (*rag_index_document_ex)(LlamaPluginHost* host, const char* scope,
                                    const char* path, const char* opts_json);
 
     /* Сведения о скоупе: {"ok":true,"scope":"...","documents":N,"chunks":N,
-       "bytes":N,"created_at":T,"model":"...","ready":bool,"reason":"..."} */
+       "bytes":N,"embeddings":bool,"model":"...","ready":bool,"reason":"..."}
+       created_at появится с R4 (scope.json); до него поля просто нет. */
     char* (*rag_scope_info)(LlamaPluginHost* host, const char* scope);
 
     /* Удаление документа из скоупа. {"ok":true,...} */

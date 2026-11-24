@@ -141,6 +141,21 @@ bool RagStore::flush() {
     return manager_->save_index();
 }
 
+bool RagStore::remove_document(const std::string& file_path) {
+    if (file_path.empty()) return false;
+    std::lock_guard<std::mutex> lk(mtx_);
+    RagManager& mgr = ensure_manager();
+
+    const bool removed = mgr.remove_document(file_path);
+    /* Профиль чистим ВСЕГДА, даже если чанков не было: расхождение
+     * «в индексе нет, в профиле есть» — это состояние, в котором
+     * дедупликация R1.6 молча отказывается индексировать документ
+     * повторно. Лучше потратить один проход по списку, чем оставить
+     * документ «вечно проиндексированным». */
+    mgr.remove_document_from_current_profile(file_path);
+    return removed;
+}
+
 void RagStore::clear() {
     std::lock_guard<std::mutex> lk(mtx_);
     if (manager_) {

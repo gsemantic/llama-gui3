@@ -127,6 +127,18 @@ int main() {
                          api.size);
             return 1;
         }
+        /* R2.2: поля должны быть ЗАПОЛНЕНЫ, а не только умещаться.
+         * Забытое присваивание в host_api_table выглядело бы как «поле
+         * есть, но плагин получает nullptr» — и это прошло бы проверку
+         * размера насквозь. */
+        if (!api.rag_search_ex || !api.rag_index_document_ex ||
+            !api.rag_scope_info || !api.rag_scope_remove_document ||
+            !api.rag_scope_clear || !api.rag_scope_flush ||
+            !api.rag_index_cancel) {
+            std::fprintf(stderr,
+                         "FAIL: часть полей RAG v2 не заполнена хостом\n");
+            return 1;
+        }
     }
 
     /* Пустое состояние — должно отработать без ошибок.

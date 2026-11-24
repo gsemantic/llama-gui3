@@ -606,6 +606,10 @@ std::string RagManager::get_current_profile_source_directory() const {
     return profile->source_directory;
 }
 
+bool RagManager::remove_document_from_current_profile(const std::string& file_path) {
+    return profile_manager_.remove_document_from_current_profile(file_path);
+}
+
 bool RagManager::reindex_current_profile() {
     std::string current = profile_manager_.get_current_profile();
     if (current.empty()) {
