@@ -14,6 +14,7 @@
 // как в test_plugin_rag_api: без модели и без сети.
 
 #include "plugins/plugin_rag_api.h"
+#include "plugins/plugin_settings_guard.h"
 
 #include "../test_framework.h"
 
@@ -205,6 +206,53 @@ void test_disabled_and_unavailable_beat_denied() {
                               "unavailable"));
 }
 
+// ============================================================================
+// Namespace-гард записи настроек (R3.2)
+// ============================================================================
+
+void test_settings_guard_own_vs_foreign() {
+    using SD = SettingsWriteDecision;
+
+    /* Своё — можно. */
+    TEST_ASSERT(check_plugin_settings_write("wp_coder", "plugin.wp_coder.theme") ==
+                SD::Allowed);
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.wp_coder.window.x") ==
+                SD::Allowed);
+    /* Свой суффикс, начинающийся с "rag", но не равный "rag" — можно. */
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.wp_coder.rag_extra.on") ==
+                SD::Allowed);
+    /* Обычные (не plugin.*) настройки — как раньше. */
+    TEST_ASSERT(check_plugin_settings_write("wp_coder", "ui.theme") ==
+                SD::Allowed);
+}
+
+void test_settings_guard_host_owned_and_foreign_denied() {
+    using SD = SettingsWriteDecision;
+
+    /* Свой .rag.* — host-owned, писать нельзя. */
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.wp_coder.rag.enabled") ==
+                SD::Denied);
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.wp_coder.rag") == SD::Denied);
+    /* Чужой плагин — нельзя (и .rag., и обычный ключ). */
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.siteparser.rag.enabled") ==
+                SD::Denied);
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.siteparser.theme") ==
+                SD::Denied);
+    /* «Прилипание» к своему имени: plugin.wp_coder_extra — чужое. */
+    TEST_ASSERT(check_plugin_settings_write("wp_coder",
+                                            "plugin.wp_coder_extra.rag.enabled") ==
+                SD::Denied);
+    /* Нет плагина (self пуст) → любой plugin.* запрещён. */
+    TEST_ASSERT(check_plugin_settings_write("", "plugin.wp_coder.theme") ==
+                SD::Denied);
+}
+
 int main() {
     REGISTER_TEST(test_permission_lookup);
 
@@ -214,6 +262,9 @@ int main() {
     REGISTER_TEST(test_with_permissions_all_work);
 
     REGISTER_TEST(test_disabled_and_unavailable_beat_denied);
+
+    REGISTER_TEST(test_settings_guard_own_vs_foreign);
+    REGISTER_TEST(test_settings_guard_host_owned_and_foreign_denied);
 
     const int rc = test::TestRunner::instance().run();
 

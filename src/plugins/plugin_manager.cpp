@@ -16,6 +16,7 @@
 #include "core/rag_manager.h"
 #include "core/rag_registry.h"
 #include "plugins/plugin_rag_api.h"
+#include "plugins/plugin_settings_guard.h"
 #include "core/version.h"
 #include "core/openrouter_client.h"
 #include "core/env_manager.h"
@@ -396,6 +397,22 @@ int host_settings_set(LlamaPluginHost* host, const char* key, const char* json_v
     if (!pd || !pd->manager || !key || !json_value) return 0;
     auto* s = pd->manager->subsystems.settings;
     if (!s) return 0;
+
+    /* R3.2: namespace-гард. Плагин не может писать `plugin.<чужой>.*` и
+     * `plugin.<self>.rag.*` (host-owned). Отказ — 0 и запись в лог:
+     * молчаливый «успех без записи» заставил бы плагин думать, что
+     * настройка применилась. Чтение host-owned не ограничено (см.
+     * host_settings_get): плагину нужно ВИДЕТЬ `enabled`/квоты/корни. */
+    const std::string self = pd->plugin ? pd->plugin->info.name : std::string();
+    if (plugin::check_plugin_settings_write(self, key) ==
+        plugin::SettingsWriteDecision::Denied) {
+        std::cerr << "[PluginManager] Plugin '" << self
+                  << "' denied write to host-owned setting '" << key
+                  << "' (only plugin.<self>.* is writable; .rag.* is host-owned)"
+                  << std::endl;
+        return 0;
+    }
+
     s->set_custom_setting(key, json_value);
     // Custom-настройки плагинов хранятся только в памяти Settings и попадают
     // на диск лишь при сохранении профиля. Чтобы настройки переживали перезапуск

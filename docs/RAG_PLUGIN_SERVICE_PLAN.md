@@ -571,9 +571,20 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       проверки права; `plugin_has_permission → false`) пойманы (2 и 1
       падение). Обновлён `ctx_for` в `test_plugin_rag_api` (R2-тесты
       наделяются правами, иначе `_ex` отвечали бы `denied`).
-- [ ] **R3.2** Namespace-гард в `host_settings_set`; чтение host-owned
+- [x] **R3.2** Namespace-гард в `host_settings_set`; чтение host-owned
       разрешено; тест на попытку записи `plugin.other.rag.enabled` и
       `plugin.self.rag.enabled`.
+      **Сделано (2026-11-25):** чистая `check_plugin_settings_write(self, key)`
+      в `plugin_settings_guard.{h,cpp}` (отдельный файл — та же причина, что
+      у R0.2/R2.2: `host_settings_set` в анонимном namespace). Правило: ключ
+      вне `plugin.` — можно; `plugin.<self>.X` при `X ≠ rag` — можно; иначе
+      (`plugin.<чужой>.*`, `plugin.<self>.rag…`) — `Denied`. `host_settings_set`
+      возвращает 0 и пишет причину в лог (молчаливый «успех без записи» врал
+      бы плагину). Чтение не тронуто: `host_settings_get` по-прежнему отдаёт
+      host-owned (`enabled`/квоты/корни) — плагину нужно их видеть. **Тест:**
+      `test_plugin_rag_permissions` — 8/8 (своё/чужое/`.rag.`/«прилипание»
+      `wp_coder_extra`/пустой self); мутация «гард всегда Allowed» поймана
+      (1 падение).
 - [ ] **R3.3** Применение настроек: `RagRegistry` читает
       `plugin.<name>.rag.*` из `Settings`; изменения применяются на
       следующем вызове (без перезапуска), удаление плагина не затрагивает
@@ -654,7 +665,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R2.4 PLUGIN_SYSTEM | `[x]` | документ | — |
 | R2.5 schema | `[x]` | валидный JSON | `test_plugin_manifest_schema` (4/4) |
 | R3.1 права | `[x]` | denied | `test_plugin_rag_permissions` (6/6) |
-| R3.2 namespace | `[ ]` | чужая запись отклонена | `test_plugin_rag_permissions` |
+| R3.2 namespace | `[x]` | чужая запись отклонена | `test_plugin_rag_permissions` (8/8) |
 | R3.3 настройки | `[ ]` | переживают рестарт | `test_rag_registry` |
 | R3.4 тест прав | `[ ]` | 3 случая | `test_plugin_rag_permissions` |
 | R3.5 UI | `[ ]` | чекбокс | ручной |
@@ -742,6 +753,9 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | 2026-11-25 | R3.1 | Нет манифеста → оба права false → `_ex` отвечают `denied` | доступ к данным пользователя не выдаётся по умолчанию; «нет plugin.json» не должно означать «можно всё» |
 | 2026-11-25 | R3.1 | `plugin_has_permission(perms, "")` → false | пустое `required` — ошибка вызывающего; «разреши всем» через пустую строку было бы тихой дырой |
 | 2026-11-25 | R3.1 | Легаси `host_rag_*` только предупреждают | ротация §3.4: сторонние плагины под ABI 1.0.0 не объявляли прав, отказ сломал бы их в одном релизе; решение об отказе — M5 |
+| 2026-11-25 | R3.2 | Гард — только на ЗАПИСЬ; чтение host-owned разрешено | плагину нужно видеть `enabled`/квоты/корни, иначе он не сможет объяснить пользователю, почему RAG молчит; а запись `plugin.<self>.rag.*` — это включение RAG за чужого |
+| 2026-11-25 | R3.2 | Отказ записи = 0 + лог, а не молчаливый «успех» | «сохранил, но не туда» хуже отказа: плагин хотя бы узнаёт правду (тот же принцип, что R1.1) |
+| 2026-11-25 | R3.2 | Пустой `self` → любой `plugin.*` запрещён | «нет плагина» не повод разрешить запись в чужие настройки; безопаснее «нет» |
 
 ---
 
