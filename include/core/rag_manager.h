@@ -147,6 +147,11 @@ public:
     /** Есть ли у менеджера рабочий генератор (свой или общий). */
     bool has_embedding_generator() const;
 
+    /** R2.6: действующий генератор — его получает реестр скоупов.
+     * Может быть nullptr: тогда у сторов эмбеддингов нет, и они честно
+     * отвечают embeddings=false, а не «правдоподобным мусором». */
+    std::shared_ptr<EmbeddingGenerator> embedding_backend() const;
+
     // Формирование промпта с RAG-контекстом
     std::string build_rag_prompt(const std::string& user_query,
                                 const std::vector<RagChunk>& context_chunks,
@@ -368,8 +373,11 @@ private:
     std::vector<RagChunk> external_chunks_;
     std::vector<RagChunk> chat_history_chunks_;
 
-    // GGUF модель для эмбеддингов
-    std::unique_ptr<EmbeddingGenerator> embedding_generator_;
+    // GGUF модель для эмбеддингов.
+    // R2.6: shared_ptr, а не unique_ptr, потому что тот же генератор
+    // отдаётся реестру скоупов (embedding_backend()): модель 117 МБ, и
+    // второй копии у плагинов быть не должно.
+    std::shared_ptr<EmbeddingGenerator> embedding_generator_;
     /* R1.3: общий генератор, если менеджеру его передали. Если непуст —
      * generate_embedding использует ЕГО, а собственный embedding_generator_
      * не создаётся (или освобождается). Владелец — реестр, живущий дольше

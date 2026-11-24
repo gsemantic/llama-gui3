@@ -411,6 +411,15 @@ bool MainWindow::initialize(int width, int height) {
             // Применяем настройки RAG (URL сервера эмбеддингов, размерность и т.п.)
             rag_manager_->update_from_settings(settings_.rag());
 
+            /* R2.6: реестр скоупов для плагинов. Корень — <cache>/rag_scopes,
+             * генератор — ТОТ ЖЕ, что у чат-RAG (R1.3): модель 117 МБ, и
+             * второй копии у плагинов быть не должно. Если эмбеддингов нет,
+             * реестр всё равно создаётся: сторы честно ответят
+             * embeddings=false, а плагин продолжит работать без RAG. */
+            rag_registry_ = std::make_shared<llama_gui::core::RagRegistry>(
+                (std::filesystem::path(get_cache_directory()) / "rag_scopes").string(),
+                rag_manager_->embedding_backend());
+
             chat_interface_->set_rag_manager(rag_manager_.get());
 
             bool rag_enabled = settings_.rag().enable_rag;
@@ -1644,6 +1653,9 @@ void MainWindow::initializePlugins() {
     subsystems.llama_interface = &llama_interface_;
     subsystems.chat_interface = chat_interface_.get();
     subsystems.rag_manager = rag_manager_.get();
+    /* R2.6: реестр скоупов (может быть nullptr, если RAG выключен или
+     * эмбеддингов нет: тогда rag_*_ex отвечают "unavailable"). */
+    subsystems.rag_registry = rag_registry_;
     subsystems.config_dir = get_config_directory();
     subsystems.data_dir = get_cache_directory();
     subsystems.plugins_dir = "plugins";

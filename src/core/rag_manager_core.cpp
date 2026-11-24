@@ -36,7 +36,7 @@ RagManager::RagManager(const std::string& embedding_model_path,
     profile_dir_ = profile_dir;
 
     // Инициализируем генератор эмбеддингов
-    embedding_generator_ = std::make_unique<EmbeddingGenerator>(embedding_model_path);
+    embedding_generator_ = std::make_shared<EmbeddingGenerator>(embedding_model_path);
 
     // Пытаемся загрузить модель эмбеддингов
     if (embedding_generator_ && !embedding_generator_->load_model()) {
@@ -110,6 +110,14 @@ bool RagManager::has_embedding_generator() const {
     return active_generator() && active_generator()->is_loaded();
 }
 
+std::shared_ptr<EmbeddingGenerator> RagManager::embedding_backend() const {
+    /* R2.6: реестр скоупов и чат-RAG обязаны считать векторы ОДНИМ
+     * генератором: две копии модели — это 234 МБ и два разных ответа на
+     * вопрос «какой моделью построен индекс». */
+    return shared_embedding_generator_ ? shared_embedding_generator_
+                                       : embedding_generator_;
+}
+
 EmbeddingGenerator* RagManager::active_generator() const {
     return shared_embedding_generator_ ? shared_embedding_generator_.get()
                                        : embedding_generator_.get();
@@ -117,7 +125,8 @@ EmbeddingGenerator* RagManager::active_generator() const {
 
 RagManager::~RagManager() {
     // Деструктор теперь автоматически освободит embedding_generator_
-    // благодаря использованию std::unique_ptr
+    // благодаря использованию std::shared_ptr. Если генератор общий (R1.3),
+    // он переживёт менеджер: владелец — реестр.
 }
 
 // ============================================================================

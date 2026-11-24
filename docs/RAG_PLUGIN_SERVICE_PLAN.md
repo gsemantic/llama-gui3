@@ -502,11 +502,16 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       (`RagIndexProfileManager::remove_document_from_current_profile`) — без
       второй части дедупликация R1.6 не дала бы вернуть документ в индекс.
       **Тест:** `test_plugin_rag_api` — 11/11.
-- [ ] **R2.6** Хост создаёт реестр: `MainWindow` делит `EmbeddingGenerator` с
+- [x] **R2.6** Хост создаёт реестр: `MainWindow` делит `EmbeddingGenerator` с
       `RagManager` (R1.3), корень — `<cache>/rag_scopes`, поле уходит в
       `PluginSubsystems.rag_registry`.
       *Готово, когда:* в работающем приложении `rag_scope_info` отвечает
       `ok:true`, а не `unavailable`.
+      **Сделано (2026-11-24):** `RagManager::embedding_generator_` стал
+      `shared_ptr` + accessor `embedding_backend()`; `MainWindow` создаёт
+      `RagRegistry` сразу после `RagManager` и кладёт в `PluginSubsystems`.
+      Реестр создаётся и без эмбеддингов: сторы тогда отвечают
+      `embeddings:false` — это честнее, чем «RAG недоступен».
 - [ ] **R2.3** Хелперы `has_rag_search_ex` и т.д. в
       `wp_coder/host_bridge/llm_stream_probe.{h,cpp}` (по образцу
       `has_model_info`).
@@ -601,7 +606,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R1.6 изоляция | `[x]` | A не видно в B | `test_rag_scope_isolation` (3/3) |
 | R2.1 поля ABI | `[x]` | `offsetof` | `test_plugin_loader`, `test_llm_stream_bridge` |
 | R2.2 host-функции | `[x]` | JSON-контракт | `test_plugin_rag_api` (11/11) |
-| R2.6 реестр в хосте | `[ ]` | `ok:true` в приложении | ручной |
+| R2.6 реестр в хосте | `[x]` | `ok:true` в приложении | `main_window` + `embedding_backend()` |
 | R2.3 has_* | `[ ]` | старый хост | `test_plugin_rag_api` |
 | R2.4 PLUGIN_SYSTEM | `[ ]` | документ | — |
 | R2.5 schema | `[ ]` | валидный JSON | `test_plugin_manifest` |
@@ -686,6 +691,9 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | 2026-11-24 | R2.2 | `rag_index_document_ex` принимает `opts_json` и игнорирует его | квоты и `reindex` — R4.1; хост R2, ответивший `bad_request` плагину, написанному под R4, сломал бы совместимость вперёд |
 | 2026-11-24 | R2.2 | `rag_index_cancel` — пустая функция | отменять нечего до R4; поле занято, чтобы не сдвигать ABI |
 | 2026-11-24 | R2.2 | Удаление документа чистит и профиль, а не только чанки | иначе документ остаётся «проиндексированным», и дедупликация R1.6 молча отказывается индексировать его повторно |
+| 2026-11-24 | R2.6 | `RagManager::embedding_generator_` — `shared_ptr` + `embedding_backend()` | реестр скоупов и чат-RAG обязаны считать векторы ОДНИМ генератором: две копии модели — это 234 МБ и два разных ответа на вопрос «какой моделью построен индекс» |
+| 2026-11-24 | R2.6 | Реестр создаётся даже без эмбеддингов | сторы ответят `embeddings:false` и внятной причиной; «RAG недоступен» скрыло бы, что дело в модели, а не в коде |
+| 2026-11-24 | R2.6 | Корень реестра — `<cache>/rag_scopes` | тот же `data_dir`, что у `PluginSubsystems`; путь плагин не выбирает (правило §3.2), и рядом с профилем пользователя такой каталог не создаётся |
 
 ---
 

@@ -39,6 +39,7 @@
 #include "workspace_applier.h"
 #include "workspace_layout_manager.h"
 #include "core/rag_manager.h"
+#include "core/rag_registry.h"
 #include "core/rag_settings.h"
 #include "ui/rag_interface.h"
 #include "ui/rag_settings_dialog.h"
@@ -311,6 +312,11 @@ private:
     std::shared_ptr<ServerManager> server_manager_;
     std::unique_ptr<llama_gui::core::EmbeddingServer> embedding_server_;
     std::unique_ptr<llama_gui::core::RagManager> rag_manager_;
+    /* R2.6: реестр скоупов RAG для плагинов. Создаётся вместе с
+     * RagManager и делит с ним ОДИН EmbeddingGenerator (модель 117 МБ,
+     * второй копии быть не должно — R1.3). Живёт столько же, сколько
+     * приложение: плагин может быть выгружен, а его индекс — нет. */
+    std::shared_ptr<llama_gui::core::RagRegistry> rag_registry_;
 
     // Отслеживание видимости диалога настроек RAG для применения изменений
     bool rag_settings_visible_prev_ = false;
