@@ -49,6 +49,14 @@ target_link_libraries(test_rag_store PRIVATE core)
 target_include_directories(test_rag_store PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagStore COMMAND test_rag_store)
 
+# Изоляция скоупов (R1.6): документ A не находится в B, clear(A) не трогает
+# B, повторная индексация не дублирует чанки. Эмбеддинги — детерминированный
+# n-gram фолбэк (недостижимый server_url), без модели и без сети.
+add_executable(test_rag_scope_isolation core/test_rag_scope_isolation.cpp)
+target_link_libraries(test_rag_scope_isolation PRIVATE core)
+target_include_directories(test_rag_scope_isolation PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RagScopeIsolation COMMAND test_rag_scope_isolation)
+
 # RAG embedding unavailability contract (R0.1).
 # Проверяет, что при отсутствии модели/сервера generate_embedding
 # возвращает ПУСТОЙ вектор, индекс чат-истории не растёт, а

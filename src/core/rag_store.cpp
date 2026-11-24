@@ -95,6 +95,27 @@ int RagStore::index_document(const std::string& file_path) {
     std::lock_guard<std::mutex> lk(mtx_);
     RagManager& mgr = ensure_manager();
 
+    /* R1.6: повторная индексация НЕ удваивает чанки.
+     *
+     * `RagManager::process_document()` всегда ДОБАВЛЯЕТ чанки — дедупликации
+     * в нём нет (проверено: ни `documents_index_`, ни проверки «документ уже
+     * в профиле»). Для легаси-чата это незаметно, а для стора это означало
+     * бы, что второй вызов `rag_index` с тем же путём удваивает индекс и
+     * поиск возвращает один и тот же кусок дважды.
+     *
+     * Считаем документ уже проиндексированным, если он есть в профиле стора.
+     * Переиндексация (изменившийся файл) — задача R4.1 с флагом
+     * `reindex`; до неё «уже индексировали» — это «ничего не делаем», а не
+     * «строим вторую копию». */
+    for (const auto& doc : mgr.get_current_profile_documents()) {
+        if (doc == file_path) {
+            std::cout << "[RagStore] " << scope_
+                      << ": document already indexed, skipping: " << file_path
+                      << std::endl;
+            return 0;
+        }
+    }
+
     const size_t before = mgr.get_external_chunks_count();
     if (!mgr.process_document(file_path, /*report_completion=*/false)) {
         return 0;
