@@ -1386,11 +1386,27 @@ char* host_llm_ast_symbols(LlamaPluginHost* host, const char* path,
  * Отдельный файл — та же причина, по которой разбор символов живёт в
  * ast_symbols.cpp, а не в plugin_manager.cpp.
  */
+/* R3.1: легаси-функции (rag_search/rag_process_document/…) НЕ отказывают
+ * без права — они предупреждают. Причина: сторонние плагины собраны под
+ * ABI 1.0.0 и не объявляли прав; отказ сломал бы их в одном релизе.
+ * Ротация: R3 — предупреждение, M5 — решение об отказе (§3.4). */
+void warn_if_missing_rag_permission(PluginHostData* pd, const char* perm,
+                                    const char* legacy_fn) {
+    if (!pd || !pd->plugin) return;
+    const auto& perms = pd->plugin->info.manifest.permissions;
+    if (plugin::plugin_has_permission(perms, perm)) return;
+    std::cerr << "[PluginManager] Plugin '" << pd->plugin->info.name
+              << "' calls " << legacy_fn << " without permission '" << perm
+              << "' — allowed with warning until M5 (legacy ABI 1.0.0)"
+              << std::endl;
+}
+
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,
                       const char* path_filter) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !query) return nullptr;
     if (!plugin_rag_allowed(pd->manager->subsystems)) return nullptr;
+    warn_if_missing_rag_permission(pd, "rag_access", "rag_search");
 
     auto* rm = pd->manager->subsystems.rag_manager;
     auto chunks = rm->search_hybrid(query, k > 0 ? k : 5, path_filter ? path_filter : "");
@@ -1413,6 +1429,7 @@ int host_rag_process_document(LlamaPluginHost* host, const char* path) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !path) return 0;
     if (!plugin_rag_allowed(pd->manager->subsystems)) return 0;
+    warn_if_missing_rag_permission(pd, "rag_write", "rag_process_document");
     auto* rm = pd->manager->subsystems.rag_manager;
     return rm->process_document(path) ? 1 : 0;
 }
@@ -1422,6 +1439,7 @@ int host_rag_embedding(LlamaPluginHost* host, const char* text,
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !text || !out_vec || !out_dim) return 0;
     if (!plugin_rag_allowed(pd->manager->subsystems)) return 0;
+    warn_if_missing_rag_permission(pd, "rag_access", "rag_embedding");
     auto* rm = pd->manager->subsystems.rag_manager;
     auto vec = rm->generate_embedding(text);
     if (vec.empty()) return 0;
@@ -1436,6 +1454,7 @@ int host_rag_index_count(LlamaPluginHost* host) {
     auto* pd = to_pd(host);
     if (!pd || !pd->manager) return 0;
     if (!plugin_rag_allowed(pd->manager->subsystems)) return 0;
+    warn_if_missing_rag_permission(pd, "rag_access", "rag_index_count");
     auto* rm = pd->manager->subsystems.rag_manager;
     return static_cast<int>(rm->get_external_chunks_count());
 }
@@ -1445,6 +1464,7 @@ char* host_rag_build_prompt(LlamaPluginHost* host, const char* query, int k,
     auto* pd = to_pd(host);
     if (!pd || !pd->manager || !query) return nullptr;
     if (!plugin_rag_allowed(pd->manager->subsystems)) return nullptr;
+    warn_if_missing_rag_permission(pd, "rag_access", "rag_build_prompt");
     auto* rm = pd->manager->subsystems.rag_manager;
 
     auto chunks = rm->search_hybrid(query, k > 0 ? k : 5, path_filter ? path_filter : "");
@@ -1470,7 +1490,15 @@ plugin::RagCallContext rag_call_context(PluginHostData* pd) {
     if (!pd || !pd->manager) return ctx;
     ctx.registry = pd->manager->subsystems.rag_registry.get();
     ctx.allowed = plugin_rag_allowed(pd->manager->subsystems);
-    if (pd->plugin) ctx.plugin_name = pd->plugin->info.name;
+    if (pd->plugin) {
+        ctx.plugin_name = pd->plugin->info.name;
+        /* R3.1: права берутся из манифеста плагина. Нет манифеста →
+         * оба false → `_ex` отвечают `denied`. Это осознанно: доступ к
+         * данным пользователя не выдаётся по умолчанию. */
+        const auto& perms = pd->plugin->info.manifest.permissions;
+        ctx.has_rag_access = plugin::plugin_has_permission(perms, "rag_access");
+        ctx.has_rag_write = plugin::plugin_has_permission(perms, "rag_write");
+    }
     return ctx;
 }
 
@@ -2219,6 +2247,18 @@ bool PluginManager::is_plugin_loaded(const std::string& name) const {
     if (!impl_) return false;
     for (const auto& up : impl_->plugins) {
         if (up->info.name == name) return true;
+    }
+    return false;
+}
+
+bool PluginManager::has_permission(const std::string& name,
+                                   const std::string& perm) const {
+    if (!impl_) return false;
+    for (const auto& up : impl_->plugins) {
+        if (up->info.name != name) continue;
+        /* Право берётся из манифеста, а не из capabilities: capabilities —
+         * «что плагин умеет», permissions — «что ему разрешено». */
+        return plugin::plugin_has_permission(up->info.manifest.permissions, perm);
     }
     return false;
 }

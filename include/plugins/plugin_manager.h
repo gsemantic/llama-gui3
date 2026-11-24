@@ -185,6 +185,13 @@ public:
     std::vector<PluginInfo> list_plugins() const;
     bool is_plugin_loaded(const std::string& name) const;
 
+    /* R3.1: есть ли у плагина право из манифеста (`rag_access`,
+     * `rag_write`, …). Плагина нет или манифест не объявляет право →
+     * false. Единственный источник правды для хоста; сами `host_rag_*`
+     * ходят сюда через plugin_has_permission (чистую функцию), чтобы
+     * решение можно было проверить без загрузки .so. */
+    bool has_permission(const std::string& name, const std::string& perm) const;
+
     /* Зарегистрированные режимы агентов (для интеграции с ChatInterface). */
     struct AgentModeInfo {
         const LlamaPluginAgentMode* mode;

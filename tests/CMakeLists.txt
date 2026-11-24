@@ -67,6 +67,16 @@ target_include_directories(test_plugin_rag_api PRIVATE
     ${CMAKE_SOURCE_DIR}/src/plugins)
 add_test(NAME PluginRagApi COMMAND test_plugin_rag_api)
 
+# Права RAG из манифеста (R3.1): `_ex` отказывают без rag_access/rag_write,
+# легаси пока предупреждает. Проверяется через plugin_rag_api.cpp напрямую,
+# без PluginManager: plugin_has_permission — чистая функция.
+add_executable(test_plugin_rag_permissions core/test_plugin_rag_permissions.cpp)
+target_link_libraries(test_plugin_rag_permissions PRIVATE plugin_core core)
+target_include_directories(test_plugin_rag_permissions PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+add_test(NAME PluginRagPermissions COMMAND test_plugin_rag_permissions)
+
 # Схема манифеста (R2.5): rag_write в enum прав, блок rag, additionalProperties.
 # Тест читает схему и манифесты из ДЕРЕВА ИСХОДНИКОВ, а не из build/.
 add_executable(test_plugin_manifest_schema core/test_plugin_manifest_schema.cpp)

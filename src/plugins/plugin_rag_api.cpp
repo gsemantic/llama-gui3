@@ -44,14 +44,33 @@ char* error_json(const std::string& code, const std::string& message) {
     return dup_string(j.dump());
 }
 
+/* Какое право нужно вызову. Значение, а не строка: сравнение «нужное
+ * право == выданное» не должно зависеть от того, как назвали строку в
+ * манифесте и в коде. */
+enum class RequiredPermission { Access, Write };
+
+const char* permission_name(RequiredPermission p) {
+    return p == RequiredPermission::Write ? "rag_write" : "rag_access";
+}
+
+bool permission_granted(const RagCallContext& ctx, RequiredPermission p) {
+    return p == RequiredPermission::Write ? ctx.has_rag_write
+                                          : ctx.has_rag_access;
+}
+
 /* Общий вход: контекст + имя скоупа от плагина.
  *
  * Возвращает true и заполняет `suffix`, либо false и готовый JSON отказа
  * в `*out_error` (его и возвращает вызывающая функция как есть).
  *
- * Порядок проверок — часть контракта, см. шапку файла. */
+ * Порядок проверок — часть контракта, см. шапку файла: выключено →
+ * реестра нет → нет права → скоуп не твой. Право проверяется ДО скоупа:
+ * плагин без `rag_access` не должен получать `bad_scope` (тот увёл бы
+ * поиск в имя, а не в манифест), ровно как выключенный RAG отвечает
+ * `disabled` раньше `bad_scope`. */
 bool begin(const RagCallContext& ctx, const std::string& requested,
-           std::string& suffix, char** out_error) {
+           RequiredPermission required, std::string& suffix,
+           char** out_error) {
     if (!ctx.allowed) {
         *out_error = error_json("disabled",
                                 "RAG is disabled in settings");
@@ -60,6 +79,12 @@ bool begin(const RagCallContext& ctx, const std::string& requested,
     if (!ctx.registry) {
         *out_error = error_json("unavailable",
                                 "RAG registry is not configured");
+        return false;
+    }
+    if (!permission_granted(ctx, required)) {
+        *out_error = error_json(
+            "denied", std::string("plugin lacks permission '") +
+                          permission_name(required) + "'");
         return false;
     }
     std::string error;
@@ -104,6 +129,17 @@ json chunk_to_json(const core::RagChunk& c) {
 }
 
 } // namespace
+
+bool plugin_has_permission(const std::vector<std::string>& permissions,
+                           const std::string& required) {
+    /* Пустое `required` — не право, а ошибка вызывающего: «разреши всем»
+     * через пустую строку было бы тихой дырой. Считаем, что не выдано. */
+    if (required.empty()) return false;
+    for (const auto& p : permissions) {
+        if (p == required) return true;
+    }
+    return false;
+}
 
 bool resolve_scope(const std::string& plugin_name,
                    const std::string& requested,
@@ -159,7 +195,8 @@ char* rag_search_ex_impl(const RagCallContext& ctx,
                          const std::string& path_filter) {
     std::string suffix;
     char* err = nullptr;
-    if (!begin(ctx, requested_scope, suffix, &err)) return err;
+    if (!begin(ctx, requested_scope, RequiredPermission::Access, suffix, &err))
+        return err;
 
     if (query.empty()) return error_json("bad_request", "empty query");
     if (k <= 0) return error_json("bad_request", "k must be positive");
@@ -185,7 +222,8 @@ char* rag_index_document_ex_impl(const RagCallContext& ctx,
                                  const std::string& opts_json) {
     std::string suffix;
     char* err = nullptr;
-    if (!begin(ctx, requested_scope, suffix, &err)) return err;
+    if (!begin(ctx, requested_scope, RequiredPermission::Write, suffix, &err))
+        return err;
 
     if (path.empty()) return error_json("bad_request", "empty path");
 
@@ -215,7 +253,8 @@ char* rag_scope_info_impl(const RagCallContext& ctx,
                           const std::string& requested_scope) {
     std::string suffix;
     char* err = nullptr;
-    if (!begin(ctx, requested_scope, suffix, &err)) return err;
+    if (!begin(ctx, requested_scope, RequiredPermission::Access, suffix, &err))
+        return err;
 
     auto store = store_for(ctx, suffix, &err);
     if (!store) return err;
@@ -240,7 +279,8 @@ char* rag_scope_remove_document_impl(const RagCallContext& ctx,
                                      const std::string& path) {
     std::string suffix;
     char* err = nullptr;
-    if (!begin(ctx, requested_scope, suffix, &err)) return err;
+    if (!begin(ctx, requested_scope, RequiredPermission::Write, suffix, &err))
+        return err;
 
     if (path.empty()) return error_json("bad_request", "empty path");
 
@@ -263,7 +303,7 @@ int rag_scope_clear_impl(const RagCallContext& ctx,
                          const std::string& requested_scope) {
     std::string suffix;
     char* err = nullptr;
-    if (!begin(ctx, requested_scope, suffix, &err)) {
+    if (!begin(ctx, requested_scope, RequiredPermission::Write, suffix, &err)) {
         std::free(err);
         return 0;
     }
@@ -282,7 +322,7 @@ int rag_scope_flush_impl(const RagCallContext& ctx,
                          const std::string& requested_scope) {
     std::string suffix;
     char* err = nullptr;
-    if (!begin(ctx, requested_scope, suffix, &err)) {
+    if (!begin(ctx, requested_scope, RequiredPermission::Access, suffix, &err)) {
         std::free(err);
         return 0;
     }

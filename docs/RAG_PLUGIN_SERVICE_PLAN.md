@@ -551,8 +551,26 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 
 ### R3 — Права, настройки, namespace-гард
 
-- [ ] **R3.1** `PluginManager::has_permission()` + проверки в `host_rag_*`
+- [x] **R3.1** `PluginManager::has_permission()` + проверки в `host_rag_*`
       (см. 3.4). Легаси — предупреждение, `_ex` — отказ.
+      **Сделано (2026-11-25):** чистая `plugin_has_permission(permissions,
+      required)` в `plugin_rag_api.{h,cpp}` (пустое `required` → false, а не
+      «разреши всем»); `RagCallContext` получил `has_rag_access`/`has_rag_write`
+      (по умолчанию false — нет манифеста, нет права). `begin()` в
+      `plugin_rag_api.cpp` проверяет право ПЕРЕД скоупом: порядок
+      `disabled → unavailable → denied → bad_scope`. Разделение прав:
+      `rag_access` — `rag_search_ex`/`rag_scope_info`/`rag_scope_flush`;
+      `rag_write` — `rag_index_document_ex`/`rag_scope_remove_document`/
+      `rag_scope_clear`. `rag_call_context` заполняет флаги из
+      `manifest.permissions`. Легаси `host_rag_*` зовут
+      `warn_if_missing_rag_permission()` — предупреждают, но не отказывают
+      (ротация §3.4). `PluginManager::has_permission(name, perm)` — публичный
+      делегат к чистой функции. **Отклонение:** `rag_scope_remove_document`
+      в §3.4 не назван явно — потребовал `rag_write` (это изменение индекса,
+      §7). **Тест:** `test_plugin_rag_permissions` — 6/6; мутации (снятие
+      проверки права; `plugin_has_permission → false`) пойманы (2 и 1
+      падение). Обновлён `ctx_for` в `test_plugin_rag_api` (R2-тесты
+      наделяются правами, иначе `_ex` отвечали бы `denied`).
 - [ ] **R3.2** Namespace-гард в `host_settings_set`; чтение host-owned
       разрешено; тест на попытку записи `plugin.other.rag.enabled` и
       `plugin.self.rag.enabled`.
@@ -635,7 +653,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R2.3 has_* | `[x]` | старый хост | `test_llm_stream_abi` (1551/0) |
 | R2.4 PLUGIN_SYSTEM | `[x]` | документ | — |
 | R2.5 schema | `[x]` | валидный JSON | `test_plugin_manifest_schema` (4/4) |
-| R3.1 права | `[ ]` | denied | `test_plugin_rag_permissions` |
+| R3.1 права | `[x]` | denied | `test_plugin_rag_permissions` (6/6) |
 | R3.2 namespace | `[ ]` | чужая запись отклонена | `test_plugin_rag_permissions` |
 | R3.3 настройки | `[ ]` | переживают рестарт | `test_rag_registry` |
 | R3.4 тест прав | `[ ]` | 3 случая | `test_plugin_rag_permissions` |
@@ -719,6 +737,11 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | 2026-11-24 | R2.6 | `RagManager::embedding_generator_` — `shared_ptr` + `embedding_backend()` | реестр скоупов и чат-RAG обязаны считать векторы ОДНИМ генератором: две копии модели — это 234 МБ и два разных ответа на вопрос «какой моделью построен индекс» |
 | 2026-11-24 | R2.6 | Реестр создаётся даже без эмбеддингов | сторы ответят `embeddings:false` и внятной причиной; «RAG недоступен» скрыло бы, что дело в модели, а не в коде |
 | 2026-11-24 | R2.6 | Корень реестра — `<cache>/rag_scopes` | тот же `data_dir`, что у `PluginSubsystems`; путь плагин не выбирает (правило §3.2), и рядом с профилем пользователя такой каталог не создаётся |
+| 2026-11-25 | R3.1 | `rag_scope_remove_document` требует `rag_write` | в §3.4 не назван явно, но это изменение индекса (удаляет чанки и запись профиля) — право на запись, а не на чтение |
+| 2026-11-25 | R3.1 | Право проверяется ПЕРЕД скоупом (`… → denied → bad_scope`) | плагин без `rag_access` не должен получать `bad_scope`: тот увёл бы поиск в имя, а не в манифест — ровно как `disabled` отвечается раньше `bad_scope` |
+| 2026-11-25 | R3.1 | Нет манифеста → оба права false → `_ex` отвечают `denied` | доступ к данным пользователя не выдаётся по умолчанию; «нет plugin.json» не должно означать «можно всё» |
+| 2026-11-25 | R3.1 | `plugin_has_permission(perms, "")` → false | пустое `required` — ошибка вызывающего; «разреши всем» через пустую строку было бы тихой дырой |
+| 2026-11-25 | R3.1 | Легаси `host_rag_*` только предупреждают | ротация §3.4: сторонние плагины под ABI 1.0.0 не объявляли прав, отказ сломал бы их в одном релизе; решение об отказе — M5 |
 
 ---
 

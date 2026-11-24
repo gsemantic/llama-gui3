@@ -70,6 +70,11 @@ RagCallContext ctx_for(RagRegistry& reg, const std::string& plugin,
     ctx.registry = &reg;
     ctx.allowed = allowed;
     ctx.plugin_name = plugin;
+    /* R3.1: `_ex`-функции требуют прав. Тесты R2 проверяют JSON-контракт
+     * и изоляцию, а не права, поэтому контекст по умолчанию наделяется
+     * обоими. Без RAG-прав здесь все `_ex` отвечали бы `denied`. */
+    ctx.has_rag_access = true;
+    ctx.has_rag_write = true;
     return ctx;
 }
 
