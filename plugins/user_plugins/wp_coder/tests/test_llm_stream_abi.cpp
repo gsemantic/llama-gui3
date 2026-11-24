@@ -50,6 +50,16 @@ using DoneFn = void (*)(void*, const char*);
 char* fake_model_info(LlamaPluginHost*, const char*) { return nullptr; }
 char* fake_model_current(LlamaPluginHost*) { return nullptr; }
 
+/* Заглушки RAG v2 (R2.3): проба читает только указатель, но поле обязано
+ * быть непустым, иначе has_* ответит «нет» по значению, а не по размеру. */
+char* fake_rag_search_ex(LlamaPluginHost*, const char*, const char*, int, const char*) { return nullptr; }
+char* fake_rag_index_document_ex(LlamaPluginHost*, const char*, const char*, const char*) { return nullptr; }
+char* fake_rag_scope_info(LlamaPluginHost*, const char*) { return nullptr; }
+char* fake_rag_scope_remove_document(LlamaPluginHost*, const char*, const char*) { return nullptr; }
+int fake_rag_scope_clear(LlamaPluginHost*, const char*) { return 0; }
+int fake_rag_scope_flush(LlamaPluginHost*, const char*) { return 0; }
+void fake_rag_index_cancel(LlamaPluginHost*, void*) {}
+
 int fake_llm_chat_stream(LlamaPluginHost*, const char* system_prompt,
                          const char* messages_json, const char* request_json,
                          void* user_data, DeltaFn on_delta,
@@ -138,6 +148,47 @@ TEST(probe_rejects_an_old_host_without_model_catalog) {
     api.size = offsetof(LlamaHostApi, model_current) + sizeof(api.model_current);
     ASSERT_TRUE(host::has_model_info(&api));
     ASSERT_TRUE(host::has_model_current(&api));
+}
+
+/* RAG v2 — тоже append-only (R2.3): у старого хоста полей нет, и проба
+ * обязана ответить «нет» ПО РАЗМЕРУ, не читая их. Тихий nullptr-путь
+ * выглядел бы как «плагин иногда падает», а не как «старый хост». */
+TEST(probe_rejects_an_old_host_without_rag_scopes) {
+    LlamaHostApi api = api_with_stream();
+    api.rag_search_ex = &fake_rag_search_ex;
+    api.rag_index_document_ex = &fake_rag_index_document_ex;
+    api.rag_scope_info = &fake_rag_scope_info;
+    api.rag_scope_remove_document = &fake_rag_scope_remove_document;
+    api.rag_scope_clear = &fake_rag_scope_clear;
+    api.rag_scope_flush = &fake_rag_scope_flush;
+    api.rag_index_cancel = &fake_rag_index_cancel;
+
+    /* Хост закончился ровно на model_current — все поля RAG v2 за его
+     * пределами, и читаться они не должны. */
+    api.size = offsetof(LlamaHostApi, rag_search_ex);
+    ASSERT_FALSE(host::has_rag_search_ex(&api));
+    ASSERT_FALSE(host::has_rag_scope_info(&api));
+
+    /* Хост заполнил структуру целиком — все семь полей доступны. */
+    api.size = offsetof(LlamaHostApi, rag_index_cancel) + sizeof(api.rag_index_cancel);
+    ASSERT_TRUE(host::has_rag_search_ex(&api));
+    ASSERT_TRUE(host::has_rag_index_document_ex(&api));
+    ASSERT_TRUE(host::has_rag_scope_info(&api));
+    ASSERT_TRUE(host::has_rag_scope_remove_document(&api));
+    ASSERT_TRUE(host::has_rag_scope_clear(&api));
+    ASSERT_TRUE(host::has_rag_scope_flush(&api));
+    ASSERT_TRUE(host::has_rag_index_cancel(&api));
+}
+
+TEST(probe_rag_null_field_is_not_enough) {
+    /* Размер есть, значение — нет: звать нельзя. */
+    LlamaHostApi api = api_with_stream();
+    api.rag_search_ex = &fake_rag_search_ex;
+    api.rag_search_ex = nullptr;
+    ASSERT_FALSE(host::has_rag_search_ex(&api));
+
+    ASSERT_FALSE(host::has_rag_search_ex(nullptr));
+    ASSERT_FALSE(host::has_rag_scope_clear(nullptr));
 }
 
 /* Проба не должна зависеть от того, заполнены ли более новые поля: хост

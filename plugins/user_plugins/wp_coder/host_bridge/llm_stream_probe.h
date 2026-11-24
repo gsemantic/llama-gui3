@@ -52,5 +52,22 @@ bool has_llm_chat_cancel(const LlamaHostApi* api);
 bool has_model_info(const LlamaHostApi* api);
 bool has_model_current(const LlamaHostApi* api);
 
+/* --- RAG v2: скоупы (R2.3) ---
+ *
+ * Легаси-функции rag_* есть у всех, а эти поля добавлены в конец ABI
+ * (R2.1) и у старого хоста их нет. Плагин обязан проверить ПЕРЕД вызовом:
+ * чтение поля за пределами `size` — это чтение чужой памяти, и оно
+ * выглядит как «плагин иногда падает», а не как «старый хост».
+ *
+ * Если has_rag_search_ex == false, плагин уходит на легаси-путь
+ * (rag_search в скоупе app) — так R5.2 и написано. */
+bool has_rag_search_ex(const LlamaHostApi* api);
+bool has_rag_index_document_ex(const LlamaHostApi* api);
+bool has_rag_scope_info(const LlamaHostApi* api);
+bool has_rag_scope_remove_document(const LlamaHostApi* api);
+bool has_rag_scope_clear(const LlamaHostApi* api);
+bool has_rag_scope_flush(const LlamaHostApi* api);
+bool has_rag_index_cancel(const LlamaHostApi* api);
+
 } // namespace host
 } // namespace coder

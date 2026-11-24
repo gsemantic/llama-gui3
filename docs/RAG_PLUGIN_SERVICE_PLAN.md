@@ -512,9 +512,15 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       `RagRegistry` сразу после `RagManager` и кладёт в `PluginSubsystems`.
       Реестр создаётся и без эмбеддингов: сторы тогда отвечают
       `embeddings:false` — это честнее, чем «RAG недоступен».
-- [ ] **R2.3** Хелперы `has_rag_search_ex` и т.д. в
+- [x] **R2.3** Хелперы `has_rag_search_ex` и т.д. в
       `wp_coder/host_bridge/llm_stream_probe.{h,cpp}` (по образцу
       `has_model_info`).
+      **Сделано (2026-11-24):** семь хелперов, порядок «сначала размер,
+      потом значение» (передавать само поле в хелпер нельзя — аргументы
+      вычисляются до проверки). Тесты `probe_rejects_an_old_host_without_rag_scopes`
+      и `probe_rag_null_field_is_not_enough` в `test_llm_stream_abi`:
+      старый хост (size на `model_current`), заполненный хост, поле есть по
+      размеру но nullptr, `nullptr` вместо api. Плагин: 1551/0.
 - [ ] **R2.4** Обновить `docs/PLUGIN_SYSTEM.md`: таблица RAG v2, коды
       ошибок, владение памятью, пример вызова.
 - [ ] **R2.5** Обновить `plugins/plugin.schema.json`: `permissions`
@@ -607,7 +613,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R2.1 поля ABI | `[x]` | `offsetof` | `test_plugin_loader`, `test_llm_stream_bridge` |
 | R2.2 host-функции | `[x]` | JSON-контракт | `test_plugin_rag_api` (11/11) |
 | R2.6 реестр в хосте | `[x]` | `ok:true` в приложении | `main_window` + `embedding_backend()` |
-| R2.3 has_* | `[ ]` | старый хост | `test_plugin_rag_api` |
+| R2.3 has_* | `[x]` | старый хост | `test_llm_stream_abi` (1551/0) |
 | R2.4 PLUGIN_SYSTEM | `[ ]` | документ | — |
 | R2.5 schema | `[ ]` | валидный JSON | `test_plugin_manifest` |
 | R3.1 права | `[ ]` | denied | `test_plugin_rag_permissions` |
