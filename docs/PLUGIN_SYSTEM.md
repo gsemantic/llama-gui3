@@ -279,7 +279,7 @@ if (g_api->size >= offsetof(LlamaHostApi, rag_search_ex) +
 - проверяет согласованность `name` и `api_version` с данными из `ll_plugin_info` (при расхождении — предупреждение);
 - сохраняет метаданные (`name`, `version`, `description`, `author`, `api_version`, `permissions`, `capabilities`) в `PluginInfo::manifest` — доступны через `PluginManager::list_plugins()`.
 
-**Пермиссии на текущем этапе информационные и не применяются** — загрузка плагина не блокируется отсутствием пермиссии. Схема манифеста: `plugins/plugin.schema.json`.
+**Пермиссии на текущем этапе информационные и не применяются** — загрузка плагина не блокируется отсутствием пермиссии. Схема манифеста: `plugins/plugin.schema.json`. Право `rag_write` (R2.5) пока тоже информационное: применение начнётся в R3 (легаси-функции — предупреждение, `_ex` — отказ).
 
 ```json
 {

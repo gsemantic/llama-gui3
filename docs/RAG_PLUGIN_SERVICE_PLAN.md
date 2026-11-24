@@ -529,8 +529,15 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       пример с `offsetof`, оговорка про легаси-скоуп `app` («другие индексы,
       а не то же самое с суффиксом») и про отсутствие «правдоподобного
       мусора».
-- [ ] **R2.5** Обновить `plugins/plugin.schema.json`: `permissions`
+- [x] **R2.5** Обновить `plugins/plugin.schema.json`: `permissions`
       включает `rag_write`; блок `rag` (optional, roots, max_docs).
+      **Сделано (2026-11-24):** `rag_write` в enum прав; блок `rag` с
+      `enabled`, `scope_suffix` (паттерн `[a-z0-9][a-z0-9._-]*`, 64), `roots`,
+      `max_docs`, `max_chunk_bytes`, `max_index_bytes`, `mode`. Корень схемы
+      остался `additionalProperties: false` — иначе новое поле проходило бы
+      мимо проверки. Тест `test_plugin_manifest_schema` (4/4): схема —
+      валидный JSON, `rag_write` в enum, ключи блока `rag` совпадают с
+      тем, что читает хост, приложенные манифесты соответствуют enum'у.
 
 *Готово, когда:* старый `hello_plugin` и `wp_coder` собираются и
 загружаются без изменений; новый тест `test_plugin_loader` проверяет, что
@@ -621,7 +628,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R2.6 реестр в хосте | `[x]` | `ok:true` в приложении | `main_window` + `embedding_backend()` |
 | R2.3 has_* | `[x]` | старый хост | `test_llm_stream_abi` (1551/0) |
 | R2.4 PLUGIN_SYSTEM | `[x]` | документ | — |
-| R2.5 schema | `[ ]` | валидный JSON | `test_plugin_manifest` |
+| R2.5 schema | `[x]` | валидный JSON | `test_plugin_manifest_schema` (4/4) |
 | R3.1 права | `[ ]` | denied | `test_plugin_rag_permissions` |
 | R3.2 namespace | `[ ]` | чужая запись отклонена | `test_plugin_rag_permissions` |
 | R3.3 настройки | `[ ]` | переживают рестарт | `test_rag_registry` |

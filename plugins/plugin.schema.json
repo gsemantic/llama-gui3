@@ -62,6 +62,7 @@
                     "chat_access",
                     "llm_access",
                     "rag_access",
+                    "rag_write",
                     "embedding",
                     "filesystem_read",
                     "filesystem_write",
@@ -70,6 +71,55 @@
                 ]
             },
             "examples": [["rag_access", "chat_access"], ["llm_access"]]
+        },
+        
+        "rag": {
+            "type": "object",
+            "description": "Optional RAG v2 scope settings (R2.5). Host-owned: the plugin READS them (settings_get) but must not write plugin.<name>.rag.* — the namespace guard rejects it (R3.2). Absent block = defaults: enabled, plugin's own scope, no roots, 20000 docs.",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "May this plugin call rag_* at all"
+                },
+                "scope_suffix": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]*$",
+                    "maxLength": 64,
+                    "description": "Optional suffix: scope becomes plugin:<name>:<suffix>. Empty = plugin:<name>"
+                },
+                "roots": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "maxItems": 64,
+                    "description": "Whitelist of paths the plugin may index (empty = no restriction beyond the host)"
+                },
+                "max_docs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 20000,
+                    "description": "Document limit per scope"
+                },
+                "max_chunk_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 524288,
+                    "description": "Limit for a single chunk"
+                },
+                "max_index_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 2147483648,
+                    "description": "On-disk index limit per scope"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["hybrid", "bm25", "vector"],
+                    "default": "hybrid",
+                    "description": "Search mode (bm25/vector are honoured when embeddings are unavailable)"
+                }
+            },
+            "additionalProperties": false
         },
         
         "capabilities": {

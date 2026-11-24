@@ -67,6 +67,16 @@ target_include_directories(test_plugin_rag_api PRIVATE
     ${CMAKE_SOURCE_DIR}/src/plugins)
 add_test(NAME PluginRagApi COMMAND test_plugin_rag_api)
 
+# Схема манифеста (R2.5): rag_write в enum прав, блок rag, additionalProperties.
+# Тест читает схему и манифесты из ДЕРЕВА ИСХОДНИКОВ, а не из build/.
+add_executable(test_plugin_manifest_schema core/test_plugin_manifest_schema.cpp)
+target_link_libraries(test_plugin_manifest_schema PRIVATE core)
+target_include_directories(test_plugin_manifest_schema PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(test_plugin_manifest_schema PRIVATE
+    PLUGIN_SCHEMA_PATH="${CMAKE_SOURCE_DIR}/plugins/plugin.schema.json"
+    PLUGIN_MANIFEST_DIR="${CMAKE_SOURCE_DIR}/plugins")
+add_test(NAME PluginManifestSchema COMMAND test_plugin_manifest_schema)
+
 # RAG embedding unavailability contract (R0.1).
 # Проверяет, что при отсутствии модели/сервера generate_embedding
 # возвращает ПУСТОЙ вектор, индекс чат-истории не растёт, а
