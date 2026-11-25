@@ -2329,6 +2329,12 @@ void register_base_tools() {
 void register_rag_tools() {
     auto& reg = ToolsRegistry::instance();
 
+    /* R5.1: скоуп проекта — plugin:wp_coder (архив сессий — :archive,
+     * используется компакшном; rag_index/rag_query работают с проектом). */
+    static constexpr const char* kRagScopeProject = "plugin:wp_coder";
+    static constexpr const char* kRagScopeArchive = "plugin:wp_coder:archive";
+    (void)kRagScopeArchive;
+
     {
         ToolDef def;
         def.name = "rag_index";
@@ -2353,13 +2359,37 @@ void register_rag_tools() {
             const auto& cb = ctx.callbacks();
             int ok = 0;
             size_t done_files = 0;
+            bool truncated = false;
+            std::string trunc_reason;
             for (const auto& fp : files) {
                 if (ctx.cancelled()) break;
                 ++done_files;
-                if (cb.rag_process_document && cb.rag_process_document(fp)) ++ok;
+                bool file_ok = false;
+                if (cb.rag_index_document_ex) {
+                    /* R5.1: скоуп через ABI v2. JSON хоста разбираем
+                     * терпимо: невалидный ответ = «файл не проиндексирован»,
+                     * а не падение. */
+                    const std::string resp =
+                        cb.rag_index_document_ex(kRagScopeProject, fp, "");
+                    json::JsonValue j;
+                    if (json::JsonValue::parse(resp, j)) {
+                        file_ok = j.get_bool("ok", false);
+                        if (j.get_bool("truncated", false)) {
+                            truncated = true;
+                            trunc_reason = j.get_string("reason", "");
+                        }
+                    }
+                } else if (cb.rag_process_document) {
+                    /* Старый хост: легаси-скоуп app. */
+                    file_ok = cb.rag_process_document(fp);
+                }
+                if (file_ok) ++ok;
             }
             std::stringstream s;
             s << "[проиндексировано " << ok << "/" << done_files << " php-файлов в RAG]";
+            if (truncated)
+                s << "\n[внимание: квота/дедлайн — "
+                  << (trunc_reason.empty() ? "прервано" : trunc_reason) << "]";
             if (!walk_done || done_files < files.size())
                 s << "\n" << kWalkCancelledNote
                   << " (найдено файлов: " << files.size()
@@ -2382,8 +2412,50 @@ void register_rag_tools() {
         def.parameters = b.build();
         def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
             const auto& cb = ctx.callbacks();
+            const std::string query = arg_str(a, "query");
+            const int k = static_cast<int>(arg_int(a, "k"));
+
+            /* R5.1/R5.2: при наличии RAG v2 — поиск по скоупу plugin:wp_coder.
+             * Пустой результат НЕ значит «не проиндексирован»: различаем
+             * «RAG выключен» и «индекс пуст» через rag_scope_info().code. */
+            if (cb.rag_search_ex) {
+                const std::string resp = cb.rag_search_ex(kRagScopeProject, query, k, "");
+                json::JsonValue j;
+                if (json::JsonValue::parse(resp, j) && j.get_bool("ok", false)) {
+                    const auto& chunks = j.get("chunks");
+                    if (chunks.is_array() && chunks.size() > 0) {
+                        std::string result;
+                        for (size_t i = 0; i < chunks.size(); ++i) {
+                            const auto& c = chunks.at(i);
+                            if (!result.empty()) result += "\n---\n";
+                            result += c.get_string("file_path", "") + ":" +
+                                      std::to_string(c.get_int("start_line", 0)) + "\n" +
+                                      c.get_string("content", "");
+                        }
+                        return out("rag_query", shell::cap(result, kMaxToolOutput));
+                    }
+                    /* Пусто — спрашиваем причину, а не гадаем. */
+                    std::string why = "проект не проиндексирован";
+                    if (cb.rag_scope_info) {
+                        json::JsonValue info;
+                        if (json::JsonValue::parse(cb.rag_scope_info(kRagScopeProject), info)) {
+                            if (info.get_string("code", "") == "disabled")
+                                why = "RAG выключен в настройках";
+                            else if (info.get_bool("ready", false) == false &&
+                                     !info.get_string("reason", "").empty())
+                                why = info.get_string("reason", "");
+                        }
+                    }
+                    return out("rag_query", "[RAG: пусто — " + why + "]");
+                }
+                /* Ответ не ok (denied/unavailable/…): показываем причину. */
+                return out("rag_query", "[RAG: " +
+                           j.get_string("error", "ошибка") + "]");
+            }
+
+            /* Старый хост: легаси-путь (скоуп app). */
             if (!cb.rag_build_prompt) return out("[ошибка] RAG не доступен");
-            std::string result = cb.rag_build_prompt(arg_str(a, "query"), arg_int(a, "k"), "");
+            std::string result = cb.rag_build_prompt(query, k, "");
             if (result.empty()) return out("rag_query", "[RAG: пусто — проект не проиндексирован]");
             return out("rag_query", shell::cap(result, kMaxToolOutput));
         };

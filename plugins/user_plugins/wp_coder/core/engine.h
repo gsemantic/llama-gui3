@@ -810,6 +810,15 @@ struct HostCallbacks {
                               const std::string& path_filter)> rag_build_prompt;
     std::function<int()> rag_index_count;
 
+    /* RAG v2 (R5.1): скоупы. Слоты пусты на старом хосте (нет полей в
+     * ABI) — тогда rag_query/rag_index уходят на легаси-путь (скоуп app).
+     * Возвращают JSON-строку хоста (см. PLUGIN_SYSTEM.md, RAG v2). */
+    std::function<std::string(const std::string& scope, const std::string& query,
+                              int k, const std::string& path_filter)> rag_search_ex;
+    std::function<std::string(const std::string& scope, const std::string& path,
+                              const std::string& opts_json)> rag_index_document_ex;
+    std::function<std::string(const std::string& scope)> rag_scope_info;
+
     /* Прогресс в чат приложения (через agent_mode_push_event). */
     std::function<void(const std::string& event)> chat_event;
 };

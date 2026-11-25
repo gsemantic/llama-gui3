@@ -299,6 +299,41 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
         if (!g_api || !g_host) return 0;
         return g_api->rag_index_count(g_host);
     };
+    /* RAG v2 (R5.1): скоупы. На старом хосте полей нет — слоты остаются
+     * пустыми, и rag_query/rag_index работают по-старому (скоуп app). */
+    {
+        auto take = [](char* p) -> std::string {
+            if (!p) return "";
+            std::string s(p);
+            if (g_api && g_host) g_api->free_string(g_host, p);
+            return s;
+        };
+        if (coder::host::has_rag_search_ex(g_api)) {
+            cb.rag_search_ex = [take](const std::string& scope,
+                                      const std::string& query, int k,
+                                      const std::string& pf) -> std::string {
+                if (!g_api || !g_host) return "";
+                return take(g_api->rag_search_ex(
+                    g_host, scope.c_str(), query.c_str(), k,
+                    pf.empty() ? nullptr : pf.c_str()));
+            };
+        }
+        if (coder::host::has_rag_index_document_ex(g_api)) {
+            cb.rag_index_document_ex = [take](const std::string& scope,
+                                              const std::string& path,
+                                              const std::string& opts) -> std::string {
+                if (!g_api || !g_host) return "";
+                return take(g_api->rag_index_document_ex(
+                    g_host, scope.c_str(), path.c_str(), opts.c_str()));
+            };
+        }
+        if (coder::host::has_rag_scope_info(g_api)) {
+            cb.rag_scope_info = [take](const std::string& scope) -> std::string {
+                if (!g_api || !g_host) return "";
+                return take(g_api->rag_scope_info(g_host, scope.c_str()));
+            };
+        }
+    }
 
     coder::engine().init(std::move(cb));
 

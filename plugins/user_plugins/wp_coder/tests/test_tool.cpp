@@ -590,3 +590,68 @@ TEST(rag_инструменты_исполняются_на_хосте_без_с
         engine_state().project_dir.clear();
     }
 }
+
+/* R5.1/R5.2: при наличии RAG v2 инструменты ходят в скоуп plugin:wp_coder
+ * через _ex-функции, а пустой результат различают «выключено»/«пусто»
+ * через rag_scope_info().code. */
+TEST(rag_v2_использует_скоупы_и_различает_выключено_и_пусто) {
+    register_all_tools();
+    const fs::path t = fs::temp_directory_path() /
+                       ("wp_coder_ragv2_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(t, ec);
+    fs::create_directories(t);
+    { std::ofstream f(t / "a.php"); f << "<?php // a"; }
+
+    std::string seen_scope;
+    HostCallbacks cb = Engine::instance().callbacks();
+    cb.rag_index_document_ex = [&seen_scope](const std::string& scope,
+                                             const std::string&, const std::string&) {
+        seen_scope = scope;
+        return std::string(R"({"ok":true,"chunks":1,"documents":1,"truncated":false,"reason":""})");
+    };
+    cb.rag_search_ex = [&seen_scope](const std::string& scope, const std::string&,
+                                     int, const std::string&) {
+        seen_scope = scope;
+        return std::string(
+            R"({"ok":true,"scope":"plugin:wp_coder","chunks":[{"content":"found v2 text","file_path":"/x.php","start_line":3}]})");
+    };
+    cb.rag_scope_info = [](const std::string&) {
+        return std::string(R"({"ok":false,"code":"disabled","error":"RAG is disabled"})");
+    };
+    /* Легаси-слоты намеренно null: _ex-путь не должен на них падать. */
+    cb.rag_process_document = nullptr;
+    cb.rag_build_prompt = nullptr;
+    Engine::instance().init(cb);
+    test_support::approve_all_permissions();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = t.string();
+        engine_state().turn_abort = std::make_shared<AbortToken>();
+    }
+
+    const ToolOutput idx = ToolsRegistry::instance().run_output(
+        "rag_index", args_with("rag_index", "root", t.string()));
+    ASSERT_TRUE(idx.output.find("проиндексировано 1/1") != std::string::npos);
+    ASSERT_EQ(seen_scope, std::string("plugin:wp_coder"));
+
+    const ToolOutput q = ToolsRegistry::instance().run_output(
+        "rag_query", args_with("rag_query", "query", "v2"));
+    ASSERT_TRUE(q.output.find("found v2 text") != std::string::npos);
+    ASSERT_EQ(seen_scope, std::string("plugin:wp_coder"));
+
+    /* Пусто + code=disabled → «выключен», а не «не проиндексирован». */
+    cb.rag_search_ex = [](const std::string&, const std::string&, int, const std::string&) {
+        return std::string(R"({"ok":true,"chunks":[]})");
+    };
+    Engine::instance().init(cb);
+    const ToolOutput empty = ToolsRegistry::instance().run_output(
+        "rag_query", args_with("rag_query", "query", "v2"));
+    ASSERT_TRUE(empty.output.find("выключен") != std::string::npos);
+
+    fs::remove_all(t, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
