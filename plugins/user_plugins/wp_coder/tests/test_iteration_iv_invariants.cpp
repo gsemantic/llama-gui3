@@ -195,7 +195,10 @@ TEST(every_write_tool_is_classified_by_the_format_test) {
          * A0.1 `archive_write` — тот же случай: пишет полный вывод в
          * архив-скоуп `plugin:wp_coder:archive`, файл проекта не трогает,
          * поэтому проверка BOM/CRLF к нему неприменима. */
-        "rag_index", "archive_write"};
+        "rag_index", "archive_write",
+        /* A3.2 `archive_clear`: удаляет документы из архива RAG, файлы
+         * проекта не трогает — формат BOM/CRLF неприменим. */
+        "archive_clear"};
 
     for (const auto& d : ToolsRegistry::instance().defs()) {
         if (!tf_has(d.flags, TF_WRITES_FILES)) continue;

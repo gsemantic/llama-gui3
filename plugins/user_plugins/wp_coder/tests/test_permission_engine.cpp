@@ -837,10 +837,11 @@ TEST(every_tool_has_permission_key) {
     }
     defs = real;
     /* И10.4 добавил undo и redo (55 → 57); A0.1 добавил archive_write
-     * (57 → 58); A0.2 — archive_search (58 → 59). Число, а не «≥»:
-     * молчаливое добавление инструмента мимо счётчика означало бы, что
-     * проверка перестала быть проверкой. */
-    ASSERT_EQ(defs.size(), (size_t)59);
+     * (57 → 58); A0.2 — archive_search (58 → 59); A3.2 —
+     * archive_clear (59 → 60). Число, а не «≥»: молчаливое добавление
+     * инструмента мимо счётчика означало бы, что проверка перестала быть
+     * проверкой. */
+    ASSERT_EQ(defs.size(), (size_t)60);
     for (const auto& d : defs) {
         if (d.permission_key.empty()) {
             std::cerr << "  инструмент " << d.name << " без ключа разрешения"
@@ -883,7 +884,7 @@ TEST(every_destructive_tool_asks_by_default) {
      * привычке: перезаписывают файлы проекта. A0.1 добавил archive_write
      * (22 → 23): пишет во внешний индекс RAG, откатить инструментом
      * нельзя — тот же класс необратимости, что у rag_index. */
-    ASSERT_EQ(destructive, 23);
+    ASSERT_EQ(destructive, 24);
 }
 
 /* Ключ и значение вызова — из одного ToolDef, иначе правило «read *.env»

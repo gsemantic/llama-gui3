@@ -818,6 +818,11 @@ struct HostCallbacks {
     std::function<std::string(const std::string& scope, const std::string& path,
                               const std::string& opts_json)> rag_index_document_ex;
     std::function<std::string(const std::string& scope)> rag_scope_info;
+    /* RAG v2 (A3.2): удалить документ из скоупа по пути. Пусто на старом
+     * хосте (нет поля в ABI) — archive_clear тогда честно скажет, что
+     * очистка индекса недоступна, но файлы всё равно уберёт. */
+    std::function<std::string(const std::string& scope, const std::string& path)>
+        rag_scope_remove_document;
 
     /* Прогресс в чат приложения (через agent_mode_push_event). */
     std::function<void(const std::string& event)> chat_event;

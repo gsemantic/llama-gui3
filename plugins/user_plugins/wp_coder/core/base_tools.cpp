@@ -2809,6 +2809,84 @@ void register_rag_tools() {
         };
         reg.register_def(std::move(def));
     }
+
+    /* A3.2: archive_clear — очистка архива по session_id.
+     *
+     * Один скоуп на плагин (план §7), поэтому «очистить сессию» =
+     * удалить ЕЁ файлы и убрать их из индекса, а не чистить скоуп
+     * целиком (это снесло бы чужие сессии). Чужие скоупы не трогаем:
+     * rag_scope_remove_document зовётся ТОЛЬКО с kRagScopeArchive. */
+    {
+        ToolDef def;
+        def.name = "archive_clear";
+        def.description =
+            "Очистить архив сессий для указанного session_id: удалить "
+            "сохранённые выводы этой сессии. Чужие сессии и скоупы не "
+            "трогает.";
+        /* Удаляет данные из внешнего индекса RAG — необратимо. */
+        def.flags = TF_WRITES_FILES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "rag";
+        SchemaBuilder b;
+        b.str("session_id", "идентификатор сессии для очистки")
+         .required("session_id");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            const std::string session_id = arg_str(a, "session_id");
+            if (session_id.empty())
+                return out("archive_clear",
+                           "[ошибка] archive_clear: нужен session_id");
+            const auto& cb = ctx.callbacks();
+            const std::string data_dir = cb.path_data_dir ? cb.path_data_dir() : "";
+            if (data_dir.empty())
+                return out("archive_clear",
+                           "[ошибка] archive_clear: не задан каталог данных");
+            const std::string sid = security::sanitize_ident(session_id);
+            if (sid.empty())
+                return out("archive_clear",
+                           "[ошибка] archive_clear: session_id не даёт "
+                           "безопасного имени");
+
+            const fs::path dir =
+                fs::path(data_dir) / "wp_coder" / "archive" / sid;
+            std::error_code ec;
+            /* Сначала собираем пути: удалять файл, пока идёшь по
+             * итератору каталога, — итератор инвалидируется. */
+            std::vector<std::string> files;
+            if (fs::exists(dir, ec)) {
+                for (auto it = fs::recursive_directory_iterator(dir, ec);
+                     it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                    if (it->is_regular_file()) files.push_back(it->path().string());
+                }
+            }
+
+            int removed = 0, index_failed = 0;
+            for (const std::string& path : files) {
+                if (cb.rag_scope_remove_document) {
+                    const std::string resp =
+                        cb.rag_scope_remove_document(kRagScopeArchive, path);
+                    json::JsonValue j;
+                    if (!json::JsonValue::parse(resp, j) || !j.get_bool("ok", false))
+                        ++index_failed;
+                }
+                std::error_code rm;
+                fs::remove(path, rm);
+                if (!rm) ++removed;
+            }
+            /* Каталог сессии убираем, если опустел. */
+            std::error_code rd;
+            fs::remove(dir, rd);
+
+            std::stringstream out_s;
+            out_s << "[archive_clear] очищено документов: " << removed
+                  << " (сессия " << session_id << ")";
+            if (index_failed > 0)
+                out_s << "; не удалось убрать из индекса: " << index_failed;
+            if (files.empty())
+                out_s << " — у сессии не было сохранённых выводов";
+            return out("archive_clear", out_s.str());
+        };
+        reg.register_def(std::move(def));
+    }
 }
 
 /* A1.1: если вывод инструмента превышает порог (то, что компакшн всё равно

@@ -41,6 +41,7 @@ using namespace coder;
 #include <string>
 #include <utility>
 #include <set>
+#include <map>
 #include <vector>
 #include <unistd.h>
 
@@ -570,6 +571,102 @@ TEST(a31_архив_переживает_рестарт) {
         ToolsRegistry::instance().run_output("archive_search", q);
     ASSERT_TRUE(found.output.find("ses_p:call_p") != std::string::npos);
     ASSERT_TRUE(found.output.find(marker) != std::string::npos);
+
+    fs::remove_all(data, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
+
+
+/* A3.2: archive_clear чистит ТОЛЬКО свою сессию и не трогает чужие
+ * сессии/скоупы. Мок стора — карта путь→содержимое (как индекс RAG);
+ * rag_scope_remove_document убирает документ и пишет, с каким скоупом
+ * его убрали (проверяем, что только archive). */
+TEST(a32_archive_clear_чистит_только_свою_сессию) {
+    register_rag_tools();
+    test_support::approve_all_permissions();
+    const fs::path data = fs::temp_directory_path() /
+                          ("wp_coder_a32_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+    register_tmp_tree(data.string());
+
+    std::map<std::string, std::string> store;   /* путь → содержимое */
+    std::vector<std::string> removed;           /* "scope|path" */
+    HostCallbacks cb;
+    cb.path_data_dir = [&data]() -> std::string { return data.string(); };
+    cb.rag_index_document_ex =
+        [&](const std::string&, const std::string& path,
+            const std::string&) -> std::string {
+        store[path] = read_all(path);
+        return std::string(
+            R"({"ok":true,"chunks":1,"documents":1,"truncated":false,"reason":""})");
+    };
+    cb.rag_scope_remove_document =
+        [&](const std::string& scope, const std::string& path) -> std::string {
+        removed.push_back(scope + "|" + path);
+        store.erase(path);
+        return std::string(R"({"ok":true})");
+    };
+    cb.rag_search_ex = [&store](const std::string&, const std::string& query,
+                                int, const std::string&) -> std::string {
+        for (const auto& kv : store)
+            if (kv.second.find(query) != std::string::npos)
+                return search_hit(kv.first, kv.second);
+        return std::string(R"({"ok":true,"chunks":[]})");
+    };
+    cb.rag_scope_info = [](const std::string&) {
+        return std::string(R"({"ok":true,"ready":true})");
+    };
+    Engine::instance().init(cb);
+
+    const std::string marker_a = "МАРКЕР_СЕССИИ_A";
+    const std::string marker_b = "МАРКЕР_СЕССИИ_B";
+    const std::string big(3000, 'з');
+    auto write = [&](const std::string& sid, const std::string& cid,
+                     const std::string& marker) {
+        json::JsonValue w = json::JsonValue::object();
+        w.set("session_id", json::JsonValue(sid));
+        w.set("call_id", json::JsonValue(cid));
+        w.set("text", json::JsonValue(marker + big));
+        ToolsRegistry::instance().run_output("archive_write", w);
+    };
+    write("ses_a", "call_a", marker_a);
+    write("ses_b", "call_b", marker_b);
+    ASSERT_EQ(store.size(), (size_t)2);
+
+    /* Чистим сессию A. */
+    json::JsonValue c = json::JsonValue::object();
+    c.set("session_id", json::JsonValue("ses_a"));
+    const ToolOutput clr =
+        ToolsRegistry::instance().run_output("archive_clear", c);
+    ASSERT_TRUE(clr.output.find("очищено") != std::string::npos);
+
+    /* В индексе осталась только сессия B. */
+    ASSERT_EQ(store.size(), (size_t)1);
+    ASSERT_TRUE(store.count("ses_b") == 0);   /* ключ — путь, не sid */
+    /* Удалён ровно один документ, и только из архивного скоупа. */
+    ASSERT_EQ(removed.size(), (size_t)1);
+    ASSERT_TRUE(removed[0].rfind("plugin:wp_coder:archive|", 0) == 0);
+
+    /* Файл A удалён, файл B на месте. */
+    ASSERT_TRUE(!fs::exists(data / "wp_coder" / "archive" / "ses_a" / "call_a.txt"));
+    ASSERT_TRUE(fs::exists(data / "wp_coder" / "archive" / "ses_b" / "call_b.txt"));
+
+    /* Поиск: A не находится, B находится. */
+    json::JsonValue qa = json::JsonValue::object();
+    qa.set("query", json::JsonValue("call_a"));
+    ASSERT_TRUE(ToolsRegistry::instance()
+                    .run_output("archive_search", qa)
+                    .output.find("пусто") != std::string::npos);
+    json::JsonValue qb = json::JsonValue::object();
+    qb.set("query", json::JsonValue("call_b"));
+    ASSERT_TRUE(ToolsRegistry::instance()
+                    .run_output("archive_search", qb)
+                    .output.find("ses_b:call_b") != std::string::npos);
 
     fs::remove_all(data, ec);
     {

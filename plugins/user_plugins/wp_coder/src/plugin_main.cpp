@@ -333,6 +333,15 @@ LLAMA_PLUGIN_EXPORT int ll_plugin_init(LlamaPluginHost* host, const LlamaHostApi
                 return take(g_api->rag_scope_info(g_host, scope.c_str()));
             };
         }
+        if (coder::host::has_rag_scope_remove_document(g_api)) {
+            cb.rag_scope_remove_document =
+                [take](const std::string& scope,
+                       const std::string& path) -> std::string {
+                if (!g_api || !g_host) return "";
+                return take(g_api->rag_scope_remove_document(
+                    g_host, scope.c_str(), path.c_str()));
+            };
+        }
     }
 
     coder::engine().init(std::move(cb));
