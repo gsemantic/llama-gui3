@@ -254,8 +254,13 @@ std::shared_ptr<RagStore> RagRegistry::get_locked(const std::string& scope,
     (void)error;
     for (auto& s : lru_) {
         if (s && s->scope() == scope) {
-            touch_locked(s.get());
-            return s;
+            /* Копию shared_ptr берём ДО touch_locked: touch переставляет
+             * вектор (erase+insert в начало), и ссылка `s` после этого
+             * указывала бы на другой/пустой элемент — ровно тот баг, что
+             * поймал живой тест суффикса (get возвращал чужой стор). */
+            std::shared_ptr<RagStore> result = s;
+            touch_locked(result.get());
+            return result;
         }
     }
 

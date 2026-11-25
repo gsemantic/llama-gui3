@@ -48,22 +48,29 @@ PluginRagConfig plugin_rag_config(const core::Settings* settings,
     if (!settings || plugin_name.empty()) return cfg;
 
     const std::string key = "plugin." + plugin_name + ".rag.enabled";
-    if (!settings->has_custom_setting(key)) return cfg;
-
-    const std::string raw = settings->get_custom_setting(key);
-    /* Значение приходит строкой (custom_settings_ — map<string,string>).
-     * Принимаем "true"/"1" и "false"/"0"; опечатка не выключает RAG
-     * (это удобство, а не граница безопасности — граница в правах R3.1),
-     * но пишем в лог, чтобы «почему не выключилось» было видно. */
-    if (raw == "true" || raw == "1") {
-        cfg.enabled = true;
-    } else if (raw == "false" || raw == "0") {
-        cfg.enabled = false;
-    } else {
-        std::cerr << "[PluginManager] plugin '" << plugin_name
-                  << "' has non-boolean rag.enabled='" << raw
-                  << "' — treating as enabled" << std::endl;
+    if (settings->has_custom_setting(key)) {
+        const std::string raw = settings->get_custom_setting(key);
+        /* Значение приходит строкой (custom_settings_ — map<string,string>).
+         * Принимаем "true"/"1" и "false"/"0"; опечатка не выключает RAG
+         * (это удобство, а не граница безопасности — граница в правах R3.1),
+         * но пишем в лог, чтобы «почему не выключилось» было видно. */
+        if (raw == "true" || raw == "1") {
+            cfg.enabled = true;
+        } else if (raw == "false" || raw == "0") {
+            cfg.enabled = false;
+        } else {
+            std::cerr << "[PluginManager] plugin '" << plugin_name
+                      << "' has non-boolean rag.enabled='" << raw
+                      << "' — treating as enabled" << std::endl;
+        }
     }
+
+    /* R4.1: суффикс скоупа (plugin.<name>.rag.scope_suffix). Пусто = не
+     * задан. Читается на каждом вызове, как и enabled. */
+    const std::string suffix_key = "plugin." + plugin_name + ".rag.scope_suffix";
+    if (settings->has_custom_setting(suffix_key))
+        cfg.scope_suffix = settings->get_custom_setting(suffix_key);
+
     return cfg;
 }
 

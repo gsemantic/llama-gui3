@@ -316,6 +316,76 @@ void test_clear_and_flush_return_status() {
                       0);
 }
 
+// ============================================================================
+// R4.1: суффикс скоупа из настроек (scope_suffix)
+// ============================================================================
+
+void test_resolve_scope_appends_extra_suffix() {
+    std::string suffix;
+    std::string error;
+
+    /* Пустой запрошенный суффикс + extra → extra. */
+    TEST_ASSERT_TRUE(resolve_scope("wp_coder", "", suffix, error, "s1"));
+    TEST_ASSERT_EQUAL(suffix, std::string("s1"));
+
+    /* Запрошенный "archive" + extra "s1" → "archives1": дописывается. */
+    TEST_ASSERT_TRUE(resolve_scope("wp_coder", "plugin:wp_coder:archive",
+                                   suffix, error, "s1"));
+    TEST_ASSERT_EQUAL(suffix, std::string("archives1"));
+
+    /* Без extra поведение прежнее. */
+    TEST_ASSERT_TRUE(resolve_scope("wp_coder", "plugin:wp_coder:archive",
+                                   suffix, error));
+    TEST_ASSERT_EQUAL(suffix, std::string("archive"));
+
+    /* Невалидный extra нормализуется вместе со скоупом → bad_scope, а не
+     * запись «в никуда». */
+    TEST_ASSERT_FALSE(resolve_scope("wp_coder", "", suffix, error, "../x"));
+    TEST_ASSERT_FALSE(error.empty());
+}
+
+/* «Живой» пример через РЕАЛЬНЫЙ хостовый RAG (RagRegistry + RagStore +
+ * ABI _impl, без моков): суффикс из настроек реально дописывается к скоупу
+ * и изолирует индекс. Это тот же путь, которым ходит archive_write/
+ * archive_search плагина. */
+void test_scope_suffix_isolates_index() {
+    const auto root = temp_root();
+    RagRegistry reg(root.string(), fallback_embeddings());
+
+    const std::string doc = (root / "doc.txt").string();
+    const std::string text = "beta unique marker for scope suffix";
+    write_file(doc, text + "\n");
+
+    /* Индексируем в "plugin:wp_coder:archive" с суффиксом "s1" → "archives1". */
+    RagCallContext ctx = ctx_for(reg, "wp_coder");
+    ctx.scope_suffix = "s1";
+    const json idx = take_json(
+        rag_index_document_ex_impl(ctx, "plugin:wp_coder:archive", doc, ""));
+    TEST_ASSERT_EQUAL(idx.value("ok", false), true);
+    TEST_ASSERT_EQUAL(idx.value("scope", std::string()),
+                      std::string("plugin:wp_coder:archives1"));
+
+    /* Поиск с тем же суффиксом — находит. */
+    const json hit = take_json(
+        rag_search_ex_impl(ctx, "plugin:wp_coder:archive", text, 5, ""));
+    TEST_ASSERT_EQUAL(hit.value("ok", false), true);
+    TEST_ASSERT(hit.contains("chunks"));
+    TEST_ASSERT(!hit["chunks"].empty());
+
+    /* Поиск БЕЗ суффикса — другой скоуп, ничего не видит (изоляция). */
+    RagCallContext no_suffix = ctx_for(reg, "wp_coder");
+    const json miss = take_json(
+        rag_search_ex_impl(no_suffix, "plugin:wp_coder:archive", text, 5, ""));
+    TEST_ASSERT_EQUAL(miss.value("ok", false), true);
+    TEST_ASSERT(miss["chunks"].empty());
+
+    /* Инфо подтверждает имя скоупа с суффиксом. */
+    const json info =
+        take_json(rag_scope_info_impl(ctx, "plugin:wp_coder:archive"));
+    TEST_ASSERT_EQUAL(info.value("scope", std::string()),
+                      std::string("plugin:wp_coder:archives1"));
+}
+
 int main() {
     REGISTER_TEST(test_resolve_scope_default_and_own);
     REGISTER_TEST(test_resolve_scope_rejects_foreign_and_broken);
@@ -331,6 +401,8 @@ int main() {
     REGISTER_TEST(test_two_plugins_do_not_see_each_other);
     REGISTER_TEST(test_remove_document_lets_index_again);
     REGISTER_TEST(test_clear_and_flush_return_status);
+    REGISTER_TEST(test_resolve_scope_appends_extra_suffix);
+    REGISTER_TEST(test_scope_suffix_isolates_index);
 
     const int rc = test::TestRunner::instance().run();
 

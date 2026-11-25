@@ -93,7 +93,8 @@ bool begin(const RagCallContext& ctx, const std::string& requested,
         return false;
     }
     std::string error;
-    if (!resolve_scope(ctx.plugin_name, requested, suffix, error)) {
+    if (!resolve_scope(ctx.plugin_name, requested, suffix, error,
+                       ctx.scope_suffix)) {
         *out_error = error_json("bad_scope", error);
         return false;
     }
@@ -162,7 +163,8 @@ std::string legacy_rag_permission_warning(
 bool resolve_scope(const std::string& plugin_name,
                    const std::string& requested,
                    std::string& suffix_out,
-                   std::string& error) {
+                   std::string& error,
+                   const std::string& extra_suffix) {
     /* Выходной параметр — наш: иначе вызывающий, забывший очистить строку,
      * получил бы «суффикс от предыдущего вызова» и проиндексировал не туда. */
     suffix_out.clear();
@@ -196,6 +198,12 @@ bool resolve_scope(const std::string& plugin_name,
             suffix_out = rest.substr(1);
         }
     }
+
+    /* R4.1: суффикс из настроек дописывается к запрошенному ДО нормализации,
+     * поэтому невалидный extra_suffix даёт bad_scope, а не запись «в никуда».
+     * Конкатенация без разделителя: пользователь сам задаёт «-prod»/«prod»,
+     * а host не додумывает пунктуацию за него. */
+    suffix_out += extra_suffix;
 
     /* Полное имя собирает реестр — здесь только проверка. */
     std::string normalized;

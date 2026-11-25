@@ -78,6 +78,9 @@ struct RagCallContext {
      * в begin() отдельно от глобального `allowed`: пользователь может
      * выключить RAG одному плагину, не трогая остальные. */
     bool plugin_enabled = true;
+    /* R4.1: `plugin.<name>.rag.scope_suffix` — дописывается к суффиксу
+     * запрошенного скоупа в resolve_scope (пусто = не задан). */
+    std::string scope_suffix;
 };
 
 /* Разобрать имя скоупа, которое просит плагин.
@@ -89,11 +92,16 @@ struct RagCallContext {
  * Валидно: "", "plugin:<name>", "plugin:<name>:<suffix>".
  * Отказ: любое другое (чужой плагин, `..`, `/`, пустой суффикс после `:`
  * и т.п.). `error` заполняется причиной — она уйдёт плагину.
+ *
+ * R4.1: `extra_suffix` (настройка из `plugin.<name>.rag.scope_suffix`) ДОПИСЫВАЕТСЯ
+ * к суффиксу запрошенного скоупа ДО нормализации, поэтому проверяется
+ * вместе с ним (невалидный extra → bad_scope, а не запись «в никуда»).
  */
 bool resolve_scope(const std::string& plugin_name,
                    const std::string& requested,
                    std::string& suffix_out,
-                   std::string& error);
+                   std::string& error,
+                   const std::string& extra_suffix = "");
 
 /* --- Реализации вызовов ABI (см. plugin_api.h, RAG v2) --- */
 

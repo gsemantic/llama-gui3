@@ -1517,9 +1517,12 @@ plugin::RagCallContext rag_call_context(PluginHostData* pd) {
         ctx.has_rag_access = plugin::plugin_has_permission(perms, "rag_access");
         ctx.has_rag_write = plugin::plugin_has_permission(perms, "rag_write");
         /* R3.3: per-plugin выключатель читается на КАЖДОМ вызове, поэтому
-         * правка `plugin.<name>.rag.enabled` действует без перезапуска. */
-        ctx.plugin_enabled = plugin::plugin_rag_config(
-            pd->manager->subsystems.settings, ctx.plugin_name).enabled;
+         * правка `plugin.<name>.rag.enabled` действует без перезапуска.
+         * R4.1: оттуда же берётся `scope_suffix` (дописывается к скоупу). */
+        const plugin::PluginRagConfig cfg = plugin::plugin_rag_config(
+            pd->manager->subsystems.settings, ctx.plugin_name);
+        ctx.plugin_enabled = cfg.enabled;
+        ctx.scope_suffix = cfg.scope_suffix;
     }
     return ctx;
 }

@@ -127,6 +127,11 @@ bool plugin_rag_allowed(const PluginSubsystems& subsystems);
  */
 struct PluginRagConfig {
     bool enabled = true;
+    /* R4.1: `plugin.<name>.rag.scope_suffix` — суффикс, который ДОПИСЫВАЕТСЯ
+     * к суффиксу запрошенного скоупа (пусто = не задан). Позволяет
+     * пользователю изолировать данные плагина (например, по проекту),
+     * не меняя код плагина. Нормализуется вместе с скоупом (resolve_scope). */
+    std::string scope_suffix;
 };
 
 PluginRagConfig plugin_rag_config(const core::Settings* settings,
