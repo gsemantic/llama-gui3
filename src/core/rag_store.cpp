@@ -93,11 +93,17 @@ RagManager& RagStore::ensure_manager() {
 
 int RagStore::index_document(const std::string& file_path) {
     /* Совместимость: старый вызов = индексация без квот (как R1/R2). */
-    return index_document(file_path, RagScopeOptions{}).chunks;
+    return index_document(file_path, RagScopeOptions{}, nullptr).chunks;
 }
 
 RagStore::IndexResult RagStore::index_document(const std::string& file_path,
                                                const RagScopeOptions& opts) {
+    return index_document(file_path, opts, nullptr);
+}
+
+RagStore::IndexResult RagStore::index_document(const std::string& file_path,
+                                               const RagScopeOptions& opts,
+                                               std::atomic<bool>* cancel) {
     IndexResult result;
     if (file_path.empty()) {
         result.reason = "empty path";
@@ -107,6 +113,12 @@ RagStore::IndexResult RagStore::index_document(const std::string& file_path,
      * а режим). Причина в reason, чанков 0. */
     if (!opts.allow_index) {
         result.reason = "scope is read-only";
+        return result;
+    }
+    /* R4.3: отмена ещё до старта. */
+    if (cancel && cancel->load()) {
+        result.truncated = true;
+        result.reason = "cancelled";
         return result;
     }
 
@@ -145,15 +157,36 @@ RagStore::IndexResult RagStore::index_document(const std::string& file_path,
         mgr.remove_document_from_current_profile(file_path);
     }
 
+    /* R4.3: отмена/дедлайн — в цикле чанков RagManager. */
+    mgr.set_index_cancel_flag(cancel);
+    mgr.set_index_deadline_ms(opts.deadline_ms);
     const auto start = std::chrono::steady_clock::now();
     const size_t before = mgr.get_external_chunks_count();
 
-    if (!mgr.process_document(file_path, /*report_completion=*/false)) {
-        result.reason = "process_document failed";
+    const bool ok = mgr.process_document(file_path, /*report_completion=*/false);
+
+    const size_t added = mgr.get_external_chunks_count() - before;
+    const bool was_cancelled = mgr.index_was_cancelled();
+    const bool cancel_now = cancel && cancel->load();
+    mgr.set_index_cancel_flag(nullptr);
+    mgr.set_index_deadline_ms(0);
+
+    /* R4.3: отмена/дедлайн — частичный результат БЕЗ отката: уже
+     * добавленные чанки остаются, caller видит truncated и причину.
+     * ВАЖНО: проверяем ДО `!ok`, иначе отмена, прервавшая до первого
+     * чанка (total_chunks==0 → process_document вернул false), выглядела
+     * бы как «process_document failed», а не «cancelled». */
+    if (was_cancelled || cancel_now) {
+        result.truncated = true;
+        result.chunks = static_cast<int>(added);
+        result.reason = cancel_now ? "cancelled" : "deadline exceeded";
         return result;
     }
 
-    const size_t added = mgr.get_external_chunks_count() - before;
+    if (!ok) {
+        result.reason = "process_document failed";
+        return result;
+    }
 
     /* Откат: документ не должен остаться в индексе, если квота превышена.
      * Убираем и чанки, и запись профиля (иначе дедупликация R1.6 сочтёт
@@ -161,13 +194,6 @@ RagStore::IndexResult RagStore::index_document(const std::string& file_path,
     auto rollback = [&]() {
         mgr.remove_document(file_path);
         mgr.remove_document_from_current_profile(file_path);
-    };
-    auto deadline_exceeded = [&]() {
-        if (opts.deadline_ms <= 0) return false;
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - start)
-                            .count();
-        return ms > opts.deadline_ms;
     };
 
     /* R4.2, квота на документ (max_chunks). */
@@ -179,13 +205,6 @@ RagStore::IndexResult RagStore::index_document(const std::string& file_path,
                         std::to_string(opts.max_chunks) + ")";
         return result;
     }
-    /* Дедлайн (R4.2 — по завершении; проверка в цикле чанков — R4.3). */
-    if (deadline_exceeded()) {
-        rollback();
-        result.truncated = true;
-        result.reason = "deadline exceeded";
-        return result;
-    }
     /* R4.2, квота на индекс (max_index_bytes). */
     if (opts.max_index_bytes > 0 &&
         dir_bytes(path_) > static_cast<size_t>(opts.max_index_bytes)) {
@@ -195,6 +214,7 @@ RagStore::IndexResult RagStore::index_document(const std::string& file_path,
         return result;
     }
 
+    (void)start;
     result.chunks = static_cast<int>(added);
     return result;
 }

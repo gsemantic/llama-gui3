@@ -56,6 +56,15 @@ target_link_libraries(test_rag_quota PRIVATE core)
 target_include_directories(test_rag_quota PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagQuota COMMAND test_rag_quota)
 
+# Асинхронная индексация и отмена (R4.3): start/wait/cancel, дедлайн в
+# цикле чанков. Эмбеддинги — n-gram фолбэк.
+add_executable(test_rag_cancel core/test_rag_cancel.cpp)
+target_link_libraries(test_rag_cancel PRIVATE plugin_core core)
+target_include_directories(test_rag_cancel PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src/plugins)
+add_test(NAME RagCancel COMMAND test_rag_cancel)
+
 # Изоляция скоупов (R1.6): документ A не находится в B, clear(A) не трогает
 # B, повторная индексация не дублирует чанки. Эмбеддинги — детерминированный
 # n-gram фолбэк (недостижимый server_url), без модели и без сети.

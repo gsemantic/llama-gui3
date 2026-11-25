@@ -376,10 +376,15 @@ void test_new_host_api_fields_are_append_only() {
                       offsetof(LlamaHostApi, rag_scope_clear) + sizeof(void*));
     TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_cancel),
                       offsetof(LlamaHostApi, rag_scope_flush) + sizeof(void*));
+    /* R4.3: асинхронная пара — append-only, после rag_index_cancel. */
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_start),
+                      offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*));
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_wait),
+                      offsetof(LlamaHostApi, rag_index_start) + sizeof(void*));
     /* Хвост структуры — последнее добавленное поле. Сюда же добавляется
      * assert для следующего поля; суть проверки — «ничего не вставлено
      * в середину». */
-    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*),
+    TEST_ASSERT_EQUAL(offsetof(LlamaHostApi, rag_index_wait) + sizeof(void*),
                       sizeof(LlamaHostApi));
 }
 

@@ -119,11 +119,11 @@ int main() {
                          api.size, sizeof(LlamaHostApi));
             return 1;
         }
-        if (api.size < offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*)) {
+        if (api.size < offsetof(LlamaHostApi, rag_index_wait) + sizeof(void*)) {
             std::fprintf(stderr,
                          "FAIL: таблица ABI не вмещает поля RAG v2 "
                          "(нужно %zu байт, есть %u)\n",
-                         offsetof(LlamaHostApi, rag_index_cancel) + sizeof(void*),
+                         offsetof(LlamaHostApi, rag_index_wait) + sizeof(void*),
                          api.size);
             return 1;
         }
@@ -134,7 +134,7 @@ int main() {
         if (!api.rag_search_ex || !api.rag_index_document_ex ||
             !api.rag_scope_info || !api.rag_scope_remove_document ||
             !api.rag_scope_clear || !api.rag_scope_flush ||
-            !api.rag_index_cancel) {
+            !api.rag_index_cancel || !api.rag_index_start || !api.rag_index_wait) {
             std::fprintf(stderr,
                          "FAIL: часть полей RAG v2 не заполнена хостом\n");
             return 1;

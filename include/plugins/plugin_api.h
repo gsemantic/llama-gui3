@@ -412,10 +412,19 @@ struct LlamaHostApi {
     /* Немедленная запись индекса скоупа на диск: 1/0. */
     int   (*rag_scope_flush)(LlamaPluginHost* host, const char* scope);
 
-    /* Отмена идущей индексации по хендлу. Хендл появится в R4 вместе с
-     * асинхронной парой rag_index_start/rag_index_wait; до R4 поле
-     * зарезервировано и возвращает 0. */
+    /* Отмена идущей индексации по хендлу (R4.3). Хендл выдаёт
+     * rag_index_start; отмена ставит флаг, проверяемый в цикле чанков. */
     void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
+
+    /* R4.3: асинхронная индексация (append-only). start возвращает
+     * непрозрачный хендл (nullptr при отказе; причина — в логе хоста).
+     * wait(timeout_ms<=0 — бесконечно) возвращает malloc-JSON
+     * {"ok":true,"chunks":N,"truncated":bool,"reason":"..."} или
+     * {"ok":false,"code":"timeout"}; при завершении освобождает хендл.
+     * cancel — см. выше. */
+    void* (*rag_index_start)(LlamaPluginHost* host, const char* scope,
+                             const char* path, const char* opts_json);
+    char* (*rag_index_wait)(LlamaPluginHost* host, void* handle, int timeout_ms);
 };
 
 /* Информация о плагине (возвращается ll_plugin_info, статична) */

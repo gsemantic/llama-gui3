@@ -38,6 +38,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <atomic>
 
 namespace llama_gui {
 namespace core {
@@ -103,7 +104,16 @@ public:
      * документ, `max_index_bytes` — на индекс, `deadline_ms` — на вызов.
      * При превышении документ НЕ добавляется (откат), `truncated=true` и
      * `reason` называют причину. `opts.reindex` переиндексирует изменённый
-     * документ (R4.1). */
+     * документ (R4.1).
+     *
+     * R4.3: `cancel` (может быть nullptr) — флаг отмены; проверяется в
+     * цикле чанков. При отмене/дедлайне документ НЕ откатывается: уже
+     * добавленные чанки остаются (частичный результат), `truncated=true`. */
+    IndexResult index_document(const std::string& file_path,
+                               const RagScopeOptions& opts,
+                               std::atomic<bool>* cancel);
+
+    /* Удобная перегрузка без флага отмены. */
     IndexResult index_document(const std::string& file_path,
                                const RagScopeOptions& opts);
 

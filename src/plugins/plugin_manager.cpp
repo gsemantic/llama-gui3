@@ -16,6 +16,7 @@
 #include "core/rag_manager.h"
 #include "core/rag_registry.h"
 #include "plugins/plugin_rag_api.h"
+#include "plugins/plugin_rag_index.h"
 #include "plugins/plugin_settings_guard.h"
 #include "core/version.h"
 #include "core/openrouter_client.h"
@@ -1561,10 +1562,28 @@ int host_rag_scope_flush(LlamaPluginHost* host, const char* scope) {
 }
 
 void host_rag_index_cancel(LlamaPluginHost* host, void* handle) {
-    /* R4: асинхронная пара rag_index_start/rag_index_wait. До неё
-     * отменять нечего — поле зарезервировано, чтобы не сдвигать ABI. */
+    /* R4.3: отмена идущей индексации. Хендл — plugin::RagIndexJob*. */
     (void)host;
-    (void)handle;
+    plugin::rag_index_cancel(static_cast<plugin::RagIndexJob*>(handle));
+}
+
+void* host_rag_index_start(LlamaPluginHost* host, const char* scope,
+                           const char* path, const char* opts_json) {
+    std::string error;
+    plugin::RagIndexJob* job = plugin::rag_index_start(
+        rag_call_context(to_pd(host)), scope ? scope : "", path ? path : "",
+        opts_json ? opts_json : "", &error);
+    if (!job) {
+        std::cerr << "[PluginManager] rag_index_start denied: " << error
+                  << std::endl;
+    }
+    return job;
+}
+
+char* host_rag_index_wait(LlamaPluginHost* host, void* handle, int timeout_ms) {
+    (void)host;
+    return plugin::rag_index_wait(
+        static_cast<plugin::RagIndexJob*>(handle), timeout_ms);
 }
 
 const char* host_path_config_dir(LlamaPluginHost* host) {
@@ -1806,6 +1825,8 @@ const LlamaHostApi& host_api_table() {
         a.rag_scope_clear = host_rag_scope_clear;
         a.rag_scope_flush = host_rag_scope_flush;
         a.rag_index_cancel = host_rag_index_cancel;
+        a.rag_index_start = host_rag_index_start;
+        a.rag_index_wait = host_rag_index_wait;
         return a;
     }();
     return api;

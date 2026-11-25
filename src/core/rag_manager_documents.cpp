@@ -13,7 +13,18 @@
 namespace llama_gui {
 namespace core {
 
+void RagManager::set_index_deadline_ms(long long ms) {
+    if (ms <= 0) {
+        index_deadline_ = std::chrono::steady_clock::time_point{};
+    } else {
+        index_deadline_ = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(ms);
+    }
+}
+
 bool RagManager::process_document(const std::string& file_path, bool report_completion) {
+    // R4.3: сбрасываем флаг отмены на старте новой индексации.
+    index_cancelled_.store(false);
     // Проверяем, что путь к файлу не пуст
     if (file_path.empty()) {
         std::cerr << "Error: Empty file path provided for document processing" << std::endl;
@@ -124,6 +135,17 @@ bool RagManager::process_document(const std::string& file_path, bool report_comp
         }
 
         for (size_t j = 0; j < chunks.size(); ++j) {
+            // R4.3: отмена/дедлайн проверяются на каждом чанке — длинный
+            // документ прерывается «на лету», а не после полной обработки.
+            if (cancel_flag_ && cancel_flag_->load()) {
+                index_cancelled_.store(true);
+                break;
+            }
+            if (index_deadline_ != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() > index_deadline_) {
+                index_cancelled_.store(true);
+                break;
+            }
             // Report: Embedding phase
             report_indexing_progress(IndexingPhase::Embedding, file_path, 0, 1,
                                      processed_chunks, estimated_total_chunks);

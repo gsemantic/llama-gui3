@@ -3,6 +3,7 @@ add_library(plugin_core STATIC
     plugin_manager.cpp
     plugin_rag_gate.cpp
     plugin_rag_api.cpp
+    plugin_rag_index.cpp
     plugin_settings_guard.cpp
     plugin_identity.cpp
     llm_stream_bridge.cpp

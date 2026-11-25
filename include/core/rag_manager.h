@@ -11,6 +11,8 @@
 #include "kv_cache_types.h"
 #include "rag_index_profile.h"
 #include <functional>
+#include <atomic>
+#include <chrono>
 
 // Предварительное объявление классов
 namespace llama_gui {
@@ -95,6 +97,14 @@ public:
     // Обработка внешних документов
     bool process_document(const std::string& file_path, bool report_completion = true);
     bool process_documents_batch(const std::vector<std::string>& file_paths);
+
+    /* R4.3: отмена/дедлайн индексации. Флаг проверяется в цикле чанков
+     * process_document (и в батче), поэтому длинный документ можно
+     * прервать «на лету», не дожидаясь конца. nullptr/0 = нет отмены.
+     * `index_was_cancelled()` — результат последней индексации. */
+    void set_index_cancel_flag(std::atomic<bool>* flag) { cancel_flag_ = flag; }
+    void set_index_deadline_ms(long long ms);
+    bool index_was_cancelled() const { return index_cancelled_.load(); }
     bool process_text_chunk(const std::string& text, const std::string& doc_id, int chunk_index);
     bool reindex_document(const std::string& file_path);
     bool remove_document(const std::string& file_path);
@@ -413,6 +423,11 @@ private:
     int max_chunks_in_memory_ = 1000;  // Ограничение для экономии памяти
     float similarity_threshold_ = 0.7f; // Порог схожести
     int max_tokens_per_chunk_ = 256;   // Размер чанка в токенах
+
+    // R4.3: отмена/дедлайн индексации (см. set_index_cancel_flag).
+    std::atomic<bool>* cancel_flag_ = nullptr;
+    std::atomic<bool> index_cancelled_{false};
+    std::chrono::steady_clock::time_point index_deadline_{};
     static constexpr int EMBEDDING_DIMENSION = 384; // Размер эмбеддинга granite-embedding-107m
     
     // MMR параметры

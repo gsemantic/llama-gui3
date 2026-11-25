@@ -653,10 +653,25 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       `rag_index_document_ex` парсит `opts_json` и отдаёт `truncated`/`reason`.
       **Тест:** `test_rag_quota` — 6/6; мутация «снята проверка max_chunks»
       поймана (1 падение).
-- [ ] **R4.3** Дедлайн/отмена: `deadline_ms` проверяется в цикле чанков;
+- [x] **R4.3** Дедлайн/отмена: `deadline_ms` проверяется в цикле чанков;
       асинхронная пара `rag_index_start`/`rag_index_wait` +
       `rag_index_cancel(handle)` добавляется в конец ABI (append-only) и
       используется парсером сайтов для тысяч страниц.
+      **Сделано (2026-11-25):** ABI append-only — `rag_index_start`/
+      `rag_index_wait` после `rag_index_cancel` (версия 1.0.0 не менялась).
+      `RagManager` получил `set_index_cancel_flag()`/`set_index_deadline_ms()`/
+      `index_was_cancelled()`; проверка в цикле чанков `process_document`
+      (и в батче) прерывает длинный документ «на лету». `RagStore::index_
+      document(path, opts, cancel)` при отмене/дедлайне НЕ откатывает
+      (частичный результат, `truncated=true`). Асинхронный менеджер —
+      `plugin_rag_index.{h,cpp}` (чистый, тестируемый): start спавнит поток,
+      wait(timeout) забирает JSON и освобождает job, cancel ставит атомарный
+      флаг. `plugin_manager.cpp` — тонкие обёртки. **Найдено попутно:**
+      отмена до первого чанка давала `process_document=false` (0 чанков) и
+      выглядела как «failed» — порядок проверок в сторе исправлен (отмена
+      раньше `!ok`). **Тест:** `test_rag_cancel` — 5/5 (async complete,
+      deadline<3с, pre-set cancel, без rag_write, async cancel); мутация
+      «снята проверка дедлайна в цикле» поймана (1 падение).
 - [ ] **R4.4** `rag_scope_flush` + флаш при выгрузке плагина; тест
       «создали → проиндексировали → выгрузили → загрузили → нашли».
 - [ ] **R4.5** LRU вытеснение сторов с флашем; тест на 3 скоупа при
@@ -718,7 +733,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R3.5 UI | `[ ]` | чекбокс | отдельная UI-задача (§9.11) |
 | R4.1 опции | `[x]` | клампы | `test_rag_registry` (28/28) |
 | R4.2 квоты | `[x]` | `truncated` | `test_rag_quota` (6/6) |
-| R4.3 отмена | `[ ]` | < 1 с | `test_rag_cancel` |
+| R4.3 отмена | `[x]` | < 1 с | `test_rag_cancel` (5/5) |
 | R4.4 flush | `[ ]` | после рестарта | `test_rag_persistence` |
 | R4.5 LRU | `[ ]` | 2 из 3 | `test_rag_registry` |
 | R4.6 документация | `[ ]` | документ | — |
@@ -813,6 +828,10 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | 2026-11-25 | R4.2 | Превышение квоты = ОТКАТ документа, а не «keep-first-N» | `RagManager` не умеет убирать часть чанков документа (только `remove_document` целиком); «keep-first-N» потребовал бы новой кишки в общем менеджере. Частичность на уровне партии — R4.3 |
 | 2026-11-25 | R4.2 | Дедлайн проверяется по завершении (в цикле чанков — R4.3) | `process_document` синхронный; прерывать его изнутри без правки общего кода нельзя. R4.3 даёт асинхронную пару с проверкой в цикле |
 | 2026-11-25 | R4.2 | `RagScopeOptions` переехал в `rag_store.h` | квоты применяет стор; `rag_registry.h` включает `rag_store.h`, обратное — цикл. Тип один, а не две копии |
+| 2026-11-25 | R4.3 | Проверка отмены/дедлайна — ДО `!ok` в сторе | отмена до первого чанка даёт `process_document=false` (0 чанков); без переупорядочивания это выглядело бы как «process_document failed», а не «cancelled» — плагин бы не понял, что его остановка сработала |
+| 2026-11-25 | R4.3 | Отмена/дедлайн НЕ откатывают документ (в отличие от квот R4.2) | «частичный результат»: уже добавленные чанки остаются, `truncated=true`; откат при отмене стёр бы работу, сделанную до нажатия «стоп» |
+| 2026-11-25 | R4.3 | Менеджер job — в `plugin_rag_index.cpp`, а не в plugin_manager | `host_*` в анонимном namespace; чистая логика start/wait/cancel проверяется без `LlamaPluginHost*` (та же причина, что R0.2/R2.2) |
+| 2026-11-25 | R4.3 | `wait` освобождает job только по завершении; таймаут оставляет живым | иначе `cancel` после `wait` был бы use-after-free; парсер зовёт `wait` в цикле до `done`, `cancel` — пока job жив |
 
 ---
 
