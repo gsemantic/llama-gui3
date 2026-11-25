@@ -40,6 +40,7 @@ using namespace coder;
 #include <iterator>
 #include <string>
 #include <utility>
+#include <set>
 #include <vector>
 #include <unistd.h>
 
@@ -398,4 +399,58 @@ TEST(a11_длинный_вывод_уходит_в_архив_а_в_резуль
         engine_state().project_dir.clear();
         engine_state().session_id.clear();
     }
+}
+
+
+/* A1.2: повторный вызов с тем же call_id НЕ дублирует архив.
+ *
+ * Дедуп держится на двух вещах: путь документа ключуется call_id
+ * (archive_file_path), а хост RAG v2 не индексирует один путь дважды
+ * (R1.6, RagStore::index_document). Мок ниже повторяет R1.6 (по пути —
+ * «уже проиндексировано, chunks:0»), поэтому тест проверяет именно наш
+ * вклад: детерминированный путь по call_id. Разъедься путь (случайный
+ * суффикс/счётчик) — два вызова дали бы два документа, и тест упал бы. */
+TEST(a12_повторный_вызов_не_дублирует_архив_по_call_id) {
+    const fs::path data = fs::temp_directory_path() /
+                          ("wp_coder_a12_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+    register_tmp_tree(data.string());
+
+    std::set<std::string> seen_paths;
+    std::vector<std::pair<std::string, std::string>> docs;
+    HostCallbacks cb = Engine::instance().callbacks();
+    cb.path_data_dir = [&data]() -> std::string { return data.string(); };
+    cb.rag_index_document_ex =
+        [&](const std::string&, const std::string& path,
+            const std::string&) -> std::string {
+        /* R1.6: один путь — один документ. */
+        if (seen_paths.count(path))
+            return std::string(
+                R"({"ok":true,"chunks":0,"documents":1,"truncated":false,"reason":""})");
+        seen_paths.insert(path);
+        docs.emplace_back(path, read_all(path));
+        return std::string(
+            R"({"ok":true,"chunks":1,"documents":1,"truncated":false,"reason":""})");
+    };
+    Engine::instance().init(cb);
+    test_support::approve_all_permissions();
+
+    const std::string big(3000, 'ф');   /* заведомо выше порога 2000 */
+
+    /* Два вызова с ОДНИМ call_id — один документ. */
+    const std::string a = archive_output_if_large("ses_d", "call_x", big);
+    const std::string b = archive_output_if_large("ses_d", "call_x", big);
+    ASSERT_TRUE(!a.empty());
+    ASSERT_EQ(a, b);   /* тот же локатор — тот же путь */
+    ASSERT_EQ(docs.size(), (size_t)1);
+
+    /* Другой call_id — другой документ (дедуп не склеивает разные вызовы). */
+    const std::string c = archive_output_if_large("ses_d", "call_y", big);
+    ASSERT_TRUE(!c.empty());
+    ASSERT_TRUE(c != a);
+    ASSERT_EQ(docs.size(), (size_t)2);
+
+    fs::remove_all(data, ec);
 }
