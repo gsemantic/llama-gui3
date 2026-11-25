@@ -21,6 +21,8 @@
 
 #include <atomic>
 #include <filesystem>
+#include <iostream>
+#include <memory>
 #include <thread>
 #include <unistd.h>
 #include <fstream>
@@ -45,6 +47,19 @@ std::string read_file(const std::string& p) {
     std::stringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+/* Детерминированные эмбеддинги без модели/сети (n-gram фолбэк). Нужны
+ * только тесту LRU-флаша: без эмбеддингов чанки не создаются и «флаш»
+ * проверять не на чем. */
+std::shared_ptr<EmbeddingGenerator> fallback_embeddings() {
+    auto gen = std::make_shared<EmbeddingGenerator>();
+    gen->set_server_url("http://127.0.0.1:9");
+    if (!gen->load_model()) {
+        std::cerr << "test: cannot prepare fallback embeddings" << std::endl;
+        std::abort();
+    }
+    return gen;
 }
 
 } // namespace
@@ -351,6 +366,38 @@ void test_registry_lru_eviction() {
     TEST_ASSERT(reg.info("a").reason.find("не загружен") != std::string::npos);
 }
 
+/* R4.5: вытесненный стор ФЛАШИТСЯ — его индекс переживает вытеснение.
+ * 3 скоупа при max_loaded=2; самый старый (a) вытесняется и пишется на
+ * диск. shared_ptr на a не держим: иначе деструктор не сработает. */
+void test_registry_lru_eviction_flushes() {
+    const auto root = temp_root();
+    RagRegistry reg(root.string(), fallback_embeddings(), /*max_loaded=*/2);
+
+    const std::string doc_a = (root / "a.txt").string();
+    const std::string doc_b = (root / "b.txt").string();
+    const std::string doc_c = (root / "c.txt").string();
+    std::ofstream(doc_a) << "alpha lru marker\n";
+    std::ofstream(doc_b) << "beta lru marker\n";
+    std::ofstream(doc_c) << "gamma lru marker\n";
+
+    /* Временные shared_ptr: после вызова ссылок на стор, кроме реестра, нет,
+     * поэтому вытеснение реально уничтожает стор (и флашит). */
+    TEST_ASSERT(reg.get("a")->index_document(doc_a) > 0);
+    TEST_ASSERT(reg.get("b")->index_document(doc_b) > 0);
+    TEST_ASSERT(reg.get("c")->index_document(doc_c) > 0);   /* вытесняет a */
+
+    TEST_ASSERT_EQUAL(reg.loaded_count(), 2u);
+    /* a вытеснен и сброшен на диск. */
+    TEST_ASSERT(reg.info("a").reason.find("не загружен") != std::string::npos);
+
+    /* Новый реестр над тем же корнем: a читается с диска (флаш сработал). */
+    RagRegistry reg2(root.string(), fallback_embeddings(), /*max_loaded=*/4);
+    auto a2 = reg2.get("a");
+    /* search открывает стор; info() до этого вернул бы 0 (R1.2). */
+    TEST_ASSERT(!a2->search("lru marker", 5, "").empty());
+    TEST_ASSERT(a2->info().chunks > 0);
+}
+
 void test_registry_list_includes_disk_dirs() {
     const auto root = temp_root();
     RagRegistry reg(root.string());
@@ -485,6 +532,7 @@ int main() {
     REGISTER_TEST(test_registry_same_plugin_same_store);
     REGISTER_TEST(test_registry_suffix_creates_distinct_store);
     REGISTER_TEST(test_registry_lru_eviction);
+    REGISTER_TEST(test_registry_lru_eviction_flushes);
     REGISTER_TEST(test_registry_list_includes_disk_dirs);
     REGISTER_TEST(test_registry_remove_deletes_dir);
     REGISTER_TEST(test_registry_shares_one_embedding_generator);
