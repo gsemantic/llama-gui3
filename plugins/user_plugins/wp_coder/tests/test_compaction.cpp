@@ -924,8 +924,12 @@ TEST(summary_transcript_caps_a_long_tool_result) {
     h.push_back(assistant_with("c", completed_tool("bash", std::string(5000, 'x'))));
     const std::string text = serialize_for_summary(h);
     /* Метка обрезания обязана быть: без неё сводщик принял бы огрызок за
-     * весь вывод и записал в сводку выводы о том, чего не было. */
-    ASSERT_TRUE(text.find("[обрезано, всего 5000 символов]") != std::string::npos);
+     * весь вывод и записал в сводку выводы о том, чего не было.
+     * A2.2: к метке добавлена подсказка про архив — «обрезано» больше не
+     * тупик, полный текст достаётся archive_search по локатору. */
+    ASSERT_TRUE(text.find("[обрезано, всего 5000 символов") != std::string::npos);
+    ASSERT_TRUE(text.find("архиве сессий") != std::string::npos);
+    ASSERT_TRUE(text.find("archive_search") != std::string::npos);
     ASSERT_TRUE(text.find("x") != std::string::npos);
     /* Обрезанный результат — меньше 2600 символов строки, а не 5000. */
     ASSERT_TRUE(text.size() < (size_t)2600);
