@@ -386,6 +386,90 @@ void test_scope_suffix_isolates_index() {
                       std::string("plugin:wp_coder:archives1"));
 }
 
+// ============================================================================
+// «Живой пример» архива сессии через РЕАЛЬНЫЙ хостовый RAG
+// ============================================================================
+//
+// Это НЕ мок: RagRegistry + RagStore + ABI _impl — настоящий путь, которым
+// ходят archive_write/archive_search плагина (тот же скоуп
+// plugin:wp_coder:archive и тот же заголовок-локатор). Проверяется полный
+// жизненный цикл архива одной сессии:
+//   запись → поиск по call_id → поиск по содержимому → info → удаление
+//   документа → очистка скоупа.
+// Эмбеддинги — детерминированный n-gram фолбэк (без модели и сети).
+
+void test_archive_live_example() {
+    const auto root = temp_root();
+    RagRegistry reg(root.string(), fallback_embeddings());
+    const RagCallContext ctx = ctx_for(reg, "wp_coder");
+
+    /* Документ архива — ровно как его пишет archive_write: заголовок с
+     * локатором session_id:call_id (+ file:line), затем полный текст. */
+    const std::string doc = (root / "call42.txt").string();
+    const std::string body =
+        "# archive locator=ses1:call42 file=src/app.php line=120\n"
+        "ОГРОМНЫЙ_ВЫВОД_ИНСТРУМЕНТА: " + std::string(3000, 'я') + "\n";
+    write_file(doc, body);
+
+    /* 1. Запись в архив. */
+    const json idx = take_json(
+        rag_index_document_ex_impl(ctx, "plugin:wp_coder:archive", doc, ""));
+    TEST_ASSERT_EQUAL(idx.value("ok", false), true);
+    TEST_ASSERT(idx.value("chunks", 0) >= 1);
+    std::cout << "  [live] index: scope=" << idx.value("scope", std::string())
+              << " chunks=" << idx.value("chunks", 0)
+              << " documents=" << idx.value("documents", 0) << std::endl;
+
+    /* 2. Поиск по call_id — находит, в чанке есть локатор и тело. */
+    const json by_call = take_json(
+        rag_search_ex_impl(ctx, "plugin:wp_coder:archive", "call42", 5, ""));
+    TEST_ASSERT_EQUAL(by_call.value("ok", false), true);
+    TEST_ASSERT(!by_call["chunks"].empty());
+    {
+        /* Документ чанкуется, поэтому локатор и тело могут лежать в разных
+         * чанках — ищем по ВСЕМ чанкам, а не только по первому. */
+        bool has_locator = false;
+        for (const auto& c : by_call["chunks"])
+            if (c.value("content", std::string()).find("ses1:call42") != std::string::npos)
+                has_locator = true;
+        TEST_ASSERT(has_locator);
+        std::cout << "  [live] find by call_id: ok, chunks="
+                  << by_call["chunks"].size() << std::endl;
+    }
+
+    /* 3. Поиск по содержимому — тоже находит. */
+    const json by_text = take_json(rag_search_ex_impl(
+        ctx, "plugin:wp_coder:archive", "ОГРОМНЫЙ_ВЫВОД_ИНСТРУМЕНТА", 5, ""));
+    TEST_ASSERT(!by_text["chunks"].empty());
+
+    /* 4. info: индекс не пуст и готов. */
+    const json info =
+        take_json(rag_scope_info_impl(ctx, "plugin:wp_coder:archive"));
+    TEST_ASSERT_EQUAL(info.value("ok", false), true);
+    TEST_ASSERT(info.value("documents", 0) >= 1);
+    TEST_ASSERT(info.value("chunks", 0) >= 1);
+    std::cout << "  [live] info: documents=" << info.value("documents", 0)
+              << " chunks=" << info.value("chunks", 0)
+              << " bytes=" << info.value("bytes", 0LL)
+              << " ready=" << info.value("ready", false) << std::endl;
+
+    /* 5. Удаление документа — индекс пустеет. */
+    const json rm = take_json(
+        rag_scope_remove_document_impl(ctx, "plugin:wp_coder:archive", doc));
+    TEST_ASSERT_EQUAL(rm.value("ok", false), true);
+    const json after = take_json(
+        rag_search_ex_impl(ctx, "plugin:wp_coder:archive", "call42", 5, ""));
+    TEST_ASSERT(after["chunks"].empty());
+
+    /* 6. Очистка скоупа — статус 1 (как rag_scope_clear). */
+    TEST_ASSERT_EQUAL(rag_scope_clear_impl(ctx, "plugin:wp_coder:archive"), 1);
+    const json cleared =
+        take_json(rag_scope_info_impl(ctx, "plugin:wp_coder:archive"));
+    TEST_ASSERT_EQUAL(cleared.value("chunks", 0), 0);
+    std::cout << "  [live] cleared: chunks=" << cleared.value("chunks", 0)
+              << std::endl;
+}
+
 int main() {
     REGISTER_TEST(test_resolve_scope_default_and_own);
     REGISTER_TEST(test_resolve_scope_rejects_foreign_and_broken);
@@ -403,6 +487,7 @@ int main() {
     REGISTER_TEST(test_clear_and_flush_return_status);
     REGISTER_TEST(test_resolve_scope_appends_extra_suffix);
     REGISTER_TEST(test_scope_suffix_isolates_index);
+    REGISTER_TEST(test_archive_live_example);
 
     const int rc = test::TestRunner::instance().run();
 
