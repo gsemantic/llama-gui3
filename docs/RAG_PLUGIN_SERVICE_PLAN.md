@@ -603,9 +603,17 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
       «прилипание» `wp_coder_extra`) + `test_plugin_rag_permissions`
       (9/9: `begin()` honors `plugin_enabled`); мутации «config всегда
       enabled» и «begin игнорирует plugin_enabled» пойманы (2 и 1 падение).
-- [ ] **R3.4** Тест `test_plugin_rag_permissions.cpp`: плагин без
+- [x] **R3.4** Тест `test_plugin_rag_permissions.cpp`: плагин без
       `rag_access` получает `denied` на `_ex` и «пусто + warning» на
       легаси; плагин с правом — работает.
+      **Сделано (2026-11-25):** `test_plugin_rag_permissions` — 10/10.
+      `_ex` без `rag_access`/`rag_write` → `denied` (`test_search_requires_access`,
+      `test_write_ops_require_write`); с правами — работает
+      (`test_with_permissions_all_work`). Легаси «предупреждение, а не отказ»
+      вынесено в чистую `legacy_rag_permission_warning()` (хост только
+      логирует): `test_legacy_warns_without_permission` проверяет, что без
+      права строка непустая и называет плагин/право/функцию, с правом —
+      пустая. Мутация «warning всегда пуст» поймана (1 падение).
 - [ ] **R3.5** UI: в списке плагинов — чекбокс «RAG», поле суффикса
       скоупа, размер индекса, кнопка «Очистить». (Если списка ещё нет —
       отдельная задача UI, не блокирует R3.)
@@ -681,7 +689,7 @@ void  (*rag_index_cancel)(LlamaPluginHost* host, void* handle);
 | R3.1 права | `[x]` | denied | `test_plugin_rag_permissions` (6/6) |
 | R3.2 namespace | `[x]` | чужая запись отклонена | `test_plugin_rag_permissions` (8/8) |
 | R3.3 настройки | `[x]` | переживают рестарт | `test_plugin_rag_gate` (10/10), `test_plugin_rag_permissions` (9/9) |
-| R3.4 тест прав | `[ ]` | 3 случая | `test_plugin_rag_permissions` |
+| R3.4 тест прав | `[x]` | 3 случая | `test_plugin_rag_permissions` (10/10) |
 | R3.5 UI | `[ ]` | чекбокс | ручной |
 | R4.1 опции | `[ ]` | клампы | `test_rag_registry` |
 | R4.2 квоты | `[ ]` | `truncated` | `test_rag_quota` |

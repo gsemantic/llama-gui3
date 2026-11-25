@@ -1410,12 +1410,12 @@ char* host_llm_ast_symbols(LlamaPluginHost* host, const char* path,
 void warn_if_missing_rag_permission(PluginHostData* pd, const char* perm,
                                     const char* legacy_fn) {
     if (!pd || !pd->plugin) return;
-    const auto& perms = pd->plugin->info.manifest.permissions;
-    if (plugin::plugin_has_permission(perms, perm)) return;
-    std::cerr << "[PluginManager] Plugin '" << pd->plugin->info.name
-              << "' calls " << legacy_fn << " without permission '" << perm
-              << "' — allowed with warning until M5 (legacy ABI 1.0.0)"
-              << std::endl;
+    const std::string warning = plugin::legacy_rag_permission_warning(
+        pd->plugin->info.name, pd->plugin->info.manifest.permissions, perm,
+        legacy_fn);
+    if (!warning.empty()) {
+        std::cerr << "[PluginManager] " << warning << std::endl;
+    }
 }
 
 char* host_rag_search(LlamaPluginHost* host, const char* query, int k,

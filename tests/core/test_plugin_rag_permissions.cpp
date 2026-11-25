@@ -269,6 +269,34 @@ void test_settings_guard_host_owned_and_foreign_denied() {
                 SD::Denied);
 }
 
+// ============================================================================
+// Легаси без права: предупреждение, а не отказ (R3.4)
+// ============================================================================
+
+void test_legacy_warns_without_permission() {
+    const std::vector<std::string> no_access = {"llm_access"};
+
+    /* Нет rag_access → предупреждение непустое и называет плагин/право. */
+    const std::string w =
+        legacy_rag_permission_warning("wp_coder", no_access, "rag_access",
+                                      "rag_search");
+    TEST_ASSERT(!w.empty());
+    TEST_ASSERT(w.find("wp_coder") != std::string::npos);
+    TEST_ASSERT(w.find("rag_access") != std::string::npos);
+    TEST_ASSERT(w.find("rag_search") != std::string::npos);
+
+    /* Есть право → предупреждать не о чем (пустая строка). */
+    TEST_ASSERT(legacy_rag_permission_warning(
+                    "wp_coder", {"rag_access"}, "rag_access", "rag_search")
+                    .empty());
+
+    /* Нет манифеста (пусто) → предупреждение: легаси не имеет права, но
+     * всё равно не отказывает. */
+    TEST_ASSERT(!legacy_rag_permission_warning("hello_plugin", {}, "rag_write",
+                                               "rag_process_document")
+                     .empty());
+}
+
 int main() {
     REGISTER_TEST(test_permission_lookup);
 
@@ -282,6 +310,8 @@ int main() {
 
     REGISTER_TEST(test_settings_guard_own_vs_foreign);
     REGISTER_TEST(test_settings_guard_host_owned_and_foreign_denied);
+
+    REGISTER_TEST(test_legacy_warns_without_permission);
 
     const int rc = test::TestRunner::instance().run();
 

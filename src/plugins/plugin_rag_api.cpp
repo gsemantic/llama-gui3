@@ -146,6 +146,19 @@ bool plugin_has_permission(const std::vector<std::string>& permissions,
     return false;
 }
 
+std::string legacy_rag_permission_warning(
+    const std::string& plugin_name,
+    const std::vector<std::string>& permissions,
+    const std::string& required,
+    const std::string& legacy_fn) {
+    if (plugin_has_permission(permissions, required)) return "";
+    /* Не «отказ», а «предупреждение»: сторонний плагин под ABI 1.0.0 не
+     * объявлял прав и не должен сломаться в R3. */
+    return "Plugin '" + plugin_name + "' calls " + legacy_fn +
+           " without permission '" + required +
+           "' — allowed with warning until M5 (legacy ABI 1.0.0)";
+}
+
 bool resolve_scope(const std::string& plugin_name,
                    const std::string& requested,
                    std::string& suffix_out,

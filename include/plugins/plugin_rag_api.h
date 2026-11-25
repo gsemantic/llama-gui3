@@ -48,6 +48,19 @@ namespace plugin {
 bool plugin_has_permission(const std::vector<std::string>& permissions,
                            const std::string& required);
 
+/* R3.4: текст предупреждения для ЛЕГАСИ-вызова без права.
+ *
+ * Легаси-функции (`rag_search`/`rag_process_document`/…) в R3 НЕ
+ * отказывают без права — только предупреждают (ротация §3.4). Решение
+ * «предупредить или нет» вынесено сюда чистым: пустая строка = право есть
+ * (предупреждать не о чем), непустая = плагин зовёт без права. Тест
+ * проверяет это без перехвата stderr, а хост лишь логирует строку. */
+std::string legacy_rag_permission_warning(
+    const std::string& plugin_name,
+    const std::vector<std::string>& permissions,
+    const std::string& required,
+    const std::string& legacy_fn);
+
 /* Контекст одного вызова. Собирает вызывающий (host_rag_*), сами функции
  * контекст не добывают: так их можно тестировать без PluginManager и без
  * глобального состояния. */
