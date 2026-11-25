@@ -188,3 +188,85 @@ TEST(todo_plan_is_cleared_with_the_session) {
     /* Чужой план в промпте новой задачи только сбивает. */
     ASSERT_TRUE(system_prompt().find("прошлая задача") == std::string::npos);
 }
+
+/* ======================================================================
+ * План новой задачи в продолжаемой сессии (И4.6)
+ * ====================================================================== */
+
+namespace {
+
+/* Засеять «прошлую задачу»: реплика человека, план ассистента и пункт
+ * плана. */
+void seed_previous_task(const char* user_text, const char* plan_text) {
+    auto& st = engine_state();
+    std::lock_guard<std::mutex> lk(st.mtx);
+    while (!st.inbox.empty()) st.inbox.pop();
+    st.session.clear();
+    st.session.push_back(Message::user(user_text));
+    Message plan = Message::assistant(st.session.back().id);
+    plan.parts.push_back(MessagePart::text(std::string("[ПЛАН]\n") + plan_text));
+    st.session.push_back(std::move(plan));
+    TodoItem t;
+    t.id = "1";
+    t.content = plan_text;
+    t.status = "pending";
+    st.todos.clear();
+    st.todos.push_back(t);
+    st.continue_conversation = true;
+    st.preserve_session = false;
+}
+
+} // namespace
+
+TEST(new_task_drops_the_previous_plan_when_session_continues) {
+    init_tools();
+    seed_previous_task("прошлая задача", "старый пункт");
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        /* Предыдущая задача завершена: следующая реплика — новая задача. */
+        engine_state().state = AgentState::Done;
+    }
+
+    engine().submit("новая задача");
+
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        /* План прошлой задачи ушёл, а диалог и реплики остались. */
+        ASSERT_TRUE(engine_state().todos.empty());
+        bool has_old_plan = false;
+        bool has_old_user = false;
+        bool has_new_user = false;
+        for (const Message& m : engine_state().session) {
+            if (message_is_plan(m)) has_old_plan = true;
+            if (m.is_user() && m.text() == "прошлая задача") has_old_user = true;
+            if (m.is_user() && m.text() == "новая задача") has_new_user = true;
+        }
+        ASSERT_TRUE(!has_old_plan);
+        ASSERT_TRUE(has_old_user);   /* контекст сессии сохранён */
+        ASSERT_TRUE(has_new_user);
+    }
+    /* Кэш промпта пересобран, и старого плана в нём нет. */
+    ASSERT_TRUE(system_prompt().find("старый пункт") == std::string::npos);
+}
+
+TEST(continuation_keeps_the_current_plan) {
+    init_tools();
+    seed_previous_task("задача", "текущий пункт");
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        /* Задача ещё идёт: «продолжай» — продолжение, а не новая задача. */
+        engine_state().state = AgentState::Executing;
+    }
+
+    engine().submit("продолжай");
+
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        ASSERT_EQ(engine_state().todos.size(), (size_t)1);
+        bool has_plan = false;
+        for (const Message& m : engine_state().session)
+            if (message_is_plan(m)) has_plan = true;
+        ASSERT_TRUE(has_plan);
+    }
+    ASSERT_TRUE(system_prompt().find("текущий пункт") != std::string::npos);
+}

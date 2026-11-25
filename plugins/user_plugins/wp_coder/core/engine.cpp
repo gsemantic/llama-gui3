@@ -213,24 +213,58 @@ void Engine::submit(const std::string& prompt, std::vector<ImagePart> images) {
         state_.preserve_session = false;
         if (resume) {
             /* Возобновление после паузы на разрешение: не модифицируем сессию. */
-        } else if (state_.continue_conversation && !state_.session.empty()) {
-            /* Контекст сессии сохраняется: новое сообщение добавляется к
-             * существующей истории, а не затирает её. Очистка — только по
-             * явному запросу (clear_session / новая сессия при выключенном
-             * continue_conversation), иначе агент «забывает» предыдущие шаги
-             * и результаты инструментов. */
-            state_.session.push_back(Message::user(prompt, std::move(images)));
-            std::cerr << "[wp_coder] submit: continue session, msgs="
-                      << state_.session.size() << std::endl;
         } else {
-            /* Новая задача: очищаем сессию и начинаем заново. */
-            state_.session.clear();
-            state_.session.push_back(Message::user(prompt, std::move(images)));
-            /* И4.6: план прошлой задачи в промпте новой только сбивает —
-             * модель сверялась бы с чужими пунктами. */
-            state_.todos.clear();
+            /* Новая задача или продолжение текущей — по состоянию движка, а
+             * не по одному лишь «Продолжать сессию»: пока задача идёт (или
+             * ждёт разрешения), реплика человека — продолжение, и план
+             * остаётся. Если предыдущая задача завершилась/упала, это новая
+             * задача, и план прошлой в промпте только сбивал бы (И4.6).
+             *
+             * Именно здесь была причина «агент решает предыдущее задание»:
+             * при continue_conversation план не сбрасывался, планировщик
+             * видел старый [ПЛАН] в истории и не составлял новый, а в
+             * системный промпт уходили чужие пункты. */
+            const bool active =
+                state_.state == AgentState::Planning ||
+                state_.state == AgentState::Executing ||
+                state_.state == AgentState::WaitingPermission;
+            const bool new_task = !state_.continue_conversation ||
+                                  state_.session.empty() || !active;
+            if (state_.continue_conversation && !state_.session.empty()) {
+                /* Контекст сессии сохраняется: новое сообщение добавляется к
+                 * существующей истории, а не затирает её. Очистка — только по
+                 * явному запросу (clear_session / новая сессия при выключенном
+                 * continue_conversation), иначе агент «забывает» предыдущие шаги
+                 * и результаты инструментов. */
+                state_.session.push_back(Message::user(prompt, std::move(images)));
+                std::cerr << "[wp_coder] submit: continue session, msgs="
+                          << state_.session.size() << std::endl;
+            } else {
+                /* Новая задача: очищаем сессию и начинаем заново. */
+                state_.session.clear();
+                state_.session.push_back(Message::user(prompt, std::move(images)));
+                std::cerr << "[wp_coder] submit: new session" << std::endl;
+            }
+            if (new_task) {
+                /* И4.6: план прошлой задачи в промпте новой только сбивает —
+                 * модель сверялась бы с чужими пунктами. */
+                state_.todos.clear();
+                /* [ПЛАН] — обычное сообщение ассистента в истории, и по нему
+                 * планировщик решает, что план уже есть. Убираем только планы
+                 * прошлой задачи: диалог и результаты инструментов остаются,
+                 * иначе агент «забывает» предыдущие шаги. */
+                state_.session.erase(
+                    std::remove_if(state_.session.begin(), state_.session.end(),
+                                   [](const Message& m) {
+                                       return message_is_plan(m);
+                                   }),
+                    state_.session.end());
+                /* Кэш структуры проекта относится к задаче, а не к сессии. */
+                state_.repo_map_cache_root.clear();
+                state_.repo_map_cache_result.clear();
+            }
+            /* Промпт мог измениться (план), кэш пора пересобрать. */
             state_.prompt_dirty = true;
-            std::cerr << "[wp_coder] submit: new session" << std::endl;
         }
         state_.last_agent_task = prompt;
         state_.response_ready = false;
