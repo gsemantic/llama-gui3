@@ -5,6 +5,7 @@
 #include "command.h"
 #include "settings_dialog.h"
 #include "quick_settings_dialog.h"
+#include "plugin_rag_dialog.h"
 #include "model_manager.h"
 #include "workspace_manager.h"
 #include "window_manager.h"
@@ -109,6 +110,7 @@ MainWindow::MainWindow(StateManager& state_manager, Settings& settings, LlamaInt
     , settings_dialog_(std::make_unique<SettingsDialog>(settings_, server_manager_.get(), &workspace_manager_, &config_manager_))
     , cloud_services_dialog_(std::make_unique<CloudServicesDialog>(settings_))
     , rag_settings_dialog_(std::make_unique<RagSettingsDialog>(&settings_, this))
+    , plugin_rag_dialog_(std::make_unique<PluginRagDialog>(this))
     , settings_viewer_dialog_(std::make_unique<SettingsViewerDialog>(settings_))
     , grid_snapping_dialog_(std::make_unique<GridSnappingDialog>())
     , menu_layout_editor_dialog_(std::make_unique<MenuLayoutEditorDialog>())
@@ -1063,6 +1065,11 @@ void MainWindow::initializeNewUISystem() {
     }, true);
     window_coordinator_.registerWindow("settings_viewer", [this]() {
         if (settings_viewer_dialog_) settings_viewer_dialog_->render();
+    }, true);
+    /* R3.5: интерактивный список плагинов с RAG-правами. render_always=true,
+     * как у rag_settings: видимость гейтит сам диалог (visible_). */
+    window_coordinator_.registerWindow("plugin_rag", [this]() {
+        if (plugin_rag_dialog_) plugin_rag_dialog_->render();
     }, true);
     window_coordinator_.registerWindow("grid_snapping", [this]() {
         if (grid_snapping_dialog_) grid_snapping_dialog_->render(&show_grid_snapping_);

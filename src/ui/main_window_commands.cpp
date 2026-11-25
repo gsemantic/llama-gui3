@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "plugin_rag_dialog.h"
 #include "commands_workspace.h"
 #include "commands_settings.h"
 #include "../../include/core/logger.h"
@@ -641,14 +642,10 @@ void MainWindow::connectSecondaryCommands() {
     registerCommand("open_plugins", CommandFactory::createFunctionalCommand(
         "open_plugins",
         [this]() {
-            const auto plugins = plugin_manager_ ? plugin_manager_->list_plugins()
-                                                 : std::vector<plugin::PluginInfo>();
-            std::string text = "Загружено плагинов: " + std::to_string(plugins.size()) + "\n";
-            for (const auto& p : plugins) {
-                text += "\n  • " + p.name + " v" + p.version +
-                        "\n    " + (p.description.empty() ? "<без описания>" : p.description);
-            }
-            dialog_manager_.showInfo("Плагины", text);
+            /* R3.5: интерактивный список плагинов (чекбокс «RAG», суффикс
+             * скоупа, размер индекса, «Очистить») вместо статичного текста. */
+            if (plugin_rag_dialog_) plugin_rag_dialog_->set_visible(true);
+            else dialog_manager_.showInfo("Плагины", "Диалог плагинов недоступен.");
         },
         "Show loaded plugins", "", nullptr));
 

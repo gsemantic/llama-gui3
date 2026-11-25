@@ -75,6 +75,7 @@ class FileManager;
 class ConversationManager;
 class SettingsDialog;
 class SettingsViewerDialog;
+class PluginRagDialog;
 class HeadlessBrowserPanel;
 
 // Forward declarations
@@ -211,6 +212,12 @@ public:
     // Settings access
     Settings& get_settings() { return settings_; }
     const Settings& get_settings() const { return settings_; }
+
+    /* R3.5: доступ к плагинам и реестру RAG для диалога плагинов.
+     * Отдаём указатели, а не копии: диалог только читает/чистит, а
+     * RagRegistry — общий с хостом (один EmbeddingGenerator). */
+    llama_gui::plugin::PluginManager* get_plugin_manager() { return plugin_manager_.get(); }
+    std::shared_ptr<llama_gui::core::RagRegistry> get_rag_registry() { return rag_registry_; }
     
     // ConfigManager access
     llama_gui::core::ConfigManager& get_config_manager() { return config_manager_; }
@@ -330,6 +337,7 @@ private:
     std::unique_ptr<RagInterface> rag_interface_;
     std::unique_ptr<HeadlessBrowserPanel> headless_browser_panel_;
     std::unique_ptr<RagSettingsDialog> rag_settings_dialog_;
+    std::unique_ptr<PluginRagDialog> plugin_rag_dialog_;
     std::unique_ptr<SettingsViewerDialog> settings_viewer_dialog_;
     std::unique_ptr<GridSnappingDialog> grid_snapping_dialog_;
     std::unique_ptr<MenuLayoutEditorDialog> menu_layout_editor_dialog_;
