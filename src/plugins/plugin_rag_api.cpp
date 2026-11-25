@@ -245,10 +245,10 @@ char* rag_index_document_ex_impl(const RagCallContext& ctx,
 
     if (path.empty()) return error_json("bad_request", "empty path");
 
-    /* opts_json зарезервирован под R4.1 (max_bytes/max_chunks/deadline_ms/
-     * reindex). Сейчас он принимается и игнорируется: так плагин,
-     * написанный под R4, не получит «bad_request» от хоста R2, а поведение
-     * останется прежним (индексация целиком). */
+    /* opts_json (R4.1) парсится в RagScopeOptions (max_bytes/max_chunks/
+     * deadline_ms/reindex) — парсер готов и покрыт тестами. Применение
+     * (квоты/дедлайн/reindex) — R4.2: сейчас индексация идёт целиком, как
+     * в R2, чтобы плагин под R4 не получил «bad_request» от хоста R2. */
     (void)opts_json;
 
     auto store = store_for(ctx, suffix, &err);

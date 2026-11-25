@@ -54,6 +54,13 @@ struct RagScopeOptions {
     long long max_index_bytes = 0; /* 0 = предел хоста */
     bool allow_index = true;     /* можно ли индексировать, или только читать */
     bool read_only = false;      /* синоним «только чтение», для UI */
+
+    /* R4.1: опции одного вызова индексации (opts_json ABI). 0 = «как в
+     * настройках скоупа» (то есть берётся max_documents/max_index_bytes). */
+    long long max_bytes = 0;     /* предел байт одного документа; 0 = нет */
+    int max_chunks = 0;          /* предел чанков одного документа; 0 = нет */
+    long long deadline_ms = 0;   /* дедлайн индексации; 0 = без дедлайна */
+    bool reindex = false;        /* переиндексировать изменённый документ */
 };
 
 /* Разбор JSON-настроек скоупа. Терпим к отсутствию полей и к мусору:

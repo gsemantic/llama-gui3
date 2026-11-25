@@ -217,6 +217,55 @@ void test_options_bad_field_type_ignored() {
     TEST_ASSERT_EQUAL(o.max_documents, 0);
 }
 
+// --- R4.1: опции одного вызова индексации ---
+
+void test_options_reads_index_call_fields() {
+    RagScopeOptions o;
+    const std::string json =
+        "{\"max_bytes\":524288,\"max_chunks\":50,"
+        "\"deadline_ms\":1500,\"reindex\":true}";
+    TEST_ASSERT_TRUE(parse_scope_options(json, o));
+    TEST_ASSERT(o.max_bytes == 524288LL);
+    TEST_ASSERT_EQUAL(o.max_chunks, 50);
+    TEST_ASSERT(o.deadline_ms == 1500LL);
+    TEST_ASSERT_TRUE(o.reindex);
+}
+
+void test_options_index_fields_zero_means_scope_default() {
+    /* 0 — «как в настройках скоупа», а не «ноль байт/чанков». */
+    RagScopeOptions o;
+    TEST_ASSERT_TRUE(parse_scope_options("{\"max_bytes\":0,\"max_chunks\":0}", o));
+    TEST_ASSERT(o.max_bytes == 0LL);
+    TEST_ASSERT_EQUAL(o.max_chunks, 0);
+    TEST_ASSERT(o.deadline_ms == 0LL);
+    TEST_ASSERT_FALSE(o.reindex);
+}
+
+void test_options_index_fields_clamped() {
+    RagScopeOptions o;
+    /* Отрицательные → 0 (а не «без лимита» наоборот). */
+    TEST_ASSERT_TRUE(parse_scope_options(
+        "{\"max_bytes\":-1,\"max_chunks\":-5,\"deadline_ms\":-9}", o));
+    TEST_ASSERT(o.max_bytes == 0LL);
+    TEST_ASSERT_EQUAL(o.max_chunks, 0);
+    TEST_ASSERT(o.deadline_ms == 0LL);
+
+    /* Сверх разумного предела — кламп, а не OOM/бесконечность. */
+    RagScopeOptions big;
+    TEST_ASSERT_TRUE(parse_scope_options(
+        "{\"max_bytes\":1099511627776,\"max_chunks\":1000000,"
+        "\"deadline_ms\":999999999999}", big));
+    TEST_ASSERT(big.max_bytes == (1LL << 30));   /* 1 ГиБ */
+    TEST_ASSERT_EQUAL(big.max_chunks, 100000);
+    TEST_ASSERT(big.deadline_ms == 24LL * 60 * 60 * 1000);  /* 24 ч */
+}
+
+void test_options_index_bad_type_ignored() {
+    RagScopeOptions o;
+    TEST_ASSERT_TRUE(parse_scope_options("{\"max_chunks\":\"много\"}", o));
+    TEST_ASSERT_EQUAL(o.max_chunks, 0);
+}
+
 // ============================================================================
 // RagRegistry
 // ============================================================================
@@ -424,6 +473,11 @@ int main() {
     REGISTER_TEST(test_options_negative_clamped_to_zero);
     REGISTER_TEST(test_options_bad_json_is_error_but_not_crash);
     REGISTER_TEST(test_options_bad_field_type_ignored);
+
+    REGISTER_TEST(test_options_reads_index_call_fields);
+    REGISTER_TEST(test_options_index_fields_zero_means_scope_default);
+    REGISTER_TEST(test_options_index_fields_clamped);
+    REGISTER_TEST(test_options_index_bad_type_ignored);
 
     REGISTER_TEST(test_registry_get_creates_store);
     REGISTER_TEST(test_registry_rejects_bad_name);

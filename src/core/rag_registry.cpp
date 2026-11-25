@@ -156,6 +156,41 @@ bool parse_scope_options(const std::string& json,
     get_bool("allow_index", out.allow_index);
     get_bool("read_only", out.read_only);
 
+    /* R4.1: опции одного вызова индексации. Клампы — чтобы «пришло 10^18
+     * из fromJSON» не превратилось в «индексируем бесконечно/до OOM».
+     * 0 остаётся 0: это «как в настройках скоупа», а не «ноль байт». */
+    auto get_ll = [&](const char* key, long long& dst, long long cap) {
+        auto i = j.find(key);
+        if (i == j.end()) return;
+        if (!i->is_number_integer()) {
+            std::cerr << "[RagRegistry] scope option '" << key
+                      << "' is not an integer — ignored" << std::endl;
+            return;
+        }
+        long long v = i->get<long long>();
+        if (v < 0) v = 0;
+        if (v > cap) v = cap;
+        dst = v;
+    };
+    auto get_int_capped = [&](const char* key, int& dst, int cap) {
+        auto i = j.find(key);
+        if (i == j.end()) return;
+        if (!i->is_number_integer()) {
+            std::cerr << "[RagRegistry] scope option '" << key
+                      << "' is not an integer — ignored" << std::endl;
+            return;
+        }
+        long long v = i->get<long long>();
+        if (v < 0) v = 0;
+        if (v > cap) v = cap;
+        dst = static_cast<int>(v);
+    };
+
+    get_ll("max_bytes", out.max_bytes, /*cap=*/1LL << 30);      /* 1 ГиБ */
+    get_int_capped("max_chunks", out.max_chunks, /*cap=*/100000);
+    get_ll("deadline_ms", out.deadline_ms, /*cap=*/24LL * 60 * 60 * 1000); /* 24 ч */
+    get_bool("reindex", out.reindex);
+
     /* read_only — это «не индексировать». Держать два независимых флага,
      * которые могут противоречить, нельзя: «читать можно, писать нельзя»
      * — единственное согласованное прочтение, и оно выводится ОТСЮДА. */
