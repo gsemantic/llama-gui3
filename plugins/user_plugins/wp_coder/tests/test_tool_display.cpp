@@ -317,13 +317,13 @@ TEST(the_display_kinds_are_counted_exactly) {
     ASSERT_EQ(per_kind[static_cast<int>(tool_display::Kind::List)], (size_t)3);
     ASSERT_EQ(per_kind[static_cast<int>(tool_display::Kind::Task)], (size_t)1);
     ASSERT_EQ(per_kind[static_cast<int>(tool_display::Kind::Checklist)], (size_t)1);
-    ASSERT_EQ(per_kind[static_cast<int>(tool_display::Kind::Text)], (size_t)47);
-    /* 58 живых инструментов: 11 со своим видом и 47 откатом. */
+    ASSERT_EQ(per_kind[static_cast<int>(tool_display::Kind::Text)], (size_t)48);
+    /* 59 живых инструментов: 11 со своим видом и 48 откатом. */
     ASSERT_EQ(tool_display::classified_tool_count(), (size_t)11);
-    ASSERT_EQ(tool_display::text_kind_tools().size(), (size_t)47);
+    ASSERT_EQ(tool_display::text_kind_tools().size(), (size_t)48);
     ASSERT_EQ(tool_display::classified_tool_count() +
                   tool_display::text_kind_tools().size(),
-              (size_t)58);
+              (size_t)59);
 }
 
 TEST(an_instrument_nobody_classified_still_shows_its_output) {
@@ -348,7 +348,7 @@ TEST(the_kinds_line_reports_the_same_counts_as_the_table) {
     register_all_tools();
     const std::string line = tool_display::kinds_line();
     ASSERT_TRUE(line.find("свой вид у 11 инструментов") != std::string::npos);
-    ASSERT_TRUE(line.find("текстом вывода — 47") != std::string::npos);
+    ASSERT_TRUE(line.find("текстом вывода — 48") != std::string::npos);
     const std::string head = tool_display::panel_head(3, 2);
     ASSERT_TRUE(head.find("раскрыто 3") != std::string::npos);
     ASSERT_TRUE(head.find("за кадром 2") != std::string::npos);

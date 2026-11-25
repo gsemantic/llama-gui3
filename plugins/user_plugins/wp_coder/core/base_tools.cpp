@@ -793,6 +793,43 @@ std::string archive_document(const std::string& session_id,
     return h.str() + text;
 }
 
+/* A0.2: разобрать заголовок документа архива, который кладёт
+ * archive_document (`# archive locator=… [file=…] [line=…]`).
+ *
+ * Локатор — ПЕРВОЕ и главное, что достаётся: по нему агент находит
+ * оригинал, и «найти по call_id» означает «достать locator=… из
+ * содержимого чанка». file/line — вторичны и разбираются по возможности:
+ * путь с пробелами заголовок не кодирует (разделитель — пробел), но на
+ * locator это не влияет, а он и есть мост к оригиналу.
+ *
+ * Возвращает false, если это не заголовок архива (документ чужого
+ * формата): вызывающий тогда падает на file_path/start_line чанка, а не
+ * выдумывает локатор из пустоты. */
+bool parse_archive_header(const std::string& content, std::string& locator,
+                          std::string& file, long long& line, std::string& body) {
+    const size_t nl = content.find('\n');
+    const std::string head =
+        content.substr(0, nl == std::string::npos ? content.size() : nl);
+    body = (nl == std::string::npos) ? std::string() : content.substr(nl + 1);
+    if (head.rfind("# archive", 0) != 0) return false;
+
+    /* Разбор по пробелам: "#", "archive", "locator=…", … */
+    size_t i = 0;
+    while (i < head.size()) {
+        while (i < head.size() && head[i] == ' ') ++i;
+        size_t start = i;
+        while (i < head.size() && head[i] != ' ') ++i;
+        const std::string tok = head.substr(start, i - start);
+        if (tok.rfind("locator=", 0) == 0)
+            locator = tok.substr(8);
+        else if (tok.rfind("file=", 0) == 0)
+            file = tok.substr(5);
+        else if (tok.rfind("line=", 0) == 0)
+            line = std::atoll(tok.c_str() + 5);
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 void register_base_tools() {
@@ -2629,6 +2666,98 @@ void register_rag_tools() {
             o.metadata.set("locator", json::JsonValue(locator));
             if (!where.empty()) o.metadata.set("source", json::JsonValue(where));
             o.metadata.set("chunks", json::JsonValue(j.get_int("chunks", 0)));
+            return o;
+        };
+        reg.register_def(std::move(def));
+    }
+
+    /* A0.2: archive_search — поиск по архиву сессий.
+     *
+     * Отдельный инструмент, а не rag_query с суффиксом: «код» (rag_query)
+     * и «архив» — разные вопросы с разными ответами. rag_query отдаёт
+     * file:line исходника, archive_search — ЛОКАТОР session_id:call_id
+     * (+ file:line оригинала), по которому агент достаёт полный вывод,
+     * обрезанный компакшном (план §7, «Доступ»).
+     *
+     * Локатор берётся из ЗАГОЛОВКА документа (parse_archive_header), а не
+     * из file_path чанка: file_path архивного чанка указывает на сам файл
+     * архива, и «достать оригинал» по нему было бы нечем. Документ без
+     * заголовка (чужой формат) показывается как file_path:start_line — не
+     * выдумываем локатор из пустоты. */
+    {
+        ToolDef def;
+        def.name = "archive_search";
+        def.description =
+            "Поиск по архиву сессий (RAG-скоуп plugin:wp_coder:archive). "
+            "Возвращает локаторы session_id:call_id и file:line найденных "
+            "фрагментов. Используется, чтобы достать полный вывод, обрезанный "
+            "компакшном, по локатору из результата инструмента.";
+        def.flags = TF_READ_ONLY;
+        def.permission_key = "read";
+        SchemaBuilder b;
+        b.str("query", "поисковый запрос: содержимое или call_id")
+         .integer_range("k", "сколько фрагментов вернуть", 1, 50)
+         .required("query");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            const auto& cb = ctx.callbacks();
+            const std::string query = arg_str(a, "query");
+            int k = arg_int(a, "k");
+            if (k <= 0) k = 5;   /* разумный хвост по умолчанию */
+            if (query.empty())
+                return out("archive_search",
+                           "[ошибка] archive_search: пустой запрос");
+            if (!cb.rag_search_ex)
+                return out("archive_search",
+                           "[ошибка] archive_search: RAG v2 недоступен "
+                           "(хост без rag_search_ex)");
+
+            const std::string resp = cb.rag_search_ex(kRagScopeArchive, query, k, "");
+            json::JsonValue j;
+            if (!json::JsonValue::parse(resp, j) || !j.get_bool("ok", false)) {
+                std::string reason = "невалидный ответ хоста";
+                if (json::JsonValue::parse(resp, j))
+                    reason = j.get_string("error", "ошибка");
+                return out("archive_search",
+                           "[ошибка] archive_search: " + reason);
+            }
+
+            const auto& chunks = j.get("chunks");
+            if (!chunks.is_array() || chunks.size() == 0)
+                return out("archive_search",
+                           "[archive_search] пусто — в архиве ничего не найдено "
+                           "по запросу \"" + query + "\"");
+
+            std::string result;
+            for (size_t i = 0; i < chunks.size(); ++i) {
+                const auto& c = chunks.at(i);
+                const std::string content = c.get_string("content", "");
+                std::string locator, file, body;
+                long long line = 0;
+                const bool is_archive =
+                    parse_archive_header(content, locator, file, line, body);
+                std::string where;
+                if (is_archive) {
+                    where = locator;
+                    if (!file.empty()) {
+                        where += " (";
+                        where += file;
+                        if (line > 0) where += ":" + std::to_string(line);
+                        where += ")";
+                    }
+                } else {
+                    where = c.get_string("file_path", "") + ":" +
+                            std::to_string(c.get_int("start_line", 0));
+                }
+                if (!result.empty()) result += "\n---\n";
+                result += where + "\n" + (is_archive ? body : content);
+            }
+
+            ToolOutput o = out("archive_search",
+                               shell::cap(result, kMaxToolOutput));
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("count",
+                           json::JsonValue(static_cast<long long>(chunks.size())));
             return o;
         };
         reg.register_def(std::move(def));

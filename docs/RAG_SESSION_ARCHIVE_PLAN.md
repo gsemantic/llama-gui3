@@ -93,7 +93,7 @@
 - [x] **A0.1** Инструмент `archive_write` (или `session_archive`): пишет
       полный текст с локаторами в скоуп `plugin:wp_coder:archive`.
       *Готово, когда:* тест пишет и находит по `call_id`.
-- [ ] **A0.2** `archive_search` (или `rag_query` с суффиксом `archive`):
+- [x] **A0.2** `archive_search` (или `rag_query` с суффиксом `archive`):
       возвращает локаторы + `file:line`.
       *Готово, когда:* тест находит по содержимому и по `call_id`.
 
@@ -141,7 +141,7 @@
 | Задача | Статус | Критерий | Тест |
 |---|---|---|---|
 | A0.1 archive_write | `[x]` | пишет/находит | `wp_coder_tests` |
-| A0.2 archive_search | `[ ]` | локаторы | `wp_coder_tests` |
+| A0.2 archive_search | `[x]` | локаторы | `wp_coder_tests` |
 | A1.1 локатор в результат | `[ ]` | `session:call` | `wp_coder_tests` |
 | A1.2 дедуп | `[ ]` | один чанк | `wp_coder_tests` |
 | A2.1 честная причина | `[ ]` | disabled/empty | `wp_coder_tests` |
@@ -177,6 +177,7 @@
 | 2026-11-25 | Доступ | Новый инструмент `archive_search` | чёткое разделение «код» (rag_query) и «архив»; не смешиваем в одном инструменте |
 | 2026-11-25 | A0.1 | `archive_write` пишет через `rag_index_document_ex` в файл `data_dir/wp_coder/archive/<sid>/<cid>.txt`, локатор `sid:cid` — в заголовке документа | RAG v2 индексирует ФАЙЛ (`index_document(file_path)`), а не строку; постоянный файл даёт чанку `file_path`/`start_line` (это и есть «file:line») и переживает рестарт (A3.1). Локатор в тексте, а не только в результате, — иначе поиск по `call_id` (A0.2) не находит оригинал |
 | 2026-11-25 | A0.1 | Флаги `archive_write` = `WRITES_FILES|DESTRUCTIVE|SLOW`, ключ `rag` (как у `rag_index`) | Пишет во внешний индекс RAG, откатить нельзя; переиспользует ключ `rag`, чтобы не заводить новый ключ в профиле harness (полнота strict-профиля) |
+| 2026-11-25 | A0.2 | `archive_search` (ключ `read`, `TF_READ_ONLY`) читает скоуп `:archive` через `rag_search_ex`, локатор берёт из заголовка документа (`parse_archive_header`), не из `file_path` чанка | `file_path` архивного чанка указывает на сам файл архива — по нему оригинал не достать; локатор `sid:cid` лежит в тексте (A0.1) и по нему ищет агент. Документ без заголовка показывается как `file_path:start_line`, а не выдумывает локатор |
 
 ---
 

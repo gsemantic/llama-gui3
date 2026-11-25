@@ -169,3 +169,103 @@ TEST(archive_write_пишет_и_находится_по_call_id) {
         engine_state().project_dir.clear();
     }
 }
+
+
+/* A0.2: archive_search возвращает ЛОКАТОРЫ + file:line и находится по
+ * содержимому и по call_id. Пишем через настоящий archive_write (не
+ * подкладываем документ руками): проверяется связка «записал →
+ * нашёл», а не два независимых куска. */
+TEST(archive_search_находит_по_содержимому_и_по_call_id) {
+    register_rag_tools();
+    const fs::path data = fs::temp_directory_path() /
+                          ("wp_coder_archive2_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+    register_tmp_tree(data.string());
+
+    std::vector<std::pair<std::string, std::string>> docs;
+    std::string seen_scope;
+    HostCallbacks cb = Engine::instance().callbacks();
+    cb.path_data_dir = [&data]() -> std::string { return data.string(); };
+    cb.rag_index_document_ex =
+        [&](const std::string& scope, const std::string& path,
+            const std::string&) -> std::string {
+        seen_scope = scope;
+        docs.emplace_back(path, read_all(path));
+        return std::string(
+            R"({"ok":true,"chunks":1,"documents":1,"truncated":false,"reason":""})");
+    };
+    cb.rag_search_ex = [&docs, &seen_scope](const std::string& scope,
+                                            const std::string& query, int,
+                                            const std::string&) -> std::string {
+        seen_scope = scope;
+        for (const auto& d : docs) {
+            if (d.second.find(query) != std::string::npos)
+                return search_hit(d.first, d.second);
+        }
+        return std::string(R"({"ok":true,"chunks":[]})");
+    };
+    cb.rag_scope_info = [](const std::string&) {
+        return std::string(R"({"ok":true,"ready":true})");
+    };
+    cb.rag_process_document = nullptr;
+    cb.rag_build_prompt = nullptr;
+    Engine::instance().init(cb);
+    test_support::approve_all_permissions();
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir = data.string();
+        engine_state().turn_abort = std::make_shared<AbortToken>();
+    }
+
+    const std::string marker = "УНИКАЛЬНЫЙ_КОНТЕНТ_A0_2_полный_вывод";
+    json::JsonValue w = json::JsonValue::object();
+    w.set("session_id", json::JsonValue("ses_b"));
+    w.set("call_id", json::JsonValue("call_9"));
+    w.set("text", json::JsonValue(std::string("начало\n") + marker + "\nконец"));
+    w.set("file", json::JsonValue("lib/x.php"));
+    w.set("line", json::JsonValue(42));
+    ToolsRegistry::instance().run_output("archive_write", w);
+    /* После записи в сторе ровно один документ — иначе поиск проверял бы
+     * пустоту или чужой документ. */
+    ASSERT_EQ(docs.size(), (size_t)1);
+
+    /* 1. По содержимому: возвращается локатор, file:line и сам текст. */
+    json::JsonValue q1 = json::JsonValue::object();
+    q1.set("query", json::JsonValue(marker));
+    const ToolOutput r1 =
+        ToolsRegistry::instance().run_output("archive_search", q1);
+    ASSERT_EQ(seen_scope, std::string("plugin:wp_coder:archive"));
+    ASSERT_TRUE(r1.output.find("ses_b:call_9") != std::string::npos);
+    ASSERT_TRUE(r1.output.find("lib/x.php:42") != std::string::npos);
+    ASSERT_TRUE(r1.output.find(marker) != std::string::npos);
+
+    /* 2. По call_id: тот же локатор. */
+    json::JsonValue q2 = json::JsonValue::object();
+    q2.set("query", json::JsonValue("call_9"));
+    const ToolOutput r2 =
+        ToolsRegistry::instance().run_output("archive_search", q2);
+    ASSERT_TRUE(r2.output.find("ses_b:call_9") != std::string::npos);
+
+    /* 3. Пустой результат — честное «пусто», а не молчание. */
+    json::JsonValue q3 = json::JsonValue::object();
+    q3.set("query", json::JsonValue("слова_которого_нет_в_архиве"));
+    const ToolOutput r3 =
+        ToolsRegistry::instance().run_output("archive_search", q3);
+    ASSERT_TRUE(r3.output.find("пусто") != std::string::npos);
+
+    /* 4. Старый хост без RAG v2 — внятный отказ. */
+    HostCallbacks old = Engine::instance().callbacks();
+    old.rag_search_ex = nullptr;
+    Engine::instance().init(old);
+    const ToolOutput no_rag =
+        ToolsRegistry::instance().run_output("archive_search", q1);
+    ASSERT_TRUE(no_rag.output.find("RAG v2 недоступен") != std::string::npos);
+
+    fs::remove_all(data, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
