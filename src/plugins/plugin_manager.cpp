@@ -2245,6 +2245,15 @@ void PluginManager::render_plugins() {
 void PluginManager::shutdown() {
     if (!impl_) return;
 
+    /* R4.4: флаш скоуп-индексов перед выгрузкой плагинов. Реестр живёт
+     * дольше плагина (владение — MainWindow), но на выгрузке приложения
+     * это последний шанс записать изменённые индексы на диск до того, как
+     * процесс завершится. Индексы отдельных плагинов не смешиваются:
+     * flush_all() пишет каждый стор в его каталог. */
+    if (impl_->subsystems.rag_registry) {
+        impl_->subsystems.rag_registry->flush_all();
+    }
+
     for (auto it = impl_->plugins.rbegin(); it != impl_->plugins.rend(); ++it) {
         LoadedPlugin* p = it->get();
 

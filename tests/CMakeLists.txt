@@ -65,6 +65,12 @@ target_include_directories(test_rag_cancel PRIVATE
     ${CMAKE_SOURCE_DIR}/src/plugins)
 add_test(NAME RagCancel COMMAND test_rag_cancel)
 
+# Персистентность скоупов (R4.4): индекс переживает выгрузку/перезапуск.
+add_executable(test_rag_persistence core/test_rag_persistence.cpp)
+target_link_libraries(test_rag_persistence PRIVATE core)
+target_include_directories(test_rag_persistence PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RagPersistence COMMAND test_rag_persistence)
+
 # Изоляция скоупов (R1.6): документ A не находится в B, clear(A) не трогает
 # B, повторная индексация не дублирует чанки. Эмбеддинги — детерминированный
 # n-gram фолбэк (недостижимый server_url), без модели и без сети.
