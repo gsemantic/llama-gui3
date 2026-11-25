@@ -494,3 +494,86 @@ TEST(a21_archive_search_различает_выключено_и_пусто) {
     ASSERT_TRUE(empty.output.find("пусто") != std::string::npos);
     ASSERT_TRUE(empty.output.find("выключен") == std::string::npos);
 }
+
+
+/* A3.1: архив переживает рестарт.
+ *
+ * Персистентность — host R4.4 (RagStore хранит индекс на диске и
+ * перезагружает его при старте). Вклад плагина: документ пишется в
+ * ПОСТОЯННЫЙ файл под data_dir (не во временный), поэтому после
+ * «рестарта» (новый Engine + новый стор, поднятый с того же диска) он
+ * на месте и находится. Мок стора здесь перезагружается сканированием
+ * архивных файлов — ровно то, что делает хост при старте (R4.4). */
+TEST(a31_архив_переживает_рестарт) {
+    register_rag_tools();
+    test_support::approve_all_permissions();
+    const fs::path data = fs::temp_directory_path() /
+                          ("wp_coder_a31_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+    register_tmp_tree(data.string());
+
+    const std::string marker = "МАРКЕР_A31_после_рестарта";
+    const std::string big = std::string("начало\n") + marker + "\n" +
+                            std::string(3000, 'п');
+
+    /* Фаза 1: запись. */
+    HostCallbacks cb1;
+    cb1.path_data_dir = [&data]() -> std::string { return data.string(); };
+    cb1.rag_index_document_ex = [](const std::string&, const std::string&,
+                                   const std::string&) -> std::string {
+        return std::string(
+            R"({"ok":true,"chunks":1,"documents":1,"truncated":false,"reason":""})");
+    };
+    Engine::instance().init(cb1);
+    json::JsonValue w = json::JsonValue::object();
+    w.set("session_id", json::JsonValue("ses_p"));
+    w.set("call_id", json::JsonValue("call_p"));
+    w.set("text", json::JsonValue(big));
+    const ToolOutput wr =
+        ToolsRegistry::instance().run_output("archive_write", w);
+    ASSERT_TRUE(wr.output.find("ses_p:call_p") != std::string::npos);
+
+    /* Файл на диске — постоянный, не временный. */
+    const fs::path archive_file =
+        data / "wp_coder" / "archive" / "ses_p" / "call_p.txt";
+    ASSERT_TRUE(fs::exists(archive_file));
+    ASSERT_TRUE(read_all(archive_file).find(marker) != std::string::npos);
+
+    /* Фаза 2: «рестарт» — новый Engine и новый стор, поднятый с диска. */
+    HostCallbacks cb2;
+    cb2.path_data_dir = [&data]() -> std::string { return data.string(); };
+    cb2.rag_search_ex = [&data, &ec](const std::string&, const std::string& query,
+                                int, const std::string&) -> std::string {
+        /* Перезагрузка индекса с диска (R4.4): ищем по архивным файлам. */
+        const fs::path root = data / "wp_coder" / "archive";
+        if (fs::exists(root)) {
+            for (auto it = fs::recursive_directory_iterator(root, ec);
+                 it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                if (!it->is_regular_file()) continue;
+                const std::string body = read_all(it->path());
+                if (body.find(query) != std::string::npos)
+                    return search_hit(it->path().string(), body);
+            }
+        }
+        return std::string(R"({"ok":true,"chunks":[]})");
+    };
+    cb2.rag_scope_info = [](const std::string&) {
+        return std::string(R"({"ok":true,"ready":true})");
+    };
+    Engine::instance().init(cb2);
+
+    json::JsonValue q = json::JsonValue::object();
+    q.set("query", json::JsonValue("call_p"));
+    const ToolOutput found =
+        ToolsRegistry::instance().run_output("archive_search", q);
+    ASSERT_TRUE(found.output.find("ses_p:call_p") != std::string::npos);
+    ASSERT_TRUE(found.output.find(marker) != std::string::npos);
+
+    fs::remove_all(data, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().project_dir.clear();
+    }
+}
