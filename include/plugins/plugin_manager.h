@@ -109,6 +109,29 @@ struct PluginSubsystems {
  */
 bool plugin_rag_allowed(const PluginSubsystems& subsystems);
 
+/**
+ * @brief Настройки RAG плагина из `plugin.<name>.rag.*` (R3.3).
+ *
+ * Читает host-owned настройки плагина (их пишет UI/хост, плагин — нет,
+ * см. namespace-гард R3.2). Значения хранятся в `Settings::custom_settings_`
+ * строками, поэтому парсятся здесь.
+ *
+ * Почему в plugin-слое, а не в `core::RagRegistry`: реестр намеренно не
+ * зависит от `Settings` (создаётся из root + эмбеддинг-бэкенда и тестируется
+ * без настроек приложения). «Включён ли RAG плагину» — решение хоста, и
+ * живёт рядом с `plugin_rag_allowed`.
+ *
+ * `enabled` по умолчанию true (§3.2): отсутствие настройки — «включено».
+ * Настройка читается НА КАЖДОМ вызове, поэтому правка применяется без
+ * перезапуска. Ключ конкретного плагина: чужой `enabled=false` не влияет.
+ */
+struct PluginRagConfig {
+    bool enabled = true;
+};
+
+PluginRagConfig plugin_rag_config(const core::Settings* settings,
+                                  const std::string& plugin_name);
+
 /** Метаданные из манифеста plugin.json (рядом с библиотекой плагина). */
 struct PluginManifest {
     bool present = false;       // найден ли и корректно ли распарсен plugin.json

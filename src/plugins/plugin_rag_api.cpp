@@ -76,6 +76,11 @@ bool begin(const RagCallContext& ctx, const std::string& requested,
                                 "RAG is disabled in settings");
         return false;
     }
+    if (!ctx.plugin_enabled) {
+        *out_error = error_json("disabled",
+                                "RAG is disabled for this plugin");
+        return false;
+    }
     if (!ctx.registry) {
         *out_error = error_json("unavailable",
                                 "RAG registry is not configured");

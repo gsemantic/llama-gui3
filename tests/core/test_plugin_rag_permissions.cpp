@@ -206,6 +206,22 @@ void test_disabled_and_unavailable_beat_denied() {
                               "unavailable"));
 }
 
+void test_plugin_disabled_per_plugin() {
+    /* R3.3: plugin.<name>.rag.enabled=false гасит RAG именно этому плагину,
+     * даже когда глобальный RAG включён и права есть. */
+    const auto root = temp_root();
+    RagRegistry reg(root.string(), fallback_embeddings());
+
+    RagCallContext ctx = ctx_for(reg, /*access=*/true, /*write=*/true);
+    ctx.plugin_enabled = false;
+
+    TEST_ASSERT_TRUE(has_code(take_json(rag_search_ex_impl(ctx, "", "q", 3, "")),
+                              "disabled"));
+    TEST_ASSERT_TRUE(has_code(take_json(rag_scope_info_impl(ctx, "")), "disabled"));
+    /* Письменная операция тоже: выключенный плагин не индексирует. */
+    TEST_ASSERT_EQUAL(rag_scope_clear_impl(ctx, ""), 0);
+}
+
 // ============================================================================
 // Namespace-гард записи настроек (R3.2)
 // ============================================================================
@@ -262,6 +278,7 @@ int main() {
     REGISTER_TEST(test_with_permissions_all_work);
 
     REGISTER_TEST(test_disabled_and_unavailable_beat_denied);
+    REGISTER_TEST(test_plugin_disabled_per_plugin);
 
     REGISTER_TEST(test_settings_guard_own_vs_foreign);
     REGISTER_TEST(test_settings_guard_host_owned_and_foreign_denied);

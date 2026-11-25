@@ -117,6 +117,43 @@ void test_rag_gate_tracks_enable_rag_changes() {
     TEST_ASSERT_TRUE(plugin_rag_allowed(subs));
 }
 
+// --- R3.3: per-plugin `plugin.<name>.rag.enabled` ---
+
+void test_plugin_config_defaults_to_enabled() {
+    // Нет настройки — включено (§3.2). Иначе каждый плагин без plugin.json
+    // был бы молча выключен.
+    auto s = make_settings();
+    TEST_ASSERT_TRUE(plugin_rag_config(s.get(), "wp_coder").enabled);
+    /* Нет настроек вообще / пустое имя — тоже «включено по умолчанию». */
+    TEST_ASSERT_TRUE(plugin_rag_config(nullptr, "wp_coder").enabled);
+    TEST_ASSERT_TRUE(plugin_rag_config(s.get(), "").enabled);
+}
+
+void test_plugin_config_reads_and_toggles_live() {
+    // Настройка читается на каждом вызове → правка без перезапуска.
+    auto s = make_settings();
+    s->set_custom_setting("plugin.wp_coder.rag.enabled", "false");
+    TEST_ASSERT_FALSE(plugin_rag_config(s.get(), "wp_coder").enabled);
+
+    s->set_custom_setting("plugin.wp_coder.rag.enabled", "true");
+    TEST_ASSERT_TRUE(plugin_rag_config(s.get(), "wp_coder").enabled);
+
+    /* "1"/"0" — тоже валидные булевы значения. */
+    s->set_custom_setting("plugin.wp_coder.rag.enabled", "0");
+    TEST_ASSERT_FALSE(plugin_rag_config(s.get(), "wp_coder").enabled);
+}
+
+void test_plugin_config_is_per_plugin() {
+    // Выключение одного плагина не трогает другой: ключ содержит имя.
+    auto s = make_settings();
+    s->set_custom_setting("plugin.wp_coder.rag.enabled", "false");
+
+    TEST_ASSERT_FALSE(plugin_rag_config(s.get(), "wp_coder").enabled);
+    TEST_ASSERT_TRUE(plugin_rag_config(s.get(), "siteparser").enabled);
+    /* «Прилипание» имени: wp_coder_extra — другой плагин. */
+    TEST_ASSERT_TRUE(plugin_rag_config(s.get(), "wp_coder_extra").enabled);
+}
+
 int main() {
     REGISTER_TEST(test_rag_allowed_when_enabled_and_manager_present);
     REGISTER_TEST(test_rag_denied_when_disabled_but_manager_present);
@@ -125,6 +162,10 @@ int main() {
     REGISTER_TEST(test_rag_denied_when_both_missing);
     REGISTER_TEST(test_rag_denied_by_default_constructed_subsystems);
     REGISTER_TEST(test_rag_gate_tracks_enable_rag_changes);
+
+    REGISTER_TEST(test_plugin_config_defaults_to_enabled);
+    REGISTER_TEST(test_plugin_config_reads_and_toggles_live);
+    REGISTER_TEST(test_plugin_config_is_per_plugin);
 
     return test::TestRunner::instance().run();
 }

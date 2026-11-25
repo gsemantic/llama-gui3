@@ -61,6 +61,10 @@ struct RagCallContext {
      * пользователя по умолчанию. */
     bool has_rag_access = false;
     bool has_rag_write = false;
+    /* R3.3: `plugin.<name>.rag.enabled` (по умолчанию true). Проверяется
+     * в begin() отдельно от глобального `allowed`: пользователь может
+     * выключить RAG одному плагину, не трогая остальные. */
+    bool plugin_enabled = true;
 };
 
 /* Разобрать имя скоупа, которое просит плагин.
