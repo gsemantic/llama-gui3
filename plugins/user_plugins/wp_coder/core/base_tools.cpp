@@ -37,6 +37,12 @@ namespace {
 const std::vector<std::string> kSkipDirs = {".git", "node_modules", "vendor",
                                             "__pycache__"};
 
+/* A0.1/A1.1: скоуп архива сессий — один на плагин (план §7). Живёт здесь,
+ * а не внутри register_rag_tools: им пользуются и archive_write, и хук
+ * A1.1 (archive_output_if_large), и «два имени одного скоупа» разъехались
+ * бы при первой правке. */
+constexpr const char* kRagScopeArchive = "plugin:wp_coder:archive";
+
 /* И11.10: маркер оборванного обхода.
  *
  * Одно слово на пять инструментов и по делу: проверка предела вывода
@@ -827,6 +833,50 @@ bool parse_archive_header(const std::string& content, std::string& locator,
         else if (tok.rfind("line=", 0) == 0)
             line = std::atoll(tok.c_str() + 5);
     }
+    return true;
+}
+
+/* A0.1/A1.1: записать текст в файл архива и проиндексировать через
+ * rag_index_document_ex. ОДНО тело на archive_write и хук A1.1 (D2):
+ * «записать в архив» не должно существовать в двух местах и разъезжаться.
+ * chunks — сколько чанков добавил хост (для отчёта archive_write).
+ * true — проиндексировано; иначе err называет причину. */
+bool write_archive_document(const std::string& data_dir,
+                            const std::string& session_id,
+                            const std::string& call_id, const std::string& file,
+                            long long line, const std::string& text,
+                            const HostCallbacks& cb, int& chunks,
+                            std::string& err) {
+    chunks = 0;
+    std::string path;
+    if (!archive_file_path(data_dir, session_id, call_id, path, err))
+        return false;
+    /* Файл пишем ДО индексации: rag_index_document_ex читает файл, а не
+     * строку. Ошибка записи — отказ, а не «проиндексировали пустоту». */
+    std::error_code ec;
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            err = "не удалось записать файл архива: " + path;
+            return false;
+        }
+        f << archive_document(session_id, call_id, file, line, text);
+    }
+    if (!cb.rag_index_document_ex) {
+        err = "RAG v2 недоступен";
+        return false;
+    }
+    const std::string resp = cb.rag_index_document_ex(kRagScopeArchive, path, "");
+    json::JsonValue j;
+    if (!json::JsonValue::parse(resp, j) || !j.get_bool("ok", false)) {
+        std::string reason = "невалидный ответ хоста";
+        if (json::JsonValue::parse(resp, j))
+            reason = j.get_string("error", "ошибка");
+        err = "RAG не проиндексировал архив: " + reason;
+        return false;
+    }
+    chunks = static_cast<int>(j.get_int("chunks", 0));
     return true;
 }
 
@@ -2414,7 +2464,6 @@ void register_rag_tools() {
     /* R5.1: скоуп проекта — plugin:wp_coder (архив сессий — :archive,
      * используется компакшном; rag_index/rag_query работают с проектом). */
     static constexpr const char* kRagScopeProject = "plugin:wp_coder";
-    static constexpr const char* kRagScopeArchive = "plugin:wp_coder:archive";
 
     {
         ToolDef def;
@@ -2611,35 +2660,15 @@ void register_rag_tools() {
                            "[ошибка] archive_write: не задан каталог данных "
                            "(path_data_dir) — архив некуда писать");
 
-            std::string path, path_err;
-            if (!archive_file_path(data_dir, session_id, call_id, path, path_err))
+            /* Общее тело записи+индексации (write_archive_document) —
+             * то же, что у хука A1.1, чтобы «записать в архив» не
+             * разъезжалось по двум местам. */
+            int chunks = 0;
+            std::string err;
+            if (!write_archive_document(data_dir, session_id, call_id, file, line,
+                                        text, cb, chunks, err))
                 return out("archive_write",
-                           "[ошибка] archive_write: " + path_err);
-
-            /* Файл пишем ДО индексации: rag_index_document_ex читает файл,
-             * а не строку. Ошибка записи — отказ, а не «проиндексировали
-             * пустоту». */
-            std::error_code ec;
-            fs::create_directories(fs::path(path).parent_path(), ec);
-            {
-                std::ofstream f(path, std::ios::binary | std::ios::trunc);
-                if (!f)
-                    return out("archive_write",
-                               "[ошибка] archive_write: не удалось записать файл "
-                               "архива: " + path);
-                f << archive_document(session_id, call_id, file, line, text);
-            }
-
-            const std::string resp = cb.rag_index_document_ex(kRagScopeArchive, path, "");
-            json::JsonValue j;
-            if (!json::JsonValue::parse(resp, j) || !j.get_bool("ok", false)) {
-                std::string reason = "невалидный ответ хоста";
-                if (json::JsonValue::parse(resp, j))
-                    reason = j.get_string("error", "ошибка");
-                return out("archive_write",
-                           "[ошибка] archive_write: RAG не проиндексировал архив: " +
-                               reason);
-            }
+                           "[ошибка] archive_write: " + err);
 
             /* Локатор — в результат, а не в сводку. file:line — из
              * аргументов (исходный файл), а не из chunk-метаданных: у
@@ -2655,7 +2684,7 @@ void register_rag_tools() {
             std::stringstream s;
             s << "[archive_write] записано в архив: " << locator;
             if (!where.empty()) s << " (" << where << ")";
-            s << "; чанков: " << j.get_int("chunks", 0);
+            s << "; чанков: " << chunks;
             s << "\nПолный текст в архиве; достать по локатору " << locator
               << " инструментом archive_search.";
 
@@ -2665,7 +2694,7 @@ void register_rag_tools() {
             o.metadata.set("call_id", json::JsonValue(call_id));
             o.metadata.set("locator", json::JsonValue(locator));
             if (!where.empty()) o.metadata.set("source", json::JsonValue(where));
-            o.metadata.set("chunks", json::JsonValue(j.get_int("chunks", 0)));
+            o.metadata.set("chunks", json::JsonValue(chunks));
             return o;
         };
         reg.register_def(std::move(def));
@@ -2762,6 +2791,36 @@ void register_rag_tools() {
         };
         reg.register_def(std::move(def));
     }
+}
+
+/* A1.1: если вывод инструмента превышает порог (то, что компакшн всё равно
+ * обрезал бы, — limits::kSummaryToolOutputChars), пишет ПОЛНЫЙ текст в
+ * архив и возвращает ЛОКАТОР `session_id:call_id`; иначе возвращает пустую
+ * строку, и вывод не трогается.
+ *
+ * Почему здесь, а не в компакшне: инварианты compaction.* хрупкие, а
+ * «обрезанное» определяется размером вывода на уровне инструмента (план
+ * §7). Компакшн видит уже короткий результат-локатор и ничего не режет.
+ *
+ * Молчание (пустая строка) — не ошибка, а «архивировать нечего/некуда»:
+ * нет RAG v2, нет каталога данных, мелкий вывод. Вызывающий (цикл) в этом
+ * случае оставляет результат как есть — старое поведение не ломается. */
+std::string archive_output_if_large(const std::string& session_id,
+                                    const std::string& call_id,
+                                    const std::string& text) {
+    if (session_id.empty() || call_id.empty()) return "";
+    if (text.size() <= static_cast<size_t>(limits::kSummaryToolOutputChars))
+        return "";
+    const HostCallbacks& cb = Engine::instance().callbacks();
+    if (!cb.rag_index_document_ex) return "";
+    const std::string data_dir = cb.path_data_dir ? cb.path_data_dir() : "";
+    if (data_dir.empty()) return "";
+    int chunks = 0;
+    std::string err;
+    if (!write_archive_document(data_dir, session_id, call_id, "", 0, text, cb,
+                                chunks, err))
+        return "";
+    return session_id + ":" + call_id;
 }
 
 /* И9.6: описание инструмента skill_detail — краткий уровень каталога

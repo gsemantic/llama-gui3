@@ -6,6 +6,7 @@
 #include "security.h"
 #include "shell.h"
 #include "engine.h"
+#include "base_tools.h"
 #include "limits.h"
 #include "json_utils.h"
 #include "llm_source.h"
@@ -1568,7 +1569,7 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
             last_read_sig = read_only_call ? call_sig : std::string();
 
             ToolRunner tool_runner(state_, cb_, this->push_event_);
-            const ToolOutcome outcome =
+            ToolOutcome outcome =
                 tool_runner.run(call.name, call.arguments);
             if (outcome.ok) {
                 /* Запоминаем no-op: следующий такой же вызов будет
@@ -1595,6 +1596,29 @@ bool AgentLoop::run(const std::string& sys_prompt, std::string& full_response) {
                         const std::string written =
                             canonical_args_path(call.arguments);
                         if (!written.empty()) reads_per_file.erase(written);
+                    }
+                }
+                /* A1.1: длинный вывод — в архив, в результат локатор.
+                 * Компакшн не трогаем: он видит уже короткий результат. */
+                {
+                    std::string sid;
+                    {
+                        std::lock_guard<std::mutex> lk(state_.mtx);
+                        sid = state_.session_id;
+                    }
+                    const std::string loc = archive_output_if_large(
+                        sid, call.call_id, outcome.output.output);
+                    if (!loc.empty()) {
+                        const size_t bytes = outcome.output.output.size();
+                        outcome.output.output =
+                            "[вывод " + std::to_string(bytes) +
+                            " байт записан в архив сессий: " + loc +
+                            " — достать полный текст инструментом "
+                            "archive_search по локатору]";
+                        if (!outcome.output.metadata.is_object())
+                            outcome.output.metadata = json::JsonValue::object();
+                        outcome.output.metadata.set("archive_locator",
+                                                    json::JsonValue(loc));
                     }
                 }
                 LlmResponse::reduce(response, LlmEvent::tool_result(

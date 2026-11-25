@@ -19,6 +19,14 @@ void register_base_tools();
 /* Регистрация инструментов RAG (требуют callbacks хоста). */
 void register_rag_tools();
 
+/* A1.1: если вывод инструмента превышает порог (то, что компакшн всё равно
+ * обрезал бы), пишет полный текст в архив-скоуп и возвращает локатор
+ * `session_id:call_id`; иначе — пустую строку (вывод не трогаем). Вызы callers —
+ * цикл агента после запуска инструмента; компакшн не трогается. */
+std::string archive_output_if_large(const std::string& session_id,
+                                    const std::string& call_id,
+                                    const std::string& text);
+
 /* И9.6: краткий уровень каталога навыков — описание инструмента
  * skill_detail, то есть перечисление ИМЁН.
  *

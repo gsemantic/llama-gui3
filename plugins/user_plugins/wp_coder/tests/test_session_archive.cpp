@@ -29,6 +29,9 @@
 #include "../core/tools_registry.h"
 #include "../core/engine.h"
 #include "../core/base_tools.h"
+#include "../core/agent_components.h"
+#include "../core/tools_registry.h"
+#include "../core/compaction.h"
 
 using namespace coder;
 
@@ -267,5 +270,132 @@ TEST(archive_search_находит_по_содержимому_и_по_call_id) 
     {
         std::lock_guard<std::mutex> lk(engine_state().mtx);
         engine_state().project_dir.clear();
+    }
+}
+
+
+/* A1.1: длинный вывод инструмента уходит в архив, а в РЕЗУЛЬТАТЕ остаётся
+ * локатор; компакшн не трогается (он видит уже короткий результат).
+ *
+ * Проверяется СКВОЗЬ цикл агента, а не только функция: «результат
+ * инструмента» — это то, что цикл кладёт в историю по call_id, и подмена
+ * «полный вывод → локатор» живёт именно там. Хост-имитация отдаёт вызов
+ * read_file большого файла, затем финальный ответ; RAG-слоты подменены
+ * in-memory (как в A0.1/A0.2). */
+TEST(a11_длинный_вывод_уходит_в_архив_а_в_результате_локатор) {
+    register_base_tools();
+    register_rag_tools();
+    test_support::approve_all_permissions();
+
+    const fs::path project = fs::temp_directory_path() /
+                             ("wp_coder_a11_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(project, ec);
+    fs::create_directories(project);
+    register_tmp_tree(project.string());
+    /* Вывод `seq 1 1000` (~4 КБ, 1000 строк) — больше порога (2000
+     * символов), но меньше предела truncate_output (50 КБ / 2000 строк):
+     * иначе вывод обрезал бы ещё И4.10, и проверялась бы не подмена A1.1. */
+    std::vector<std::pair<std::string, std::string>> docs;
+    std::string seen_scope;
+    std::vector<std::string> replies = {
+        std::string("Смотрю.\n```json\n{\"tool\": \"bash\"")
+            + ", \"command\": \"seq 1 1000\"}\n```",
+        std::string("Итог по задаче. ") +
+            std::string(200, 'я') + " — готово."};
+    size_t next = 0;
+
+    HostCallbacks cb;
+    cb.llm_chat = [&replies, &next](const std::string&,
+                                    const std::vector<ModelMessage>&,
+                                    LlmReply& out) -> bool {
+        if (next >= replies.size()) { out.error = "нет ответов"; return false; }
+        out.content = replies[next++];
+        out.finish_reason = "stop";
+        out.prompt_tokens = 100;
+        out.completion_tokens = 20;
+        return true;
+    };
+    cb.llm_is_connected = []() { return true; };
+    cb.path_data_dir = [&project]() -> std::string { return project.string(); };
+    cb.settings_set = [](const std::string&, const std::string&) {};
+    cb.settings_get = [](const std::string&, const std::string& d) { return d; };
+    cb.chat_event = [](const std::string&) {};
+    cb.rag_index_document_ex =
+        [&](const std::string& scope, const std::string& path,
+            const std::string&) -> std::string {
+        seen_scope = scope;
+        docs.emplace_back(path, read_all(path));
+        return std::string(
+            R"({"ok":true,"chunks":1,"documents":1,"truncated":false,"reason":""})");
+    };
+    cb.rag_search_ex = [](const std::string&, const std::string&, int,
+                          const std::string&) -> std::string {
+        return std::string(R"({"ok":true,"chunks":[]})");
+    };
+    cb.rag_scope_info = [](const std::string&) {
+        return std::string(R"({"ok":true,"ready":true})");
+    };
+    Engine::instance().init(cb);
+
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().session.clear();
+        engine_state().session.push_back(Message::user("прочитай большой файл"));
+        engine_state().project_dir = project.string();
+        engine_state().mode = 0;
+        engine_state().plan_mode = false;
+        engine_state().use_planning = false;
+        engine_state().max_steps = 6;
+        engine_state().session_budget = 60000;
+        engine_state().session_id = "ses_a11";
+        engine_state().todos.clear();
+        engine_state().recent_calls.clear();
+        engine_state().allowed_external_paths.clear();
+        engine_state().measured_input_tokens = 0;
+        engine_state().model_limits = compaction::ModelLimits();
+        engine_state().compaction_config = compaction::CompactionConfig();
+        engine_state().abort_requested.store(false);
+        engine_state().shutting_down = false;
+        engine_state().state = AgentState::Executing;
+        engine_state().steps = 0;
+    }
+
+    std::string response;
+    AgentLoop loop(engine_state(), cb,
+                   [&](AgentEvent::Kind, const std::string&) {});
+    loop.run("системный промпт", response);
+
+    /* 1. Результат инструмента — ЛОКАТОР, а не полный текст. */
+    std::vector<Message> h;
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        h = engine_state().session;
+    }
+    const MessagePart* part = nullptr;
+    for (const auto& m : h)
+        for (const auto& p : m.parts)
+            if (p.is(PartKind::Tool) && p.tool_name() == "bash") part = &p;
+    ASSERT_TRUE(part != nullptr);
+    ASSERT_TRUE(part->has_result());
+    ASSERT_TRUE(part->output().output.find("ses_a11:") != std::string::npos);
+    ASSERT_TRUE(part->output().output.find("архив сессий") != std::string::npos);
+    /* Полного текста в результате НЕТ — иначе подмена не сработала. */
+    ASSERT_TRUE(part->output().output.find("1000") == std::string::npos);
+
+    /* 2. Оригинал — в архиве, целиком (то, что компакшн обрезал бы). */
+    ASSERT_EQ(seen_scope, std::string("plugin:wp_coder:archive"));
+    ASSERT_EQ(docs.size(), (size_t)1);
+    ASSERT_TRUE(docs[0].second.find("1000") != std::string::npos);
+
+    /* 3. Мелкий вывод НЕ архивируется (порог работает). */
+    ASSERT_TRUE(archive_output_if_large("ses_a11", "call_small", "коротко").empty());
+
+    fs::remove_all(project, ec);
+    {
+        std::lock_guard<std::mutex> lk(engine_state().mtx);
+        engine_state().session.clear();
+        engine_state().project_dir.clear();
+        engine_state().session_id.clear();
     }
 }
