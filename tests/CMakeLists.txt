@@ -49,6 +49,13 @@ target_link_libraries(test_rag_store PRIVATE core)
 target_include_directories(test_rag_store PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RagStore COMMAND test_rag_store)
 
+# Квоты индексации (R4.2): max_bytes/max_chunks/max_index_bytes/дедлайн,
+# частичный результат (truncated) и reindex. Эмбеддинги — n-gram фолбэк.
+add_executable(test_rag_quota core/test_rag_quota.cpp)
+target_link_libraries(test_rag_quota PRIVATE core)
+target_include_directories(test_rag_quota PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RagQuota COMMAND test_rag_quota)
+
 # Изоляция скоупов (R1.6): документ A не находится в B, clear(A) не трогает
 # B, повторная индексация не дублирует чанки. Эмбеддинги — детерминированный
 # n-gram фолбэк (недостижимый server_url), без модели и без сети.

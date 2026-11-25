@@ -245,25 +245,29 @@ char* rag_index_document_ex_impl(const RagCallContext& ctx,
 
     if (path.empty()) return error_json("bad_request", "empty path");
 
-    /* opts_json (R4.1) парсится в RagScopeOptions (max_bytes/max_chunks/
-     * deadline_ms/reindex) — парсер готов и покрыт тестами. Применение
-     * (квоты/дедлайн/reindex) — R4.2: сейчас индексация идёт целиком, как
-     * в R2, чтобы плагин под R4 не получил «bad_request» от хоста R2. */
-    (void)opts_json;
+    /* R4.1/R4.2: opts_json парсится в квоты (max_bytes/max_chunks/
+     * deadline_ms/reindex). Пустой/отсутствующий → значения по умолчанию
+     * (индексация целиком), поэтому плагин под R2 не ломается. */
+    core::RagScopeOptions opts;
+    std::string opts_error;
+    if (!core::parse_scope_options(opts_json, opts, &opts_error)) {
+        return error_json("bad_request",
+                          "invalid opts_json: " + opts_error);
+    }
 
     auto store = store_for(ctx, suffix, &err);
     if (!store) return err;
 
-    const int chunks = store->index_document(path);
+    const core::RagStore::IndexResult res = store->index_document(path, opts);
     const core::RagStoreInfo info = store->info();
 
     json j;
     j["ok"] = true;
     j["scope"] = store->scope();
-    j["chunks"] = chunks;
+    j["chunks"] = res.chunks;
     j["documents"] = info.documents;
-    j["truncated"] = false;   /* квоты — R4.2 */
-    j["reason"] = "";
+    j["truncated"] = res.truncated;
+    j["reason"] = res.reason;
     return dup_string(j.dump());
 }
 

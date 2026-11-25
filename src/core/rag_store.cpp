@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 #include <iostream>
 
 namespace fs = std::filesystem;
@@ -91,40 +92,111 @@ RagManager& RagStore::ensure_manager() {
 }
 
 int RagStore::index_document(const std::string& file_path) {
-    if (file_path.empty()) return 0;
-    std::lock_guard<std::mutex> lk(mtx_);
-    RagManager& mgr = ensure_manager();
+    /* Совместимость: старый вызов = индексация без квот (как R1/R2). */
+    return index_document(file_path, RagScopeOptions{}).chunks;
+}
 
-    /* R1.6: повторная индексация НЕ удваивает чанки.
-     *
-     * `RagManager::process_document()` всегда ДОБАВЛЯЕТ чанки — дедупликации
-     * в нём нет (проверено: ни `documents_index_`, ни проверки «документ уже
-     * в профиле»). Для легаси-чата это незаметно, а для стора это означало
-     * бы, что второй вызов `rag_index` с тем же путём удваивает индекс и
-     * поиск возвращает один и тот же кусок дважды.
-     *
-     * Считаем документ уже проиндексированным, если он есть в профиле стора.
-     * Переиндексация (изменившийся файл) — задача R4.1 с флагом
-     * `reindex`; до неё «уже индексировали» — это «ничего не делаем», а не
-     * «строим вторую копию». */
-    for (const auto& doc : mgr.get_current_profile_documents()) {
-        if (doc == file_path) {
-            std::cout << "[RagStore] " << scope_
-                      << ": document already indexed, skipping: " << file_path
-                      << std::endl;
-            return 0;
+RagStore::IndexResult RagStore::index_document(const std::string& file_path,
+                                               const RagScopeOptions& opts) {
+    IndexResult result;
+    if (file_path.empty()) {
+        result.reason = "empty path";
+        return result;
+    }
+    /* Read-only скоуп: не индексируем (но и не «truncated» — это не квота,
+     * а режим). Причина в reason, чанков 0. */
+    if (!opts.allow_index) {
+        result.reason = "scope is read-only";
+        return result;
+    }
+
+    /* R4.2, квота на документ (max_bytes): проверяем ДО чтения, чтобы не
+     * читать гигантский файл целиком. 0 = без предела. */
+    if (opts.max_bytes > 0) {
+        std::error_code ec;
+        const auto sz = fs::file_size(file_path, ec);
+        if (!ec && static_cast<long long>(sz) > opts.max_bytes) {
+            result.truncated = true;
+            result.reason = "document exceeds max_bytes (" +
+                            std::to_string(sz) + " > " +
+                            std::to_string(opts.max_bytes) + ")";
+            return result;
         }
     }
 
-    const size_t before = mgr.get_external_chunks_count();
-    if (!mgr.process_document(file_path, /*report_completion=*/false)) {
-        return 0;
+    std::lock_guard<std::mutex> lk(mtx_);
+    RagManager& mgr = ensure_manager();
+
+    /* R1.6: повторная индексация НЕ удваивает чанки. `reindex` (R4.1)
+     * переиндексирует изменённый документ: сначала убираем старые чанки и
+     * запись профиля, потом добавляем заново. */
+    bool already = false;
+    for (const auto& doc : mgr.get_current_profile_documents()) {
+        if (doc == file_path) { already = true; break; }
     }
-    const size_t after = mgr.get_external_chunks_count();
-    /* Число чанков, а не «успех»: файл мог быть пустым или не содержать
-     * текста — это не отказ индексации, и вызывающему полезнее знать
-     * «ноль чанков», чем «ошибка». */
-    return static_cast<int>(after - before);
+    if (already && !opts.reindex) {
+        std::cout << "[RagStore] " << scope_
+                  << ": document already indexed, skipping: " << file_path
+                  << std::endl;
+        return result;
+    }
+    if (already && opts.reindex) {
+        mgr.remove_document(file_path);
+        mgr.remove_document_from_current_profile(file_path);
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    const size_t before = mgr.get_external_chunks_count();
+
+    if (!mgr.process_document(file_path, /*report_completion=*/false)) {
+        result.reason = "process_document failed";
+        return result;
+    }
+
+    const size_t added = mgr.get_external_chunks_count() - before;
+
+    /* Откат: документ не должен остаться в индексе, если квота превышена.
+     * Убираем и чанки, и запись профиля (иначе дедупликация R1.6 сочтёт
+     * документ проиндексированным и не даст повторить). */
+    auto rollback = [&]() {
+        mgr.remove_document(file_path);
+        mgr.remove_document_from_current_profile(file_path);
+    };
+    auto deadline_exceeded = [&]() {
+        if (opts.deadline_ms <= 0) return false;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        return ms > opts.deadline_ms;
+    };
+
+    /* R4.2, квота на документ (max_chunks). */
+    if (opts.max_chunks > 0 && static_cast<int>(added) > opts.max_chunks) {
+        rollback();
+        result.truncated = true;
+        result.reason = "document exceeds max_chunks (" +
+                        std::to_string(added) + " > " +
+                        std::to_string(opts.max_chunks) + ")";
+        return result;
+    }
+    /* Дедлайн (R4.2 — по завершении; проверка в цикле чанков — R4.3). */
+    if (deadline_exceeded()) {
+        rollback();
+        result.truncated = true;
+        result.reason = "deadline exceeded";
+        return result;
+    }
+    /* R4.2, квота на индекс (max_index_bytes). */
+    if (opts.max_index_bytes > 0 &&
+        dir_bytes(path_) > static_cast<size_t>(opts.max_index_bytes)) {
+        rollback();
+        result.truncated = true;
+        result.reason = "index exceeds max_index_bytes";
+        return result;
+    }
+
+    result.chunks = static_cast<int>(added);
+    return result;
 }
 
 std::vector<RagChunk> RagStore::search(const std::string& query, int k,
