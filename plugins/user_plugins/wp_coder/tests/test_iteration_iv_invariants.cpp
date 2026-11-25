@@ -191,8 +191,11 @@ TEST(every_write_tool_is_classified_by_the_format_test) {
          * И10.4 `undo`/`redo` — тот же случай и по той же причине: они
          * возвращают байты уровня сессии, а не пишут текст. */
         "revert", "undo", "redo",
-        /* Пишет не в проект, а во внешний индекс RAG (через хост). */
-        "rag_index"};
+        /* Пишет не в проект, а во внешний индекс RAG (через хост).
+         * A0.1 `archive_write` — тот же случай: пишет полный вывод в
+         * архив-скоуп `plugin:wp_coder:archive`, файл проекта не трогает,
+         * поэтому проверка BOM/CRLF к нему неприменима. */
+        "rag_index", "archive_write"};
 
     for (const auto& d : ToolsRegistry::instance().defs()) {
         if (!tf_has(d.flags, TF_WRITES_FILES)) continue;

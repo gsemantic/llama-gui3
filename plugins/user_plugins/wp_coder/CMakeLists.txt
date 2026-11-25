@@ -294,6 +294,12 @@ if(WP_CODER_BUILD_TESTS)
         tests/test_iteration_iv_invariants.cpp
         tests/test_agent_loop.cpp
         tests/test_base_tools.cpp
+        # A0.1 (RAG-архив сессий): archive_write пишет полный вывод в
+        # скоуп plugin:wp_coder:archive и находится по call_id. Инструмент
+        # регистрирует ТОЛЬКО rag-набор (без модульных), поэтому стоит до
+        # test_iteration_iv_invariants.cpp: archive_write добавлен в список
+        # исключений проверки формата (пишет не в проект, а в RAG).
+        tests/test_session_archive.cpp
         # И13.5: символы файла — решение AST/скан (core/ast_symbols.cpp),
         # мост к полю хоста и поведение repo_map на живом обзоре. Файл
         # поднимает движок с колбэками (test_base_tools.cpp), поэтому

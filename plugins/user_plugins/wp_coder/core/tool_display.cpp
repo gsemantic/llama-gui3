@@ -46,7 +46,7 @@ const Entry kEntries[] = {
     {"list",          Kind::List},
     {"task",          Kind::Task},
     {"todowrite",     Kind::Checklist},
-    /* --- Откат «текст вывода» (46 инструментов) ---
+    /* --- Откат «текст вывода» (47 инструментов) ---
      *
      * Ни у одного из них в метаданных НИЧЕГО нет: `core/git_tools.cpp`,
      * `modules/python`, `modules/devops` и `modules/wordpress` не пишут ни
@@ -75,6 +75,7 @@ const Entry kEntries[] = {
     {"redo",            Kind::Text},
     {"rag_index",       Kind::Text},
     {"rag_query",       Kind::Text},
+    {"archive_write",   Kind::Text},
     /* git */
     {"git_status",      Kind::Text},
     {"git_diff",        Kind::Text},

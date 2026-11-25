@@ -748,6 +748,51 @@ static ToolDef make_history_move_tool(const char* name, bool is_undo) {
     return def;
 }
 
+/* A0.1: путь к файлу архива сессий для пары (session_id, call_id).
+ *
+ * Файл ПОСТОЯННЫЙ (data_dir/wp_coder/archive/<sid>/<cid>.txt), а не
+ * временный, и это решение, а не небрежность: RAG v2 индексирует ФАЙЛ
+ * (include/core/rag_store.h, index_document(file_path)), поэтому у
+ * проиндексированного чанка есть file_path и start_line — они и есть
+ * «file:line» локатора. Временный файл сделал бы локатор «протухшим» в
+ * тот же миг, а архив обязан переживать рестарт (A3.1). Имена сегментов
+ * санитизируются: session_id/call_id приходят снаружи и в имени файла
+ * недопустимы (security::sanitize_ident, тот же приём, что у имён
+ * контейнеров). Пустой результат — «имя из одних спецсимволов», и это
+ * отказ, а не запись в каталог с пустым сегментом. */
+bool archive_file_path(const std::string& data_dir, const std::string& session_id,
+                       const std::string& call_id, std::string& out,
+                       std::string& err) {
+    const std::string sid = security::sanitize_ident(session_id);
+    const std::string cid = security::sanitize_ident(call_id);
+    if (sid.empty()) { err = "session_id не даёт безопасного имени файла"; return false; }
+    if (cid.empty()) { err = "call_id не даёт безопасного имени файла"; return false; }
+    out = data_dir + "/wp_coder/archive/" + sid + "/" + cid + ".txt";
+    return true;
+}
+
+/* A0.1: тело документа архива — заголовок с ЛОКАТОРОМ, затем полный
+ * текст. Локатор в заголовке, а не только в результате инструмента:
+ * архив ищется по содержимому (A0.2), и «найти по call_id» означает
+ * «call_id лежит в проиндексированном тексте». Без этого заголовка
+ * поиск по call_id не нашёл бы ничего, а результат инструмента врал бы,
+ * что оригинал доставаем. */
+std::string archive_document(const std::string& session_id,
+                             const std::string& call_id, const std::string& file,
+                             long long line, const std::string& text) {
+    std::stringstream h;
+    /* Локатор в канонической форме `session_id:call_id` — той самой, что
+     * уходит в результат инструмента и по которой ищет A0.2. Писать его
+     * здесь, а не только «session_id=… call_id=…», нужно потому, что
+     * поиск по call_id обязан находить документ по строке-локатору, а не
+     * по случайному совпадению имени поля. */
+    h << "# archive locator=" << session_id << ":" << call_id;
+    if (!file.empty()) h << " file=" << file;
+    if (line > 0) h << " line=" << line;
+    h << "\n";
+    return h.str() + text;
+}
+
 } // anonymous namespace
 
 void register_base_tools() {
@@ -2333,7 +2378,6 @@ void register_rag_tools() {
      * используется компакшном; rag_index/rag_query работают с проектом). */
     static constexpr const char* kRagScopeProject = "plugin:wp_coder";
     static constexpr const char* kRagScopeArchive = "plugin:wp_coder:archive";
-    (void)kRagScopeArchive;
 
     {
         ToolDef def;
@@ -2458,6 +2502,134 @@ void register_rag_tools() {
             std::string result = cb.rag_build_prompt(query, k, "");
             if (result.empty()) return out("rag_query", "[RAG: пусто — проект не проиндексирован]");
             return out("rag_query", shell::cap(result, kMaxToolOutput));
+        };
+        reg.register_def(std::move(def));
+    }
+
+    /* A0.1: archive_write — запись полного вывода в архив сессий.
+     *
+     * Зачем отдельный инструмент, а не «индекс проекта»: архив — это
+     * ДРУГОЙ скоуп (`plugin:wp_coder:archive`) с другой политикой (что
+     * хранить, как чистить), и смешивать его с rag_index значило бы
+     * индексировать выводы инструментов в тот же индекс, по которому
+     * ищется код (план §7, «Скоуп»). Пишет через rag_index_document_ex:
+     * хост RAG v2 уже даёт квоты/персистентность/async, и новый механизм
+     * был бы дублем (§3).
+     *
+     * Локатор (`session_id:call_id` + file:line) кладётся в РЕЗУЛЬТАТ, а
+     * не в сводку компакшна: компакшн не трогаем (инварианты хрупкие),
+     * запись живёт на уровне инструментов (план §7, «Точка подключения»).
+     * Здесь, в A0.1, инструмент только пишет и отдаёт локатор; порог
+     * «что архивировать» и подстановка локатора вместо текста — A1.1. */
+    {
+        ToolDef def;
+        def.name = "archive_write";
+        def.description =
+            "Записать полный вывод инструмента в архив сессий (RAG-скоуп "
+            "plugin:wp_coder:archive) и получить локатор session_id:call_id "
+            "для доступа к оригиналу. Используется, когда вывод обрезан "
+            "компакшном: полный текст остаётся в архиве, а в контекст "
+            "уходит короткий локатор.";
+        /* Пишет во внешний индекс RAG (не в проект) и необратимо — те же
+         * флаги, что у rag_index: в режиме плана запрещён, в research
+         * недоступен, формат файла проекта не проверяет (см. список
+         * исключений в test_iteration_iv_invariants.cpp). */
+        def.flags = TF_WRITES_FILES | TF_DESTRUCTIVE | TF_SLOW;
+        def.permission_key = "rag";
+        SchemaBuilder b;
+        b.str("session_id", "идентификатор сессии (часть локатора)")
+         .str("call_id", "идентификатор вызова инструмента (часть локатора)")
+         .str("text", "полный текст вывода для архива")
+         .str("file", "исходный файл для локатора file:line (необязательно)")
+         .integer_range("line", "строка в исходном файле (необязательно)",
+                        0, 1000000000)
+         .required("session_id")
+         .required("call_id")
+         .required("text");
+        def.parameters = b.build();
+        def.handler = [](const json::JsonValue& a, ToolContext& ctx) -> ToolOutput {
+            const std::string session_id = arg_str(a, "session_id");
+            const std::string call_id = arg_str(a, "call_id");
+            const std::string text = arg_str(a, "text");
+            const std::string file = arg_str(a, "file");
+            const long long line = a.get_int("line", 0);
+
+            if (session_id.empty() || call_id.empty())
+                return out("archive_write",
+                           "[ошибка] archive_write: нужны session_id и call_id");
+            if (text.empty())
+                return out("archive_write",
+                           "[ошибка] archive_write: пустой text — архивировать нечего");
+
+            const auto& cb = ctx.callbacks();
+            /* Старый хост без RAG v2: честный отказ, а не тихая потеря
+             * вывода (тот же класс, что «RAG не доступен» у rag_query). */
+            if (!cb.rag_index_document_ex)
+                return out("archive_write",
+                           "[ошибка] archive_write: RAG v2 недоступен "
+                           "(хост без rag_index_document_ex)");
+            const std::string data_dir = cb.path_data_dir ? cb.path_data_dir() : "";
+            if (data_dir.empty())
+                return out("archive_write",
+                           "[ошибка] archive_write: не задан каталог данных "
+                           "(path_data_dir) — архив некуда писать");
+
+            std::string path, path_err;
+            if (!archive_file_path(data_dir, session_id, call_id, path, path_err))
+                return out("archive_write",
+                           "[ошибка] archive_write: " + path_err);
+
+            /* Файл пишем ДО индексации: rag_index_document_ex читает файл,
+             * а не строку. Ошибка записи — отказ, а не «проиндексировали
+             * пустоту». */
+            std::error_code ec;
+            fs::create_directories(fs::path(path).parent_path(), ec);
+            {
+                std::ofstream f(path, std::ios::binary | std::ios::trunc);
+                if (!f)
+                    return out("archive_write",
+                               "[ошибка] archive_write: не удалось записать файл "
+                               "архива: " + path);
+                f << archive_document(session_id, call_id, file, line, text);
+            }
+
+            const std::string resp = cb.rag_index_document_ex(kRagScopeArchive, path, "");
+            json::JsonValue j;
+            if (!json::JsonValue::parse(resp, j) || !j.get_bool("ok", false)) {
+                std::string reason = "невалидный ответ хоста";
+                if (json::JsonValue::parse(resp, j))
+                    reason = j.get_string("error", "ошибка");
+                return out("archive_write",
+                           "[ошибка] archive_write: RAG не проиндексировал архив: " +
+                               reason);
+            }
+
+            /* Локатор — в результат, а не в сводку. file:line — из
+             * аргументов (исходный файл), а не из chunk-метаданных: у
+             * архивного чанка file_path указывает на сам файл архива, и
+             * «file:line» оригинала иначе потерялся бы. */
+            const std::string locator = session_id + ":" + call_id;
+            std::string where;
+            if (!file.empty()) {
+                where = file;
+                if (line > 0) where += ":" + std::to_string(line);
+            }
+
+            std::stringstream s;
+            s << "[archive_write] записано в архив: " << locator;
+            if (!where.empty()) s << " (" << where << ")";
+            s << "; чанков: " << j.get_int("chunks", 0);
+            s << "\nПолный текст в архиве; достать по локатору " << locator
+              << " инструментом archive_search.";
+
+            ToolOutput o = out("archive_write", s.str());
+            o.metadata = json::JsonValue::object();
+            o.metadata.set("session_id", json::JsonValue(session_id));
+            o.metadata.set("call_id", json::JsonValue(call_id));
+            o.metadata.set("locator", json::JsonValue(locator));
+            if (!where.empty()) o.metadata.set("source", json::JsonValue(where));
+            o.metadata.set("chunks", json::JsonValue(j.get_int("chunks", 0)));
+            return o;
         };
         reg.register_def(std::move(def));
     }
