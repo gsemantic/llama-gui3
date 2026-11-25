@@ -2752,10 +2752,28 @@ void register_rag_tools() {
             }
 
             const auto& chunks = j.get("chunks");
-            if (!chunks.is_array() || chunks.size() == 0)
+            if (!chunks.is_array() || chunks.size() == 0) {
+                /* R5.2: пустой результат — это НЕ «не проиндексирован».
+                 * Различаем «выключено» и «пусто» по rag_scope_info().code,
+                 * как rag_query: иначе «выключенный RAG» и «пустой архив»
+                 * выглядели бы одинаково, и агент не знал бы, чинить
+                 * настройки или искать иначе. */
+                std::string why = "в архиве ничего не найдено";
+                if (cb.rag_scope_info) {
+                    json::JsonValue info;
+                    if (json::JsonValue::parse(cb.rag_scope_info(kRagScopeArchive),
+                                               info)) {
+                        if (info.get_string("code", "") == "disabled")
+                            why = "RAG выключен в настройках";
+                        else if (!info.get_bool("ready", false) &&
+                                 !info.get_string("reason", "").empty())
+                            why = info.get_string("reason", "");
+                    }
+                }
                 return out("archive_search",
-                           "[archive_search] пусто — в архиве ничего не найдено "
-                           "по запросу \"" + query + "\"");
+                           "[archive_search] пусто — " + why + " (запрос \"" +
+                               query + "\")");
+            }
 
             std::string result;
             for (size_t i = 0; i < chunks.size(); ++i) {

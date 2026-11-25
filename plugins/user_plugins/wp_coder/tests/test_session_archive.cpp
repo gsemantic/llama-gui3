@@ -454,3 +454,43 @@ TEST(a12_повторный_вызов_не_дублирует_архив_по_c
 
     fs::remove_all(data, ec);
 }
+
+
+/* A2.1: archive_search различает «выключено» и «пусто» (R5.2).
+ *
+ * Пустой результат — это не «не проиндексирован»: «выключенный RAG»
+ * (code=disabled) и «пустой архив» (ready, но ничего не найдено) требуют
+ * разных действий агента, и выглядеть одинаково они не должны. */
+TEST(a21_archive_search_различает_выключено_и_пусто) {
+    register_rag_tools();
+    test_support::approve_all_permissions();
+
+    HostCallbacks cb = Engine::instance().callbacks();
+    cb.rag_search_ex = [](const std::string&, const std::string&, int,
+                          const std::string&) -> std::string {
+        return std::string(R"({"ok":true,"chunks":[]})");
+    };
+    /* 1. Выключено: code=disabled → «выключен». */
+    cb.rag_scope_info = [](const std::string&) -> std::string {
+        return std::string(
+            R"({"ok":false,"code":"disabled","error":"RAG is disabled"})");
+    };
+    Engine::instance().init(cb);
+
+    json::JsonValue q = json::JsonValue::object();
+    q.set("query", json::JsonValue("что-нибудь"));
+    const ToolOutput off =
+        ToolsRegistry::instance().run_output("archive_search", q);
+    ASSERT_TRUE(off.output.find("выключен") != std::string::npos);
+    ASSERT_TRUE(off.output.find("пусто") != std::string::npos);
+
+    /* 2. Пусто: RAG готов, но ничего не найдено → «пусто», без «выключен». */
+    cb.rag_scope_info = [](const std::string&) -> std::string {
+        return std::string(R"({"ok":true,"ready":true,"reason":""})");
+    };
+    Engine::instance().init(cb);
+    const ToolOutput empty =
+        ToolsRegistry::instance().run_output("archive_search", q);
+    ASSERT_TRUE(empty.output.find("пусто") != std::string::npos);
+    ASSERT_TRUE(empty.output.find("выключен") == std::string::npos);
+}
